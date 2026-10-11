@@ -1,5 +1,5 @@
 import type { AgentMessage, AgentTool, ConversationLogAppend } from "@hansjm10/volt-agent-core";
-import { fauxAssistantMessage, fauxToolCall, type ImageContent } from "@hansjm10/volt-ai";
+import { type DeepReadonly, fauxAssistantMessage, fauxToolCall, type ImageContent } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { getClientMessageId } from "../../../src/core/messages.ts";
@@ -27,9 +27,12 @@ function mutateMessages(messages: AgentMessage[]): void {
 	}
 }
 
-function findUser(messages: readonly AgentMessage[], text?: string): UserMessage | undefined {
+function findUser(
+	messages: readonly DeepReadonly<AgentMessage>[],
+	text?: string,
+): DeepReadonly<UserMessage> | undefined {
 	return messages.find(
-		(message): message is UserMessage =>
+		(message): message is DeepReadonly<UserMessage> =>
 			message.role === "user" && (text === undefined || getMessageText(message) === text),
 	);
 }
@@ -53,8 +56,18 @@ describe("regression #211: delivery payload isolation", () => {
 	});
 
 	it("keeps canonical, finalized-event, delivery-event, and provider payloads identical when observers mutate what they receive", async () => {
-		let providerUser: UserMessage | undefined;
-		let deliveryUser: UserMessage | undefined;
+		let providerUser: DeepReadonly<UserMessage> | undefined;
+		let deliveryUser: DeepReadonly<UserMessage> | undefined;
+		// Session events are frozen: a listener that writes to one anyway is refused.
+		const listenerWrites: unknown[] = [];
+		const attemptWrite = (messages: readonly DeepReadonly<AgentMessage>[]): void => {
+			try {
+				mutateMessages(messages as AgentMessage[]);
+				listenerWrites.push("written");
+			} catch (error) {
+				listenerWrites.push(error);
+			}
+		};
 		harness = await createHarness({
 			extensionFactories: [
 				(volt) => {
@@ -76,10 +89,10 @@ describe("regression #211: delivery payload isolation", () => {
 			if (event.type !== "delivery_start") return;
 			const user = findUser(event.messages);
 			if (user) deliveryUser = structuredClone(user);
-			mutateMessages(event.messages);
+			attemptWrite(event.messages);
 		});
 		harness.session.subscribe((event) => {
-			if (event.type === "message_end") mutateMessages([event.message]);
+			if (event.type === "message_end" && event.message.role === "user") attemptWrite([event.message]);
 		});
 		harness.setResponses([fauxAssistantMessage("committed")]);
 		const images = [structuredClone(ORIGINAL_IMAGE)];
@@ -95,13 +108,15 @@ describe("regression #211: delivery payload isolation", () => {
 		expect(deliveryUser).toEqual(canonicalUser);
 		expect(providerUser?.content).toEqual(expectedContent);
 		expect(providerUser?.timestamp).toBe(canonicalUser?.timestamp);
+		expect(listenerWrites.length).toBeGreaterThan(0);
+		expect(listenerWrites.every((outcome) => outcome instanceof TypeError)).toBe(true);
 	});
 
 	it("keeps a rolled-back delivery's queued payload isolated from the extension output of the failed attempt", async () => {
 		const received: string[] = [];
 		const returned: UserMessage[] = [];
-		let deliveryUser: UserMessage | undefined;
-		let providerUser: UserMessage | undefined;
+		let deliveryUser: DeepReadonly<UserMessage> | undefined;
+		let providerUser: DeepReadonly<UserMessage> | undefined;
 		harness = await createHarness({
 			log: "memory",
 			extensionFactories: [

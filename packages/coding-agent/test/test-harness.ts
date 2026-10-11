@@ -15,6 +15,7 @@ import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
 	Context,
+	DeepReadonly,
 	JsonObject,
 	Model,
 	ProviderError,
@@ -349,9 +350,9 @@ export interface Harness {
 	/** Faux stream function state (call count, captured contexts). */
 	faux: FauxStreamFnState;
 	/** All events emitted by the session, in order. */
-	events: AgentSessionEvent[];
+	events: DeepReadonly<AgentSessionEvent>[];
 	/** Filter captured events by type. */
-	eventsOfType<T extends AgentSessionEvent["type"]>(type: T): Extract<AgentSessionEvent, { type: T }>[];
+	eventsOfType<T extends AgentSessionEvent["type"]>(type: T): Extract<DeepReadonly<AgentSessionEvent>, { type: T }>[];
 	/** Temp directory (cleaned up by cleanup()). */
 	tempDir: string;
 	/** Dispose session and remove temp directory. */
@@ -401,7 +402,7 @@ async function createHarnessWithResourceLoader(
 		subagentToolManager: options.subagentToolManager,
 	});
 
-	const events: AgentSessionEvent[] = [];
+	const events: DeepReadonly<AgentSessionEvent>[] = [];
 	session.subscribe((event) => {
 		events.push(event);
 	});
@@ -421,7 +422,7 @@ async function createHarnessWithResourceLoader(
 		faux: fauxState,
 		events,
 		eventsOfType<T extends AgentSessionEvent["type"]>(type: T) {
-			return events.filter((e): e is Extract<AgentSessionEvent, { type: T }> => e.type === type);
+			return events.filter((e): e is Extract<DeepReadonly<AgentSessionEvent>, { type: T }> => e.type === type);
 		},
 		tempDir,
 		cleanup,

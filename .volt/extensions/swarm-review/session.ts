@@ -1,4 +1,4 @@
-import type { Api, Model, ModelThinkingLevel } from "@hansjm10/volt-ai";
+import type { Api, DeepReadonly, Model, ModelThinkingLevel } from "@hansjm10/volt-ai";
 import {
 	type AgentSession,
 	type AgentSessionEvent,
@@ -68,7 +68,7 @@ export interface PassOptions {
 	checkout?: string;
 	/** The host's tools this pass may call, from the host pass it reads through (such as review_diff). */
 	hostTools?: ToolDefinition[];
-	onEvent?: (event: AgentSessionEvent) => void;
+	onEvent?: (event: DeepReadonly<AgentSessionEvent>) => void;
 	bindControl?: (control: PassControl) => void;
 }
 

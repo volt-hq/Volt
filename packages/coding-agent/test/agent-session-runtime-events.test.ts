@@ -3,7 +3,7 @@ import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clientInputRecovery } from "@hansjm10/volt-agent-core";
-import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
+import { createFauxProvider, type DeepReadonly, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { type HostFrame, REMOTE_CAPABILITIES, type RemoteGrant } from "@hansjm10/volt-protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.ts";
@@ -190,7 +190,7 @@ describe("conversation host client session lifecycle events", () => {
 
 	it("bridges Git replacements while retaining the session's first Git observation", async () => {
 		const { runtimeHost } = await createRuntimeHost(() => undefined);
-		const events: AgentSessionEvent[] = [];
+		const events: DeepReadonly<AgentSessionEvent>[] = [];
 		await vi.waitFor(() => expect(runtimeHost.session.sessionManager.getStartingGitContext()).toBeNull());
 		expect(runtimeHost.conversation.summary().startingGitContext).toBeNull();
 		const unsubscribe = runtimeHost.session.subscribe((event) => events.push(event));

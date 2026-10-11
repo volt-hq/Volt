@@ -1,5 +1,5 @@
 import { rm } from "node:fs/promises";
-import { StringEnum } from "@hansjm10/volt-ai";
+import { type DeepReadonly, StringEnum } from "@hansjm10/volt-ai";
 import { type AgentSessionEvent, defineTool, type ReviewEnginePass } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
 import {
@@ -161,7 +161,7 @@ function combine(cluster: Cluster): ClusterOutcome {
 }
 
 /** Notes the commands a verifier runs with bash (--exec) and which of them fail. */
-function recordCommand(state: SwarmState, pending: Map<string, string>, event: AgentSessionEvent): void {
+function recordCommand(state: SwarmState, pending: Map<string, string>, event: DeepReadonly<AgentSessionEvent>): void {
 	if (event.type === "tool_execution_start" && event.toolName === "bash") {
 		const command = (event.args as { command?: unknown } | undefined)?.command;
 		if (typeof command === "string") pending.set(event.toolCallId, command.replace(/\s+/g, " ").trim().slice(0, 500));

@@ -66,7 +66,8 @@ describe("regression #417: incremental approved plan progress", () => {
 		harness.session.subscribe((event) => {
 			if (event.type === "planning_state_changed" && event.planning.plan) {
 				timeline.push(
-					`progress:${getPlanLeafSteps(event.planning.plan)
+					`progress:${event.planning.plan.steps
+						.flatMap((step) => step.substeps ?? [step])
 						.map((leaf) => leaf.status)
 						.join(",")}`,
 				);

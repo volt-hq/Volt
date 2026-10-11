@@ -165,7 +165,7 @@ export function createTestSession(sessionId: string, leafId: string | null) {
 		getPlanningState: () => ({ mode: "build" as const, plan: null }),
 		waitForIdle: vi.fn(async () => {}),
 		activeToolExecutions: new Map(),
-		subscribeRuntimeEvents: vi.fn((_handler: () => Promise<void> | void) => () => {}),
+		paceRuntimeEvents: vi.fn((_pace: () => Promise<void> | void) => () => {}),
 		/** Never resolves: a test session keeps its log. */
 		lost: new Promise<Error>(() => {}),
 	};

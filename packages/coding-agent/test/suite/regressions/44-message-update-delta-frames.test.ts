@@ -1,4 +1,4 @@
-import type { AssistantMessage } from "@hansjm10/volt-ai";
+import type { AssistantMessage, DeepReadonly } from "@hansjm10/volt-ai";
 import type { HostFrame, LiveItem } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createLoopbackClient, type LoopbackClient } from "../../../src/client/protocol-client.ts";
@@ -11,7 +11,7 @@ const STREAMED_TEXT = ["Delta frames flatten the quadratic streaming cost.", "Ea
 	.join("\n")
 	.repeat(3);
 
-function messageText(message: AssistantMessage | undefined): string {
+function messageText(message: DeepReadonly<AssistantMessage> | undefined): string {
 	return (message?.content ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
 }
 

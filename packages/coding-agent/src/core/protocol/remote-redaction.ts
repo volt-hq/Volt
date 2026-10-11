@@ -33,7 +33,7 @@
  */
 
 import { Buffer } from "node:buffer";
-import type { AssistantMessage, ToolCall } from "@hansjm10/volt-ai";
+import type { AssistantMessage, DeepReadonly, ToolCall } from "@hansjm10/volt-ai";
 import type {
 	HostFrame,
 	HostRequest,
@@ -309,7 +309,10 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 	};
 
 	/** A redacted assistant message within the snapshot budget; blocks cut short are frozen. */
-	const redactMessage = (message: AssistantMessage, view: StreamingView): AssistantMessage => {
+	const redactMessage = (
+		message: DeepReadonly<AssistantMessage>,
+		view: StreamingView,
+	): DeepReadonly<AssistantMessage> => {
 		const redacted = sanitize(message);
 		view.text.clear();
 		view.frozen.clear();
@@ -337,7 +340,7 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 			view.bytes += Buffer.byteLength(kept, "utf8");
 			return block.type === "text" ? { ...block, text: kept } : { ...block, thinking: kept };
 		});
-		return { ...redacted, content } as AssistantMessage;
+		return { ...redacted, content } as DeepReadonly<AssistantMessage>;
 	};
 
 	/** Items that rebuild the client's streaming assistant message from the raw state, redacted. */

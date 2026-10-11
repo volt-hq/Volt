@@ -25,7 +25,7 @@ import type {
 	ThinkingLevel,
 } from "@hansjm10/volt-agent-core";
 import { AdmissionGate, Conversation, type ConversationLog } from "@hansjm10/volt-agent-core";
-import type { ImageContent, Message, Model, PromptCacheRefresher, TextContent } from "@hansjm10/volt-ai";
+import type { DeepReadonly, ImageContent, Message, Model, PromptCacheRefresher, TextContent } from "@hansjm10/volt-ai";
 import type { WorkNoticeDetails } from "@hansjm10/volt-protocol/entries";
 import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
 import { getAgentDir } from "../config.ts";
@@ -187,8 +187,11 @@ export type AgentSessionEvent =
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
 	| McpManagerEvent;
 
-/** Passive observer of agent session events. Async implementations are observed but do not delay session work. */
-export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
+/**
+ * Passive observer of agent session events. Async implementations are observed but do not delay session work.
+ * Every listener receives the same deeply frozen event: writing to it throws.
+ */
+export type AgentSessionEventListener = (event: DeepReadonly<AgentSessionEvent>) => void;
 
 /**
  * A committed change to the conversation generation.
@@ -1561,8 +1564,12 @@ export class AgentSession {
 		return this._tools.getActiveToolNames();
 	}
 
-	subscribeRuntimeEvents(listener: (event: AgentEvent) => Promise<void> | void): () => void {
-		return this._events.subscribeRuntimeEvents(listener);
+	/**
+	 * Await `pace` after the session handles each loop event: a slow pace slows
+	 * the agent loop. It receives no event, so pacing copies nothing.
+	 */
+	paceRuntimeEvents(pace: () => Promise<void> | void): () => void {
+		return this._events.paceRuntimeEvents(pace);
 	}
 
 	/** Own callback snapshots; explicit updates/invalidation revoke earlier managed authorization. */

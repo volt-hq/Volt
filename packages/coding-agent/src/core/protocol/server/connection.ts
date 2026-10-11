@@ -699,7 +699,7 @@ export function serveConnection(
 		// remote client never does: its transport bounds what it queues instead.
 		const unsubscribeBackpressure =
 			profile.limits.sendQueueBytes === undefined
-				? session.subscribeRuntimeEvents(async () => {
+				? session.paceRuntimeEvents(async () => {
 						try {
 							await drain();
 						} catch (error) {

@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
-import { createFauxProvider, type FauxProvider, type Model } from "@hansjm10/volt-ai";
+import { createFauxProvider, type DeepReadonly, type FauxProvider, type Model } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSession, AgentSessionEvent } from "../../../src/core/agent-session.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
@@ -308,7 +308,7 @@ describe("issue #110: durable Fast mode state", () => {
 		const runtime = await createRuntime({ provider: "openai", explicitThinking: "high", manager, tempDir });
 		if (initial) await runtime.session.setFastModeEnabled(true);
 		const entries = runtime.manager.getEntries();
-		const events: AgentSessionEvent[] = [];
+		const events: DeepReadonly<AgentSessionEvent>[] = [];
 		runtime.session.subscribe((event) => events.push(event));
 		log.failNext("rolled_back", appendsEntryType("fast_mode_change"));
 
@@ -323,8 +323,8 @@ describe("issue #110: durable Fast mode state", () => {
 
 	it("publishes one settled Fast event without thinking events or duplicate writes", async () => {
 		const runtime = await createRuntime({ provider: "openai", explicitThinking: "high" });
-		const firstEvents: AgentSessionEvent[] = [];
-		const secondEvents: AgentSessionEvent[] = [];
+		const firstEvents: DeepReadonly<AgentSessionEvent>[] = [];
+		const secondEvents: DeepReadonly<AgentSessionEvent>[] = [];
 		const baselineEntries = runtime.manager.getEntries().length;
 		runtime.session.subscribe((event) => {
 			firstEvents.push(event);
@@ -346,7 +346,7 @@ describe("issue #110: durable Fast mode state", () => {
 
 	it("does not turn a committed transition into a failure when an event listener throws", async () => {
 		const runtime = await createRuntime({ provider: "openai", explicitThinking: "high" });
-		const observed: AgentSessionEvent[] = [];
+		const observed: DeepReadonly<AgentSessionEvent>[] = [];
 		runtime.session.subscribe(() => {
 			throw new Error("injected listener failure");
 		});

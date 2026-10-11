@@ -1,4 +1,4 @@
-import { fauxAssistantMessage, fauxToolCall, type Model } from "@hansjm10/volt-ai";
+import { type DeepReadonly, fauxAssistantMessage, fauxToolCall, type Model } from "@hansjm10/volt-ai";
 import { type Component, type Container, Text, type TUI, type TuiMode } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
@@ -26,7 +26,7 @@ interface Harness {
 	setResponses: TuiHarness["faux"]["setResponses"];
 	getModel(): Model<string>;
 	getPendingResponseCount(): number;
-	eventsOfType<T extends AgentSessionEvent["type"]>(type: T): Extract<AgentSessionEvent, { type: T }>[];
+	eventsOfType<T extends AgentSessionEvent["type"]>(type: T): Extract<DeepReadonly<AgentSessionEvent>, { type: T }>[];
 }
 
 const request = {
@@ -85,7 +85,7 @@ async function fixture(tuiMode: TuiMode, columns = 80, withPlan = false) {
 			summary: "Keep storage local and respect ignored files.",
 		});
 	}
-	const events: AgentSessionEvent[] = [];
+	const events: DeepReadonly<AgentSessionEvent>[] = [];
 	session.subscribe((event) => {
 		events.push(event);
 	});
@@ -95,7 +95,7 @@ async function fixture(tuiMode: TuiMode, columns = 80, withPlan = false) {
 		getModel: () => tuiHarness.faux.getModel(),
 		getPendingResponseCount: () => tuiHarness.faux.getPendingResponseCount(),
 		eventsOfType: <T extends AgentSessionEvent["type"]>(type: T) =>
-			events.filter((event): event is Extract<AgentSessionEvent, { type: T }> => event.type === type),
+			events.filter((event): event is Extract<DeepReadonly<AgentSessionEvent>, { type: T }> => event.type === type),
 	};
 	const tui = await tuiHarness.startMode({ tuiMode, columns, rows: 24 });
 	const access = tui.mode as unknown as TestAccess;

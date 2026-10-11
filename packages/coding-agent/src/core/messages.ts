@@ -7,6 +7,7 @@
 
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type {
+	DeepReadonly,
 	ImageContent,
 	JsonCompatibleInput,
 	JsonValue,
@@ -103,7 +104,7 @@ declare module "@hansjm10/volt-agent-core" {
 }
 
 /** The client input identity of a runtime message, when a client submitted it. */
-export function getClientMessageId(message: AgentMessage): string | undefined {
+export function getClientMessageId(message: DeepReadonly<AgentMessage>): string | undefined {
 	return message.role === "user" && "clientMessageId" in message ? message.clientMessageId : undefined;
 }
 

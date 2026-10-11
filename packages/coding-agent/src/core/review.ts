@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
-import type { Api, Model } from "@hansjm10/volt-ai";
+import type { Api, DeepReadonly, Model } from "@hansjm10/volt-ai";
 import { minimatch } from "minimatch";
 import type { AgentSession, AgentSessionEvent } from "./agent-session.ts";
 import type { AgentSessionServices } from "./agent-session-services.ts";
@@ -622,7 +622,7 @@ export interface RunReviewOptions {
 	onProgress?: (message: string) => void;
 	/** A pass of round `round` starts. */
 	onPass?: (pass: ReviewPass, round: number) => void;
-	onSessionEvent?: (event: AgentSessionEvent) => void;
+	onSessionEvent?: (event: DeepReadonly<AgentSessionEvent>) => void;
 	onUsage?: (usage: ReviewUsageSnapshot) => void;
 	/** Local-only observer; never forward this warning into review/session/protocol data. */
 	onDiagnosticRetentionWarning?: (message: string) => void | Promise<void>;
@@ -668,7 +668,7 @@ export interface ReviewWorkflowHooks {
 	signal?: AbortSignal;
 	onProgress?: (message: string) => void;
 	onPrepared?: (resolution: ResolvedReview, model: Model<Api>) => Promise<void> | void;
-	onSessionEvent?: (event: AgentSessionEvent) => void;
+	onSessionEvent?: (event: DeepReadonly<AgentSessionEvent>) => void;
 	onUsage?: (usage: ReviewUsageSnapshot) => void;
 	cleanup?: () => void;
 }
@@ -760,7 +760,7 @@ export interface ExecuteReviewWorkflowOptions {
 	skipWorkingTreeGuard?: boolean;
 	signal?: AbortSignal;
 	onProgress?: (message: string) => void;
-	onSessionEvent?: (event: AgentSessionEvent) => void;
+	onSessionEvent?: (event: DeepReadonly<AgentSessionEvent>) => void;
 	onUsage?: (usage: ReviewUsageSnapshot) => void;
 	onDiagnosticRetentionWarning?: RunReviewOptions["onDiagnosticRetentionWarning"];
 	/** Host each pass as a conversation, which the review's work links as its `child` while the pass runs. */
@@ -1127,7 +1127,7 @@ interface ReviewPassOptions<TReport> {
 	priorUsage: SessionUsageTotals;
 	signal?: AbortSignal;
 	onPass?: RunReviewOptions["onPass"];
-	onEvent: (event: AgentSessionEvent) => void;
+	onEvent: (event: DeepReadonly<AgentSessionEvent>) => void;
 	onUsage?: (usage: ReviewUsageSnapshot) => void;
 	/** Host the pass as a conversation of these passes while it runs. */
 	passes?: ReviewPasses;
@@ -1355,7 +1355,7 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 	try {
 		if (requestedAuxiliaryTools.length > 0) reviewCwd = await snapshot.materializeHead();
 		const contextFiles = await loadReviewContextFiles(snapshot, options.cwd, options.agentDir);
-		const onSessionEvent = (phase: ReviewPass, event: AgentSessionEvent): void => {
+		const onSessionEvent = (phase: ReviewPass, event: DeepReadonly<AgentSessionEvent>): void => {
 			options.onSessionEvent?.(event);
 			if (event.type === "tool_execution_start") {
 				const summary = summarizeToolArgs(event.args);

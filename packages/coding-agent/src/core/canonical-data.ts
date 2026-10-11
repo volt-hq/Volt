@@ -1,4 +1,4 @@
-import type { JsonValue } from "@hansjm10/volt-ai";
+import type { DeepReadonly, JsonValue } from "@hansjm10/volt-ai";
 
 /** Typed admission failure for values outside Volt's lossless JSON data grammar. */
 export class CanonicalDataError extends TypeError {
@@ -19,7 +19,13 @@ function fail(description: string, path: string, reason: string): never {
 	throw new CanonicalDataError(description, path, reason);
 }
 
-function cloneValue(value: unknown, description: string, path: string, active: WeakSet<object>): JsonValue {
+function cloneValue(
+	value: unknown,
+	description: string,
+	path: string,
+	active: WeakSet<object>,
+	freeze: boolean,
+): JsonValue {
 	if (value === null || typeof value === "string" || typeof value === "boolean") {
 		return value;
 	}
@@ -76,8 +82,9 @@ function cloneValue(value: unknown, description: string, path: string, active: W
 				if (!("value" in descriptor) || !descriptor.enumerable) {
 					fail(description, `${path}[${index}]`, "array entries must be enumerable data properties");
 				}
-				clone.push(cloneValue(descriptor.value, description, `${path}[${index}]`, active));
+				clone.push(cloneValue(descriptor.value, description, `${path}[${index}]`, active, freeze));
 			}
+			if (freeze) Object.freeze(clone);
 			return clone;
 		} finally {
 			active.delete(value);
@@ -104,12 +111,13 @@ function cloneValue(value: unknown, description: string, path: string, active: W
 				fail(description, childPath, "non-enumerable properties are not permitted");
 			}
 			Object.defineProperty(clone, key, {
-				value: cloneValue(descriptor.value, description, childPath, active),
+				value: cloneValue(descriptor.value, description, childPath, active, freeze),
 				enumerable: true,
 				writable: true,
 				configurable: true,
 			});
 		}
+		if (freeze) Object.freeze(clone);
 		return clone;
 	} finally {
 		active.delete(value);
@@ -118,8 +126,20 @@ function cloneValue(value: unknown, description: string, path: string, active: W
 
 /** Clone and own a value after proving that JSON persistence preserves its data exactly. */
 export function cloneCanonicalData<T>(value: T, description: string): T {
+	return ownCanonicalData(value, description, false);
+}
+
+/**
+ * {@link cloneCanonicalData}, deeply frozen: one copy any number of readers can
+ * share, since none of them can change what another reads.
+ */
+export function freezeCanonicalData<T>(value: T, description: string): DeepReadonly<T> {
+	return ownCanonicalData(value, description, true) as DeepReadonly<T>;
+}
+
+function ownCanonicalData<T>(value: T, description: string, freeze: boolean): T {
 	try {
-		return cloneValue(value, description, "$", new WeakSet<object>()) as T;
+		return cloneValue(value, description, "$", new WeakSet<object>(), freeze) as T;
 	} catch (error) {
 		if (error instanceof CanonicalDataError) throw error;
 		const reason = error instanceof Error && error.message ? error.message : String(error);
