@@ -257,7 +257,7 @@ describe("model catalog watcher", () => {
 		const session = {
 			attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 			subscribe: vi.fn(() => () => {}),
-			subscribeRuntimeEvents: vi.fn(() => () => {}),
+			paceRuntimeEvents: vi.fn(() => () => {}),
 			subscribeReloads: vi.fn(() => () => {}),
 			settingsManager: { subscribeExtensionSettings: vi.fn(() => () => {}) },
 			modelRegistry: registry,

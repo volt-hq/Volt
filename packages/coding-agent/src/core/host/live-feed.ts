@@ -17,7 +17,7 @@
  * `resources` query reports it.
  */
 
-import type { AssistantMessageEvent } from "@hansjm10/volt-ai";
+import type { AssistantMessageEvent, DeepReadonly } from "@hansjm10/volt-ai";
 import { HOST_NOTICE_SOURCE, type LiveItem, type LiveToolPartial, type LiveValue } from "@hansjm10/volt-protocol";
 import type { AgentSession, AgentSessionEvent } from "../agent-session.ts";
 import { liveIntentAvailability } from "../protocol/intents/state.ts";
@@ -48,7 +48,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** The incremental part of an assistant stream event, without its message snapshot. */
-export function slimAssistantEvent(event: AssistantMessageEvent): SlimAssistantEvent | undefined {
+export function slimAssistantEvent(event: DeepReadonly<AssistantMessageEvent>): SlimAssistantEvent | undefined {
 	switch (event.type) {
 		case "text_start":
 			return { type: "text_start", contentIndex: event.contentIndex };
@@ -228,7 +228,7 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 		stream([{ type: "tool", op: "end", toolCallId, toolName, isError, ...change }]);
 	};
 
-	const onEvent = (event: AgentSessionEvent): void => {
+	const onEvent = (event: DeepReadonly<AgentSessionEvent>): void => {
 		switch (event.type) {
 			case "message_start":
 				if (event.message.role === "assistant") {

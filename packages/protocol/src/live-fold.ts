@@ -17,7 +17,13 @@
  * Notices and directives leave no state.
  */
 
-import { type AssistantMessage, type JsonObject, parseStreamingJson, type ToolCall } from "@hansjm10/volt-ai";
+import {
+	type AssistantMessage,
+	type DeepReadonly,
+	type JsonObject,
+	parseStreamingJson,
+	type ToolCall,
+} from "@hansjm10/volt-ai";
 import type { LiveItem, LiveValue } from "./live.ts";
 import type { ToolPresentation, ToolPresentationPatch } from "./presentation.ts";
 import type { ProjectedEntry } from "./projected.ts";
@@ -30,7 +36,7 @@ export type LiveToolPartial = NonNullable<LiveToolItem["partial"]>;
 
 /** The streaming assistant message: the start message with every delta since applied. */
 export interface LiveStreamingAssistant {
-	readonly message: AssistantMessage;
+	readonly message: DeepReadonly<AssistantMessage>;
 	/** `assistant_end` arrived: the entry that commits the message follows. */
 	readonly ended: boolean;
 	/** The raw argument text of tool calls still streaming, by content index. */

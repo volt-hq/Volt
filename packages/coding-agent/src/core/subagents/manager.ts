@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import type { AgentAbortSource, AgentMessage, ThinkingLevel, WorkRecord } from "@hansjm10/volt-agent-core";
+import type { DeepReadonly } from "@hansjm10/volt-ai";
 import { WORK_OUTPUT_MAX_UTF8_BYTES } from "@hansjm10/volt-protocol/work";
 import type { SessionWorktreeDaemon } from "../../daemon/session-worktree.ts";
 import type { AgentSessionEvent, SessionStats } from "../agent-session.ts";
@@ -49,7 +50,7 @@ import { SUBAGENT_REGISTRY_TOOL_NAME } from "./tool-names.ts";
 import { SubagentTurnBudget, type SubagentTurnLimits } from "./turn-budget.ts";
 import { readSubagentWorkInput, SUBAGENT_WORK_KIND, subagentToolActivity, subagentWorkKind } from "./work.ts";
 
-export type SubagentEvent = AgentSessionEvent;
+export type SubagentEvent = DeepReadonly<AgentSessionEvent>;
 export type SubagentEndEvent = Extract<SubagentEvent, { type: "agent_end" }>;
 export type SubagentEventListener = (event: SubagentEvent) => void;
 

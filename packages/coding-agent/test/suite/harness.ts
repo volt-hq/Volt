@@ -17,6 +17,7 @@ import {
 } from "@hansjm10/volt-agent-core";
 import {
 	createFauxProvider,
+	type DeepReadonly,
 	type FauxModelDefinition,
 	type FauxPromptCacheRefresh,
 	type FauxProvider,
@@ -133,8 +134,8 @@ export interface Harness {
 	setResponses: (responses: FauxResponseStep[]) => void;
 	appendResponses: (responses: FauxResponseStep[]) => void;
 	getPendingResponseCount: () => number;
-	events: AgentSessionEvent[];
-	eventsOfType<T extends AgentSessionEvent["type"]>(type: T): Extract<AgentSessionEvent, { type: T }>[];
+	events: DeepReadonly<AgentSessionEvent>[];
+	eventsOfType<T extends AgentSessionEvent["type"]>(type: T): Extract<DeepReadonly<AgentSessionEvent>, { type: T }>[];
 	tempDir: string;
 	cleanup: () => void;
 	cleanupAsync: () => Promise<void>;
@@ -256,7 +257,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	});
 	const control = createAgentSessionTestControl(session);
 
-	const events: AgentSessionEvent[] = [];
+	const events: DeepReadonly<AgentSessionEvent>[] = [];
 	session.subscribe((event) => {
 		events.push(event);
 	});
@@ -276,7 +277,9 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		getPendingResponseCount: fauxProvider.getPendingResponseCount,
 		events,
 		eventsOfType<T extends AgentSessionEvent["type"]>(type: T) {
-			return events.filter((event): event is Extract<AgentSessionEvent, { type: T }> => event.type === type);
+			return events.filter(
+				(event): event is Extract<DeepReadonly<AgentSessionEvent>, { type: T }> => event.type === type,
+			);
 		},
 		tempDir,
 		cleanup() {

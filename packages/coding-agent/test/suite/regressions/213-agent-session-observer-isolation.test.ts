@@ -1,5 +1,5 @@
 import type { AgentMessage, AgentTool } from "@hansjm10/volt-agent-core";
-import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
+import { type DeepReadonly, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
@@ -7,7 +7,7 @@ import type { CustomMessageInput } from "../../../src/core/messages.ts";
 import { queueOf } from "../../utilities/session-reads.ts";
 import { createHarness, getUserTexts, type Harness } from "../harness.ts";
 
-function getUserText(messages: readonly AgentMessage[]): string | undefined {
+function getUserText(messages: readonly DeepReadonly<AgentMessage>[]): string | undefined {
 	const user = messages.find((message) => message.role === "user");
 	if (!user) return undefined;
 	if (typeof user.content === "string") return user.content;
@@ -17,8 +17,9 @@ function getUserText(messages: readonly AgentMessage[]): string | undefined {
 		.join("\n");
 }
 
-function mutateUserText(messages: readonly AgentMessage[], text: string): void {
-	const user = messages.find((message) => message.role === "user");
+/** Write to a session event's user text as a misbehaving observer might, past its read-only type. */
+function mutateUserText(messages: readonly DeepReadonly<AgentMessage>[], text: string): void {
+	const user = (messages as AgentMessage[]).find((message) => message.role === "user");
 	if (!user) return;
 	if (typeof user.content === "string") {
 		user.content = text;
@@ -29,8 +30,8 @@ function mutateUserText(messages: readonly AgentMessage[], text: string): void {
 }
 
 function isDeliveryOrTerminalEvent(
-	event: AgentSessionEvent,
-): event is Extract<AgentSessionEvent, { type: "delivery_start" | "agent_end" }> {
+	event: DeepReadonly<AgentSessionEvent>,
+): event is Extract<DeepReadonly<AgentSessionEvent>, { type: "delivery_start" | "agent_end" }> {
 	return event.type === "delivery_start" || event.type === "agent_end";
 }
 
@@ -44,7 +45,7 @@ interface CyclicDetails {
 	self?: CyclicDetails;
 }
 
-function getToolResultText(tool: Extract<AgentSessionEvent, { type: "tool_execution_end" }>): string {
+function getToolResultText(tool: Extract<DeepReadonly<AgentSessionEvent>, { type: "tool_execution_end" }>): string {
 	const content = tool.result.content as Array<{ type: string; text?: string }>;
 	return content
 		.filter((part): part is { type: "text"; text: string } => part.type === "text")
@@ -177,7 +178,7 @@ describe("regression #213: AgentSession observer isolation", () => {
 
 	it("rejects an invalid custom message before persistence or publication", async () => {
 		harness = await createHarness();
-		const customEvents: AgentSessionEvent[] = [];
+		const customEvents: DeepReadonly<AgentSessionEvent>[] = [];
 		harness.session.subscribe((event) => {
 			if ((event.type === "message_start" || event.type === "message_end") && event.message.role === "custom") {
 				customEvents.push(event);
@@ -221,7 +222,7 @@ describe("regression #213: AgentSession observer isolation", () => {
 		["shared memory", () => new SharedArrayBuffer(1)],
 	] as const)("rejects %s custom details before observer publication", async (_name, createDetails) => {
 		harness = await createHarness();
-		const events: AgentSessionEvent[] = [];
+		const events: DeepReadonly<AgentSessionEvent>[] = [];
 		harness.session.subscribe((event) => events.push(event));
 		const sendUnchecked = harness.session.sendCustomMessage.bind(harness.session) as (message: {
 			customType: string;
@@ -515,6 +516,7 @@ describe("regression #213: AgentSession observer isolation", () => {
 				const first = event.steering[0];
 				if (first) (first as { text: string }).text = "mutated queue snapshot";
 			} else if (event.type === "planning_state_changed") {
+				// @ts-expect-error A listener's event is read-only, and frozen at runtime.
 				event.planning.mode = "build";
 			} else {
 				return;

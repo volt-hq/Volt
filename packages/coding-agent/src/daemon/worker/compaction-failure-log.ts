@@ -1,3 +1,4 @@
+import type { DeepReadonly } from "@hansjm10/volt-ai";
 import type { AgentSessionEvent } from "../../core/agent-session.ts";
 import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
 import type { DaemonLogger } from "../log.ts";
@@ -17,7 +18,7 @@ export function observeCompactionFailures(
 ): () => void {
 	const session = conversation.session;
 	return session.subscribe(
-		(event: AgentSessionEvent) => {
+		(event: DeepReadonly<AgentSessionEvent>) => {
 			if (event.type !== "compaction_end" || event.aborted || event.errorMessage === undefined) return;
 			const model = session.model;
 			const error =

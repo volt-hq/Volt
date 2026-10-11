@@ -1,5 +1,11 @@
 import type { AgentTool } from "@hansjm10/volt-agent-core";
-import { type AssistantMessage, fauxAssistantMessage, fauxToolCall, type PromptCacheMetadata } from "@hansjm10/volt-ai";
+import {
+	type AssistantMessage,
+	type DeepReadonly,
+	fauxAssistantMessage,
+	fauxToolCall,
+	type PromptCacheMetadata,
+} from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
@@ -176,7 +182,7 @@ describe("issue #724: prompt cache status while a turn runs", () => {
 		const prompt = harness.session.prompt("again");
 		await toolStarted;
 		const liveBefore = harness.session.liveState.get("prompt_cache");
-		const started: AssistantMessage[] = [];
+		const started: DeepReadonly<AssistantMessage>[] = [];
 		const changes: unknown[] = [];
 		harness.session.subscribe((event) => {
 			if (event.type === "prompt_cache_changed") changes.push(event.promptCache);
@@ -204,7 +210,7 @@ describe("issue #724: prompt cache status while a turn runs", () => {
 		await vi.advanceTimersByTimeAsync(MINUTE);
 
 		const liveBefore = harness.session.liveState.get("prompt_cache");
-		const started: AssistantMessage[] = [];
+		const started: DeepReadonly<AssistantMessage>[] = [];
 		const changes: unknown[] = [];
 		harness.session.subscribe((event) => {
 			if (event.type === "prompt_cache_changed") changes.push(event.promptCache);

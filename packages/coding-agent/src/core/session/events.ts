@@ -17,11 +17,11 @@ import type {
 	ConversationPhase,
 	PendingToolExecution,
 } from "@hansjm10/volt-agent-core";
-import type { JsonValue } from "@hansjm10/volt-ai";
+import type { DeepReadonly, JsonValue } from "@hansjm10/volt-ai";
 import { WORK_NOTICE_CUSTOM_TYPE } from "@hansjm10/volt-protocol";
 import type { ActiveAgentRun, AgentSessionEvent, AgentSessionEventListener } from "../agent-session.ts";
 import type { BackgroundJobDiagnostics } from "../background-job-diagnostics.ts";
-import { cloneCanonicalData } from "../canonical-data.ts";
+import { cloneCanonicalData, freezeCanonicalData } from "../canonical-data.ts";
 import type {
 	ExtensionRunner,
 	MessageEndEvent,
@@ -103,6 +103,7 @@ export interface SessionEventsHost {
 export class SessionEvents {
 	private readonly host: SessionEventsHost;
 	private listeners: AgentSessionEventListener[] = [];
+	private readonly pacers = new Set<() => Promise<void> | void>();
 	private readonly listenerGitObservations = new Set<() => void>();
 	private streaming: AgentMessage | undefined;
 	private readonly toolExecutions = new Map<string, PendingToolExecution>();
@@ -251,28 +252,22 @@ export class SessionEvents {
 
 	private dispatch(event: AgentSessionEvent): void {
 		const listeners = [...this.listeners];
-		const description = `AgentSession ${event.type} event`;
-		let canonicalEvent: AgentSessionEvent;
+		// Every listener shares one validated, deeply frozen copy: none can change what another
+		// listener or the session sees, and the cost does not grow with the number of listeners.
+		let snapshot: DeepReadonly<AgentSessionEvent>;
 		try {
-			canonicalEvent = cloneCanonicalData(event, description);
+			snapshot = freezeCanonicalData(event, `AgentSession ${event.type} event`);
 		} catch (error) {
 			this.reportProjectionFailure(event.type, error);
 			return;
 		}
 
 		for (const listener of listeners) {
-			let snapshot: AgentSessionEvent;
-			try {
-				snapshot = cloneCanonicalData(canonicalEvent, description);
-			} catch (error) {
-				this.reportProjectionFailure(event.type, error);
-				continue;
-			}
 			try {
 				void Promise.resolve(listener(snapshot)).catch(() => {});
 			} catch {
-				// Public subscribers are passive projections. Their failure or mutation
-				// cannot alter session state or suppress a later subscriber.
+				// Public subscribers are passive projections. Their failure, or a write to the
+				// frozen event, cannot alter session state or suppress a later subscriber.
 			}
 		}
 	}
@@ -315,12 +310,15 @@ export class SessionEvents {
 		this.listeners = [];
 	}
 
-	subscribeRuntimeEvents(listener: (event: AgentEvent) => Promise<void> | void): () => void {
-		return this.host.conversation().subscribe(async (event) => {
-			if (!isAgentEvent(event)) return;
-			const { basedOn: _basedOn, ...agentEvent } = event;
-			await listener(agentEvent as AgentEvent);
-		});
+	/**
+	 * Await `pace` after the session handles each loop event: a slow pace slows
+	 * the agent loop. It receives no event, so pacing copies nothing.
+	 */
+	paceRuntimeEvents(pace: () => Promise<void> | void): () => void {
+		this.pacers.add(pace);
+		return () => {
+			this.pacers.delete(pace);
+		};
 	}
 
 	/** Every conversation event, in publication order. */
@@ -388,7 +386,17 @@ export class SessionEvents {
 				return;
 			default: {
 				const { basedOn: _basedOn, ...agentEvent } = event;
-				await this.handleAgentEvent(agentEvent as AgentEvent);
+				try {
+					await this.handleAgentEvent(agentEvent as AgentEvent);
+				} finally {
+					for (const pace of [...this.pacers]) {
+						try {
+							await pace();
+						} catch {
+							// A pace only delays the loop; its failure cannot change the session.
+						}
+					}
+				}
 			}
 		}
 	}

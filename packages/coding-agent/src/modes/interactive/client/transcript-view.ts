@@ -24,6 +24,7 @@
 import {
 	type AssistantMessage,
 	createProviderError,
+	type DeepReadonly,
 	type ImageContent,
 	type JsonValue,
 	type TextContent,
@@ -94,7 +95,7 @@ export interface TranscriptViewHost {
 
 interface Streaming {
 	readonly component: AssistantMessageComponent;
-	readonly coalescer: StreamingRenderCoalescer<AssistantMessage>;
+	readonly coalescer: StreamingRenderCoalescer<DeepReadonly<AssistantMessage>>;
 	/** When the streaming message started: another start is another message. */
 	readonly timestamp: number;
 	/** The tool calls the message made so far, whose rows leave with it unless it commits. */
@@ -563,7 +564,7 @@ export class TranscriptView {
 					this.host.markdownTheme(),
 				);
 				this.add(component);
-				const coalescer = new StreamingRenderCoalescer<AssistantMessage>((message) => {
+				const coalescer = new StreamingRenderCoalescer<DeepReadonly<AssistantMessage>>((message) => {
 					component.updateContent(message);
 					this.host.ui.requestRender();
 				});

@@ -23,5 +23,29 @@ export type JsonCompatible<T> = [T] extends [JsonValue]
 					? { [Key in keyof T]: Key extends string ? JsonCompatible<T[Key]> : never }
 					: never;
 
+/** {@link JsonObject} with every object and array at every depth read-only. */
+export type ReadonlyJsonObject = { readonly [key: string]: ReadonlyJsonValue };
+
+/** {@link JsonValue} with every object and array at every depth read-only. */
+export type ReadonlyJsonValue = JsonPrimitive | ReadonlyJsonObject | readonly ReadonlyJsonValue[];
+
+/**
+ * `T` with every property and array at every depth read-only, as a deeply
+ * frozen value is. JSON objects and arrays map to their named read-only forms.
+ */
+export type DeepReadonly<T> = T extends (...args: never[]) => unknown
+	? T
+	: [T] extends [JsonObject]
+		? [JsonObject] extends [T]
+			? ReadonlyJsonObject
+			: { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+		: [T] extends [JsonValue[]]
+			? [JsonValue[]] extends [T]
+				? readonly ReadonlyJsonValue[]
+				: { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+			: T extends object
+				? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+				: T;
+
 /** A concrete value statically checked against the JSON data grammar. */
 export type JsonCompatibleInput<T> = T & JsonCompatible<T>;

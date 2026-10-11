@@ -1,4 +1,4 @@
-import type { AssistantMessage } from "@hansjm10/volt-ai";
+import type { AssistantMessage, DeepReadonly } from "@hansjm10/volt-ai";
 import {
 	Container,
 	Markdown,
@@ -21,12 +21,12 @@ export class AssistantMessageComponent extends Container {
 	private contentContainer: Container;
 	private hideThinkingBlock: boolean;
 	private markdownTheme: MarkdownTheme;
-	private lastMessage?: AssistantMessage;
+	private lastMessage?: DeepReadonly<AssistantMessage>;
 	private contentDirty = false;
 	private hasToolCalls = false;
 
 	constructor(
-		message?: AssistantMessage,
+		message?: DeepReadonly<AssistantMessage>,
 		hideThinkingBlock = false,
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
 	) {
@@ -68,7 +68,7 @@ export class AssistantMessageComponent extends Container {
 		});
 	}
 
-	updateContent(message: AssistantMessage): void {
+	updateContent(message: DeepReadonly<AssistantMessage>): void {
 		this.lastMessage = message;
 		this.contentDirty = true;
 	}

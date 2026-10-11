@@ -1,5 +1,5 @@
 import type { AgentTool } from "@hansjm10/volt-agent-core";
-import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
+import { type DeepReadonly, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
@@ -83,7 +83,10 @@ describe("regression #750: extension loop events no extension handles", () => {
 		// Unhandled events still reach session listeners in full.
 		const assistantStarts = harness
 			.eventsOfType("message_start")
-			.filter((event: Extract<AgentSessionEvent, { type: "message_start" }>) => event.message.role === "assistant");
+			.filter(
+				(event: Extract<DeepReadonly<AgentSessionEvent>, { type: "message_start" }>) =>
+					event.message.role === "assistant",
+			);
 		expect(assistantStarts).toHaveLength(2);
 		expect(harness.eventsOfType("tool_execution_start")).toEqual([
 			{ type: "tool_execution_start", toolCallId: "call-1", toolName: "progress", args: { step: "one" } },

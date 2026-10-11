@@ -502,7 +502,7 @@ await session.waitForIdle();
 
 ### Events
 
-Subscribe to events to receive streaming output and lifecycle notifications. Volt snapshots the listener list and gives every listener its own full JSON-data snapshot. Mutating an event, throwing synchronously, or returning a rejected promise cannot affect session state or suppress later listeners. Listener promises are observed only to contain rejection; they do not delay session work.
+Subscribe to events to receive streaming output and lifecycle notifications. Volt snapshots the listener list and gives every listener the same deeply frozen JSON-data snapshot, typed `DeepReadonly<AgentSessionEvent>` (`DeepReadonly` comes from `@hansjm10/volt-ai`); build your own values from an event instead of changing it. Writing to an event throws, and neither that nor throwing synchronously or returning a rejected promise can affect session state or suppress later listeners. Listener promises are observed only to contain rejection; they do not delay session work.
 
 The source event is validated and owned even when there are no listeners. Public custom-message inputs, finalized messages, and tool final/update results are validated before acceptance, so invalid producer data fails explicitly instead of silently dropping an event. Accepted event and persisted values are limited to `null`, booleans, strings, finite numbers other than negative zero, dense arrays, and ordinary plain objects with enumerable string-keyed data properties. Omit absent optional properties. `undefined`, cycles, sparse/accessor/symbol-keyed objects, custom prototypes, `Map`, `Set`, `Date`, typed arrays, buffers, `ArrayBuffer`, `SharedArrayBuffer`, and other rich objects are rejected; convert them to plain JSON representations first.
 

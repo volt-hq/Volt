@@ -54,11 +54,14 @@ export * from "./utils/diagnostics.ts";
 export * from "./utils/event-stream.ts";
 export * from "./utils/json-parse.ts";
 export type {
+	DeepReadonly,
 	JsonCompatible,
 	JsonCompatibleInput,
 	JsonObject,
 	JsonPrimitive,
 	JsonValue,
+	ReadonlyJsonObject,
+	ReadonlyJsonValue,
 } from "./utils/json-value.ts";
 export type {
 	OAuthAuthInfo,

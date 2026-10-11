@@ -27,6 +27,7 @@
  * frame, and the first answer wins.
  */
 
+import type { DeepReadonly } from "@hansjm10/volt-ai";
 import {
 	AssistantMessageSchema,
 	ImageContentSchema,
@@ -705,4 +706,9 @@ export const LiveItemSchema = Type.Union([
 	LiveNoticeItemSchema,
 	LiveDirectiveItemSchema,
 ]);
-export type LiveItem = Static<typeof LiveItemSchema>;
+/**
+ * A live item. The streaming assistant items are read-only throughout: a host
+ * publishes them from the session's frozen events.
+ */
+export type LiveItem = ReadonlyAssistantItems<Static<typeof LiveItemSchema>>;
+type ReadonlyAssistantItems<T> = T extends { type: "assistant_start" | "assistant_delta" } ? DeepReadonly<T> : T;

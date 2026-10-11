@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
+	type DeepReadonly,
 	EventStream,
 	getModel,
 	type Message,
@@ -158,7 +159,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 	let control: AgentSessionTestControl;
 	let sessionManager: SessionManager;
 	let tempDir: string;
-	let events: AgentSessionEvent[];
+	let events: DeepReadonly<AgentSessionEvent>[];
 
 	beforeEach(() => {
 		tempDir = join(tmpdir(), `volt-auto-compaction-queue-${Date.now()}`);

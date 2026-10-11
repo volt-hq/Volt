@@ -34,6 +34,7 @@ import {
 	HostResponseSchema,
 	LIVE_EXTENSION_NAME_MAX_CHARS,
 	LIVE_KEY_ID_MAX_CHARS,
+	type LiveItem,
 	LiveItemSchema,
 } from "./live.ts";
 import { RpcConversationIdentifierSchema, RpcSafeNonNegativeIntegerSchema } from "./primitives.ts";
@@ -365,7 +366,9 @@ export const HostFrameSchema = Type.Union([
 	FatalFrameSchema,
 ]);
 
-export type HostFrame = Static<typeof HostFrameSchema>;
+export type HostFrame = WithLiveItems<Static<typeof HostFrameSchema>>;
+/** A live frame carries {@link LiveItem}s, whose streaming assistant items are read-only. */
+type WithLiveItems<T> = T extends { type: "live" } ? Omit<T, "items"> & { items: LiveItem[] } : T;
 
 // ============================================================================
 // Limits block

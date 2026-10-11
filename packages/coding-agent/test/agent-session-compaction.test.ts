@@ -10,7 +10,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getModel } from "@hansjm10/volt-ai";
+import { type DeepReadonly, getModel } from "@hansjm10/volt-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -24,7 +24,7 @@ describe.skipIf(!API_KEY)("AgentSession compaction e2e", () => {
 	let session: AgentSession;
 	let tempDir: string;
 	let sessionManager: SessionManager;
-	let events: AgentSessionEvent[];
+	let events: DeepReadonly<AgentSessionEvent>[];
 
 	beforeEach(() => {
 		// Create temp directory for session files
