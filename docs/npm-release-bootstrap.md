@@ -51,7 +51,8 @@ outside the automated release:
    placeholders are verified and skipped.
 3. For each reserved package, configure npm trusted publishing for GitHub
    repository `volt-hq/Volt`, workflow filename `build-binaries.yml`,
-   environment `npm-publish`, with `npm publish` allowed. Then set package
+   environment `npm-publish`, with direct `npm publish` enabled under Allowed
+   actions (see [Adding a package](#adding-a-package)). Then set package
    publishing access to require two-factor authentication and disallow tokens,
    and revoke any obsolete automation publish tokens. Trusted OIDC publication
    continues to work without leaving a long-lived credential.
@@ -112,14 +113,40 @@ straight to `latest`, and the release checks reject a `beta` tag on it.
    node scripts/bootstrap-npm-packages.mjs --publish
    ```
 
-3. Configure the new package's trusted publisher exactly as in step 3 above
-   (repository `volt-hq/Volt`, workflow `build-binaries.yml`, environment
-   `npm-publish`), require two-factor authentication, and disallow tokens.
+   Reserve the name only with this helper. Do not run `npm publish` or
+   `npm stage publish` from the package directory to create it: staging a
+   package that does not exist yet makes npm publish a public `0.0.0-stage`
+   stub ("Temporary package placeholder for staged publishing") and holds the
+   real package for maintainer approval.
+
+3. Configure the new package's trusted publisher as in step 3 above:
+   repository `volt-hq/Volt`, workflow `build-binaries.yml`, environment
+   `npm-publish`. Under Allowed actions, enable direct `npm publish`; the
+   release never needs `npm dist-tag`. npm always allows `npm stage publish`,
+   and trusted publishers created after 2026-09-03 allow only that by default.
+   Without direct publish, Publish Release fails on this package with
+   `403 Forbidden ... OIDC permission denied for this action` after the
+   packages before it in dependency order have published; enable it, then
+   rerun Publish Release at the same tag. Then require two-factor
+   authentication and disallow tokens.
+
+   Create the trusted publisher at most 2 days before Approve Release. npm
+   expires a new trusted publisher that has not completed a successful publish
+   within 2 days; an expired one cannot be edited, so delete it and create a
+   new one.
+
 4. Verify with
    `npm view <name>@0.0.0-bootstrap.0 name versions license dist-tags repository --json`:
    the only version is `0.0.0-bootstrap.0`, `bootstrap` and `latest` point to
    it, and `beta` is absent.
 
+   A `0.0.0-stage` version means someone ran `npm stage publish` before the
+   name existed (see step 2), and `latest` may point to it until the first
+   release. Leave the stub in place: the release checks accept it, but
+   `node scripts/bootstrap-npm-packages.mjs` reports the package `released`
+   before it has shipped. Run `npm stage list <name>` and reject any pending
+   staged package so it cannot be approved outside the release workflow.
+
 Prepare Release and the tag workflow fail closed until the placeholder exists.
-npm reports a missing trusted publisher only when `npm publish` runs, so
-configure it before approving the release.
+npm checks the trusted publisher and its allowed actions only when
+`npm publish` runs, so configure it (step 3) before approving the release.

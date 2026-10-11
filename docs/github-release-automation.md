@@ -446,6 +446,8 @@ Configure each npm package's trusted publisher for:
 - repository: `volt-hq/Volt`
 - workflow filename: `build-binaries.yml`
 - environment: `npm-publish`
+- allowed actions: direct `npm publish` (npm always allows `npm stage publish`;
+  the release does not use `npm dist-tag`)
 
 Keep the existing `build-binaries.yml` filename so all five npm trusted
 publishers remain aligned. If that filename is ever changed, update all five
@@ -454,10 +456,11 @@ publish a release.
 
 A package added to the lockstep set (as `@hansjm10/volt-protocol` was for
 `0.3.0`) must have its name reserved with the bootstrap placeholder and its
-trusted publisher configured before the first release that contains it. The
-tag workflow's npm verification fails closed on a package that has no
-placeholder, but npm reports a missing trusted publisher only when
-`npm publish` runs, after earlier packages in dependency order have published.
+trusted publisher configured, with direct `npm publish` allowed, before the
+first release that contains it. The tag workflow's npm verification fails
+closed on a package that has no placeholder, but npm reports a missing trusted
+publisher, or one that allows only staged publishing, only when `npm publish`
+runs, after earlier packages in dependency order have published.
 See [Initial npm Release Bootstrap](npm-release-bootstrap.md#adding-a-package).
 
 #### binary-release
