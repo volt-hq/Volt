@@ -419,7 +419,7 @@ export interface ExtensionCommandContext extends ExtensionContext {
 	 */
 	signal: AbortSignal;
 
-	/** Get the current base system-prompt construction options. */
+	/** Get a copy of the current base system-prompt construction options; changing it changes nothing in the session. */
 	getSystemPromptOptions(): BuildSystemPromptOptions;
 
 	/** Wait for the agent to finish streaming */
@@ -762,7 +762,7 @@ export interface BeforeAgentStartEvent {
 	images?: ImageContent[];
 	/** The fully assembled system prompt string. */
 	systemPrompt: string;
-	/** Structured options used to build the system prompt. Extensions can inspect this to understand what Volt loaded without re-discovering resources. */
+	/** Structured options used to build the system prompt. Extensions can inspect this to understand what Volt loaded without re-discovering resources. Each handler gets its own copy; changing it changes nothing in the session. */
 	systemPromptOptions: BuildSystemPromptOptions;
 }
 
