@@ -1018,9 +1018,18 @@ export const CONTROL_REQUEST_SCHEMAS = {
 		worktreeName: Type.Optional(Type.String({ maxLength: 128 })),
 		branch: Type.Optional(Type.String({ maxLength: 256 })),
 		baseRef: Type.Optional(Type.String({ maxLength: 256 })),
+		/** Check out `branch` when it already exists, instead of failing. */
+		reuseBranch: Type.Optional(Type.Boolean()),
 	}),
 	/** Worker: list the managed worktrees of its workspace, for its extensions. Answered by `worktrees_result`. */
 	worker_worktree_list: withId("worker_worktree_list", {}),
+	/**
+	 * Worker: remove a managed worktree of its workspace, for its extensions,
+	 * keeping its branch. Refused while the worktree is dirty or busy. Answered by `ok`.
+	 */
+	worker_worktree_remove: withId("worker_worktree_remove", {
+		worktreeId: Type.String({ minLength: 1, maxLength: 128 }),
+	}),
 } as const;
 
 /** The requests a worker connection may send; a control connection may send none of them. */
@@ -1043,6 +1052,7 @@ export const WORKER_REQUEST_TYPES = [
 	"worker_worktree_release",
 	"worker_worktree_create",
 	"worker_worktree_list",
+	"worker_worktree_remove",
 ] as const satisfies readonly (keyof typeof CONTROL_REQUEST_SCHEMAS)[];
 export type WorkerRequestType = (typeof WORKER_REQUEST_TYPES)[number];
 
@@ -1090,6 +1100,7 @@ export const ControlRequestSchema = Type.Union([
 	CONTROL_REQUEST_SCHEMAS.worker_worktree_release,
 	CONTROL_REQUEST_SCHEMAS.worker_worktree_create,
 	CONTROL_REQUEST_SCHEMAS.worker_worktree_list,
+	CONTROL_REQUEST_SCHEMAS.worker_worktree_remove,
 ]);
 export type ControlRequest = Static<typeof ControlRequestSchema>;
 

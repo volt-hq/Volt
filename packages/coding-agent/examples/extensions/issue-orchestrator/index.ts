@@ -149,11 +149,13 @@ async function start(
 			if (existing !== undefined && !existing.available) {
 				throw new Error(`Worktree ${name} is archived; restore or remove it`);
 			}
+			// A released issue's branch is still there, with the work done on it: check it out again.
 			const worktree =
 				existing ??
 				(await ctx.worktrees.create({
 					name,
 					branch: issueBranch(issue.number),
+					reuseBranch: true,
 					...(config.workspace.baseRef === undefined ? {} : { baseRef: config.workspace.baseRef }),
 				}));
 			// Once per worktree each time the orchestrator starts: a hook that failed runs again on the next attempt.
@@ -171,6 +173,18 @@ async function start(
 			}
 			hooked.add(name);
 			return { path: worktree.path, branch: worktree.branch };
+		},
+		release: async (number) => {
+			const name = issueWorktree(number);
+			try {
+				await ctx.worktrees.remove(name);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				if (message.startsWith("worktree_busy")) return "retry";
+				if (!message.startsWith("worktree_not_found")) return "kept";
+			}
+			hooked.delete(name);
+			return "released";
 		},
 	};
 	const orchestrator = new Orchestrator({

@@ -188,6 +188,18 @@ function subagentLimits(limits: unknown): Pick<SubagentRunOptions, "limits" | "t
 	};
 }
 
+/** Call the daemon; a refusal rejects with its code leading the message, as `worktree_busy: ...`. */
+async function daemonCall<T>(call: () => Promise<T>): Promise<T> {
+	try {
+		return await call();
+	} catch (error) {
+		const code = (error as { code?: unknown }).code;
+		const message = error instanceof Error ? error.message : String(error);
+		if (typeof code !== "string" || message.startsWith(code)) throw error;
+		throw new Error(message.length === 0 ? code : `${code}: ${message}`, { cause: error });
+	}
+}
+
 /** A managed worktree as an extension sees it. */
 function extensionWorktree(status: ControlWorktreeStatus): ExtensionWorktree {
 	return {
@@ -462,7 +474,7 @@ export class SessionExtensionBinding {
 			list: async () => {
 				const daemon = this.host.worktreeDaemon;
 				if (daemon?.list === undefined) throw unavailable();
-				return (await daemon.list()).map(extensionWorktree);
+				return (await daemonCall(() => daemon.list!())).map(extensionWorktree);
 			},
 			create: async (options) => {
 				if (!isRecord(options)) throw new TypeError("ctx.worktrees.create takes { name?, branch?, baseRef? }");
@@ -477,15 +489,30 @@ export class SessionExtensionBinding {
 				const name = read("name");
 				const branch = read("branch");
 				const baseRef = read("baseRef");
+				const { reuseBranch } = options;
+				if (reuseBranch !== undefined && typeof reuseBranch !== "boolean") {
+					throw new TypeError("ctx.worktrees.create: reuseBranch must be true or false");
+				}
 				const daemon = this.host.worktreeDaemon;
 				if (daemon?.create === undefined) throw unavailable();
 				return extensionWorktree(
-					await daemon.create({
-						...(name === undefined ? {} : { name }),
-						...(branch === undefined ? {} : { branch }),
-						...(baseRef === undefined ? {} : { baseRef }),
-					}),
+					await daemonCall(() =>
+						daemon.create!({
+							...(name === undefined ? {} : { name }),
+							...(branch === undefined ? {} : { branch }),
+							...(baseRef === undefined ? {} : { baseRef }),
+							...(reuseBranch === true ? { reuseBranch: true } : {}),
+						}),
+					),
 				);
+			},
+			remove: async (id) => {
+				if (typeof id !== "string" || id.trim().length === 0) {
+					throw new TypeError("ctx.worktrees.remove: id must name a worktree");
+				}
+				const daemon = this.host.worktreeDaemon;
+				if (daemon?.remove === undefined) throw unavailable();
+				await daemonCall(() => daemon.remove!(id));
 			},
 		};
 	}

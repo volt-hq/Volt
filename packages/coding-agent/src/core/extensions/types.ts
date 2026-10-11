@@ -350,6 +350,8 @@ export interface ExtensionWorktreeCreateOptions {
 	readonly branch?: string;
 	/** The ref the branch starts from: the workspace checkout's current branch by default. */
 	readonly baseRef?: string;
+	/** Check out `branch` when it already exists locally, instead of failing; `baseRef` then only records the base. */
+	readonly reuseBranch?: boolean;
 }
 
 /** The managed worktrees an extension reaches (`ctx.worktrees`). */
@@ -359,15 +361,23 @@ export interface ExtensionWorktrees {
 	/**
 	 * Create a managed worktree of the workspace. Needs the `exec` permission;
 	 * rejects outside a conversation the daemon hosts, or with the daemon's
-	 * error (an id in use, the workspace's checkout limit, ...).
+	 * error, whose message starts with its code (`worktree_exists`,
+	 * `worktree_limit_reached`, `worktree_branch_conflict`, ...).
 	 */
 	create(options?: ExtensionWorktreeCreateOptions): Promise<ExtensionWorktree>;
+	/**
+	 * Remove the managed worktree `id`, keeping its branch. Needs the `exec`
+	 * permission. Never forced: rejects with `worktree_dirty` while its
+	 * checkout has changes, and `worktree_busy` while a conversation holds it.
+	 */
+	remove(id: string): Promise<void>;
 }
 
 /** How the session reaches the daemon's worktrees for its extensions. */
 export interface ExtensionWorktreesHandler {
 	list(): Promise<ExtensionWorktree[]>;
 	create(options: ExtensionWorktreeCreateOptions): Promise<ExtensionWorktree>;
+	remove(id: string): Promise<void>;
 }
 
 // ============================================================================

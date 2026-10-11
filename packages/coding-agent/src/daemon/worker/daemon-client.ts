@@ -319,9 +319,16 @@ export class WorkerDaemonClient {
 			...(options.name === undefined ? {} : { worktreeName: options.name }),
 			...(options.branch === undefined ? {} : { branch: options.branch }),
 			...(options.baseRef === undefined ? {} : { baseRef: options.baseRef }),
+			...(options.reuseBranch === true ? { reuseBranch: true } : {}),
 		});
 		if (response.type !== "worktree_result") throw new Error(`Unexpected ${response.type}`);
 		return response.worktree;
+	}
+
+	/** Remove a managed worktree of the worker's workspace, for its extensions, keeping its branch. */
+	async removeWorktree(id: string): Promise<void> {
+		const response = await this.request({ type: "worker_worktree_remove", worktreeId: id });
+		if (response.type !== "ok") throw new Error(`Unexpected ${response.type}`);
 	}
 
 	/** The managed worktrees of the worker's workspace, for its extensions. */

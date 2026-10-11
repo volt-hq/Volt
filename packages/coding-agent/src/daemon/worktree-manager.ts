@@ -520,6 +520,8 @@ export class WorktreeManager {
 			signal?: AbortSignal;
 			prReviewLaunch?: PrReviewLaunch;
 			assertCurrent?: () => void;
+			/** Check out `branch` when it already exists locally, instead of failing; `baseRef` then only records the base. */
+			reuseBranch?: boolean;
 		} = {},
 	): Promise<WorktreeResult<{ worktree: IrohRemoteWorkspaceWorktree }>> {
 		const runGit = options.prReviewLaunch ? runPrReviewGit : this.runGit;
@@ -574,16 +576,30 @@ export class WorktreeManager {
 				options.assertCurrent?.();
 				if (options.prReviewLaunch && options.prReviewLaunch.placement.cwd !== checkoutPath)
 					throw new Error("PR checkout placement changed");
+				const reuse =
+					options.reuseBranch === true &&
+					!options.prReviewLaunch &&
+					(
+						await runGit(
+							["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`],
+							source.source.sourceRootPath,
+							{
+								signal: options.signal,
+							},
+						)
+					).ok;
 				const added = await runGit(
-					[
-						"worktree",
-						"add",
-						...(options.prReviewLaunch ? ["--no-checkout"] : []),
-						checkoutPath,
-						"-b",
-						branch,
-						baseRef,
-					],
+					reuse
+						? ["worktree", "add", checkoutPath, branch]
+						: [
+								"worktree",
+								"add",
+								...(options.prReviewLaunch ? ["--no-checkout"] : []),
+								checkoutPath,
+								"-b",
+								branch,
+								baseRef,
+							],
 					source.source.sourceRootPath,
 					{ signal: options.signal },
 				);

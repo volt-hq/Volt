@@ -17,6 +17,7 @@ import {
 	type AgentResult,
 	type Agents,
 	Orchestrator,
+	type ReleaseOutcome,
 	type Workspaces,
 } from "../../examples/extensions/issue-orchestrator/orchestrator.ts";
 import { decidePhase, issueBranch } from "../../examples/extensions/issue-orchestrator/phase.ts";
@@ -175,13 +176,40 @@ function fakeAgents(): Agents & { started: StartedRun[]; cancelled: string[] } {
 	};
 }
 
-const workspaces: Workspaces = {
-	prepare: async (issue) => ({ path: `/worktrees/issue-${issue.number}`, branch: issueBranch(issue.number) }),
-};
+/**
+ * Checkouts in memory: `prepare` fails while `failPrepare` says why, and
+ * `release` answers the next queued outcome (`released` by default).
+ */
+function fakeWorkspaces(): Workspaces & {
+	prepared: number[];
+	releases: number[];
+	failPrepare: string | undefined;
+	outcomes: ReleaseOutcome[];
+} {
+	const workspaces = {
+		prepared: [] as number[],
+		releases: [] as number[],
+		failPrepare: undefined as string | undefined,
+		outcomes: [] as ReleaseOutcome[],
+		prepare: async (issue: Issue) => {
+			if (workspaces.failPrepare !== undefined) throw new Error(workspaces.failPrepare);
+			workspaces.prepared.push(issue.number);
+			return { path: `/worktrees/issue-${issue.number}`, branch: issueBranch(issue.number) };
+		},
+		release: async (number: number): Promise<ReleaseOutcome> => {
+			workspaces.releases.push(number);
+			return workspaces.outcomes.shift() ?? "released";
+		},
+	};
+	return workspaces;
+}
+
+const workspaces = fakeWorkspaces();
 
 function setup(config: WorkflowConfig = workflow(), options: { now?: () => number } = {}) {
 	const github = new FakeGitHub();
 	const agents = fakeAgents();
+	const workspaces = fakeWorkspaces();
 	const orchestrator = new Orchestrator({
 		loadWorkflow: async () => ({ path: "/repo/.volt/WORKFLOW.md", config }),
 		tracker: async () => github,
@@ -202,6 +230,7 @@ function setup(config: WorkflowConfig = workflow(), options: { now?: () => numbe
 	return {
 		github,
 		agents,
+		workspaces,
 		orchestrator,
 		runs,
 		finish,
@@ -395,6 +424,63 @@ describe("issue orchestrator", () => {
 		await loop;
 		expect(agents.cancelled).toEqual([running.id]);
 		expect(orchestrator.snapshot().running).toEqual([]);
+	});
+
+	it("releases the checkout of an issue it handed off, once nothing holds it", async () => {
+		const { github, workspaces, orchestrator } = setup();
+		github.addIssue(12);
+		github.push(12);
+		github.review(12, "clean");
+		workspaces.outcomes.push("retry");
+
+		// Approved: handed to a human, its checkout released on the next tick (held once, so tried again).
+		await orchestrator.tick();
+		expect(github.handoffs).toMatchObject([{ issue: 12, label: "agent-approved" }]);
+		await orchestrator.tick();
+		await orchestrator.tick();
+		expect(workspaces.releases).toEqual([12, 12]);
+		await orchestrator.tick();
+		expect(workspaces.releases).toEqual([12, 12]);
+	});
+
+	it("keeps a checkout the release refuses, and retries a checkout it cannot set up without handing the issue off", async () => {
+		let now = 1_000_000;
+		const { github, workspaces, orchestrator, agents, runs } = setup(workflow("agent:\n  max_attempts: 1"), {
+			now: () => now,
+		});
+		github.addIssue(12);
+		workspaces.failPrepare = "worktree_limit_reached";
+
+		for (let round = 0; round < 3; round += 1) {
+			await orchestrator.tick();
+			await vi.waitFor(() => expect(orchestrator.snapshot().retrying).toHaveLength(1));
+			now += 400_000;
+		}
+		expect(orchestrator.snapshot().retrying).toEqual([
+			expect.objectContaining({
+				issue: 12,
+				failures: 3,
+				error: "setting up the checkout failed: worktree_limit_reached",
+			}),
+		]);
+		expect(github.handoffs).toEqual([]);
+		expect(agents.started).toEqual([]);
+
+		// Once there is room, the agent runs; only it counts as the phase's attempt.
+		workspaces.failPrepare = undefined;
+		await orchestrator.tick();
+		const run = await runs(1);
+		run.finish();
+		await vi.waitFor(() => expect(orchestrator.snapshot().running).toEqual([]));
+		workspaces.outcomes.push("kept");
+		await orchestrator.tick();
+		expect(github.handoffs).toEqual([
+			{ issue: 12, label: "agent-needs-human", comment: expect.stringContaining("ran 1 times without moving") },
+		]);
+		await orchestrator.tick();
+		await orchestrator.tick();
+		// Kept (a checkout with changes stays for the human): not tried again.
+		expect(workspaces.releases).toEqual([12]);
 	});
 
 	it("works an issue again once a human removes its handoff label", async () => {

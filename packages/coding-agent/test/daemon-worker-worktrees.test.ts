@@ -6,7 +6,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createDaemonClient, type DaemonClient } from "../src/daemon/control-client.ts";
@@ -124,6 +124,69 @@ describe("a worker's managed worktrees", () => {
 		).toMatchObject({ type: "error" });
 	}, 60_000);
 
+	it("removes a worktree, keeping its branch, and creates it again on that branch", async () => {
+		const { harness, worker } = await fixture();
+		const created = await worker.request({
+			type: "worker_worktree_create",
+			worktreeName: "issue-12",
+			baseRef: "main",
+		});
+		if (created.type !== "worktree_result") throw new Error(`not created: ${JSON.stringify(created)}`);
+		const path = created.worktree.path;
+		writeFileSync(join(path, "fix.txt"), "fixed\n");
+		git(path, "add", "fix.txt");
+		git(
+			path,
+			"-c",
+			"user.name=Test",
+			"-c",
+			"user.email=test@example.test",
+			"-c",
+			"commit.gpgsign=false",
+			"commit",
+			"-m",
+			"fix",
+		);
+		const head = git(path, "rev-parse", "HEAD");
+
+		// A dirty checkout stays.
+		writeFileSync(join(path, "scratch.txt"), "wip\n");
+		expect(await worker.request({ type: "worker_worktree_remove", worktreeId: "issue-12" })).toMatchObject({
+			type: "error",
+			code: "worktree_dirty",
+		});
+		rmSync(join(path, "scratch.txt"));
+		expect(await worker.request({ type: "worker_worktree_remove", worktreeId: "issue-12" })).toMatchObject({
+			type: "ok",
+		});
+		expect(existsSync(path)).toBe(false);
+		expect(await worker.request({ type: "worker_worktree_list" })).toMatchObject({ worktrees: [] });
+		expect(git(harness.workspacePath, "rev-parse", "volt/issue-12")).toBe(head);
+
+		// Created again: without reuseBranch the branch is in the way; with it, its commits come back.
+		expect(
+			await worker.request({ type: "worker_worktree_create", worktreeName: "issue-12", baseRef: "main" }),
+		).toMatchObject({ type: "error", code: "worktree_branch_conflict" });
+		const again = await worker.request({
+			type: "worker_worktree_create",
+			worktreeName: "issue-12",
+			baseRef: "main",
+			reuseBranch: true,
+		});
+		expect(again).toMatchObject({ type: "worktree_result", worktree: { id: "issue-12", branch: "volt/issue-12" } });
+		if (again.type !== "worktree_result") throw new Error("unreachable");
+		expect(git(again.worktree.path, "rev-parse", "HEAD")).toBe(head);
+		// reuseBranch for a branch that does not exist creates it from the base.
+		const fresh = await worker.request({
+			type: "worker_worktree_create",
+			worktreeName: "issue-13",
+			baseRef: "main",
+			reuseBranch: true,
+		});
+		if (fresh.type !== "worktree_result") throw new Error(`not created: ${JSON.stringify(fresh)}`);
+		expect(git(fresh.worktree.path, "rev-parse", "HEAD")).toBe(git(harness.workspacePath, "rev-parse", "main"));
+	}, 60_000);
+
 	it("serves the requests only to a worker", async () => {
 		const { harness } = await fixture();
 		const tui = await harness.connect("tui");
@@ -133,6 +196,10 @@ describe("a worker's managed worktrees", () => {
 			code: "forbidden",
 		});
 		expect(await harness.control.request({ type: "worker_worktree_list" })).toMatchObject({
+			type: "error",
+			code: "forbidden",
+		});
+		expect(await tui.request({ type: "worker_worktree_remove", worktreeId: "issue-12" })).toMatchObject({
 			type: "error",
 			code: "forbidden",
 		});

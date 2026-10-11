@@ -48,9 +48,14 @@ export interface Workspace {
 	readonly branch: string;
 }
 
-/** Prepares the checkout an issue's agents work in. */
+/** What releasing an issue's checkout did: `retry` while something still holds it, `kept` when it must stay. */
+export type ReleaseOutcome = "released" | "retry" | "kept";
+
+/** Prepares the checkout an issue's agents work in, and releases it once the orchestrator is done with the issue. */
 export interface Workspaces {
 	prepare(issue: Issue, config: WorkflowConfig): Promise<Workspace>;
+	/** Release issue `number`'s checkout, keeping its branch; a checkout with changes is `kept`. */
+	release(number: number): Promise<ReleaseOutcome>;
 }
 
 export interface OrchestratorOptions {
@@ -140,6 +145,8 @@ export class Orchestrator {
 	private readonly attempts = new Map<string, number>();
 	private waiting = new Map<number, NotedIssue>();
 	private readonly handedOff = new Map<number, HandedOff>();
+	/** Issues whose checkouts the orchestrator is done with and has yet to release, with their titles. */
+	private readonly pendingReleases = new Map<number, string>();
 	private readonly finished: NotedIssue[] = [];
 	private totals = { runs: 0, tokens: 0, cost: 0 };
 	private signal: AbortSignal | undefined;
@@ -223,6 +230,7 @@ export class Orchestrator {
 			return this.emit();
 		}
 		await this.reconcile(tracker, config);
+		await this.releaseCheckouts();
 		let candidates: Issue[];
 		try {
 			candidates = await tracker.candidates(config.tracker.labels);
@@ -248,6 +256,8 @@ export class Orchestrator {
 				// Labeled, and a human removed the label: work it again from a clean slate.
 				if (handoff.label === undefined || issue.labels.includes(handoff.label.toLowerCase())) continue;
 				this.forget(issue.number);
+				// Its checkout is wanted again; one already released is created again on its branch.
+				this.pendingReleases.delete(issue.number);
 			}
 			const retry = this.retries.get(issue.number);
 			if (retry !== undefined && retry.dueAt > this.now()) continue;
@@ -323,18 +333,23 @@ export class Orchestrator {
 				) {
 					return note(`waiting for a free ${phase.kind} slot`);
 				}
-				this.attempts.set(key, attempts + 1);
-				this.dispatch(tracker, config, issue, phase, attempts);
+				this.dispatch(tracker, config, issue, phase, key, attempts);
 			}
 		}
 	}
 
-	/** Start an agent of `phase`'s role on `issue` in the background; its slot is taken at once. */
+	/**
+	 * Start an agent of `phase`'s role on `issue` in the background; its slot is
+	 * taken at once. Only an agent that started counts as an attempt of the
+	 * phase (`key`): a checkout that could not be prepared is retried with
+	 * backoff, never handed off for it.
+	 */
 	private dispatch(
 		tracker: Tracker,
 		config: WorkflowConfig,
 		issue: Issue,
 		phase: Extract<Phase, { kind: Role }>,
+		key: string,
 		attempts: number,
 	): void {
 		const role = config.roles[phase.kind];
@@ -352,7 +367,12 @@ export class Orchestrator {
 		void (async () => {
 			let result: AgentResult;
 			try {
-				const workspace = await this.options.workspaces.prepare(issue, config);
+				let workspace: Workspace;
+				try {
+					workspace = await this.options.workspaces.prepare(issue, config);
+				} catch (error) {
+					throw new Error(`setting up the checkout failed: ${errorText(error)}`);
+				}
 				const task = renderTemplate(
 					role.prompt,
 					this.variables(tracker, config, issue, phase, workspace, attempts),
@@ -365,6 +385,7 @@ export class Orchestrator {
 					limits: role.limits,
 				});
 				entry.runId = run.id;
+				this.attempts.set(key, attempts + 1);
 				this.emit();
 				// Stopped while it started.
 				if (entry.cancelled) await this.options.agents.cancel(run.id).catch(() => undefined);
@@ -424,6 +445,30 @@ export class Orchestrator {
 		}
 	}
 
+	/**
+	 * Release the checkouts of issues the orchestrator is done with: handed to a
+	 * human (a checkout with changes stays for them), approved, or finished.
+	 * One a conversation still holds is tried again next tick.
+	 */
+	private async releaseCheckouts(): Promise<void> {
+		for (const [number, title] of [...this.pendingReleases]) {
+			if (this.running.has(number)) {
+				this.pendingReleases.delete(number);
+				continue;
+			}
+			let outcome: ReleaseOutcome;
+			try {
+				outcome = await this.options.workspaces.release(number);
+			} catch (error) {
+				this.log(`#${number}: releasing the checkout failed: ${errorText(error)}`);
+				outcome = "kept";
+			}
+			if (outcome === "retry") continue;
+			this.pendingReleases.delete(number);
+			this.log(`#${number} (${title}): ${outcome === "released" ? "released its checkout" : "kept its checkout"}`);
+		}
+	}
+
 	private async cancel(entry: RunningEntry): Promise<void> {
 		entry.cancelled = true;
 		if (entry.runId !== undefined) await this.options.agents.cancel(entry.runId).catch(() => undefined);
@@ -444,11 +489,13 @@ export class Orchestrator {
 		}
 		this.handedOff.set(issue.number, { title: issue.title, reason, label: labeled ? label : undefined });
 		this.retries.delete(issue.number);
+		this.pendingReleases.set(issue.number, issue.title);
 		this.log(`#${issue.number}: handed to a human: ${reason}`);
 	}
 
 	private finish(issue: Issue, reason: string): void {
 		this.forget(issue.number);
+		this.pendingReleases.set(issue.number, issue.title);
 		if (this.finished.some((entry) => entry.issue === issue.number && entry.reason === reason)) return;
 		this.finished.unshift({ issue: issue.number, title: issue.title, reason });
 		this.finished.length = Math.min(this.finished.length, MAX_FINISHED);

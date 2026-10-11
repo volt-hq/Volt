@@ -87,6 +87,7 @@ function setup(options: { confirm?: boolean } = {}) {
 	const notifications: string[] = [];
 	const panels: Array<ExtensionPanel | undefined> = [];
 	const worktrees: ExtensionWorktree[] = [];
+	const creates: Array<{ name: string; branch: string; baseRef?: string; reuseBranch?: boolean }> = [];
 	const started: ExtensionSubagentStartOptions[] = [];
 	const cancelled: string[] = [];
 	const ended = Promise.withResolvers<ExtensionSubagentResult>();
@@ -104,7 +105,8 @@ function setup(options: { confirm?: boolean } = {}) {
 		},
 		worktrees: {
 			list: async () => [...worktrees],
-			create: async (create: { name: string; branch: string; baseRef?: string }) => {
+			create: async (create: { name: string; branch: string; baseRef?: string; reuseBranch?: boolean }) => {
+				creates.push(create);
 				const worktree: ExtensionWorktree = {
 					id: create.name,
 					path: `/agent/worktrees/r/${create.name}`,
@@ -142,7 +144,7 @@ function setup(options: { confirm?: boolean } = {}) {
 		if (!registered) throw new Error("/orchestrate is not registered");
 		return registered.handler(args, ctx);
 	};
-	return { command, calls, notifications, panels, worktrees, started, cancelled, work: () => work };
+	return { command, calls, notifications, panels, worktrees, creates, started, cancelled, work: () => work };
 }
 
 describe("issue orchestrator extension", () => {
@@ -151,10 +153,12 @@ describe("issue orchestrator extension", () => {
 	});
 
 	it("starts an issue's agent in its worktree under the loop's work, and stops it", async () => {
-		const { command, calls, panels, worktrees, started, cancelled, work, notifications } = setup();
+		const { command, calls, panels, worktrees, creates, started, cancelled, work, notifications } = setup();
 
 		await command("start");
 		await vi.waitFor(() => expect(started).toHaveLength(1));
+		// On the issue's branch, which a released issue still has.
+		expect(creates).toEqual([{ name: "issue-12", branch: "volt/issue-12", reuseBranch: true, baseRef: "main" }]);
 		expect(worktrees).toEqual([
 			{
 				id: "issue-12",

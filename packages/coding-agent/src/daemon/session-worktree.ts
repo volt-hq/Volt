@@ -24,6 +24,8 @@ export interface SessionWorktreeCreateOptions {
 	readonly name?: string;
 	readonly branch?: string;
 	readonly baseRef?: string;
+	/** Check out `branch` when it already exists, instead of failing. */
+	readonly reuseBranch?: boolean;
 }
 
 /**
@@ -36,6 +38,8 @@ export interface SessionWorktreeDaemon {
 	restore(sessionRef: SessionReference, cwd: string): Promise<() => Promise<void>>;
 	create?(options: SessionWorktreeCreateOptions): Promise<ControlWorktreeStatus>;
 	list?(): Promise<ControlWorktreeStatus[]>;
+	/** Remove the worktree `id`, keeping its branch; refused while it is dirty or busy. */
+	remove?(id: string): Promise<void>;
 }
 
 interface LocalWorktreeOwnership {

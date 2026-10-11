@@ -2021,6 +2021,9 @@
 				},
 				{
 					"$ref": "#/$defs/Control.Request.worker_worktree_list"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_worktree_remove"
 				}
 			]
 		},
@@ -2919,6 +2922,9 @@
 				"baseRef": {
 					"type": "string",
 					"maxLength": 256
+				},
+				"reuseBranch": {
+					"type": "boolean"
 				}
 			},
 			"additionalProperties": false
@@ -2958,6 +2964,29 @@
 				"pinId": {
 					"type": "string",
 					"maxLength": 64
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_worktree_remove": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"worktreeId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_worktree_remove"
+				},
+				"id": {
+					"type": "string"
+				},
+				"worktreeId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 128
 				}
 			},
 			"additionalProperties": false
