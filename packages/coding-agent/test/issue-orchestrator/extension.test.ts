@@ -6,11 +6,12 @@
  * agent and ends the work.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import issueOrchestrator, { manifest } from "../../examples/extensions/issue-orchestrator/index.ts";
+import issueOrchestrator, { manifest, releaseWorktree } from "../../examples/extensions/issue-orchestrator/index.ts";
 import type {
 	ExecOptions,
 	ExecResult,
@@ -225,5 +226,93 @@ describe("issue orchestrator extension", () => {
 		await command("start missing.md");
 		expect(work()).toBeUndefined();
 		expect(notifications.at(-1)).toMatch(/^Cannot read .*missing\.md/);
+	});
+});
+
+describe("releasing an issue's worktree", () => {
+	function git(cwd: string, ...args: string[]): string {
+		return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+	}
+	const runGit = async (args: string[], cwd: string) => {
+		try {
+			return { code: 0, stdout: git(cwd, ...args) };
+		} catch (error) {
+			return { code: 1, stdout: String((error as { stdout?: unknown }).stdout ?? "") };
+		}
+	};
+
+	/** A checkout with a commit, an ignored `node_modules/`, and the worktree API over it. */
+	function checkout(options: { available?: boolean; removeError?: string } = {}) {
+		const path = mkdtempSync(join(tmpdir(), "volt-orchestrator-release-"));
+		directories.push(path);
+		writeFileSync(join(path, ".gitignore"), "node_modules/\n");
+		writeFileSync(join(path, "README.md"), "readme\n");
+		git(path, "init", "--initial-branch=main");
+		git(path, "add", ".");
+		git(
+			path,
+			"-c",
+			"user.name=T",
+			"-c",
+			"user.email=t@example.test",
+			"-c",
+			"commit.gpgsign=false",
+			"commit",
+			"-m",
+			"base",
+		);
+		mkdirSync(join(path, "node_modules", "dep"), { recursive: true });
+		writeFileSync(join(path, "node_modules", "dep", "index.js"), "module.exports = 1;\n");
+		const removed: string[] = [];
+		const worktree: ExtensionWorktree = {
+			id: "issue-12",
+			path,
+			branch: "volt/issue-12",
+			available: options.available ?? true,
+		};
+		return {
+			path,
+			removed,
+			worktrees: {
+				list: async () => [worktree],
+				remove: async (id: string) => {
+					if (options.removeError !== undefined) throw new Error(options.removeError);
+					removed.push(id);
+				},
+			},
+		};
+	}
+
+	it("drops ignored build output, then removes a checkout without other changes", async () => {
+		const { path, removed, worktrees } = checkout();
+		expect(await releaseWorktree(worktrees, runGit, 12)).toBe("released");
+		expect(existsSync(join(path, "node_modules"))).toBe(false);
+		expect(removed).toEqual(["issue-12"]);
+	});
+
+	it("keeps a checkout with tracked or untracked changes, ignored files and all", async () => {
+		for (const change of ["tracked", "untracked"] as const) {
+			const { path, removed, worktrees } = checkout();
+			if (change === "tracked") writeFileSync(join(path, "README.md"), "edited\n");
+			else writeFileSync(join(path, "notes.txt"), "wip\n");
+			expect(await releaseWorktree(worktrees, runGit, 12)).toBe("kept");
+			expect(existsSync(join(path, "node_modules", "dep", "index.js"))).toBe(true);
+			expect(removed).toEqual([]);
+		}
+	});
+
+	it("tries a held checkout again, and treats a gone or archived one as released", async () => {
+		expect(await releaseWorktree(checkout({ removeError: "worktree_busy" }).worktrees, runGit, 12)).toBe("retry");
+		expect(await releaseWorktree(checkout({ removeError: "worktree_dirty: changes" }).worktrees, runGit, 12)).toBe(
+			"kept",
+		);
+		expect(await releaseWorktree(checkout({ removeError: "worktree_not_found" }).worktrees, runGit, 12)).toBe(
+			"released",
+		);
+		expect(await releaseWorktree({ list: async () => [], remove: async () => {} }, runGit, 12)).toBe("released");
+		// An archived worktree has no checkout to clean.
+		const archived = checkout({ available: false });
+		expect(await releaseWorktree(archived.worktrees, runGit, 12)).toBe("released");
+		expect(archived.removed).toEqual(["issue-12"]);
 	});
 });

@@ -22,7 +22,7 @@ import {
 } from "@hansjm10/volt-coding-agent";
 import type { UiNode } from "@hansjm10/volt-protocol";
 import { type GhRunner, GitHubTracker, type Tracker } from "./github.ts";
-import { Orchestrator, type OrchestratorSnapshot, type Workspaces } from "./orchestrator.ts";
+import { Orchestrator, type OrchestratorSnapshot, type ReleaseOutcome, type Workspaces } from "./orchestrator.ts";
 import { issueBranch, issueWorktree } from "./phase.ts";
 import { loadWorkflow, type WorkflowConfig } from "./workflow.ts";
 
@@ -175,16 +175,9 @@ async function start(
 			return { path: worktree.path, branch: worktree.branch };
 		},
 		release: async (number) => {
-			const name = issueWorktree(number);
-			try {
-				await ctx.worktrees.remove(name);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				if (message.startsWith("worktree_busy")) return "retry";
-				if (!message.startsWith("worktree_not_found")) return "kept";
-			}
-			hooked.delete(name);
-			return "released";
+			const outcome = await releaseWorktree(ctx.worktrees, (args, cwd) => volt.exec("git", args, { cwd }), number);
+			if (outcome === "released") hooked.delete(issueWorktree(number));
+			return outcome;
 		},
 	};
 	const orchestrator = new Orchestrator({
@@ -254,6 +247,37 @@ async function start(
 		},
 	);
 	return { controller, orchestrator };
+}
+
+/**
+ * Release issue `number`'s worktree, keeping its branch. The daemon never
+ * removes a checkout holding ignored files, and the setup hook and agents
+ * leave dependencies and build output there, so a checkout whose only
+ * changes are ignored files loses those first. One with changes to tracked
+ * or untracked files is kept for a human; one a conversation still holds is
+ * tried again.
+ */
+export async function releaseWorktree(
+	worktrees: Pick<ExtensionCommandContext["worktrees"], "list" | "remove">,
+	git: (args: string[], cwd: string) => Promise<{ code: number; stdout: string }>,
+	number: number,
+): Promise<ReleaseOutcome> {
+	const name = issueWorktree(number);
+	const worktree = (await worktrees.list()).find((candidate) => candidate.id === name);
+	if (worktree === undefined) return "released";
+	if (worktree.available) {
+		const status = await git(["status", "--porcelain", "--untracked-files=all"], worktree.path);
+		if (status.code !== 0 || status.stdout.trim().length > 0) return "kept";
+		if ((await git(["clean", "-fdX", "--quiet"], worktree.path)).code !== 0) return "kept";
+	}
+	try {
+		await worktrees.remove(name);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		if (message.startsWith("worktree_busy")) return "retry";
+		if (!message.startsWith("worktree_not_found")) return "kept";
+	}
+	return "released";
 }
 
 function summary(snapshot: OrchestratorSnapshot): string {
