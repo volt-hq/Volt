@@ -1798,6 +1798,7 @@ Each entry has this shape:
 ```
 
 Use `sourceInfo` as the canonical provenance field. Do not infer ownership from command names or from ad hoc path parsing.
+Each call returns copies: changing an entry's `sourceInfo` does not change the session.
 
 Built-in interactive commands (like `/model` and `/settings`) are not included here. They are handled only in interactive
 mode and would not execute if sent via `prompt`.
@@ -1998,7 +1999,7 @@ volt.setActiveTools([...new Set([...active, "my_custom_tool"])]); // Keep curren
 volt.setActiveTools(["read", "bash"]); // Switch to read-only
 ```
 
-`volt.getAllTools()` returns `name`, `description`, `parameters`, `promptGuidelines`, and `sourceInfo`.
+`volt.getAllTools()` returns `name`, `description`, `parameters`, `promptGuidelines`, and `sourceInfo`. Each `sourceInfo` is a copy: changing it does not change the session or which tools it treats as built-in.
 
 Typical `sourceInfo.source` values:
 - `builtin` for built-in tools
