@@ -55,8 +55,10 @@ tmux send-keys -t volt-view M-a                              # option+a: subagen
 tmux send-keys -t volt-view C-d                              # ctrl+d: exit (editor must be empty)
 ```
 
-Keybindings are configurable; the defaults live in
-`packages/coding-agent/src/core/keybindings.ts` (`DEFAULT_APP_KEYBINDINGS`).
+Keybindings are configurable; the defaults live in `KEYBINDINGS`
+(`app.*` actions) in `packages/coding-agent/src/core/keybindings.ts`, which
+spreads `TUI_KEYBINDINGS` (`tui.*` actions) from
+`packages/tui/src/keybindings.ts`.
 The footer hints under tool cards (e.g. `option+a inspect  ctrl+o outputs`)
 tell you what is available in context.
 
