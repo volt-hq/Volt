@@ -1675,7 +1675,11 @@ export class ExtensionRunner {
 					const event: BeforeAgentStartEvent = {
 						type: "before_agent_start",
 						prompt,
-						images,
+						// A copy: only a returned result changes the prompt.
+						images:
+							images === undefined
+								? undefined
+								: cloneCanonicalData(images, `Extension before_agent_start input for ${ext.id}`),
 						systemPrompt: currentSystemPrompt,
 						systemPromptOptions,
 					};
