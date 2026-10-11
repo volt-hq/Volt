@@ -4,6 +4,7 @@ import { VERSION } from "../config.ts";
 import type { SessionManager, SessionReference } from "../core/session-manager.ts";
 import type { NativeFileLock } from "../core/workspace-fs/native-loader.ts";
 import { createDaemonClient } from "./control-client.ts";
+import type { ControlWorktreeStatus } from "./control-protocol.ts";
 import { ensureDaemonRunning } from "./spawn.ts";
 import { tryAcquireWorktreeLock } from "./worktree-lock.ts";
 import { getWorktreesRoot, isPathUnderWorktreesRoot } from "./worktree-manager.ts";
@@ -18,13 +19,23 @@ export class LocalSessionWorktreeRestoreError extends Error {
 	}
 }
 
+/** A managed worktree to create: its id (`name`), branch, and base ref, the daemon's defaults when omitted. */
+export interface SessionWorktreeCreateOptions {
+	readonly name?: string;
+	readonly branch?: string;
+	readonly baseRef?: string;
+}
+
 /**
  * A conversation worker's route to its daemon for managed checkouts, over its
  * own control connection: the daemon restores the archived checkout of a
- * session of the worker's workspace and pins it until the release runs.
+ * session of the worker's workspace and pins it until the release runs, and
+ * creates and lists the workspace's worktrees for the worker's extensions.
  */
 export interface SessionWorktreeDaemon {
 	restore(sessionRef: SessionReference, cwd: string): Promise<() => Promise<void>>;
+	create?(options: SessionWorktreeCreateOptions): Promise<ControlWorktreeStatus>;
+	list?(): Promise<ControlWorktreeStatus[]>;
 }
 
 interface LocalWorktreeOwnership {

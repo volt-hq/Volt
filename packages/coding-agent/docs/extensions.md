@@ -264,7 +264,7 @@ export default function (volt: ExtensionAPI<ExtensionSettingsOf<typeof manifest>
 
 | Permission | Allows | Enforced |
 |------------|--------|----------|
-| `exec` | `volt.exec`, and starting subagents with `ctx.subagents.start` | Yes: both reject without it |
+| `exec` | `volt.exec`, starting subagents with `ctx.subagents.start`, and creating worktrees with `ctx.worktrees.create` | Yes: each rejects without it |
 | `providers` | `volt.registerProvider`, `volt.unregisterProvider`, and registering or reaching provider implementations through `ctx.modelRegistry` and its `client` | Yes |
 | `secrets` | `ctx.modelRegistry.authStorage`, `getApiKeyAndHeaders`, `getApiKeyForProvider`, `login`, and `client.generateImages`; without it, `ctx.modelRegistry.client` requests go only to catalog models as the catalog has them (same `baseUrl` and headers) | Yes |
 | `network` | Network access | No: declared and shown only |
@@ -1265,6 +1265,21 @@ volt.registerCommand("fix-issue", {
 - `cancel(id)` cancels a run the extension started (another extension's is not found); its `ended` resolves `cancelled`. A run that already ended is left as it is.
 
 A panel or work detail of the extension may open or cancel the runs it started (`open_work`, `cancel_work`). Runs are work: a restart leaves an unfinished one suspended, as it does a model's subagent, and its `ended` is gone with the process.
+
+### ctx.worktrees
+
+The [managed worktrees](daemon.md#git-worktrees) of the conversation's workspace, so that each subagent can work in a checkout of its own. Available in a conversation the daemon hosts (every interactive Volt conversation); elsewhere (`volt -p`, `--mode rpc`, the SDK) both methods reject.
+
+```typescript
+const existing = (await ctx.worktrees.list()).find((worktree) => worktree.id === "issue-12");
+const worktree = existing ?? (await ctx.worktrees.create({ name: "issue-12", baseRef: "main" }));
+await ctx.subagents.start({ agent: "general", task: "Fix issue #12.", cwd: worktree.path });
+```
+
+- `list()` resolves with the workspace's worktrees: `id`, checkout `path`, `branch`, `baseRef`, whether the checkout is `available` (the daemon archives an idle, clean checkout it may reclaim; an archived one has no checkout to run in), and whether it is `dirty` when the daemon checked.
+- `create({ name?, branch?, baseRef? })` needs the `exec` permission. It creates the worktree `name` (a generated id by default) on `branch` (`volt/<name>` by default) from `baseRef` (the workspace checkout's current branch by default), and rejects with the daemon's error, such as an id in use or the workspace's checkout limit.
+
+The daemon's retention and removal rules apply to these worktrees as to any other; merging a branch back stays the extension's or the user's action.
 
 ### ctx.reviews
 

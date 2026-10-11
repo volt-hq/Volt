@@ -6,7 +6,8 @@
  * run it starts from its own work is that work's child.
  */
 
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type FauxResponseStep, fauxAssistantMessage, type Usage } from "@hansjm10/volt-ai";
@@ -22,6 +23,7 @@ import type { ConversationFactory } from "../../src/core/host/hosted-conversatio
 import type { ResourceLoader } from "../../src/core/resource-loader.ts";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.ts";
 import { type SubagentDefinition, SubagentManager } from "../../src/core/subagents/index.ts";
+import { getWorktreesRoot } from "../../src/daemon/worktree-manager.ts";
 import type { CreateTestExtensionsResultInput } from "../utilities.ts";
 import { createTestResourceLoader } from "../utilities.ts";
 import { createHarness, type Harness } from "./harness.ts";
@@ -53,6 +55,29 @@ const usage: Usage = {
 	cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
 };
 
+function git(cwd: string, ...args: string[]): string {
+	return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+}
+
+/** Make `directory` a Git repository on `main` with one commit. */
+function commitRepository(directory: string): void {
+	writeFileSync(join(directory, "README.md"), "repository\n");
+	git(directory, "init", "--initial-branch=main");
+	git(directory, "add", "README.md");
+	git(
+		directory,
+		"-c",
+		"user.name=Test",
+		"-c",
+		"user.email=test@example.test",
+		"-c",
+		"commit.gpgsign=false",
+		"commit",
+		"-m",
+		"base",
+	);
+}
+
 /** A child reply that holds until its request is aborted. */
 const heldUntilAborted: FauxResponseStep = async (_context, options) => {
 	await new Promise<void>((resolve) => {
@@ -73,6 +98,7 @@ interface Setup {
 async function setup(
 	extensions: Array<ExtensionFactory | CreateTestExtensionsResultInput>,
 	childResponses: FauxResponseStep[] = [fauxAssistantMessage("issue worked", { usage })],
+	agentDir?: string,
 ): Promise<Setup> {
 	const childCwds: string[] = [];
 	const children: Harness[] = [];
@@ -114,6 +140,7 @@ async function setup(
 		resourceLoader: resourceLoader(),
 	});
 	const parent = await createHarness({
+		...(agentDir === undefined ? {} : { agentDir }),
 		subagentToolManager: manager,
 		extensionFactories: extensions,
 		settings: { lsp: { enabled: false }, retry: { enabled: false } },
@@ -196,6 +223,33 @@ describe("extension subagents", () => {
 			child: { conversation: run?.sessionId },
 		});
 		expect(parent.faux.state.callCount).toBe(0);
+	});
+
+	it("starts an agent in a managed worktree of the conversation's repository, and of no other", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "volt-extension-subagents-agent-"));
+		const elsewhere = mkdtempSync(join(tmpdir(), "volt-extension-subagents-elsewhere-"));
+		cleanups.push(() => {
+			rmSync(agentDir, { recursive: true, force: true });
+			rmSync(elsewhere, { recursive: true, force: true });
+		});
+		const cwds: string[] = [];
+		const delegator = delegating(() => ({ agent: "worker", task: "Work issue 12", cwd: cwds.shift() ?? "" }));
+		const { parent, childCwds } = await setup([delegator.extension], undefined, agentDir);
+		const ours = join(getWorktreesRoot(agentDir), "ws", "issue-12");
+		const theirs = join(getWorktreesRoot(agentDir), "other", "issue-7");
+		commitRepository(parent.tempDir);
+		git(parent.tempDir, "worktree", "add", "-b", "volt/issue-12", ours);
+		commitRepository(elsewhere);
+		git(elsewhere, "worktree", "add", "-b", "volt/issue-7", theirs);
+		cwds.push(ours, theirs);
+
+		await parent.session.prompt("/delegate");
+		await parent.session.prompt("/delegate");
+		expect(delegator.errors).toEqual([
+			`ctx.subagents.start: cwd ${JSON.stringify(theirs)} is outside the conversation's working directory and its repository's managed worktrees`,
+		]);
+		expect((await delegator.runs[0]?.ended)?.status).toBe("completed");
+		expect(childCwds).toEqual([realpathSync.native(ours)]);
 	});
 
 	it("stops a run at its limits", async () => {

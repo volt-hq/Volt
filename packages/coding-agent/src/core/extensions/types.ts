@@ -321,11 +321,61 @@ export interface ExtensionContext {
 	 */
 	readonly subagents: ExtensionSubagents;
 	/**
+	 * The managed worktrees of the conversation's workspace, in a conversation
+	 * the daemon hosts. Creating one needs the `exec` permission.
+	 */
+	readonly worktrees: ExtensionWorktrees;
+	/**
 	 * Reviews of the conversation: the extension starts one on any engine the
 	 * conversation can run, as `/review` does, and reads how it ended. Starting
 	 * one needs the `exec` permission.
 	 */
 	readonly reviews: ExtensionReviews;
+}
+
+// ============================================================================
+// Worktrees
+// ============================================================================
+
+/** A managed worktree of the conversation's workspace. */
+export interface ExtensionWorktree {
+	readonly id: string;
+	/** Its checkout: a subagent may run there (`ctx.subagents.start({ cwd })`). */
+	readonly path: string;
+	readonly branch: string;
+	readonly baseRef?: string;
+	/** Whether its checkout is on disk: the daemon archives an idle, clean one it may reclaim. */
+	readonly available: boolean;
+	/** Whether its checkout has uncommitted changes, when the daemon checked. */
+	readonly dirty?: boolean;
+}
+
+/** A managed worktree to create; the daemon's defaults apply to what is omitted. */
+export interface ExtensionWorktreeCreateOptions {
+	/** Its id, unique in the workspace: a generated name by default. */
+	readonly name?: string;
+	/** Its branch: `volt/<id>` by default. */
+	readonly branch?: string;
+	/** The ref the branch starts from: the workspace checkout's current branch by default. */
+	readonly baseRef?: string;
+}
+
+/** The managed worktrees an extension reaches (`ctx.worktrees`). */
+export interface ExtensionWorktrees {
+	/** The workspace's managed worktrees. Rejects outside a conversation the daemon hosts. */
+	list(): Promise<ExtensionWorktree[]>;
+	/**
+	 * Create a managed worktree of the workspace. Needs the `exec` permission;
+	 * rejects outside a conversation the daemon hosts, or with the daemon's
+	 * error (an id in use, the workspace's checkout limit, ...).
+	 */
+	create(options?: ExtensionWorktreeCreateOptions): Promise<ExtensionWorktree>;
+}
+
+/** How the session reaches the daemon's worktrees for its extensions. */
+export interface ExtensionWorktreesHandler {
+	list(): Promise<ExtensionWorktree[]>;
+	create(options: ExtensionWorktreeCreateOptions): Promise<ExtensionWorktree>;
 }
 
 // ============================================================================

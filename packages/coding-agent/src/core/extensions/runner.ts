@@ -59,6 +59,8 @@ import type {
 	ExtensionSubagents,
 	ExtensionSubagentsHandler,
 	ExtensionUIContext,
+	ExtensionWorktrees,
+	ExtensionWorktreesHandler,
 	InputEvent,
 	InputEventResult,
 	InputSource,
@@ -588,6 +590,10 @@ export class ExtensionRunner {
 		start: () => Promise.reject(new Error("Subagents are not available in this runtime")),
 		cancel: () => Promise.reject(new Error("Subagents are not available in this runtime")),
 	};
+	private worktreesHandler: ExtensionWorktreesHandler = {
+		list: () => Promise.reject(new Error("Managed worktrees are available only in conversations the daemon hosts")),
+		create: () => Promise.reject(new Error("Managed worktrees are available only in conversations the daemon hosts")),
+	};
 	private reviewsHandler: ExtensionReviewsHandler = {
 		engines: () => [],
 		start: () => Promise.reject(new Error("Reviews are not available in this runtime")),
@@ -635,6 +641,11 @@ export class ExtensionRunner {
 	/** Run the extensions' subagents (`ctx.subagents`) through `handler`. */
 	bindSubagents(handler: ExtensionSubagentsHandler): void {
 		this.subagentsHandler = handler;
+	}
+
+	/** Reach the daemon's managed worktrees (`ctx.worktrees`) through `handler`. */
+	bindWorktrees(handler: ExtensionWorktreesHandler): void {
+		this.worktreesHandler = handler;
 	}
 
 	/** Run and read the extensions' reviews (`ctx.reviews`) through `handler`. */
@@ -1351,9 +1362,37 @@ export class ExtensionRunner {
 				assertActive();
 				return runner.subagentsFor(owner, assertActive, assertRunning);
 			},
+			get worktrees() {
+				assertActive();
+				return runner.worktreesFor(owner, assertActive, assertRunning);
+			},
 			get reviews() {
 				assertActive();
 				return runner.reviewsFor(owner, assertActive, assertRunning);
+			},
+		};
+	}
+
+	/** `ctx.worktrees` of the extension `owner`: creating one needs `exec`. */
+	private worktreesFor(
+		owner: string | undefined,
+		assertActive: () => void,
+		assertRunning: () => void,
+	): ExtensionWorktrees {
+		return {
+			list: async () => {
+				assertActive();
+				return await this.worktreesHandler.list();
+			},
+			create: async (options = {}) => {
+				assertRunning();
+				if (owner === undefined) {
+					throw new Error(
+						"ctx.worktrees.create is available only in an extension's own handlers, commands, and tools",
+					);
+				}
+				requirePermission(this.permissionHolder(owner), "exec", "ctx.worktrees.create");
+				return await this.worktreesHandler.create(options);
 			},
 		};
 	}

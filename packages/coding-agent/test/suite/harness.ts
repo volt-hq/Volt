@@ -38,6 +38,7 @@ import { type CommittedSessionEntry, type FileEntry, SessionManager } from "../.
 import type { Settings } from "../../src/core/settings-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
 import type { SubagentToolManager } from "../../src/core/tools/subagent.ts";
+import type { SessionWorktreeDaemon } from "../../src/daemon/session-worktree.ts";
 import type { ExtensionFactory, ExtensionServicesLimits, ResourceLoader } from "../../src/index.ts";
 import { createAgentSessionTestControl } from "../agent-session-test-control.ts";
 import { FaultyConversationLog, injectFaultyLog } from "../utilities/faulty-log.ts";
@@ -113,6 +114,8 @@ export interface HarnessOptions {
 	projectCwd?: string;
 	/** Share language servers with other sessions using the same pool. */
 	lspServerPool?: LspServerPool;
+	/** The daemon's managed worktrees, as a daemon-hosted session reaches them. */
+	worktreeDaemon?: SessionWorktreeDaemon;
 	/** Give the faux provider a prompt-cache refresh and wire the session to it. */
 	refreshPromptCache?: true | FauxPromptCacheRefresh;
 	/** Which request options the faux refresh supports; omitted means all of them. */
@@ -253,6 +256,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		excludedToolNames: options.excludedToolNames,
 		subagentToolManager: options.subagentToolManager,
 		...(options.lspServerPool === undefined ? {} : { lspServerPool: options.lspServerPool }),
+		...(options.worktreeDaemon === undefined ? {} : { worktreeDaemon: options.worktreeDaemon }),
 		extensionRunnerRef,
 	});
 	const control = createAgentSessionTestControl(session);

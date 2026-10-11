@@ -2109,7 +2109,8 @@ function resolveRequestWorkspaces(
 	return workspace ? { ok: true, workspaces: [workspace] } : { ok: false, missing: workspaceName };
 }
 
-function toControlWorktreeStatus(
+/** A worktree's status as the local control socket carries it, checkout path included. */
+export function toControlWorktreeStatus(
 	worktree: IrohRemoteWorkspaceWorktree & Partial<Pick<WorktreeStatus, "aheadBehind">>,
 	available?: boolean,
 	dirty?: boolean,

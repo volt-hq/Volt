@@ -178,6 +178,14 @@ const REQUESTS: ByType<ControlRequest> = {
 		sessionRef: { sessionDirectory: "/sessions", storeId: "store", sessionId: "session", sessionGeneration: "gen" },
 	},
 	worker_worktree_release: { type: "worker_worktree_release", id: "41", pinId: "pin-1" },
+	worker_worktree_create: {
+		type: "worker_worktree_create",
+		id: "42",
+		worktreeName: "issue-12",
+		branch: "volt/issue-12",
+		baseRef: "main",
+	},
+	worker_worktree_list: { type: "worker_worktree_list", id: "43" },
 	worker_forward: {
 		type: "worker_forward",
 		id: "35",
@@ -329,6 +337,7 @@ const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, u
 	worker_close_result: [{ outcome: "stopped" }, { closeId: undefined }],
 	worker_worktree_restore: [{ path: "" }, { path: "p".repeat(4097) }, { sessionRef: undefined }],
 	worker_worktree_release: [{ pinId: "p".repeat(65) }, { pinId: undefined }],
+	worker_worktree_create: [{ worktreeName: "n".repeat(129) }, { branch: 1 }, { baseRef: "r".repeat(257) }],
 	worker_moved: [{ to: undefined }],
 	worker_last_session: [{ sessionId: undefined }],
 	worker_session_owned: [{ sessionId: undefined }, { relayId: undefined }],
