@@ -26,9 +26,13 @@
  * gets a `ctx.ui` of its own.
  */
 
-import { join } from "node:path";
+import { statSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import type { AgentTool, Conversation } from "@hansjm10/volt-agent-core";
 import { type HostRequest, type HostResponse, WORK_NOTICE_CUSTOM_TYPE } from "@hansjm10/volt-protocol";
+import { isPathInside } from "../../daemon/workspace-directory.ts";
+import { resolveWorktreeParentCheckout } from "../../daemon/worktree-manager.ts";
+import { canonicalizePath } from "../../utils/paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import {
 	type CommandInvoker,
@@ -37,6 +41,8 @@ import {
 	type ExtensionErrorListener,
 	type ExtensionMode,
 	ExtensionRunner,
+	type ExtensionSubagentStartOptions,
+	type ExtensionSubagentsHandler,
 	type ExtensionUIContext,
 	type ReplacedSessionContext,
 	type SessionStartEvent,
@@ -54,6 +60,7 @@ import { ClientScope } from "../host/client-scope.ts";
 import { type HostRequestOptions, hostRequestTimeout, type LiveState } from "../host/live-state.ts";
 import type { CustomMessageInput } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
+import { projectTrustPath } from "../project-trust.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "../resource-loader.ts";
 import type { ExtensionReviewEngines, ReviewEngineRefusal } from "../review-engine-extensions.ts";
 import type { SessionManager } from "../session-manager.ts";
@@ -65,6 +72,7 @@ import {
 } from "../session-writer.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
+import type { SubagentRunOptions } from "../subagents/index.ts";
 import { getAvailableThemesWithPaths } from "../theme/discovery.ts";
 import type { Theme } from "../theme/theme.ts";
 import type { ThemeInfo } from "../theme/types.ts";
@@ -138,6 +146,42 @@ function buildExtensionResourcePaths(entries: readonly DiscoveredResourcePath[])
 			baseDir: entry.baseDir,
 		},
 	}));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The limits an extension's subagent run asks for, checked: each a positive number, `maxTurns` an integer. */
+function subagentLimits(limits: unknown): Pick<SubagentRunOptions, "limits" | "turnLimits"> {
+	if (limits === undefined) return {};
+	if (!isRecord(limits)) throw new TypeError("ctx.subagents.start: limits must be an object");
+	const read = (key: string, integer: boolean): number | undefined => {
+		const value = limits[key];
+		if (value === undefined) return undefined;
+		if (
+			typeof value !== "number" ||
+			!(value > 0) ||
+			!Number.isFinite(value) ||
+			(integer && !Number.isSafeInteger(value))
+		) {
+			throw new TypeError(`ctx.subagents.start: limits.${key} must be a positive ${integer ? "integer" : "number"}`);
+		}
+		return value;
+	};
+	const maxTurns = read("maxTurns", true);
+	const maxTotalTokens = read("maxTotalTokens", false);
+	const maxTotalCostUsd = read("maxTotalCostUsd", false);
+	const maxDurationMs = read("maxDurationMs", false);
+	const tree = {
+		...(maxTotalTokens === undefined ? {} : { maxTotalTokens }),
+		...(maxTotalCostUsd === undefined ? {} : { maxTotalCostUsd }),
+		...(maxDurationMs === undefined ? {} : { maxDurationMs }),
+	};
+	return {
+		...(Object.keys(tree).length === 0 ? {} : { limits: tree }),
+		...(maxTurns === undefined ? {} : { turnLimits: { maxTurns } }),
+	};
 }
 
 /** A work kind the session refused to register, as an extension error. */
@@ -274,12 +318,18 @@ export class SessionExtensionBinding {
 	private readonly uiRouters = new Map<string | undefined, ExtensionUIContext>();
 	/** Each extension instance's `ctx.ui`: it stops when its instance stops, whatever runs under its id later. */
 	private readonly instanceUIs = new WeakMap<Extension, ExtensionUIContext>();
+	/** The subagent runs each extension started, by manifest id: its UI may open and cancel them. */
+	private readonly subagentRuns = new Map<string, Set<string>>();
+	/** The extensions' subagent runs that have not ended. */
+	private readonly runningSubagents = new Set<string>();
+	private readonly subagents: ExtensionSubagentsHandler = this.createSubagentsHandler();
 	private readonly uiHost: ExtensionUiHost = {
 		// Read when a call runs: the routers are built before the binding's host is set.
 		live: () => this.host.liveState,
 		ownsWork: (extensionId, workId) =>
 			this.host.extensionKinds().owns(extensionId, workId) ||
-			this.host.extensionReviewEngines().owns(extensionId, workId),
+			this.host.extensionReviewEngines().owns(extensionId, workId) ||
+			this.subagentRuns.get(extensionId)?.has(workId) === true,
 		droppedIntent: (extensionId, intent) =>
 			this.extensionRunner.emitError({
 				extensionId,
@@ -328,7 +378,11 @@ export class SessionExtensionBinding {
 			statesChanged: () => this.host.extensionsChanged(),
 			retireDeclarations: (extension) => this.retireDeclarations(extension),
 			retireWork: async (id) => {
-				await Promise.all([this.host.extensionKinds().retire(id), this.host.extensionReviewEngines().retire(id)]);
+				await Promise.all([
+					this.host.extensionKinds().retire(id),
+					this.host.extensionReviewEngines().retire(id),
+					this.cancelSubagents(id),
+				]);
 			},
 			turnBoundary: () => this.host.turnBoundary(),
 			reportError: (error) => this.extensionRunner.emitError(error),
@@ -339,6 +393,112 @@ export class SessionExtensionBinding {
 							resourceLoader.rescanExtensions?.(known) ?? Promise.reject(new Error("unavailable")),
 					}),
 		};
+	}
+
+	/** How the session runs the extensions' subagents (`ctx.subagents`): as work of the conversation, through its manager. */
+	private createSubagentsHandler(): ExtensionSubagentsHandler {
+		return {
+			definitions: () =>
+				(this.host.tools().getSubagentToolManager()?.listAvailableDefinitions?.() ?? []).map((definition) => ({
+					name: definition.name,
+					description: definition.description,
+				})),
+			start: async (owner, options) => {
+				const { agent, task, run } = this.subagentStart(owner, options);
+				const manager = this.host.tools().getSubagentToolManager();
+				if (manager?.startRun === undefined) throw new Error("Subagents are not available in this session");
+				const started = await manager.startRun(agent, task, run);
+				let owned = this.subagentRuns.get(owner);
+				if (!owned) {
+					owned = new Set();
+					this.subagentRuns.set(owner, owned);
+				}
+				owned.add(started.workId);
+				this.runningSubagents.add(started.workId);
+				const ended = started.ended.then((result) => {
+					this.runningSubagents.delete(started.workId);
+					return result;
+				});
+				return { id: started.workId, sessionId: started.conversation, ended };
+			},
+			cancel: async (owner, id) => {
+				if (typeof id !== "string" || this.subagentRuns.get(owner)?.has(id) !== true) {
+					throw new Error(
+						`Unknown subagent run ${JSON.stringify(id)}: an extension cancels only the runs it started`,
+					);
+				}
+				if (!this.runningSubagents.has(id)) return;
+				const manager = this.host.tools().getSubagentToolManager();
+				if (manager?.cancelRun === undefined) throw new Error("Subagents are not available in this session");
+				await manager.cancelRun(id);
+			},
+		};
+	}
+
+	/** Check an extension's subagent start: its agent and task, a cwd it may run in, its limits, and its parent work. */
+	private subagentStart(
+		owner: string,
+		options: ExtensionSubagentStartOptions,
+	): { agent: string; task: string; run: SubagentRunOptions } {
+		if (!isRecord(options)) throw new TypeError("ctx.subagents.start needs { agent, task }");
+		const { agent, task, cwd, parentWorkId } = options;
+		if (typeof agent !== "string" || agent.trim().length === 0) {
+			throw new TypeError("ctx.subagents.start: agent must name an agent definition");
+		}
+		if (typeof task !== "string" || task.trim().length === 0) {
+			throw new TypeError("ctx.subagents.start: task must be a non-empty string");
+		}
+		if (
+			parentWorkId !== undefined &&
+			(typeof parentWorkId !== "string" || !this.host.extensionKinds().owns(owner, parentWorkId))
+		) {
+			throw new Error("ctx.subagents.start: parentWorkId must be work of the extension's own kinds");
+		}
+		return {
+			agent,
+			task,
+			run: {
+				...(cwd === undefined ? {} : { cwd: this.subagentCwd(cwd) }),
+				...subagentLimits(options.limits),
+				...(parentWorkId === undefined ? {} : { parentWorkId }),
+			},
+		};
+	}
+
+	/**
+	 * The directory an extension's subagent runs in, canonical: inside the
+	 * conversation's working directory, or inside a managed worktree whose
+	 * parent checkout holds the conversation's project.
+	 */
+	private subagentCwd(cwd: unknown): string {
+		if (typeof cwd !== "string" || !isAbsolute(cwd)) {
+			throw new TypeError("ctx.subagents.start: cwd must be an absolute path");
+		}
+		const resolved = canonicalizePath(cwd);
+		let directory = false;
+		try {
+			directory = statSync(resolved).isDirectory();
+		} catch {
+			// Reported below.
+		}
+		if (!directory) throw new Error(`ctx.subagents.start: cwd ${JSON.stringify(cwd)} is not a directory`);
+		if (isPathInside(canonicalizePath(this.host.cwd), resolved)) return resolved;
+		const parent = resolveWorktreeParentCheckout(this.host.agentDir, resolved);
+		const project = projectTrustPath(this.host.agentDir, this.host.cwd);
+		if (parent !== undefined && project !== undefined && isPathInside(canonicalizePath(parent), project)) {
+			return resolved;
+		}
+		throw new Error(
+			`ctx.subagents.start: cwd ${JSON.stringify(cwd)} is outside the conversation's working directory and its repository's managed worktrees`,
+		);
+	}
+
+	/** Cancel the subagent runs of the extension `id` that have not ended. */
+	private async cancelSubagents(id: string): Promise<void> {
+		const manager = this.host.tools().getSubagentToolManager();
+		const running = [...(this.subagentRuns.get(id) ?? [])].filter((runId) => this.runningSubagents.has(runId));
+		if (manager?.cancelRun === undefined) return;
+		await Promise.all(running.map((runId) => manager.cancelRun?.(runId).catch(() => undefined)));
 	}
 
 	/**
@@ -918,6 +1078,7 @@ export class SessionExtensionBinding {
 		runner.bindServices(this.host.extensionServices().servicesManager);
 		const kinds = this.host.extensionKinds();
 		runner.bindWork(kinds.start, () => this.refuseDeclarations(runner));
+		runner.bindSubagents(this.subagents);
 		const getCommands = (): SlashCommandInfo[] => {
 			const extensionCommands: SlashCommandInfo[] = runner.getRegisteredCommands().map((command) => ({
 				name: command.invocationName,

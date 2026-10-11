@@ -22,7 +22,7 @@ import type { ExtensionSessionWriter } from "../session-writer.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import type { MessagePresenter } from "../ui/presentation.ts";
 import type { DeclaredWorkKind, StartWorkHandler } from "../work/extension-kinds.ts";
-import { type PermissionHolder, permissionCheckedModelRegistry } from "./permissions.ts";
+import { type PermissionHolder, permissionCheckedModelRegistry, requirePermission } from "./permissions.ts";
 import {
 	type ExtensionServicesManager,
 	extensionServicesForbidden,
@@ -52,6 +52,8 @@ import type {
 	ExtensionLifetime,
 	ExtensionMode,
 	ExtensionRuntime,
+	ExtensionSubagents,
+	ExtensionSubagentsHandler,
 	ExtensionUIContext,
 	InputEvent,
 	InputEventResult,
@@ -473,6 +475,11 @@ export class ExtensionRunner {
 	private staleMessage: string | undefined;
 	private servicesManager: ExtensionServicesManager | undefined;
 	private startWorkFn: StartWorkHandler = () => Promise.reject(new Error("Work is not available in this runtime"));
+	private subagentsHandler: ExtensionSubagentsHandler = {
+		definitions: () => [],
+		start: () => Promise.reject(new Error("Subagents are not available in this runtime")),
+		cancel: () => Promise.reject(new Error("Subagents are not available in this runtime")),
+	};
 
 	/** @throws when an extension's id is not a manifest id or two extensions share one: ownership is by id. */
 	constructor(
@@ -507,6 +514,11 @@ export class ExtensionRunner {
 			this.assertActive();
 			refresh();
 		};
+	}
+
+	/** Run the extensions' subagents (`ctx.subagents`) through `handler`. */
+	bindSubagents(handler: ExtensionSubagentsHandler): void {
+		this.subagentsHandler = handler;
 	}
 
 	emitRequestBoundary(event: RequestBoundaryEvent): void {
@@ -1213,6 +1225,39 @@ export class ExtensionRunner {
 			startWork: (kind, options, run) => {
 				assertRunning();
 				return runner.startWorkFn(owner, kind, options, run);
+			},
+			get subagents() {
+				assertActive();
+				return runner.subagentsFor(owner, assertActive, assertRunning);
+			},
+		};
+	}
+
+	/** `ctx.subagents` of the extension `owner`: starting one needs `exec`, and it cancels only its own runs. */
+	private subagentsFor(
+		owner: string | undefined,
+		assertActive: () => void,
+		assertRunning: () => void,
+	): ExtensionSubagents {
+		const requireOwner = (use: string): string => {
+			if (owner === undefined)
+				throw new Error(`${use} is available only in an extension's own handlers, commands, and tools`);
+			return owner;
+		};
+		return {
+			definitions: () => {
+				assertActive();
+				return this.subagentsHandler.definitions();
+			},
+			start: async (options) => {
+				assertRunning();
+				const id = requireOwner("ctx.subagents.start");
+				requirePermission(this.permissionHolder(id), "exec", "ctx.subagents.start");
+				return await this.subagentsHandler.start(id, options);
+			},
+			cancel: async (runId) => {
+				assertRunning();
+				await this.subagentsHandler.cancel(requireOwner("ctx.subagents.cancel"), runId);
 			},
 		};
 	}
