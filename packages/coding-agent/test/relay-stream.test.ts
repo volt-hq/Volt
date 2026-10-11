@@ -307,6 +307,44 @@ describe("relay framing (§12.2.3)", () => {
 		expect(stop).toHaveBeenCalledTimes(1);
 	});
 
+	it("delivers what the worker wrote before a phone frame finds its socket closed", async () => {
+		const { socketPath, registry } = await startRelayHarness();
+		const phone = new FakePhoneIrohStream();
+		const writeGate = createDeferred<void>();
+		const writtenChunks: Buffer[] = [];
+		const finish = vi.fn(async () => {});
+		const reset = vi.fn(async () => {});
+		phone.send.writeAll = vi.fn((bytes: Array<number>) => {
+			writtenChunks.push(Buffer.from(bytes));
+			return writeGate.promise;
+		});
+		phone.send.finish = finish;
+		phone.send.reset = reset;
+		const relay = mintTestRelay(registry, phone, vi.fn());
+
+		const client = connectRawRelayClient(socketPath, relay);
+		await vi.waitFor(() => expect(client.messages).toHaveLength(2));
+		// The worker answers; the answer is admitted and still on its way to the phone.
+		const answer = Buffer.from(`${JSON.stringify({ type: "accepted", intentId: "i-1" })}\n`, "utf8");
+		client.socket.write(answer);
+		await vi.waitFor(() => expect(phone.send.writeAll).toHaveBeenCalledTimes(1));
+		// Its last frame waits unread behind the answer as the worker closes the relay.
+		const fatal = `${JSON.stringify({ type: "fatal", code: "workspace_unregistered" })}\n`;
+		await new Promise<void>((resolve) => client.socket.end(fatal, resolve));
+		client.socket.destroy();
+		await client.closed;
+
+		// A frame the phone pipelined after the intent cannot reach the closed worker.
+		phone.sendLine({ type: "query", queryId: "pipelined", query: "sessions" });
+		await vi.waitFor(() => expect(relay.phase).toBe("closed"));
+		expect(reset).not.toHaveBeenCalled();
+		writeGate.resolve(undefined);
+		await vi.waitFor(() => expect(finish).toHaveBeenCalledTimes(1));
+		expect(Buffer.concat(writtenChunks).subarray(0, answer.length)).toEqual(answer);
+		expect(reset).not.toHaveBeenCalled();
+		expect(await relay.settled).toMatchObject({ reason: "error" });
+	});
+
 	it("propagates phone EOF to the worker and settles phone_disconnected with byte counts", async () => {
 		const { socketPath, registry } = await startRelayHarness();
 		const phone = new FakePhoneIrohStream();
