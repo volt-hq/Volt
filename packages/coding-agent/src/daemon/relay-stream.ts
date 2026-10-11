@@ -205,8 +205,15 @@ export class RelayLifecycleOwner {
 		// A failing socket is the worker going away too: a write of the phone's
 		// bytes fails once the worker closed after its last frame (EPIPE), possibly
 		// before its EOF is read. Every byte it wrote that was admitted still
-		// reaches the phone before FIN, as on EOF; a reset would discard them.
-		socket.on("error", (error: Error) => this.beginActiveClose("error", "graceful", error.message));
+		// reaches the phone before FIN, as on EOF; a reset would discard them. So
+		// do the bytes the paused socket read but, destroyed by the failure, never
+		// emitted: the worker's last frame and its EOF wait among them.
+		socket.on("error", (error: Error) => {
+			for (let unread: Buffer | null = socket.read(); unread !== null; unread = socket.read()) {
+				this.enqueueWrite(unread, false);
+			}
+			this.beginActiveClose("error", "graceful", error.message);
+		});
 		// A close without a daemon-initiated reason or a socket error is the worker
 		// going away (it ended the stream, or exited).
 		socket.on("close", () => this.beginActiveClose(this.closeReason ?? "worker_disconnected", "abortive"));
