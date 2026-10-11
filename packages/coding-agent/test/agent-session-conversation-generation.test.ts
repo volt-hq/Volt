@@ -19,6 +19,7 @@ import { SessionManager, type SessionMessageEntry } from "../src/core/session-ma
 import { connectTestClient, type OpenTestHostOptions, openTestHost, type TestClient } from "./utilities/host-client.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
 import { connectRemotePhone, type RemotePhone } from "./utilities/remote-phone.ts";
+import { testExtension } from "./utilities.ts";
 
 type Frame<T extends HostFrame["type"]> = Extract<HostFrame, { type: T }>;
 
@@ -206,11 +207,30 @@ describe("AgentSession conversation generation commits", () => {
 		faux.setResponses([fauxAssistantMessage("streamed answer")]);
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
+		let releaseUpdate = () => {};
+		const updateRelease = new Promise<void>((resolve) => {
+			releaseUpdate = resolve;
+		});
+		let notifyUpdateStarted = () => {};
+		const updateStarted = new Promise<void>((resolve) => {
+			notifyUpdateStarted = resolve;
+		});
+		let heldUpdate = false;
+		// The first streamed update holds the turn until navigation has been refused.
+		const holdFirstUpdate = testExtension("hold-first-update", (volt) => {
+			volt.on("message_update", async () => {
+				if (heldUpdate) return;
+				heldUpdate = true;
+				notifyUpdateStarted();
+				await updateRelease;
+			});
+		});
 		const createRuntime: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 			const services = await createAgentSessionServices({
 				agentDir: tempDir,
 				authStorage,
 				resourceLoaderOptions: {
+					extensionFactories: [holdFirstUpdate],
 					noSkills: true,
 					noPromptTemplates: true,
 					noThemes: true,
@@ -254,26 +274,6 @@ describe("AgentSession conversation generation commits", () => {
 		cleanups.push(() => targetManager.closePersistence());
 		await targetManager.logWriter.appendMessage({ role: "user", content: "target user", timestamp: 5 });
 		await targetManager.logWriter.appendMessage(fauxAssistantMessage("target assistant", { timestamp: 6 }));
-
-		let releaseUpdate = () => {};
-		const updateRelease = new Promise<void>((resolve) => {
-			releaseUpdate = resolve;
-		});
-		let notifyUpdateStarted = () => {};
-		const updateStarted = new Promise<void>((resolve) => {
-			notifyUpdateStarted = resolve;
-		});
-		let heldUpdate = false;
-		const runner = runtime.session.extensionRunner;
-		const originalEmit = runner.emit.bind(runner);
-		vi.spyOn(runner, "emit").mockImplementation(async (event) => {
-			if (event.type === "message_update" && !heldUpdate) {
-				heldUpdate = true;
-				notifyUpdateStarted();
-				await updateRelease;
-			}
-			return originalEmit(event);
-		});
 
 		const prompt = runtime.session.prompt("third user");
 		await updateStarted;
