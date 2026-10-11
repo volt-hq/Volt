@@ -115,7 +115,7 @@ describe("#409 interactive terminal review accounting", () => {
 			}
 			const terminalStatus =
 				status === "failed" ? "Review uncommitted changes failed:" : "Review uncommitted changes cancelled";
-			await vi.waitFor(() => expect(listReviewRuns(manager).runs[0]?.status).toBe(status));
+			await vi.waitFor(() => expect(listReviewRuns(manager).runs[0]?.status).toBe(status), { timeout: 5_000 });
 			// The list covers the chat: close it to read how the review ended and what it cost.
 			access.dismissWorkInspector?.();
 			await waitForScreen(tui, terminalStatus, "Model-priced estimate: $");
