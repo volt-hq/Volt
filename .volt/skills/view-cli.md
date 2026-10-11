@@ -55,12 +55,12 @@ tmux send-keys -t volt-view M-j                              # alt+j (option+j o
 tmux send-keys -t volt-view C-d                              # ctrl+d: exit (editor must be empty)
 ```
 
-Keybindings are configurable; the defaults live in
-`packages/coding-agent/src/core/keybindings.ts` (`DEFAULT_APP_KEYBINDINGS`).
-Hints in the UI name the configured keys: a collapsed tool card shows
-`ctrl+o to expand`, and while work is open the footer's work line (e.g.
-`Work · ● running · subagent · scout · 8.0s`) ends with the work inspector key
-(`Alt+J`, or `Option+J` on macOS).
+Keybindings are configurable; the defaults live in `KEYBINDINGS`
+(`app.*` actions) in `packages/coding-agent/src/core/keybindings.ts`, which
+spreads `TUI_KEYBINDINGS` (`tui.*` actions) from
+`packages/tui/src/keybindings.ts`.
+The footer hints under tool cards (e.g. `option+a inspect  ctrl+o outputs`)
+tell you what is available in context.
 
 ### Waiting for a turn to finish
 

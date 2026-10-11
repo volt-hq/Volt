@@ -601,7 +601,7 @@ describe("AgentSession model and extension characterization", () => {
 		},
 	);
 
-	it("allows extension commands to inspect live system prompt options", async () => {
+	it("gives extension commands a copy of the current system prompt options", async () => {
 		const seenOptions: BuildSystemPromptOptions[] = [];
 		const harness = await createHarness({
 			extensionFactories: [
@@ -610,7 +610,7 @@ describe("AgentSession model and extension characterization", () => {
 						description: "Inspect system prompt options",
 						handler: async (_args, ctx) => {
 							const options = ctx.getSystemPromptOptions();
-							seenOptions.push(options);
+							seenOptions.push(structuredClone(options));
 							options.selectedTools?.push("mutated_tool");
 						},
 					});
@@ -623,10 +623,9 @@ describe("AgentSession model and extension characterization", () => {
 		await harness.session.prompt("/inspect-options");
 
 		expect(seenOptions).toHaveLength(2);
-		expect(seenOptions[0]).toBe(seenOptions[1]);
-		expect(seenOptions[0]?.cwd).toBe(harness.tempDir);
-		expect(seenOptions[0]?.selectedTools).toContain("read");
-		expect(seenOptions[1]?.selectedTools).toContain("mutated_tool");
+		expect(seenOptions[1]?.cwd).toBe(harness.tempDir);
+		expect(seenOptions[1]?.selectedTools).toEqual(harness.session.getActiveToolNames());
+		expect(seenOptions[1]?.selectedTools).not.toContain("mutated_tool");
 	});
 
 	it("allows before_agent_start handlers to inject custom messages and modify the system prompt", async () => {

@@ -1262,7 +1262,8 @@ export class ExtensionRunner {
 		});
 		context.getSystemPromptOptions = () => {
 			assertActive();
-			return this.getSystemPromptOptionsFn();
+			// A copy: the options share the session's loaded skills and context files.
+			return structuredClone(this.getSystemPromptOptionsFn());
 		};
 		context.waitForIdle = () => {
 			assertActive();
@@ -1675,9 +1676,14 @@ export class ExtensionRunner {
 					const event: BeforeAgentStartEvent = {
 						type: "before_agent_start",
 						prompt,
-						images,
+						// A copy: only a returned result changes the prompt.
+						images:
+							images === undefined
+								? undefined
+								: cloneCanonicalData(images, `Extension before_agent_start input for ${ext.id}`),
 						systemPrompt: currentSystemPrompt,
-						systemPromptOptions,
+						// A copy: the options share the session's loaded skills and context files.
+						systemPromptOptions: structuredClone(systemPromptOptions),
 					};
 					const handlerResult = await handler(event, ctx);
 
@@ -1793,7 +1799,11 @@ export class ExtensionRunner {
 					const event: InputEvent = {
 						type: "input",
 						text: currentText,
-						images: currentImages,
+						// A copy: only a transform result changes the prompt.
+						images:
+							currentImages === undefined
+								? undefined
+								: cloneCanonicalData(currentImages, `Extension input images for ${ext.id}`),
 						source,
 						streamingBehavior,
 					};

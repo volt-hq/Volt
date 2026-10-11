@@ -357,6 +357,7 @@ export class SessionToolRuntime {
 
 	/**
 	 * Get all configured tools with name, description, parameter schema, prompt guidelines, and source metadata.
+	 * Each `sourceInfo` is a copy, so callers cannot change which tools the registry treats as trusted built-ins.
 	 */
 	getAllTools(): ToolInfo[] {
 		return Array.from(this.toolDefinitions.values())
@@ -366,7 +367,7 @@ export class SessionToolRuntime {
 				description: definition.description,
 				parameters: definition.parameters,
 				promptGuidelines: definition.promptGuidelines,
-				sourceInfo,
+				sourceInfo: { ...sourceInfo },
 			}));
 	}
 
