@@ -93,6 +93,7 @@ Extensions observe the stop through the aborted `ctx.signal` of their commands a
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
 | `/compact [prompt]` | Summarize older context; see [Compaction](compaction.md) |
+| `/discard-stuck` | Discard a message Volt stopped while sending, which holds later messages back; it is not sent again |
 | `/import <file>` | Import a JSONL snapshot as a new session |
 | `/export [file]` | Export session to HTML |
 | `/share` | Upload as private GitHub gist with shareable HTML link |

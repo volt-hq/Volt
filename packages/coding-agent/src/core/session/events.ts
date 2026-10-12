@@ -327,9 +327,11 @@ export class SessionEvents {
 		switch (event.type) {
 			case "committed":
 				// The session manager's view already includes the batch. A client input's
-				// state can change the queue without the conversation's queue changing.
+				// state can change the queue without the conversation's queue changing,
+				// and settle the ambiguous input that held later input back.
 				if (event.entries.some((entry) => entry.type.startsWith("client_input_"))) {
 					this.host.clientInputs().publishQueue();
+					this.host.clientInputs().publishAmbiguous();
 				}
 				if (event.entries.some((entry) => entry.type.startsWith("work_"))) {
 					this.host.jobs().runtime.changed();
@@ -550,8 +552,9 @@ export class SessionEvents {
 	async emitExtensionEvent(event: AgentEvent): Promise<AgentMessage | undefined> {
 		this.host.assertActive();
 		const extensionRunner = this.host.extensionRunner();
-		// An observation no extension handles needs no extension copy; `dispatch` still validates the event
-		// before session listeners see it. `message_end` always owns its message, and `turn_end` counts turns.
+		// The runner gives each handler its own copy of a loop event; an observation no extension handles needs
+		// none, and `dispatch` still validates the event before session listeners see it. `message_end` always
+		// owns its message, and `turn_end` counts turns.
 		if (
 			(event.type === "message_start" ||
 				event.type === "message_update" ||
@@ -584,20 +587,14 @@ export class SessionEvents {
 			await extensionRunner.emit(extensionEvent);
 			this.turnIndex++;
 		} else if (event.type === "message_start") {
-			const extensionEvent: MessageStartEvent = {
-				type: "message_start",
-				message: cloneCanonicalData(event.message, "Extension message_start input"),
-			};
+			const extensionEvent: MessageStartEvent = { type: "message_start", message: event.message };
 			await extensionRunner.emit(extensionEvent);
 		} else if (event.type === "message_update") {
-			const extensionEvent = cloneCanonicalData(
-				{
-					type: "message_update" as const,
-					message: event.message,
-					assistantMessageEvent: event.assistantMessageEvent,
-				} satisfies MessageUpdateEvent,
-				"Extension message_update input",
-			);
+			const extensionEvent: MessageUpdateEvent = {
+				type: "message_update",
+				message: event.message,
+				assistantMessageEvent: event.assistantMessageEvent,
+			};
 			await extensionRunner.emit(extensionEvent);
 		} else if (event.type === "message_end") {
 			const message = cloneCanonicalData(event.message, `Agent ${event.message.role} message`);
@@ -608,39 +605,32 @@ export class SessionEvents {
 			const replacement = await extensionRunner.emitMessageEnd(extensionEvent);
 			return replacement ?? message;
 		} else if (event.type === "tool_execution_start") {
-			const extensionEvent = cloneCanonicalData(
-				{
-					type: "tool_execution_start",
-					toolCallId: event.toolCallId,
-					toolName: event.toolName,
-					args: event.args,
-				} as const,
-				"Extension tool_execution_start input",
-			) as ToolExecutionStartEvent;
+			const extensionEvent: ToolExecutionStartEvent = {
+				type: "tool_execution_start",
+				toolCallId: event.toolCallId,
+				toolName: event.toolName,
+				args: event.args,
+			};
 			await extensionRunner.emit(extensionEvent);
 		} else if (event.type === "tool_execution_update") {
-			const extensionEvent = cloneCanonicalData(
-				{
-					type: "tool_execution_update",
-					toolCallId: event.toolCallId,
-					toolName: event.toolName,
-					args: event.args,
-					partialResult: event.partialResult,
-				} as const,
-				"Extension tool_execution_update input",
-			) as ToolExecutionUpdateEvent;
+			// The runner's copy validates the partial result as JSON data.
+			const extensionEvent = {
+				type: "tool_execution_update",
+				toolCallId: event.toolCallId,
+				toolName: event.toolName,
+				args: event.args,
+				partialResult: event.partialResult,
+			} as ToolExecutionUpdateEvent;
 			await extensionRunner.emit(extensionEvent);
 		} else if (event.type === "tool_execution_end") {
-			const extensionEvent = cloneCanonicalData(
-				{
-					type: "tool_execution_end",
-					toolCallId: event.toolCallId,
-					toolName: event.toolName,
-					result: event.result,
-					isError: event.isError,
-				} as const,
-				"Extension tool_execution_end input",
-			) as ToolExecutionEndEvent;
+			// The runner's copy validates the result as JSON data.
+			const extensionEvent = {
+				type: "tool_execution_end",
+				toolCallId: event.toolCallId,
+				toolName: event.toolName,
+				result: event.result,
+				isError: event.isError,
+			} as ToolExecutionEndEvent;
 			await extensionRunner.emit(extensionEvent);
 		}
 		return undefined;

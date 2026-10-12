@@ -5,7 +5,15 @@ import { describe, expect, test } from "vitest";
 import { type RpcGitContext, RpcGitContextSchema } from "../src/git-context.ts";
 import { IntentPresentationSchema } from "../src/intents.ts";
 import { RpcPlanningStateSchema } from "../src/planning.ts";
+import { RpcEpochMillisecondsSchema } from "../src/primitives.ts";
+import {
+	RpcReviewAcknowledgmentResponseSchema,
+	RpcReviewRunDescriptorSchema,
+	RpcReviewWorkflowResultResponseSchema,
+} from "../src/projections.ts";
+import { RpcActiveAgentRunSchema, RpcActiveCompactionSchema } from "../src/session.ts";
 import { RpcSubscriptionUsageReportSchema } from "../src/subscription-usage.ts";
+import { RPC_WIRE_MAX_SAFE_INTEGER } from "../src/wire-limits.ts";
 
 function check(schema: TSchema, value: unknown): boolean {
 	return Compile(schema).Check(value);
@@ -146,5 +154,60 @@ describe("shared schemas", () => {
 			}),
 		).toBe(false);
 		expect(validator.Check({ ...planning, unexpected: true })).toBe(false);
+	});
+
+	test("host-authoritative timestamps are safe non-negative epoch milliseconds", () => {
+		const startedAt = 1_800_000_000_000;
+		const run = {
+			runId: "run-1",
+			workflowAction: "review",
+			engine: "standard",
+			status: "completed",
+			startedAt,
+			endedAt: startedAt + 60_000,
+			usageUpdatedAt: startedAt + 60_000,
+			acknowledgedAt: startedAt + 120_000,
+			target: {
+				description: "Uncommitted changes",
+				diffCommand: "git diff HEAD",
+				identity: { kind: "uncommitted", baseTree: "base-tree", headTree: "head-tree" },
+				files: {
+					totalCount: 0,
+					projectedCount: 0,
+					omittedCount: 0,
+					additions: 0,
+					deletions: 0,
+					isComplete: true,
+					items: [],
+				},
+			},
+			options: { scope: [], effort: "standard", includeOptional: false, scopeMode: "full" },
+		};
+		const runTimestamps = ["startedAt", "endedAt", "usageUpdatedAt", "acknowledgedAt"];
+		const cases: Array<[TSchema, Record<string, unknown>, string[]]> = [
+			[RpcReviewRunDescriptorSchema, run, runTimestamps],
+			[RpcReviewWorkflowResultResponseSchema, run, runTimestamps],
+			[RpcReviewAcknowledgmentResponseSchema, { runId: "run-1", acknowledgedAt: startedAt }, ["acknowledgedAt"]],
+			[RpcActiveAgentRunSchema, { startedAt }, ["startedAt"]],
+			[RpcActiveCompactionSchema, { reason: "manual", startedAt }, ["startedAt"]],
+		];
+		for (const value of [0, startedAt, RPC_WIRE_MAX_SAFE_INTEGER]) {
+			expect(check(RpcEpochMillisecondsSchema, value), `${value}`).toBe(true);
+		}
+		for (const value of [-1, 1.5, RPC_WIRE_MAX_SAFE_INTEGER + 1, Number.MAX_VALUE, "1800000000000"]) {
+			expect(check(RpcEpochMillisecondsSchema, value), `${value}`).toBe(false);
+		}
+		for (const [schema, record, fields] of cases) {
+			const validator = Compile(schema);
+			expect(validator.Errors(record)).toEqual([]);
+			for (const field of fields) {
+				for (const value of [0, RPC_WIRE_MAX_SAFE_INTEGER]) {
+					expect(validator.Check({ ...record, [field]: value }), `${field}=${value}`).toBe(true);
+				}
+				for (const value of [-1, startedAt + 0.5, RPC_WIRE_MAX_SAFE_INTEGER + 1]) {
+					expect(validator.Check({ ...record, [field]: value }), `${field}=${value}`).toBe(false);
+				}
+			}
+		}
 	});
 });

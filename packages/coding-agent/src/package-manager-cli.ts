@@ -808,7 +808,10 @@ export async function handlePackageCommand(
 			}
 
 			case "remove": {
-				const removed = await packageManager.removeAndPersist(source!, { local: options.local });
+				const removed = await packageManager.removeAndPersist(
+					packageManager.resolveRemoveSource(source!, { local: options.local }),
+					{ local: options.local },
+				);
 				if (!removed) {
 					console.error(chalk.red(`No matching package found for ${source}`));
 					process.exitCode = 1;
@@ -888,14 +891,6 @@ export async function handlePackageCommand(
 						return true;
 					}
 					const installMethod = detectInstallMethod();
-					if (process.platform === "win32" && installMethod !== "npm" && installMethod !== "pnpm") {
-						console.error(
-							chalk.red(`${APP_NAME} self-update on Windows is only supported for npm and pnpm installs.`),
-						);
-						console.error(chalk.dim(`Detected install method: ${installMethod}. Update ${APP_NAME} manually.`));
-						process.exitCode = 1;
-						return true;
-					}
 					const selfUpdateCommand = getSelfUpdateCommand(
 						PACKAGE_NAME,
 						selfUpdateNpmCommand,
@@ -903,6 +898,17 @@ export async function handlePackageCommand(
 					);
 					if (!selfUpdateCommand) {
 						printSelfUpdateUnavailable(selfUpdateNpmCommand, selfUpdatePlan.packageSpec);
+						process.exitCode = 1;
+						return true;
+					}
+					// Standalone and unknown installs have no self-update command, so only yarn and bun reach this.
+					if (process.platform === "win32" && installMethod !== "npm" && installMethod !== "pnpm") {
+						console.error(
+							chalk.red(`${APP_NAME} self-update on Windows is only supported for npm and pnpm installs.`),
+						);
+						console.error(
+							chalk.dim(`Update this ${installMethod} install yourself with: ${selfUpdateCommand.display}`),
+						);
 						process.exitCode = 1;
 						return true;
 					}

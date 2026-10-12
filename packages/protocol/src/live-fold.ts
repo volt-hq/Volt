@@ -36,6 +36,7 @@ export type LiveToolPartial = NonNullable<LiveToolItem["partial"]>;
 
 /** The streaming assistant message: the start message with every delta since applied. */
 export interface LiveStreamingAssistant {
+	/** A tool call still streaming parses its argument text into `arguments` when they are first read. */
 	readonly message: DeepReadonly<AssistantMessage>;
 	/** `assistant_end` arrived: the entry that commits the message follows. */
 	readonly ended: boolean;
@@ -354,6 +355,24 @@ function applyToolItem(existing: LiveStreamingTool | undefined, item: LiveToolIt
 	}
 }
 
+/**
+ * A streaming tool call whose `arguments` are `text` parsed when first read.
+ * Parsing at every delta would cost the whole text each time, quadratic over
+ * the call's stream, though the host's fold never reads them while it streams.
+ */
+function streamingToolCall(id: string, name: string, text: string): ToolCall {
+	let parsed: JsonObject | undefined;
+	return {
+		type: "toolCall",
+		id,
+		name,
+		get arguments(): JsonObject {
+			parsed ??= parseStreamingJson<JsonObject>(text);
+			return parsed;
+		},
+	};
+}
+
 /** One incremental assistant event applied to the streaming message; an event that does not fit is ignored. */
 function applyAssistantDelta(assistant: LiveStreamingAssistant, event: SlimAssistantEvent): LiveStreamingAssistant {
 	const index = event.contentIndex;
@@ -407,12 +426,8 @@ function applyAssistantDelta(assistant: LiveStreamingAssistant, event: SlimAssis
 			if (existing?.type !== "toolCall" || previous === undefined) return assistant;
 			const text = previous + event.argsTextDelta;
 			setArgsText(text);
-			content[index] = {
-				...existing,
-				...(event.id === undefined ? {} : { id: event.id }),
-				...(event.name === undefined ? {} : { name: event.name }),
-				arguments: parseStreamingJson<JsonObject>(text),
-			};
+			// A streaming call holds only these fields; spreading it would parse its text.
+			content[index] = streamingToolCall(event.id ?? existing.id, event.name ?? existing.name, text);
 			break;
 		}
 		case "toolcall_end":
