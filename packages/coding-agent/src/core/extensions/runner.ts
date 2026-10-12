@@ -119,6 +119,19 @@ type RunnerEmitEvent = Exclude<
 	| SettingsChangedEvent
 >;
 
+/** Agent loop events carry session data: each handler gets its own copy, so its changes reach no other handler and not the session. */
+const LOOP_EVENT_TYPES: ReadonlySet<RunnerEmitEvent["type"]> = new Set<RunnerEmitEvent["type"]>([
+	"agent_start",
+	"agent_end",
+	"turn_start",
+	"turn_end",
+	"message_start",
+	"message_update",
+	"tool_execution_start",
+	"tool_execution_update",
+	"tool_execution_end",
+]);
+
 type SessionBeforeEvent = Extract<
 	RunnerEmitEvent,
 	{ type: "session_before_switch" | "session_before_fork" | "session_before_compact" | "session_before_tree" }
@@ -1332,15 +1345,20 @@ export class ExtensionRunner {
 			return undefined as RunnerEmitResult<TEvent>;
 		}
 		let result: SessionBeforeEventResult | undefined;
+		const copyPerHandler = LOOP_EVENT_TYPES.has(event.type);
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(event.type);
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
+				// Copied outside the handler's error containment: invalid session data is not the extension's failure.
+				const handlerEvent = copyPerHandler
+					? cloneCanonicalData(event, `Extension ${event.type} input for ${ext.id}`)
+					: event;
 				try {
 					const ctx = this.createContext(ext.id, event.type === "tool_execution_end");
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await handler(handlerEvent, ctx);
 
 					if (this.isSessionBeforeEvent(event) && handlerResult) {
 						result = cloneCanonicalData(
