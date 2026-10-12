@@ -704,7 +704,7 @@ volt.on("before_agent_start", async (event, ctx) => {
 
 The `systemPromptOptions` field gives extensions access to the same structured data Volt uses to build the system prompt. This lets you inspect what Volt has loaded — custom prompts, guidelines, tool snippets, context files, skills — without re-discovering resources or re-parsing flags. Use it when your extension needs to make deep, informed changes to the system prompt while respecting user-provided configuration.
 
-Inside `before_agent_start`, `event.systemPrompt` and `ctx.getSystemPrompt()` both reflect the chained system prompt as of the current handler. Later `before_agent_start` handlers can still modify it again. An injected message must satisfy the [JSON data boundary](#json-data-boundary); Volt diagnoses and skips only the invalid optional message while continuing the turn.
+Inside `before_agent_start`, `event.systemPrompt` and `ctx.getSystemPrompt()` both reflect the chained system prompt as of the current handler. Later `before_agent_start` handlers can still modify it again. An injected message must satisfy the [JSON data boundary](#json-data-boundary); Volt diagnoses and skips only the invalid optional message while continuing the turn. An injected message of one of the host's message types (`work_notice`, `review`, `subagent_recovery`, `volt-plan-checkpoint`, or `volt-plan-execution`) is refused the same way, with the error `volt.sendMessage()` gives.
 
 #### agent_start / agent_end
 
@@ -738,7 +738,7 @@ Fired for message lifecycle updates.
 
 - `message_start` and `message_end` fire for user, assistant, and toolResult messages.
 - `message_update` fires for assistant streaming updates.
-- `message_end` handlers can return `{ message }` to replace the finalized message. The replacement must keep the same `role` and satisfy the [JSON data boundary](#json-data-boundary). An invalid replacement fails message preparation before it commits.
+- `message_end` handlers can return `{ message }` to replace the finalized message. The replacement must keep the same `role` and satisfy the [JSON data boundary](#json-data-boundary). An invalid replacement fails message preparation before it commits. A custom message's replacement cannot change its `customType` to one of the host's message types (`work_notice`, `review`, `subagent_recovery`, `volt-plan-checkpoint`, or `volt-plan-execution`): Volt reports the handler's error and keeps the message as it was.
 
 ```typescript
 volt.on("message_start", async (event, ctx) => {
