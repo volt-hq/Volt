@@ -65,14 +65,20 @@ const SECRET_KEY_PATTERN = /token|secret|password|passwd|api[-_]?key|authorizati
 // A secret key may be quoted (`"password": "x"`), and an HTTP auth scheme may sit between the key and the
 // credential (`Authorization: Bearer x`). Both stay visible; only the credential after them is redacted.
 const SECRET_KEY_PREFIX = String.raw`(?:${SECRET_KEY_PATTERN.source})["']?[\s:=]+`;
-const AUTH_SCHEME = String.raw`(?:(?:bearer|basic|token)\s+)?`;
+const AUTH_SCHEME = String.raw`(?:bearer|basic|token)\s+`;
+// A value that opens an object (`{"secret":{"value":"Bearer x"}}`) is not redacted as one token; its own keys and
+// bearer credentials are matched instead.
+const NOT_NESTED_OBJECT = String.raw`(?![\[\s]*\{)`;
 const SECRET_VALUE_PATTERN = new RegExp(
 	[
 		String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+`,
-		// A quoted value is redacted up to its closing quote, which is kept.
-		String.raw`(${SECRET_KEY_PREFIX}(["'])${AUTH_SCHEME})(?:(?!\3)[^\\]|\\.)*(?=\3)`,
+		// A quoted value, also as the first array entry (`["x"]`) or with a Python `b`/`u` prefix (`b'x'`), is redacted
+		// up to its closing quote, which is kept.
+		String.raw`(${SECRET_KEY_PREFIX}(?:\[\s*)?[bu]?(["'])(?:${AUTH_SCHEME})?)(?:(?!\3)[^\\]|\\.)*(?=\3)`,
+		// An unquoted authorization value with any other scheme (`Authorization: DPoP x`) is redacted with its scheme.
+		String.raw`(authorization["']?\s*[:=]\s*)${NOT_NESTED_OBJECT}(?!${AUTH_SCHEME})[^\s,;]+[ \t]+[^\s,;]*[^\s,;"']`,
 		// An unquoted value ends at whitespace, `,`, or `;`; a trailing quote that closes an enclosing string is kept.
-		String.raw`(${SECRET_KEY_PREFIX}${AUTH_SCHEME})[^\s,;]*[^\s,;"']`,
+		String.raw`(${SECRET_KEY_PREFIX}${NOT_NESTED_OBJECT}(?:${AUTH_SCHEME})?)[^\s,;]*[^\s,;"']`,
 	].join("|"),
 	"gi",
 );
@@ -117,8 +123,9 @@ export function redactMcpText(value: string): string {
 			bearerPrefix: string | undefined,
 			quotedKeyPrefix: string | undefined,
 			_quote: string | undefined,
+			authorizationPrefix: string | undefined,
 			keyPrefix: string | undefined,
-		) => `${bearerPrefix ?? quotedKeyPrefix ?? keyPrefix ?? ""}[redacted]`,
+		) => `${bearerPrefix ?? quotedKeyPrefix ?? authorizationPrefix ?? keyPrefix ?? ""}[redacted]`,
 	);
 }
 

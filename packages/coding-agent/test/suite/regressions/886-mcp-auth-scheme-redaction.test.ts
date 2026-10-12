@@ -20,6 +20,20 @@ describe("issue #886: MCP redaction hides credentials after auth schemes and quo
 		expect(redactMcpText("Authorization: token ghp_abc123")).toBe("Authorization: token [redacted]");
 		expect(redactMcpText("X-Auth-Token: Bearer ghp_abc123, retry")).toBe("X-Auth-Token: Bearer [redacted], retry");
 		expect(redactMcpText("Authorization: Bearer")).toBe("Authorization: [redacted]");
+		expect(redactMcpText("Authorization: Bearer ghp_abc123 was rejected")).toBe(
+			"Authorization: Bearer [redacted] was rejected",
+		);
+	});
+
+	it("redacts an authorization credential together with any other scheme", () => {
+		expect(redactMcpText("Authorization: Digest abc123")).toBe("Authorization: [redacted]");
+		expect(redactMcpText("Authorization: Bot abc123")).toBe("Authorization: [redacted]");
+		expect(redactMcpText("Authorization: ApiKey abc123")).toBe("Authorization: [redacted]");
+		expect(redactMcpText("Proxy-Authorization: DPoP abc123")).toBe("Proxy-Authorization: [redacted]");
+		expect(redactMcpText("authorization=ghp_abc123 user=bob")).toBe("authorization=[redacted]");
+		expect(redactMcpText('curl -H "Authorization: DPoP abc123" https://api.example')).toBe(
+			'curl -H "Authorization: [redacted]" https://api.example',
+		);
 	});
 
 	it("redacts values of quoted keys and keeps the quotes", () => {
@@ -31,6 +45,19 @@ describe("issue #886: MCP redaction hides credentials after auth schemes and quo
 		expect(redactMcpText('{"password":"ab\\"cd"}')).toBe('{"password":"[redacted]"}');
 		expect(redactMcpText("{'api_key': 'sk-abc'}")).toBe("{'api_key': '[redacted]'}");
 		expect(redactMcpText('{"Authorization": "Bearer ghp_abc123"}')).toBe('{"Authorization": "Bearer [redacted]"}');
+	});
+
+	it("redacts the credential when a quoted key's value is an array, a bytes literal, or an object", () => {
+		expect(redactMcpText('{"Authorization":["Bearer ghp_abc123"]}')).toBe('{"Authorization":["Bearer [redacted]"]}');
+		expect(redactMcpText('{"token": ["ghp_abc123"]}')).toBe('{"token": ["[redacted]"]}');
+		expect(redactMcpText("{'Authorization': b'Bearer ghp_abc123'}")).toBe("{'Authorization': b'Bearer [redacted]'}");
+		expect(redactMcpText("{'Authorization': [b'Bearer ghp_abc123']}")).toBe(
+			"{'Authorization': [b'Bearer [redacted]']}",
+		);
+		expect(redactMcpText('{"secret":{"value":"Bearer ghp_abc123"}}')).toBe(
+			'{"secret":{"value":"Bearer [redacted]"}}',
+		);
+		expect(redactMcpText('{"token":{"password":"hunter2"}}')).toBe('{"token":{"password":"[redacted]"}}');
 	});
 
 	it("redacts a quoted authorization header in a command argument", () => {
