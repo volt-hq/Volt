@@ -56,6 +56,8 @@ export interface McpAuthConfig {
 	scope?: string;
 	clientId?: string;
 	clientSecret?: string;
+	/** Authorization server URL that the pre-registered `clientId` belongs to. Required with `clientId`. */
+	issuer?: string;
 	clientMetadataUrl?: string;
 	resourceMetadataUrl?: string;
 	tokenEndpointAuthMethod?: "client_secret_basic" | "client_secret_post" | "none";

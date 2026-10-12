@@ -26,15 +26,39 @@ function emptyStorage(): McpOAuthStorageData {
 	return { version: 1, servers: {} };
 }
 
+function hasIssuer(credential: { issuer?: unknown }): boolean {
+	return typeof credential.issuer === "string" && credential.issuer.length > 0;
+}
+
+/**
+ * Stored tokens and client registrations are only presented to the authorization
+ * server recorded as their `issuer`. A credential without one has no trusted
+ * binding, so it is dropped rather than bound to whichever authorization server
+ * the MCP server names next; the user authenticates again.
+ */
+function withoutUnboundCredentials(record: McpOAuthStoredRecord): McpOAuthStoredRecord {
+	const { tokens, clientInformation, ...rest } = record;
+	return {
+		...rest,
+		...(tokens && hasIssuer(tokens) ? { tokens } : {}),
+		...(clientInformation && hasIssuer(clientInformation) ? { clientInformation } : {}),
+	};
+}
+
 function parseStorage(content: string | undefined): McpOAuthStorageData {
 	if (!content?.trim()) {
 		return emptyStorage();
 	}
 	const parsed = JSON.parse(content) as Partial<McpOAuthStorageData>;
-	return {
-		version: 1,
-		servers: typeof parsed.servers === "object" && parsed.servers !== null ? parsed.servers : {},
-	};
+	const servers: Record<string, McpOAuthStoredRecord> = {};
+	if (typeof parsed.servers === "object" && parsed.servers !== null) {
+		for (const [key, record] of Object.entries(parsed.servers)) {
+			if (typeof record === "object" && record !== null) {
+				servers[key] = withoutUnboundCredentials(record);
+			}
+		}
+	}
+	return { version: 1, servers };
 }
 
 function serializeStorage(data: McpOAuthStorageData): string {
