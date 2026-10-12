@@ -159,10 +159,9 @@ import { resolveStoreSource } from "../../store/resolver.ts";
 import {
 	chooseStoreRemoveTarget,
 	chooseStoreUpdateTarget,
+	findStoreCatalogRevision,
 	type StoreScopeTarget,
 	storeReviewSource,
-	storeSourcePinsCommit,
-	storeTargetMatchesUpdateSource,
 	storeUpdateTouches,
 } from "../../store/targets.ts";
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
@@ -5646,6 +5645,18 @@ export class InteractiveMode {
 		try {
 			this.showStatus(`Preparing store install for ${formatStoreSourceSummary(input)}...`);
 			const resolved = await resolveStoreSource({ input, catalog: storeCatalog, pinGit: true });
+			const packageManager = this.getStorePackageManager();
+			const catalogId = resolved.catalogPackage?.id;
+			const installed =
+				catalogId === undefined
+					? undefined
+					: findStoreCatalogRevision(packageManager, resolved.source, catalogId, scope);
+			if (installed !== undefined) {
+				this.showWarning(
+					`${catalogId} is installed from ${formatStoreSourceSummary(installed.source)}; update it with /store update ${catalogId}`,
+				);
+				return;
+			}
 			const inspection = await inspectStorePackage({
 				source: resolved.source,
 				cwd: this.settingsScope.cwd,
@@ -5669,7 +5680,6 @@ export class InteractiveMode {
 				return;
 			}
 
-			const packageManager = this.getStorePackageManager();
 			await packageManager.installAndPersist(plan.source, {
 				local: scope === "project",
 				scripts: "never",
@@ -5708,9 +5718,18 @@ export class InteractiveMode {
 		try {
 			const resolved = await resolveStoreSource({ input, catalog: storeCatalog, pinGit: false });
 			const packageManager = this.getStorePackageManager();
-			const selection = chooseStoreRemoveTarget(packageManager, resolved.source, local ?? false);
+			const selection = chooseStoreRemoveTarget(
+				packageManager,
+				resolved.source,
+				local ?? false,
+				resolved.catalogPackage?.id,
+			);
 			if (selection.conflict === "both-scopes") {
 				this.showWarning("Package is installed in both user and project scopes. Use /extensions to pick one.");
+				return;
+			}
+			if (selection.conflict === "several-refs") {
+				this.showWarning(`${input} is installed at several refs. Name the ref to remove.`);
 				return;
 			}
 			if (!selection.target) {
@@ -5770,7 +5789,7 @@ export class InteractiveMode {
 		try {
 			this.showStatus(`Preparing store update for ${input}...`);
 			const resolved = await resolveStoreSource({ input, catalog: storeCatalog, pinGit: true });
-			const selection = chooseStoreUpdateTarget(packageManager, resolved.source);
+			const selection = chooseStoreUpdateTarget(packageManager, resolved.source, false, catalogPackage.id);
 			if (selection.conflict === "both-scopes") {
 				this.showWarning("Package is installed in both user and project scopes. Use /extensions to pick one.");
 				return;
@@ -5779,7 +5798,8 @@ export class InteractiveMode {
 				this.showWarning(`No matching installed package found for catalog ID ${input}`);
 				return;
 			}
-			if (storeTargetMatchesUpdateSource(selection.target, resolved.source)) {
+			// Already the catalog pin: update it in place.
+			if (storeUpdateTouches(packageManager, selection.target, resolved.source)) {
 				const targetLabel = formatStoreSourceSummary(selection.target.source);
 				const confirmed = await this.showExtensionConfirm("Store update", `Update ${targetLabel}?`);
 				if (!confirmed) {
@@ -5818,58 +5838,29 @@ export class InteractiveMode {
 				this.showStatus("Store update cancelled");
 				return;
 			}
-			const local = selection.target.scope === "project";
-			await packageManager.installAndPersist(plan.source, { local, scripts: "never" });
-			await this.settingsManager.flush();
-			if (this.reportStoreSettingsErrors(packageManager, plan.source, selection.target.scope)) {
-				return;
-			}
+			const target = selection.target;
+			const local = target.scope === "project";
+			// The new pin installs beside the installed one, which stays configured until the new pin is acknowledged.
+			await packageManager.install(plan.source, { local, scripts: "never" });
 			if (
 				!(await this.confirmPackagePermissions(
 					packageManager,
 					plan.source,
-					selection.target.scope,
+					target.scope,
 					`Declining keeps ${currentLabel}.`,
 					{ installed: true },
 				))
 			) {
-				// Back to the reviewed pin: the update's new permissions were not acknowledged.
-				const scope = selection.target.scope;
-				const removeDeclined = async (reason: string): Promise<void> => {
-					// The declined revision must not stay installed: without the previous one, the package goes.
-					await packageManager.removeAndPersist(plan.source, { local });
-					await this.settingsManager.flush();
-					if (this.reportStoreSettingsErrors(packageManager, plan.source, scope)) return;
-					this.showWarning(`Removed ${currentLabel}: ${reason}`);
-					await this.offerStoreReload(`Removed ${currentLabel}`);
-				};
-				try {
-					await packageManager.installAndPersist(selection.target.source, { local, scripts: "never" });
-					await this.settingsManager.flush();
-				} catch (error: unknown) {
-					this.showError(
-						`Could not reinstall ${currentLabel}: ${sanitizeText(error instanceof Error ? error.message : String(error))}`,
-					);
-					await removeDeclined("the update's permissions were not acknowledged");
-					return;
-				}
-				if (this.reportStoreSettingsErrors(packageManager, selection.target.source, selection.target.scope)) return;
-				// A source without a commit pin reinstalls at its newest revision, which has its own permissions:
-				// declining them too removes the package.
-				if (
-					!storeSourcePinsCommit(selection.target.source) &&
-					!(await this.confirmPackagePermissions(
-						packageManager,
-						selection.target.source,
-						selection.target.scope,
-						"Declining removes the package.",
-						{ installed: true },
-					))
-				) {
-					await removeDeclined("the reinstalled revision's permissions were not acknowledged");
-					return;
-				}
+				// The new pin was never configured: dropping its checkout leaves the installed pin as it was.
+				await packageManager.removeAndPersist(plan.source, { local });
 				this.showStatus(`Kept ${currentLabel}: the update's permissions were not acknowledged`);
+				return;
+			}
+			// The new pin takes over the installed one's settings entry, and the installed pin's checkout goes.
+			packageManager.addSourceToSettings(plan.source, { local, scripts: "never", replace: target.source });
+			await packageManager.removeAndPersist(target.actionSource ?? target.source, { local });
+			await this.settingsManager.flush();
+			if (this.reportStoreSettingsErrors(packageManager, plan.source, target.scope)) {
 				return;
 			}
 			await this.offerStoreReload(`Updated ${currentLabel} to ${targetLabel}`);

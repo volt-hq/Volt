@@ -6,7 +6,13 @@ import { CONFIG_DIR_NAME, ENV_AGENT_DIR } from "../src/config.ts";
 import { DefaultPackageManager } from "../src/core/package-manager.ts";
 import { main } from "../src/main.ts";
 import type { StorePackageInspection } from "../src/store/inspector.ts";
-import { NEXT_TEST_STORE_COMMIT, testCatalog, testCatalogEntry, testStoreSource } from "./store-catalog-fixtures.ts";
+import {
+	NEXT_TEST_STORE_COMMIT,
+	TEST_STORE_COMMIT,
+	testCatalog,
+	testCatalogEntry,
+	testStoreSource,
+} from "./store-catalog-fixtures.ts";
 
 // Catalog packages are git pins on github.com; inspection would clone them, so it reads no files here.
 const inspectorMock = vi.hoisted(() => ({
@@ -61,11 +67,22 @@ describe("store CLI", () => {
 		);
 	});
 
-	/** The package a mocked install leaves where the store reviews it: one that asks for no permissions. */
+	/**
+	 * The package a mocked install leaves where the store reviews it: the catalog's rtk, asking for no
+	 * permissions. An update finds the installed pin by that manifest id.
+	 */
 	function stubInstalledPackage(): void {
 		const root = join(tempDir, "installed");
 		mkdirSync(root, { recursive: true });
-		writeFileSync(join(root, "package.json"), JSON.stringify({ name: "installed", version: "1.0.0" }));
+		writeFileSync(
+			join(root, "package.json"),
+			JSON.stringify({
+				name: "installed",
+				version: "1.0.0",
+				volt: { id: "rtk", displayName: "rtk", entry: "index.js" },
+			}),
+		);
+		writeFileSync(join(root, "index.js"), "export default function () {}\n");
 		vi.spyOn(DefaultPackageManager.prototype, "getInstalledPath").mockReturnValue(root);
 	}
 	afterEach(() => {
@@ -155,6 +172,37 @@ describe("store CLI", () => {
 		expect(process.exitCode).toBeUndefined();
 	});
 
+	it("removes a git package store install pinned by the repository source it was installed from", async () => {
+		const pinned = `git:https://github.com/foo/bar@${TEST_STORE_COMMIT}`;
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [pinned] }, null, 2));
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(main(["store", "remove", "git:github.com/foo/bar", "--yes"])).resolves.toBeUndefined();
+
+		const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")) as { packages?: string[] };
+		expect(settings.packages ?? []).toHaveLength(0);
+		expect(logSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain("Removed");
+		expect(errorSpy).not.toHaveBeenCalled();
+		expect(process.exitCode).toBeUndefined();
+	});
+
+	it("refuses to remove a repository source configured at several refs", async () => {
+		const refs = ["git:github.com/foo/bar@v1", "git:github.com/foo/bar@v2"];
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: refs }, null, 2));
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(main(["store", "remove", "git:github.com/foo/bar", "--yes"])).resolves.toBeUndefined();
+
+		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+			"git:github.com/foo/bar is installed at several refs. Name the ref to remove.",
+		);
+		expect(process.exitCode).toBe(1);
+		const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")) as { packages?: string[] };
+		expect(settings.packages).toEqual(refs);
+	});
+
 	it("removes a project-local package by its settings-relative source", async () => {
 		const projectPackageDir = join(projectDir, "pkg");
 		mkdirSync(join(projectPackageDir, "extensions"), { recursive: true });
@@ -238,6 +286,29 @@ describe("store CLI", () => {
 		expect(process.exitCode).toBeUndefined();
 	});
 
+	it("refuses to install a catalog package beside its installed older pin", async () => {
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [testStoreSource()] }, null, 2));
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => catalogResponse(NEXT_TEST_STORE_COMMIT)),
+		);
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		stubInstalledPackage();
+		const installSpy = vi.spyOn(DefaultPackageManager.prototype, "installAndPersist").mockResolvedValue(undefined);
+
+		await expect(main(["store", "install", "rtk", "--yes"])).resolves.toBeUndefined();
+
+		expect(installSpy).not.toHaveBeenCalled();
+		expect(inspectorMock.inspectStorePackage).not.toHaveBeenCalled();
+		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+			`rtk is installed from git github.com/volt-hq/Volt @ ${TEST_STORE_COMMIT.slice(0, 12)}; update it with "volt store update rtk"`,
+		);
+		expect(process.exitCode).toBe(1);
+		const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")) as { packages?: string[] };
+		expect(settings.packages).toEqual([testStoreSource()]);
+	});
+
 	it("moves an installed catalog package to the catalog's new reviewed pin", async () => {
 		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [testStoreSource()] }, null, 2));
 		vi.stubGlobal(
@@ -248,7 +319,7 @@ describe("store CLI", () => {
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 		const updateSpy = vi.spyOn(DefaultPackageManager.prototype, "update").mockResolvedValue(undefined);
 		stubInstalledPackage();
-		const installSpy = vi.spyOn(DefaultPackageManager.prototype, "installAndPersist").mockResolvedValue(undefined);
+		const installSpy = vi.spyOn(DefaultPackageManager.prototype, "install").mockResolvedValue(undefined);
 
 		await expect(main(["store", "update", "rtk", "--yes"])).resolves.toBeUndefined();
 
@@ -257,6 +328,9 @@ describe("store CLI", () => {
 			local: false,
 			scripts: "never",
 		});
+		// The new pin takes over the installed pin's entry.
+		const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")) as { packages?: unknown[] };
+		expect(settings.packages).toEqual([{ source: testStoreSource(NEXT_TEST_STORE_COMMIT), scripts: "never" }]);
 		const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
 		expect(stdout).toContain("Reviewed: 89abcdef0123 by hansjm10 on 2026-10-05");
 		expect(stdout).toContain("to rtk - RTK Output Compression");
