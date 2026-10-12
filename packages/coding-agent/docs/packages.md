@@ -109,6 +109,7 @@ ssh://git@github.com/user/repo@v1
 - For non-interactive runs (for example CI), you can set `GIT_TERMINAL_PROMPT=0` to disable credential prompts and set `GIT_SSH_COMMAND` (for example `ssh -o BatchMode=yes -o ConnectTimeout=5`) to fail fast.
 - Refs are pinned tags or commits. `volt update` and `volt update --extensions` do not move them to newer refs, but they do reconcile an existing clone to the configured ref.
 - Each pinned ref is its own package: `volt install git:host/user/repo@new-ref` installs it beside the repository's other refs. To move a package to a new ref, `volt remove` the old ref and `volt install` the new one.
+- `volt remove`, `volt update`, and `volt store remove` with a repository source without a ref act on that unpinned entry when the scope configures it, and otherwise on the repository's pinned ref. When the scope configures several pinned refs of the repository, they fail; name the ref.
 - Cloned to `~/.volt/agent/git/<host>/<path>` (global) or `.volt/git/<host>/<path>` (project), and a pinned ref to `<path>@<ref>` beside it. A ref with characters other than letters, digits, `_`, and `-` (single dots between them are fine) is replaced by a hash of it in that directory name.
 - When reconciliation changes the checkout, volt resets and cleans the clone, then runs `npm install` if `package.json` exists.
 
@@ -227,7 +228,7 @@ In a running session, `/extensions` lists every extension with its state, permis
 
 ## Scope and Deduplication
 
-Packages can appear in both global and project settings. If the same package appears in both, the project entry wins. Identity is determined by:
+Packages can appear in both global and project settings. If the same package appears in both, the project entry wins. A git repository pinned to a different ref in each is two packages, so both load; when they declare the same extension id, the global one's extension runs and the project one's is reported as not loaded (see [Manifest](extensions.md#manifest)). Identity is determined by:
 
 - npm: package name
 - git: repository URL, with its ref when pinned (each pinned ref is a separate package)

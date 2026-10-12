@@ -11,6 +11,7 @@ import {
 	findStoreCatalogRevision,
 	getMatchingStorePackageScopes,
 	type StoreTargetPackageManager,
+	storeUpdateTouches,
 } from "../src/store/targets.ts";
 import { NEXT_TEST_STORE_COMMIT, TEST_STORE_COMMIT, testStoreSource } from "./store-catalog-fixtures.ts";
 
@@ -153,6 +154,56 @@ describe("store target selection", () => {
 			expect(chooseStoreUpdateTarget(manager, testStoreSource(), false, "rtk")).toEqual({
 				target: { source: `git:git@github.com:volt-hq/Volt@${TEST_STORE_COMMIT}`, scope: "user" },
 			});
+		});
+	});
+
+	describe("git sources without a ref", () => {
+		const repository = "git:github.com/foo/bar";
+		const pinned = `git:https://github.com/foo/bar@${TEST_STORE_COMMIT}`;
+		let tempDir: string | undefined;
+
+		afterEach(() => {
+			if (tempDir !== undefined) rmSync(tempDir, { recursive: true, force: true });
+			tempDir = undefined;
+		});
+
+		function createRepositoryManager(user: string[], project: string[] = []): DefaultPackageManager {
+			tempDir = mkdtempSync(join(tmpdir(), "volt-store-targets-"));
+			const settingsManager = SettingsManager.inMemory({ packages: user });
+			settingsManager.setProjectPackages(project);
+			return new DefaultPackageManager({ cwd: tempDir, agentDir: tempDir, settingsManager });
+		}
+
+		it("names the repository's pinned ref, as `store install` configures it", () => {
+			const manager = createRepositoryManager([pinned]);
+
+			expect(chooseStoreRemoveTarget(manager, repository, false)).toEqual({
+				target: { source: pinned, scope: "user" },
+			});
+			expect(storeUpdateTouches(manager, { source: pinned, scope: "user" }, repository)).toBe(true);
+		});
+
+		it("refuses to pick one of several pinned refs in a scope", () => {
+			const refs = [`${repository}@v1`, `${repository}@v2`];
+
+			expect(chooseStoreRemoveTarget(createRepositoryManager(refs), repository, false)).toEqual({
+				conflict: "several-refs",
+			});
+			expect(chooseStoreRemoveTarget(createRepositoryManager([], refs), repository, true)).toEqual({
+				conflict: "several-refs",
+			});
+			expect(chooseStoreRemoveTarget(createRepositoryManager([], refs), `${repository}@v2`, true)).toEqual({
+				target: { source: `${repository}@v2`, scope: "project" },
+			});
+		});
+
+		it("names the unpinned entry, not the pinned refs, in a scope that configures it", () => {
+			const manager = createRepositoryManager([repository, `${repository}@v1`]);
+
+			expect(chooseStoreRemoveTarget(manager, repository, false)).toEqual({
+				target: { source: repository, scope: "user" },
+			});
+			expect(storeUpdateTouches(manager, { source: `${repository}@v1`, scope: "user" }, repository)).toBe(false);
 		});
 	});
 });

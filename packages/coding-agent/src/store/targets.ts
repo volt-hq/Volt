@@ -1,6 +1,6 @@
 import { readPackageManifest } from "../core/extensions/manifest.ts";
 import type { ConfiguredPackage } from "../core/package-manager.ts";
-import { parseGitUrl } from "../utils/git.ts";
+import { isPinnedRefOf, parseGitUrl } from "../utils/git.ts";
 import { isLocalPath, resolvePath } from "../utils/paths.ts";
 import type { StoreInstallScope } from "./install-plan.ts";
 
@@ -10,7 +10,8 @@ export interface StoreScopeTarget {
 	actionSource?: string;
 }
 
-export type StoreTargetConflict = "both-scopes";
+/** `both-scopes`: the source names a package in each scope. `several-refs`: it names a repository configured at several pinned refs in the scope. */
+export type StoreTargetConflict = "both-scopes" | "several-refs";
 
 export interface StoreTargetSelection {
 	target?: StoreScopeTarget;
@@ -44,9 +45,42 @@ function isCatalogPackageRevision(pkg: ConfiguredPackage, source: string, catalo
 }
 
 /**
- * The configured packages `source` names, by identity in their scope. With
- * `catalogId`, `source` is that catalog package's pin, and the package
- * installed at another revision of it matches too.
+ * Whether configured package `pkg` is a pinned ref of the repository that
+ * `source`, a git source without a ref, names, in a scope of `packages` that
+ * does not configure `source` itself. Each pinned ref is its own package, so
+ * the repository names its pinned ref there, as the package manager resolves it.
+ */
+function isRepositoryRef(
+	packageManager: StoreTargetPackageManager,
+	packages: ConfiguredPackage[],
+	pkg: Pick<ConfiguredPackage, "source" | "scope">,
+	source: string,
+): boolean {
+	const repository = parseGitUrl(source);
+	const configured = parseGitUrl(pkg.source);
+	if (repository === null || configured === null || !isPinnedRefOf(configured, repository)) return false;
+	const identity = packageManager.getPackageIdentity(source, pkg.scope);
+	return !packages.some(
+		(other) => other.scope === pkg.scope && packageManager.getPackageIdentity(other.source, other.scope) === identity,
+	);
+}
+
+/** Whether `matches`, from one scope, are several pinned refs of the repository `source` names without a ref. */
+function hasSeveralRefs(
+	packageManager: StoreTargetPackageManager,
+	source: string,
+	matches: StoreScopeTarget[],
+): boolean {
+	const repository = parseGitUrl(source);
+	if (repository === null || repository.ref) return false;
+	return new Set(matches.map((match) => packageManager.getPackageIdentity(match.source, match.scope))).size > 1;
+}
+
+/**
+ * The configured packages `source` names, by identity in their scope, or, for
+ * a git source without a ref, the repository's pinned refs in a scope that
+ * does not configure it. With `catalogId`, `source` is that catalog package's
+ * pin, and the package installed at another revision of it matches too.
  */
 export function getMatchingStorePackageScopes(
 	packageManager: StoreTargetPackageManager,
@@ -54,14 +88,15 @@ export function getMatchingStorePackageScopes(
 	catalogId?: string,
 ): StoreScopeTarget[] {
 	const inputIdentity = packageManager.getPackageIdentity(source);
-	return packageManager
-		.listConfiguredPackages()
+	const packages = packageManager.listConfiguredPackages();
+	return packages
 		.filter((pkg) => {
 			const configuredIdentity = packageManager.getPackageIdentity(pkg.source, pkg.scope);
 			const scopedInputIdentity = packageManager.getPackageIdentity(source, pkg.scope);
 			return (
 				configuredIdentity === inputIdentity ||
 				configuredIdentity === scopedInputIdentity ||
+				isRepositoryRef(packageManager, packages, pkg, source) ||
 				(catalogId !== undefined && isCatalogPackageRevision(pkg, source, catalogId))
 			);
 		})
@@ -80,12 +115,15 @@ export function chooseStoreRemoveTarget(
 ): StoreTargetSelection {
 	const matches = getMatchingStorePackageScopes(packageManager, source, catalogId);
 	if (local) {
-		return { target: matches.find((match) => match.scope === "project") };
+		const projectMatches = matches.filter((match) => match.scope === "project");
+		if (hasSeveralRefs(packageManager, source, projectMatches)) return { conflict: "several-refs" };
+		return { target: projectMatches[0] };
 	}
 	const scopes = new Set(matches.map((match) => match.scope));
 	if (scopes.has("user") && scopes.has("project")) {
 		return { conflict: "both-scopes" };
 	}
+	if (hasSeveralRefs(packageManager, source, matches)) return { conflict: "several-refs" };
 	return { target: matches[0] };
 }
 
@@ -97,12 +135,15 @@ export function chooseStoreUpdateTarget(
 ): StoreTargetSelection {
 	const matches = getMatchingStorePackageScopes(packageManager, source, catalogId);
 	if (local) {
-		return { target: matches.find((match) => match.scope === "project") };
+		const projectMatches = matches.filter((match) => match.scope === "project");
+		if (hasSeveralRefs(packageManager, source, projectMatches)) return { conflict: "several-refs" };
+		return { target: projectMatches[0] };
 	}
 	const scopes = new Set(matches.map((match) => match.scope));
 	if (scopes.has("user") && scopes.has("project")) {
 		return { conflict: "both-scopes" };
 	}
+	if (hasSeveralRefs(packageManager, source, matches)) return { conflict: "several-refs" };
 	return { target: matches[0] };
 }
 
@@ -122,14 +163,20 @@ export function findStoreCatalogRevision(
 	);
 }
 
-/** Whether an update of `source` touched configured package `pkg`: the same package, by its identity in `pkg`'s scope. */
+/**
+ * Whether an update of `source` touched configured package `pkg`: the same
+ * package, by its identity in `pkg`'s scope, or the pinned ref a git source
+ * without a ref updates there.
+ */
 export function storeUpdateTouches(
 	packageManager: StoreTargetPackageManager,
 	pkg: Pick<ConfiguredPackage, "source" | "scope">,
 	source: string,
 ): boolean {
 	return (
-		packageManager.getPackageIdentity(pkg.source, pkg.scope) === packageManager.getPackageIdentity(source, pkg.scope)
+		packageManager.getPackageIdentity(pkg.source, pkg.scope) ===
+			packageManager.getPackageIdentity(source, pkg.scope) ||
+		isRepositoryRef(packageManager, packageManager.listConfiguredPackages(), pkg, source)
 	);
 }
 

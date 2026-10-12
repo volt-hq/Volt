@@ -224,3 +224,8 @@ export function parseGitUrl(source: string): GitSource | null {
 
 	return parseGenericGitUrl(url);
 }
+
+/** Whether `source` is a pinned ref of the repository that `repository`, a source without a ref, names. */
+export function isPinnedRefOf(source: GitSource, repository: GitSource): boolean {
+	return !repository.ref && Boolean(source.ref) && source.host === repository.host && source.path === repository.path;
+}

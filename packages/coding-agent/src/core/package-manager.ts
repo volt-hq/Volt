@@ -9,7 +9,7 @@ import { minimatch } from "minimatch";
 import { maxSatisfying, rcompare, satisfies, validRange } from "semver";
 import { CONFIG_DIR_NAME } from "../config.ts";
 import { spawnProcess, spawnProcessSync, waitForChildProcess } from "../utils/child-process.ts";
-import { type GitSource, parseGitUrl } from "../utils/git.ts";
+import { type GitSource, isPinnedRefOf, parseGitUrl } from "../utils/git.ts";
 import { addIgnoreRules, createIgnoreMatcher, type IgnoreMatcher } from "../utils/ignore-files.ts";
 import { getNpmUpdateSpec, parseNpmSpec } from "../utils/npm-spec.ts";
 import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, resolvePath } from "../utils/paths.ts";
@@ -1007,6 +1007,21 @@ export class DefaultPackageManager implements PackageManager {
 		return this.resolvePathFromBase(parsed.path, this.getBaseDirForScope(scope));
 	}
 
+	/**
+	 * The configured source a remove of `source`, as a user names it, acts on in
+	 * the scope (see resolveActionSource). `removeAndPersist` takes its source as
+	 * given: a source the scope no longer configures, such as a tracking install
+	 * a store update just replaced, must not name another ref of its repository.
+	 */
+	resolveRemoveSource(source: string, options?: { local?: boolean }): string {
+		const scope: InstalledSourceScope = options?.local ? "project" : "user";
+		const settings =
+			scope === "project"
+				? this.settingsManager.getProjectEffectiveSettings()
+				: this.settingsManager.getGlobalEffectiveSettings();
+		return this.resolveActionSource(settings.packages ?? [], source, scope);
+	}
+
 	private getPackageRemovalChange(
 		source: string,
 		scope: InstalledSourceScope,
@@ -1148,7 +1163,11 @@ export class DefaultPackageManager implements PackageManager {
 		if (scopeFilter !== "project") {
 			const globalPackages = globalSettings.packages ?? [];
 			const packages = source
-				? this.getPackageSourceMatchesForAction(globalPackages, source, "user")
+				? this.getPackageSourceMatchesForAction(
+						globalPackages,
+						this.resolveActionSource(globalPackages, source, "user"),
+						"user",
+					)
 				: globalPackages;
 			for (const pkg of packages) {
 				const sourceStr = typeof pkg === "string" ? pkg : pkg.source;
@@ -1163,7 +1182,11 @@ export class DefaultPackageManager implements PackageManager {
 		if (scopeFilter !== "user") {
 			const projectPackages = projectSettings.packages ?? [];
 			const packages = source
-				? this.getPackageSourceMatchesForAction(projectPackages, source, "project")
+				? this.getPackageSourceMatchesForAction(
+						projectPackages,
+						this.resolveActionSource(projectPackages, source, "project"),
+						"project",
+					)
 				: projectPackages;
 			for (const pkg of packages) {
 				const sourceStr = typeof pkg === "string" ? pkg : pkg.source;
@@ -1580,6 +1603,35 @@ export class DefaultPackageManager implements PackageManager {
 			return false;
 		}
 		return canonicalizePath(left.slice("local:".length)) === canonicalizePath(right.slice("local:".length));
+	}
+
+	/**
+	 * The source a remove or update of `source` acts on in `packages`. A git
+	 * source without a ref names its repository: when `packages` does not
+	 * configure it, the action takes the repository's pinned ref, and refuses to
+	 * pick one of several. `update` resolves its source with it; a remove
+	 * resolves the source a user names with `resolveRemoveSource`.
+	 */
+	private resolveActionSource(packages: PackageSource[], source: string, scope: InstalledSourceScope): string {
+		const parsed = this.parseSource(source);
+		if (parsed.type !== "git" || parsed.ref || packages.some((pkg) => this.packageSourcesMatch(pkg, source, scope))) {
+			return source;
+		}
+		const refs = new Map<string, string>();
+		for (const pkg of packages) {
+			const configured = this.getPackageSourceString(pkg);
+			const configuredParsed = this.parseSource(configured);
+			if (configuredParsed.type === "git" && isPinnedRefOf(configuredParsed, parsed)) {
+				const identity = getGitSourceIdentity(configuredParsed);
+				if (!refs.has(identity)) refs.set(identity, configured);
+			}
+		}
+		if (refs.size > 1) {
+			throw new Error(
+				`${source} is configured at several refs (${[...refs.values()].join(", ")}); name the ref to act on`,
+			);
+		}
+		return refs.values().next().value ?? source;
 	}
 
 	private getPackageSourceMatchesForAction(

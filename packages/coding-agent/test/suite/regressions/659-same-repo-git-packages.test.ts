@@ -95,4 +95,42 @@ describe("issue #659 git packages from one repository at different pinned refs",
 		expect(existsSync(rtkRoot!)).toBe(false);
 		expect(manifestId(reviewLoopRoot)).toBe("review-loop");
 	});
+
+	it("updates and removes the one pinned ref of a repository by the repository's source", async () => {
+		const repository = "git:github.com/volt-hq/Volt";
+		await packageManager.installAndPersist(rtk, { scripts: "never" });
+		const rtkRoot = packageManager.getInstalledPath(rtk, "user");
+
+		await expect(packageManager.update(repository)).resolves.toBeUndefined();
+		expect(packageManager.resolveRemoveSource(repository)).toBe(rtk);
+		await expect(packageManager.removeAndPersist(packageManager.resolveRemoveSource(repository))).resolves.toBe(true);
+
+		expect(settingsManager.getGlobalSettings().packages).toEqual([]);
+		expect(existsSync(rtkRoot!)).toBe(false);
+	});
+
+	it("refuses to pick one of several pinned refs by the repository's source", async () => {
+		const repository = "git:github.com/volt-hq/Volt";
+		await packageManager.installAndPersist(rtk, { scripts: "never" });
+		await packageManager.installAndPersist(reviewLoop, { scripts: "never" });
+
+		await expect(packageManager.update(repository)).rejects.toThrow("is configured at several refs");
+		expect(() => packageManager.resolveRemoveSource(repository)).toThrow("is configured at several refs");
+
+		expect(settingsManager.getGlobalSettings().packages).toEqual([
+			{ source: rtk, scripts: "never" },
+			{ source: reviewLoop, scripts: "never" },
+		]);
+		expect(manifestId(packageManager.getInstalledPath(rtk, "user"))).toBe("rtk");
+		expect(manifestId(packageManager.getInstalledPath(reviewLoop, "user"))).toBe("review-loop");
+	});
+
+	it("removes a repository source the settings no longer configure as given, not as its pinned ref", async () => {
+		await packageManager.installAndPersist(rtk, { scripts: "never" });
+
+		await expect(packageManager.removeAndPersist("git:github.com/volt-hq/Volt")).resolves.toBe(false);
+
+		expect(settingsManager.getGlobalSettings().packages).toEqual([{ source: rtk, scripts: "never" }]);
+		expect(manifestId(packageManager.getInstalledPath(rtk, "user"))).toBe("rtk");
+	});
 });

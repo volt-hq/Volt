@@ -612,6 +612,11 @@ async function runRemove(
 		process.exitCode = 1;
 		return true;
 	}
+	if (selection.conflict === "several-refs") {
+		console.error(chalk.red(`${input} is installed at several refs. Name the ref to remove.`));
+		process.exitCode = 1;
+		return true;
+	}
 	const target = selection.target;
 	if (!target) {
 		if (process.exitCode === undefined) {

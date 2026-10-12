@@ -5715,6 +5715,10 @@ export class InteractiveMode {
 				this.showWarning("Package is installed in both user and project scopes. Use /extensions to pick one.");
 				return;
 			}
+			if (selection.conflict === "several-refs") {
+				this.showWarning(`${input} is installed at several refs. Name the ref to remove.`);
+				return;
+			}
 			if (!selection.target) {
 				this.showWarning(`No matching package found for ${input}`);
 				return;

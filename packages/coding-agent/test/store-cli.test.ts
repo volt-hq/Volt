@@ -172,6 +172,37 @@ describe("store CLI", () => {
 		expect(process.exitCode).toBeUndefined();
 	});
 
+	it("removes a git package store install pinned by the repository source it was installed from", async () => {
+		const pinned = `git:https://github.com/foo/bar@${TEST_STORE_COMMIT}`;
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [pinned] }, null, 2));
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(main(["store", "remove", "git:github.com/foo/bar", "--yes"])).resolves.toBeUndefined();
+
+		const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")) as { packages?: string[] };
+		expect(settings.packages ?? []).toHaveLength(0);
+		expect(logSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain("Removed");
+		expect(errorSpy).not.toHaveBeenCalled();
+		expect(process.exitCode).toBeUndefined();
+	});
+
+	it("refuses to remove a repository source configured at several refs", async () => {
+		const refs = ["git:github.com/foo/bar@v1", "git:github.com/foo/bar@v2"];
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: refs }, null, 2));
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(main(["store", "remove", "git:github.com/foo/bar", "--yes"])).resolves.toBeUndefined();
+
+		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+			"git:github.com/foo/bar is installed at several refs. Name the ref to remove.",
+		);
+		expect(process.exitCode).toBe(1);
+		const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")) as { packages?: string[] };
+		expect(settings.packages).toEqual(refs);
+	});
+
 	it("removes a project-local package by its settings-relative source", async () => {
 		const projectPackageDir = join(projectDir, "pkg");
 		mkdirSync(join(projectPackageDir, "extensions"), { recursive: true });
