@@ -15,6 +15,9 @@
  * - checks still running, mergeability not known yet, or a pull request
  *   closed without merging: wait;
  * - a merged pull request or a closed issue: done.
+ *
+ * A review engine's verdict names its run: the next review follows the
+ * latest such run, and a fix for changes it asked for gets its findings.
  */
 
 import type { ChecksState, Issue, PullRequest, ReviewMarker, Tracker } from "./github.ts";
@@ -23,13 +26,21 @@ import type { WorkflowConfig } from "./workflow.ts";
 export type Phase =
 	| { readonly kind: "implement" }
 	| { readonly kind: "update"; readonly pr: PullRequest; readonly reason: string }
-	| { readonly kind: "review"; readonly pr: PullRequest; readonly round: number }
+	| {
+			readonly kind: "review";
+			readonly pr: PullRequest;
+			readonly round: number;
+			/** The review engine's run of the latest round with one, which this review follows. */
+			readonly previousRunId?: string;
+	  }
 	| {
 			readonly kind: "fix";
 			readonly pr: PullRequest;
 			readonly round: number;
 			readonly reason: string;
 			readonly failing: readonly string[];
+			/** The review engine's run that asked for the changes. */
+			readonly runId?: string;
 	  }
 	| { readonly kind: "merge"; readonly pr: PullRequest }
 	| { readonly kind: "wait"; readonly reason: string }
@@ -91,7 +102,7 @@ export function decidePhase(
 	const verdicts = verdictsByHead(reviews);
 	const current = verdicts.find((review) => pr.headSha.startsWith(review.headSha));
 	const reviewed = verdicts.filter((review) => !updates.has(review.headSha)).length;
-	const fixOrStop = (reason: string, failing: readonly string[]): Phase =>
+	const fixOrStop = (reason: string, failing: readonly string[], runId?: string): Phase =>
 		reviewed >= config.review.maxRounds
 			? {
 					kind: "handoff",
@@ -99,9 +110,12 @@ export function decidePhase(
 					reason: `The pull request did not converge after ${reviewed} review rounds (last: ${reason}).`,
 					pr,
 				}
-			: { kind: "fix", pr, round: reviewed, reason, failing };
-	if (current === undefined) return { kind: "review", pr, round: reviewed + 1 };
-	if (current.verdict === "changes") return fixOrStop("the review asked for changes", []);
+			: { kind: "fix", pr, round: reviewed, reason, failing, ...(runId === undefined ? {} : { runId }) };
+	if (current === undefined) {
+		const previousRunId = verdicts.findLast((review) => review.runId !== undefined)?.runId;
+		return { kind: "review", pr, round: reviewed + 1, ...(previousRunId === undefined ? {} : { previousRunId }) };
+	}
+	if (current.verdict === "changes") return fixOrStop("the review asked for changes", [], current.runId);
 	if (checks === undefined || checks.state === "pending") return { kind: "wait", reason: "CI checks are running" };
 	if (checks.state === "failing") return fixOrStop(`CI checks failing: ${checks.failing.join(", ")}`, checks.failing);
 	if (checks.state === "none" && config.merge.requireChecks) {

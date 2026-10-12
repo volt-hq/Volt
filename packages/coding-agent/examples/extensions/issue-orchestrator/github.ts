@@ -2,8 +2,9 @@
  * The GitHub tracker, through GitHub CLI: the issues a maintainer labeled,
  * the pull request of an issue's branch, the review verdicts the review
  * author posted on it, its CI checks, and the writes the orchestrator makes
- * itself (merging, handing an issue to a human, and taking an approval back).
- * Everything else GitHub sees, the agents do with `gh` themselves.
+ * itself (merging, handing an issue to a human, taking an approval back, and
+ * filing a review's follow-ups). Everything else GitHub sees, the agents do
+ * with `gh` themselves; the host posts a review engine's reviews.
  */
 
 import type { MergeMethod } from "./workflow.ts";
@@ -50,6 +51,14 @@ export interface ReviewMarker {
 	readonly headSha: string;
 	readonly verdict: ReviewVerdict;
 	readonly createdAt: string;
+	/** The review engine's run that gave it; none for a review agent's verdict. */
+	readonly runId?: string;
+}
+
+/** An issue the orchestrator filed. */
+export interface FiledIssue {
+	readonly number: number;
+	readonly url: string;
 }
 
 export type ChecksState =
@@ -77,6 +86,10 @@ export interface Tracker {
 	handOff(number: number, label: string, comment: string): Promise<boolean>;
 	/** Comment `comment` on issue `number` and remove its label `label`, which a handoff applied. */
 	takeBack(number: number, label: string, comment: string): Promise<void>;
+	/** File an issue labeled `labels`. */
+	fileIssue(issue: { title: string; body: string; labels: readonly string[] }): Promise<FiledIssue>;
+	/** Whether an issue, open or closed, says `text` in its body: one filed for the same follow-up before. */
+	mentioned(text: string): Promise<boolean>;
 }
 
 export class GhError extends Error {
@@ -91,19 +104,24 @@ export class GhError extends Error {
 	}
 }
 
-const MARKER = /<!--\s*volt-orchestrator review head=([0-9a-f]{7,40}) verdict=(clean|changes)\s*-->/g;
+const MARKER =
+	/<!--\s*volt-orchestrator review head=([0-9a-f]{7,40}) verdict=(clean|changes)(?: run=([\w.:-]{1,128}))?\s*-->/g;
 
-/** The line a review comment ends with to give `verdict` on head commit `headSha`. */
-export function reviewMarker(headSha: string, verdict: ReviewVerdict): string {
-	return `<!-- volt-orchestrator review head=${headSha} verdict=${verdict} -->`;
+/**
+ * The line a review ends with to give `verdict` on head commit `headSha`; a
+ * review engine's names its run, which the next round's review follows.
+ */
+export function reviewMarker(headSha: string, verdict: ReviewVerdict, runId?: string): string {
+	return `<!-- volt-orchestrator review head=${headSha} verdict=${verdict}${runId === undefined ? "" : ` run=${runId}`} -->`;
 }
 
-/** The review verdicts in a comment's body. */
+/** The review verdicts in a comment's or review's body. */
 export function parseReviewMarkers(body: string, createdAt: string): ReviewMarker[] {
 	return [...body.matchAll(MARKER)].map((match) => ({
 		headSha: match[1] ?? "",
 		verdict: match[2] as ReviewVerdict,
 		createdAt,
+		...(match[3] === undefined ? {} : { runId: match[3] }),
 	}));
 }
 
@@ -202,14 +220,29 @@ export class GitHubTracker implements Tracker {
 		return all.find((pr) => pr.state === "open") ?? all.sort((left, right) => right.number - left.number)[0];
 	}
 
+	/** The verdicts in the review author's comments (a review agent's) and pull request reviews (a review engine's). */
 	async reviews(number: number): Promise<ReviewMarker[]> {
-		const pr = await json(this.run, ["pr", "view", String(number), "--repo", this.repo, "--json", "comments"]);
-		const comments = isRecord(pr) && Array.isArray(pr.comments) ? pr.comments : [];
-		return comments
-			.filter(isRecord)
-			.filter((comment) => isRecord(comment.author) && sameLogin(text(comment.author.login), this.reviewAuthor))
-			.flatMap((comment) => parseReviewMarkers(text(comment.body), text(comment.createdAt)))
-			.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+		const pr = await json(this.run, [
+			"pr",
+			"view",
+			String(number),
+			"--repo",
+			this.repo,
+			"--json",
+			"comments,reviews",
+		]);
+		const list = (key: string): Record<string, unknown>[] =>
+			isRecord(pr) && Array.isArray(pr[key]) ? pr[key].filter(isRecord) : [];
+		const byAuthor = (entry: Record<string, unknown>): boolean =>
+			isRecord(entry.author) && sameLogin(text(entry.author.login), this.reviewAuthor);
+		return [
+			...list("comments")
+				.filter(byAuthor)
+				.flatMap((comment) => parseReviewMarkers(text(comment.body), text(comment.createdAt))),
+			...list("reviews")
+				.filter(byAuthor)
+				.flatMap((review) => parseReviewMarkers(text(review.body), text(review.submittedAt))),
+		].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
 	}
 
 	async checks(number: number): Promise<ChecksState> {
@@ -256,6 +289,36 @@ export class GitHubTracker implements Tracker {
 	async takeBack(number: number, label: string, comment: string): Promise<void> {
 		await json(this.run, ["issue", "comment", String(number), "--repo", this.repo, "--body", comment], false);
 		await json(this.run, ["issue", "edit", String(number), "--repo", this.repo, "--remove-label", label], false);
+	}
+
+	async fileIssue(issue: { title: string; body: string; labels: readonly string[] }): Promise<FiledIssue> {
+		const args = ["issue", "create", "--repo", this.repo, "--title", issue.title, "--body", issue.body];
+		for (const label of issue.labels) args.push("--label", label);
+		const result = await this.run(args);
+		if (result.code !== 0) throw new GhError(args, result);
+		// gh prints the new issue's address.
+		const url = result.stdout.trim().split("\n").at(-1) ?? "";
+		const number = Number(/\/issues\/(\d+)$/.exec(url)?.[1]);
+		if (!Number.isSafeInteger(number)) throw new GhError(args, { ...result, stderr: `no issue address: ${url}` });
+		return { number, url };
+	}
+
+	async mentioned(text: string): Promise<boolean> {
+		const issues = await json(this.run, [
+			"issue",
+			"list",
+			"--repo",
+			this.repo,
+			"--state",
+			"all",
+			"--search",
+			`"${text}" in:body`,
+			"--limit",
+			"1",
+			"--json",
+			"number",
+		]);
+		return Array.isArray(issues) && issues.length > 0;
 	}
 
 	private toIssue(value: unknown): Issue[] {

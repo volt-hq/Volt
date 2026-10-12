@@ -98,6 +98,71 @@ describe("issue orchestrator GitHub tracker", () => {
 		expect(await none.pullRequest("volt/issue-12")).toBeUndefined();
 	});
 
+	it("reads the review author's verdicts from pull request reviews too, with the run of a review engine", async () => {
+		const reviews = [
+			{
+				author: { login: "volt-agent" },
+				body: `Volt review\n\n${reviewMarker(SHA, "changes", "review:1")}`,
+				submittedAt: "2026-10-03",
+			},
+			{ author: { login: "stranger" }, body: reviewMarker(SHA, "clean", "review:2"), submittedAt: "2026-10-04" },
+		];
+		const comments = [
+			{ author: { login: "volt-agent" }, body: reviewMarker("b".repeat(40), "clean"), createdAt: "2026-10-02" },
+		];
+		const gh = scriptedGh({ "pr view 7 --repo o/r --json comments,reviews": JSON.stringify({ comments, reviews }) });
+		const tracker = new GitHubTracker(gh.run, "o/r", "volt-agent[bot]");
+		expect(await tracker.reviews(7)).toEqual([
+			{ headSha: "b".repeat(40), verdict: "clean", createdAt: "2026-10-02" },
+			{ headSha: SHA, verdict: "changes", createdAt: "2026-10-03", runId: "review:1" },
+		]);
+		expect(reviewMarker(SHA, "clean", "review:1")).toBe(
+			`<!-- volt-orchestrator review head=${SHA} verdict=clean run=review:1 -->`,
+		);
+	});
+
+	it("files an issue, and searches every issue's body for a follow-up's fingerprint", async () => {
+		const gh = scriptedGh({
+			"issue create": "https://github.com/o/r/issues/31\n",
+			'issue list --repo o/r --state all --search "fp-1"': JSON.stringify([{ number: 31 }]),
+			'issue list --repo o/r --state all --search "fp-2"': "[]",
+		});
+		const tracker = new GitHubTracker(gh.run, "o/r", "bot");
+		expect(
+			await tracker.fileIssue({ title: "Stale cache", body: "Details", labels: ["agent-ready", "agent-filed"] }),
+		).toEqual({ number: 31, url: "https://github.com/o/r/issues/31" });
+		expect(gh.calls[0]).toEqual([
+			"issue",
+			"create",
+			"--repo",
+			"o/r",
+			"--title",
+			"Stale cache",
+			"--body",
+			"Details",
+			"--label",
+			"agent-ready",
+			"--label",
+			"agent-filed",
+		]);
+		expect(await tracker.mentioned("fp-1")).toBe(true);
+		expect(await tracker.mentioned("fp-2")).toBe(false);
+		expect(gh.calls[1]).toEqual([
+			"issue",
+			"list",
+			"--repo",
+			"o/r",
+			"--state",
+			"all",
+			"--search",
+			'"fp-1" in:body',
+			"--limit",
+			"1",
+			"--json",
+			"number",
+		]);
+	});
+
 	it("counts only the review author's verdicts", async () => {
 		const comments = [
 			{ author: { login: "bot" }, body: `Findings...\n${reviewMarker(SHA, "changes")}`, createdAt: "2026-10-02" },

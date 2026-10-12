@@ -33,7 +33,7 @@ describe("issue orchestrator workflow", () => {
 			polling: { intervalMs: 60_000 },
 			workspace: { hookTimeoutMs: 600_000 },
 			agent: { maxConcurrent: 2, maxAttempts: 3, maxRetryBackoffMs: 300_000 },
-			review: { maxRounds: 3 },
+			review: { maxRounds: 3, engine: "agent" },
 			merge: { mode: "handoff", method: "squash", requireChecks: true, readyLabel: "agent-approved" },
 			handoffLabel: "agent-needs-human",
 		});
@@ -74,6 +74,7 @@ roles:
     max_concurrent: 1
 review:
   max_rounds: 5
+  engine: ext:swarm-review/swarm
 merge:
   mode: auto
   method: rebase
@@ -100,7 +101,7 @@ Ignored too.
 			polling: { intervalMs: 30_000 },
 			workspace: { baseRef: "main", afterCreate: "npm ci --ignore-scripts", hookTimeoutMs: 900_000 },
 			agent: { maxConcurrent: 4, maxAttempts: 2 },
-			review: { maxRounds: 5 },
+			review: { maxRounds: 5, engine: "ext:swarm-review/swarm" },
 			merge: { mode: "auto", method: "rebase", requireChecks: false },
 			handoffLabel: "needs-human",
 		});
@@ -130,6 +131,10 @@ Ignored too.
 			"workflow.polling.interval_ms must be a number of at least 5000",
 		);
 		expect(invalid("roles: []")).toBe("workflow.roles must be a map");
+		expect(invalid("review:\n  engine: standard")).toBe("accepted");
+		expect(invalid("review:\n  engine: ext:swarm-review")).toBe(
+			"workflow.review.engine must be agent, standard, or ext:<extension id>/<engine name>",
+		);
 		expect(codeOf(() => parseWorkflow("---\ntracker:\n  kind: jira\n  labels: [a]\n---\n"))).toBe(
 			"invalid_workflow_config",
 		);

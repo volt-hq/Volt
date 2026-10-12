@@ -85,6 +85,12 @@ export interface WorkflowConfig {
 	readonly review: {
 		/** Reviews asking for changes before the issue is handed to a human. */
 		readonly maxRounds: number;
+		/**
+		 * Who reviews: `agent`, the review role's agent with its prompt, or a
+		 * review engine of the conversation, as `/review` runs it (`standard`,
+		 * or an extension's `ext:<extension id>/<engine name>`).
+		 */
+		readonly engine: string;
 	};
 	readonly merge: {
 		/** `handoff` labels an approved, green pull request for a human to merge; `auto` merges it. */
@@ -139,6 +145,7 @@ Use the first only when nothing should block the merge.`,
 The worktree at {{ worktree.path }} is on the pull request's branch {{ worktree.branch }}. Update it first (git pull --ff-only).
 
 Read the latest review: {{ gh }} pr view {{ pr.number }} --repo {{ repo }} --comments
+{{ review.findings }}
 Failing checks: {{ ci.failing }}
 
 Fix every blocking finding and failing check, run the affected checks and tests, commit, and push to {{ worktree.branch }}. File findings outside the pull request's scope as new issues with {{ gh }} issue create --repo {{ repo }}, labeled {{ tracker.filed_labels }}, saying in each body that you found it while fixing {{ pr.url }}. Do not post review verdicts.
@@ -240,6 +247,15 @@ export function splitRolePrompts(body: string): Partial<Record<Role, string>> {
 	return prompts;
 }
 
+/** `review.engine`: `agent` by default, else `standard` or an extension's `ext:<extension id>/<engine name>`. */
+function reviewEngine(review: Section): string {
+	const engine = review.string("engine") ?? "agent";
+	if (engine !== "agent" && engine !== "standard" && !/^ext:[^\s/]+\/\S+$/.test(engine)) {
+		throw invalid(`${review.path}.engine must be agent, standard, or ext:<extension id>/<engine name>`);
+	}
+	return engine;
+}
+
 /** The typed configuration of a workflow file's front matter and body. */
 export function parseWorkflow(content: string): WorkflowConfig {
 	let parsed: { frontmatter: unknown; body: string };
@@ -295,6 +311,7 @@ export function parseWorkflow(content: string): WorkflowConfig {
 			prompt: prompts[role] ?? DEFAULT_PROMPTS[role],
 		};
 	}
+	const review = root.section("review");
 	const merge = root.section("merge");
 	const handoffLabel = root.string("handoff_label") ?? "agent-needs-human";
 	const readyLabel = merge.string("ready_label") ?? "agent-approved";
@@ -323,7 +340,10 @@ export function parseWorkflow(content: string): WorkflowConfig {
 			maxRetryBackoffMs: agent.number("max_retry_backoff_ms", { integer: true }) ?? 300_000,
 		},
 		roles,
-		review: { maxRounds: root.section("review").number("max_rounds", { integer: true }) ?? 3 },
+		review: {
+			maxRounds: review.number("max_rounds", { integer: true }) ?? 3,
+			engine: reviewEngine(review),
+		},
 		merge: {
 			mode: merge.choice("mode", ["handoff", "auto"] as const) ?? "handoff",
 			method: merge.choice("method", ["squash", "merge", "rebase"] as const) ?? "squash",

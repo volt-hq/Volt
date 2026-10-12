@@ -27,6 +27,7 @@ roles:
   update: { agent: general, max_turns: 80, max_cost_usd: 5, max_duration_ms: 2700000 }
 review:
   max_rounds: 3
+  engine: standard
 merge:
   mode: handoff
   method: squash
@@ -40,7 +41,8 @@ Notes for maintainers (not part of any prompt):
 - Only issues labeled `agent-ready` are worked. Agents label the issues they file `agent-ready` and `agent-filed`; add `agent-filed` to `tracker.exclude_labels` to vet those first.
 - `merge.mode: handoff` stops at a clean review with green checks and labels the issue `agent-approved`. Merge it yourself, or switch to `auto`.
 - A pull request that conflicts with main gets an `update` agent, which merges main in (or closes the pull request and issue when main already has the change); the merged head is then reviewed again. Approved issues stay watched: one whose pull request comes to conflict after another merge loses `agent-approved` and is updated.
-- Every role runs the built-in `general` agent on the conversation's model. Point `review` at an agent definition with another model to get a second opinion.
+- Every role runs the built-in `general` agent on the conversation's model.
+- Reviews run on the standard review engine (`review.engine: standard`), in a disposable checkout of the pull request that `npm ci --ignore-scripts` sets up, where the review may run checks and tests. The orchestrator posts each review as volt-agent[bot], files its follow-ups as `agent-ready` + `agent-filed` issues, and gives the fixer its findings. Each round follows the previous one and closes the findings it finds fixed. The `review` role and `## review` prompt below apply only with `review.engine: agent`; point that role at an agent definition with another model to get a second opinion.
 
 ## implement
 
@@ -104,7 +106,9 @@ The worktree at {{ worktree.path }} is on the pull request's branch {{ worktree.
 
 Follow AGENTS.md and run every git and GitHub command through volt-agent ({{ gh }} ...).
 
-1. Read the latest review comment: {{ gh }} pr view {{ pr.number }} --repo {{ repo }} --comments. For failing checks, read their logs: {{ gh }} pr checks {{ pr.number }} --repo {{ repo }}, then {{ gh }} run view <run-id> --repo {{ repo }} --log-failed
+{{ review.findings }}
+
+1. Read the latest review: {{ gh }} pr view {{ pr.number }} --repo {{ repo }} --comments. Findings posted on their lines are not in that output; the review's open findings are listed above when the orchestrator has them. For failing checks, read their logs: {{ gh }} pr checks {{ pr.number }} --repo {{ repo }}, then {{ gh }} run view <run-id> --repo {{ repo }} --log-failed
 2. Fix every blocking finding and failing check. Treat review findings as claims to verify; if one is wrong, say so with evidence in your summary comment instead of changing code for it.
 3. Run npm run check and the affected tests until they pass.
 4. Commit (stage explicit paths only) and push to {{ worktree.branch }}: volt-agent git push origin {{ worktree.branch }}. Never force push.

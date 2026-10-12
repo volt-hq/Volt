@@ -5,7 +5,8 @@
  *
  * `/orchestrate start [workflow]` runs the loop as work of this conversation:
  * every agent it starts is a subagent of that work, in the issue's managed
- * worktree, and this conversation's panel shows what each issue is doing.
+ * worktree, every review it runs on a review engine is review work under it,
+ * and this conversation's panel shows what each issue is doing.
  * The work item lists every issue and logs what the loop does, so `/work`
  * shows it full screen. `/orchestrate stop`, `status`, and `refresh` control it. The loop is
  * deterministic code; the conversation's own model is free to talk about it.
@@ -19,10 +20,19 @@ import {
 	defineManifest,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
+	type ExtensionReviewEnd,
+	type ExtensionReviewResult,
 	type WorkRunContext,
 } from "@hansjm10/volt-coding-agent";
 import { type GhRunner, GitHubTracker, type Tracker } from "./github.ts";
-import { Orchestrator, type OrchestratorSnapshot, type ReleaseOutcome, type Workspaces } from "./orchestrator.ts";
+import {
+	Orchestrator,
+	type OrchestratorSnapshot,
+	type ReleaseOutcome,
+	type ReviewFinding,
+	type ReviewResult,
+	type Workspaces,
+} from "./orchestrator.ts";
 import { issueBranch, issueWorktree } from "./phase.ts";
 import { issueSteps, logLine, noteText, panel } from "./views.ts";
 import { loadWorkflow, type WorkflowConfig } from "./workflow.ts";
@@ -123,6 +133,17 @@ async function start(
 	} catch (error) {
 		ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 		return undefined;
+	}
+	const engine = config.review.engine;
+	if (engine !== "agent") {
+		const engines = ctx.reviews.engines().filter((candidate) => candidate.targets.includes("pr"));
+		if (!engines.some((candidate) => candidate.id === engine)) {
+			ctx.ui.notify(
+				`Review engine ${engine} cannot review pull requests here: set review.engine to agent or one of ${engines.map((candidate) => candidate.id).join(", ")}.`,
+				"error",
+			);
+			return undefined;
+		}
 	}
 	const merging =
 		config.merge.mode === "auto"
@@ -237,6 +258,35 @@ async function start(
 			},
 			cancel: (id) => ctx.subagents.cancel(id),
 		},
+		reviews: {
+			start: async ({ pr, engine, previousRunId, setup }) => {
+				// A run the conversation does not hold, such as another conversation's, is not followed.
+				const previous =
+					previousRunId !== undefined && (await ctx.reviews.result(previousRunId)) !== undefined
+						? previousRunId
+						: undefined;
+				// The standard review runs the project's checks in a checkout of its own, which the setup prepares.
+				const commands =
+					engine === "standard" ? { tools: ["bash"], ...(setup === undefined ? {} : { setup }) } : {};
+				const run = await ctx.reviews.start({
+					target: { kind: "pr", number: pr },
+					engine,
+					followUps: true,
+					...(previous === undefined ? {} : { previousRunId: previous }),
+					...commands,
+					...(reporter === undefined ? {} : { parentWorkId: reporter.workId }),
+				});
+				return { id: run.id, ended: run.ended.then(reviewResult) };
+			},
+			cancel: (id) => ctx.reviews.cancel(id),
+			publish: async (id, options) => {
+				await ctx.reviews.publish(id, options);
+			},
+			findings: async (id) =>
+				(await ctx.reviews.result(id))?.findings
+					?.filter((finding) => finding.status !== "fixed" && finding.status !== "dismissed")
+					.map((finding) => reviewNote(finding, finding.changeLocation)),
+		},
 		workspaces,
 		onChange: (snapshot) => {
 			ctx.ui.setPanel("orchestrator", panel(snapshot, `extension.command.${manifest.id}.${COMMAND}`));
@@ -317,6 +367,64 @@ export async function releaseWorktree(
 		if (!message.startsWith("worktree_not_found")) throw error;
 	}
 	return "released";
+}
+
+/** A review's finding or follow-up as the orchestrator reads it. */
+function reviewNote(
+	note: { title: string; body: string; priority: number },
+	location: { path: string; startLine: number; endLine: number },
+): ReviewFinding {
+	return {
+		title: note.title,
+		body: note.body,
+		priority: note.priority,
+		path: location.path,
+		startLine: location.startLine,
+		endLine: location.endLine,
+	};
+}
+
+/** What a review run used: its tokens and estimated cost, when it reported them. */
+function reviewUsage(run: ExtensionReviewResult | undefined): ReviewResult["usage"] {
+	const usage = run?.usage;
+	if (usage === undefined || !("costBasis" in usage)) return { tokens: 0, cost: 0 };
+	const tokens = usage.tokens;
+	return {
+		tokens: tokens === undefined ? 0 : tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite,
+		cost: usage.estimatedCost?.total ?? 0,
+	};
+}
+
+/**
+ * How a review ended, as the orchestrator reads it: a complete review's
+ * verdict is `clean` when it found the change correct (no open P0 to P2
+ * finding), else `changes`, on the pull request head it reviewed.
+ */
+function reviewResult(end: ExtensionReviewEnd): ReviewResult {
+	const run = end.run;
+	const usage = reviewUsage(run);
+	if (end.status === "cancelled") return { status: "cancelled", followUps: [], usage };
+	if (end.status === "failed" || run === undefined) {
+		return { status: "failed", error: end.error ?? "the review failed", followUps: [], usage };
+	}
+	const headSha = run.target.identity.pullRequest?.headRefOid;
+	if (run.completionStatus !== "complete" || run.overallCorrectness === undefined || headSha === undefined) {
+		return {
+			status: "completed",
+			...(run.overallExplanation ? { error: run.overallExplanation } : {}),
+			followUps: [],
+			usage,
+		};
+	}
+	return {
+		status: "completed",
+		verdict: { value: run.overallCorrectness === "correct" ? "clean" : "changes", headSha },
+		followUps: (run.followUps ?? []).map((followUp) => ({
+			...reviewNote(followUp, followUp.location),
+			fingerprint: followUp.fingerprint,
+		})),
+		usage,
+	};
 }
 
 /** Post a line about the orchestrator to the conversation; it shows to every client and stays in the transcript. */

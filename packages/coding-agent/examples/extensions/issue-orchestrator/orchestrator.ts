@@ -3,10 +3,13 @@
  * decision. Each tick re-reads the workflow (keeping the last good one when it
  * breaks), stops the runs of issues that left the workflow, then works each
  * labeled issue by what it needs next (`phase.ts`): it starts an agent of the
- * phase's role in the issue's worktree, merges, or hands the issue to a
- * human. A run that ends wakes the loop at once. An approved issue stays
- * watched: once its pull request conflicts with its base branch (another one
- * merged), the approval is taken back and the pull request updated.
+ * phase's role in the issue's worktree, or a review of the pull request on a
+ * review engine (`review.engine`), merges, or hands the issue to a human.
+ * The orchestrator posts an engine's complete review with its verdict, and
+ * files the review's follow-ups as issues. A run that ends wakes the loop at
+ * once. An approved issue stays watched: once its pull request conflicts with
+ * its base branch (another one merged), the approval is taken back and the
+ * pull request updated.
  *
  * Its state is in memory only. GitHub is the source of truth: after a
  * restart the next tick finds each issue's phase again, and the checkouts of
@@ -15,7 +18,7 @@
  * commit, exponential backoff after a failed run, and `review.max_rounds`.
  */
 
-import type { Issue, PullRequest, Tracker } from "./github.ts";
+import type { Issue, PullRequest, ReviewVerdict, Tracker } from "./github.ts";
 import { reviewMarker } from "./github.ts";
 import { inspectIssue, isRoutable, issueBranch, type Phase } from "./phase.ts";
 import {
@@ -45,6 +48,60 @@ export interface Agents {
 	cancel(id: string): Promise<void>;
 }
 
+/** A finding of a review, as a fixer reads it. */
+export interface ReviewFinding {
+	readonly title: string;
+	readonly body: string;
+	/** 0 (most urgent) to 3. */
+	readonly priority: number;
+	readonly path: string;
+	readonly startLine: number;
+	readonly endLine: number;
+}
+
+/** A defect a review verified outside the pull request's change, for an issue of its own. */
+export interface ReviewFollowUp extends ReviewFinding {
+	/** The same for the same defect in every review that reports it. */
+	readonly fingerprint: string;
+}
+
+/** How a review on a review engine ended. */
+export interface ReviewResult {
+	readonly status: "completed" | "failed" | "cancelled";
+	readonly error?: string;
+	/** A complete review's verdict on the head commit it reviewed; an incomplete review has none. */
+	readonly verdict?: { readonly value: ReviewVerdict; readonly headSha: string };
+	readonly followUps: readonly ReviewFollowUp[];
+	readonly usage: { readonly tokens: number; readonly cost: number };
+}
+
+export interface ReviewRun {
+	readonly id: string;
+	readonly ended: Promise<ReviewResult>;
+}
+
+/** Reviews pull requests on the conversation's review engines, as `/review` does. */
+export interface Reviews {
+	/**
+	 * Review pull request `pr` on `engine`, collecting follow-ups, and following
+	 * `previousRunId` (the previous round's run) where the conversation holds
+	 * it. `setup` prepares the checkout a review that runs commands works in.
+	 * Rejects when the conversation refuses the review, such as while it runs
+	 * its most reviews at once.
+	 */
+	start(options: {
+		pr: number;
+		engine: string;
+		previousRunId?: string;
+		setup?: { command: string; timeoutMs: number };
+	}): Promise<ReviewRun>;
+	cancel(id: string): Promise<void>;
+	/** Post complete review `id` to its pull request as the account GitHub CLI `command` is signed in as. */
+	publish(id: string, options: { trailer: string; command: readonly string[] }): Promise<void>;
+	/** The open findings of review `id`; undefined when the conversation does not hold it. */
+	findings(id: string): Promise<ReviewFinding[] | undefined>;
+}
+
 /** An issue's checkout. */
 export interface Workspace {
 	readonly path: string;
@@ -69,6 +126,7 @@ export interface OrchestratorOptions {
 	/** The tracker the workflow names; called each tick, so it may cache. */
 	tracker(config: WorkflowConfig): Promise<Tracker>;
 	agents: Agents;
+	reviews: Reviews;
 	workspaces: Workspaces;
 	now?: () => number;
 	/** Called whenever what the snapshot shows may have changed. */
@@ -142,6 +200,8 @@ export interface OrchestratorSnapshot {
 interface RunningEntry {
 	issue: Issue;
 	readonly role: Role;
+	/** A review on a review engine, rather than an agent. */
+	readonly engineReview: boolean;
 	readonly startedAt: number;
 	runId: string | undefined;
 	/** Stopped by the orchestrator (the issue left the workflow, or the orchestrator stopped): no retry. */
@@ -166,6 +226,8 @@ interface PendingRelease {
 }
 
 const BASE_RETRY_DELAY_MS = 10_000;
+/** The longest a review's checkout setup may run: the host's limit. */
+const MAX_REVIEW_SETUP_MS = 3_600_000;
 /** The shortest pause between ticks, whatever is due. */
 const MIN_TICK_DELAY_MS = 1_000;
 const MAX_FINISHED = 20;
@@ -180,6 +242,27 @@ function pullRequestLink(pr: PullRequest): PullRequestLink {
 
 function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/** `path:line`, or `path:first-last`. */
+function location(finding: ReviewFinding): string {
+	const lines =
+		finding.endLine > finding.startLine ? `${finding.startLine}-${finding.endLine}` : `${finding.startLine}`;
+	return `${finding.path}:${lines}`;
+}
+
+/** The body of a follow-up's issue: the defect, where it is, where it was found, and its fingerprint. */
+function followUpBody(followUp: ReviewFollowUp, issue: Issue, pr: PullRequest): string {
+	return [
+		followUp.body,
+		"",
+		`Location: \`${location(followUp)}\` (priority P${followUp.priority}).`,
+		`Found outside the change while reviewing ${pr.url} for ${issue.identifier}.`,
+		"",
+		`Follow-up fingerprint: ${followUp.fingerprint}`,
+		"",
+		"_Volt issue orchestrator_",
+	].join("\n");
 }
 
 export class Orchestrator {
@@ -207,6 +290,8 @@ export class Orchestrator {
 	private readonly known = new Map<number, string>();
 	/** Issues it started an implementer on that have no pull request yet. */
 	private readonly awaitingPullRequest = new Set<number>();
+	/** The fingerprints of the follow-ups it filed, or found filed, since it started. */
+	private readonly filedFollowUps = new Set<string>();
 	private readonly finished: NotedIssue[] = [];
 	private totals = { runs: 0, tokens: 0, cost: 0 };
 	private signal: AbortSignal | undefined;
@@ -438,9 +523,11 @@ export class Orchestrator {
 	): void {
 		const role = config.roles[phase.kind];
 		const ended = Promise.withResolvers<void>();
+		const engineReview = phase.kind === "review" && config.review.engine !== "agent";
 		const entry: RunningEntry = {
 			issue,
 			role: phase.kind,
+			engineReview,
 			startedAt: this.now(),
 			runId: undefined,
 			cancelled: false,
@@ -457,34 +544,19 @@ export class Orchestrator {
 		}
 		if (phase.kind === "implement") this.awaitingPullRequest.add(issue.number);
 		this.known.set(issue.number, issue.title);
-		this.log(`#${issue.number}: starting ${phase.kind} (${role.agent})`);
+		this.log(`#${issue.number}: starting ${phase.kind} (${engineReview ? config.review.engine : role.agent})`);
 		void (async () => {
 			let result: AgentResult;
 			try {
-				let workspace: Workspace;
-				try {
-					workspace = await this.options.workspaces.prepare(issue, config);
-				} catch (error) {
-					// The workspace may be full of checkouts of issues done with that this orchestrator does not know of.
-					if (errorText(error).startsWith("worktree_limit_reached")) this.sweepDue = true;
-					throw new Error(`setting up the checkout failed: ${errorText(error)}`);
-				}
-				const task = renderTemplate(
-					role.prompt,
-					this.variables(tracker, config, issue, phase, workspace, attempts),
-				);
-				if (entry.cancelled) throw new Error("stopped before it started");
-				const run = await this.options.agents.start({
-					agent: role.agent,
-					task,
-					cwd: workspace.path,
-					limits: role.limits,
-				});
+				const run =
+					phase.kind === "review" && engineReview
+						? await this.startEngineReview(tracker, config, issue, phase, entry)
+						: await this.startAgent(tracker, config, issue, phase, attempts, entry);
 				entry.runId = run.id;
 				this.attempts.set(key, attempts + 1);
 				this.emit();
 				// Stopped while it started.
-				if (entry.cancelled) await this.options.agents.cancel(run.id).catch(() => undefined);
+				if (entry.cancelled) await this.stopRun(entry, run.id);
 				result = await run.ended;
 			} catch (error) {
 				result = { status: "failed", error: errorText(error), usage: { tokens: 0, cost: 0 } };
@@ -492,6 +564,153 @@ export class Orchestrator {
 			this.ended(entry, result, config);
 			ended.resolve();
 		})();
+	}
+
+	/** Start the agent of `phase`'s role in the issue's checkout. */
+	private async startAgent(
+		tracker: Tracker,
+		config: WorkflowConfig,
+		issue: Issue,
+		phase: Extract<Phase, { kind: Role }>,
+		attempts: number,
+		entry: RunningEntry,
+	): Promise<AgentRun> {
+		const role = config.roles[phase.kind];
+		let workspace: Workspace;
+		try {
+			workspace = await this.options.workspaces.prepare(issue, config);
+		} catch (error) {
+			// The workspace may be full of checkouts of issues done with that this orchestrator does not know of.
+			if (errorText(error).startsWith("worktree_limit_reached")) this.sweepDue = true;
+			throw new Error(`setting up the checkout failed: ${errorText(error)}`);
+		}
+		const findings =
+			phase.kind === "fix" && phase.runId !== undefined ? await this.findingsText(phase.runId) : undefined;
+		const task = renderTemplate(
+			role.prompt,
+			this.variables(tracker, config, issue, phase, workspace, attempts, findings),
+		);
+		if (entry.cancelled) throw new Error("stopped before it started");
+		return await this.options.agents.start({ agent: role.agent, task, cwd: workspace.path, limits: role.limits });
+	}
+
+	/**
+	 * Start a review of the pull request on the workflow's review engine. It
+	 * needs no checkout of the issue's: the host reviews the pull request's
+	 * head in a checkout of its own, set up with the workflow's hook.
+	 */
+	private async startEngineReview(
+		tracker: Tracker,
+		config: WorkflowConfig,
+		issue: Issue,
+		phase: Extract<Phase, { kind: "review" }>,
+		entry: RunningEntry,
+	): Promise<AgentRun> {
+		if (entry.cancelled) throw new Error("stopped before it started");
+		const setup = config.workspace.afterCreate;
+		const run = await this.options.reviews.start({
+			pr: phase.pr.number,
+			engine: config.review.engine,
+			...(phase.previousRunId === undefined ? {} : { previousRunId: phase.previousRunId }),
+			...(setup === undefined
+				? {}
+				: { setup: { command: setup, timeoutMs: Math.min(config.workspace.hookTimeoutMs, MAX_REVIEW_SETUP_MS) } }),
+		});
+		return {
+			id: run.id,
+			ended: run.ended.then((result) => this.concludeReview(tracker, config, issue, phase.pr, run.id, result)),
+		};
+	}
+
+	/**
+	 * Post a complete review to its pull request, ending with the verdict the
+	 * next tick reads, then file its follow-ups. An incomplete review gives no
+	 * verdict: the run failed, and is tried again.
+	 */
+	private async concludeReview(
+		tracker: Tracker,
+		config: WorkflowConfig,
+		issue: Issue,
+		pr: PullRequest,
+		runId: string,
+		result: ReviewResult,
+	): Promise<AgentResult> {
+		const usage = result.usage;
+		if (result.status !== "completed") {
+			return { status: result.status, ...(result.error === undefined ? {} : { error: result.error }), usage };
+		}
+		const verdict = result.verdict;
+		if (verdict === undefined) {
+			return {
+				status: "failed",
+				error: `the review is incomplete${result.error ? `: ${result.error}` : ""}`,
+				usage,
+			};
+		}
+		try {
+			await this.options.reviews.publish(runId, {
+				trailer: reviewMarker(verdict.headSha, verdict.value, runId),
+				command: config.ghCommand,
+			});
+		} catch (error) {
+			// Such as when the pull request moved on since: its new head is reviewed next.
+			return { status: "failed", error: `posting the review failed: ${errorText(error)}`, usage };
+		}
+		this.log(`#${issue.number}: posted the review (${verdict.value}) on pull request #${pr.number}`);
+		await this.fileFollowUps(tracker, config, issue, pr, result.followUps);
+		return { status: "completed", usage };
+	}
+
+	/**
+	 * File each follow-up as an issue the workflow works, labeled like the
+	 * issues agents file, unless one names its fingerprint already. A follow-up
+	 * that fails to file is logged; a later round may report it again.
+	 */
+	private async fileFollowUps(
+		tracker: Tracker,
+		config: WorkflowConfig,
+		issue: Issue,
+		pr: PullRequest,
+		followUps: readonly ReviewFollowUp[],
+	): Promise<void> {
+		for (const followUp of followUps) {
+			if (this.filedFollowUps.has(followUp.fingerprint)) continue;
+			try {
+				// GitHub's search lags a filing: what this run filed is remembered as well.
+				if (!(await tracker.mentioned(followUp.fingerprint))) {
+					const filed = await tracker.fileIssue({
+						title: followUp.title,
+						body: followUpBody(followUp, issue, pr),
+						labels: [...config.tracker.labels, config.tracker.filedLabel],
+					});
+					this.log(`#${issue.number}: filed follow-up #${filed.number}: ${filed.url}`);
+				}
+				this.filedFollowUps.add(followUp.fingerprint);
+			} catch (error) {
+				this.log(`#${issue.number}: filing the follow-up "${followUp.title}" failed: ${errorText(error)}`);
+			}
+		}
+	}
+
+	/** The open findings of review `runId`, for a fixer's prompt; undefined when there are none to give. */
+	private async findingsText(runId: string): Promise<string | undefined> {
+		let findings: ReviewFinding[] | undefined;
+		try {
+			findings = await this.options.reviews.findings(runId);
+		} catch (error) {
+			this.log(`reading the findings of review ${runId} failed: ${errorText(error)}`);
+			return undefined;
+		}
+		if (findings === undefined || findings.length === 0) return undefined;
+		return [
+			"The review's open findings:",
+			...findings.map((finding) =>
+				[
+					`- [P${finding.priority}] ${finding.title} (${location(finding)})`,
+					...finding.body.split("\n").map((line) => (line.length === 0 ? "" : `  ${line}`)),
+				].join("\n"),
+			),
+		].join("\n");
 	}
 
 	private ended(entry: RunningEntry, result: AgentResult, config: WorkflowConfig): void {
@@ -643,7 +862,12 @@ export class Orchestrator {
 
 	private async cancel(entry: RunningEntry): Promise<void> {
 		entry.cancelled = true;
-		if (entry.runId !== undefined) await this.options.agents.cancel(entry.runId).catch(() => undefined);
+		if (entry.runId !== undefined) await this.stopRun(entry, entry.runId);
+	}
+
+	private async stopRun(entry: RunningEntry, id: string): Promise<void> {
+		const runs = entry.engineReview ? this.options.reviews : this.options.agents;
+		await runs.cancel(id).catch(() => undefined);
 	}
 
 	private async stopAll(): Promise<void> {
@@ -708,6 +932,7 @@ export class Orchestrator {
 		phase: Extract<Phase, { kind: Role }>,
 		workspace: Workspace,
 		attempts: number,
+		findings: string | undefined,
 	): Record<string, TemplateValue> {
 		const pr = "pr" in phase ? phase.pr : undefined;
 		return {
@@ -739,6 +964,7 @@ export class Orchestrator {
 				max_rounds: config.review.maxRounds,
 				clean_marker: pr === undefined ? null : reviewMarker(pr.headSha, "clean"),
 				changes_marker: pr === undefined ? null : reviewMarker(pr.headSha, "changes"),
+				findings: findings ?? null,
 			},
 			ci: { failing: "failing" in phase ? [...phase.failing] : [] },
 		};

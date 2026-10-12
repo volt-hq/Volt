@@ -1,14 +1,17 @@
 /**
  * The orchestrator against an in-memory GitHub, whose agents do what the
  * real ones would: open a pull request, post a review verdict, push a fix.
- * Each test ticks the loop by hand and finishes agent runs explicitly.
+ * Its review engine posts what the orchestrator publishes. Each test ticks
+ * the loop by hand and finishes agent and review runs explicitly.
  */
 
 import { describe, expect, it, vi } from "vitest";
 import {
 	type ChecksState,
+	type FiledIssue,
 	type Issue,
 	type PullRequest,
+	parseReviewMarkers,
 	type ReviewMarker,
 	reviewMarker,
 	type Tracker,
@@ -19,6 +22,9 @@ import {
 	Orchestrator,
 	type OrchestratorEvent,
 	type ReleaseOutcome,
+	type ReviewFinding,
+	type ReviewResult,
+	type Reviews,
 	type Workspaces,
 } from "../../examples/extensions/issue-orchestrator/orchestrator.ts";
 import { decidePhase, issueBranch } from "../../examples/extensions/issue-orchestrator/phase.ts";
@@ -26,7 +32,7 @@ import { parseWorkflow, type WorkflowConfig } from "../../examples/extensions/is
 
 const LABEL = "agent-ready";
 
-function workflow(extra = ""): WorkflowConfig {
+function workflow(extra = "", fix = "Fix #{{ pr.number }}: {{ reason }} [{{ ci.failing }}]"): WorkflowConfig {
 	return parseWorkflow(`---
 tracker:
   repo: o/r
@@ -40,7 +46,7 @@ Implement {{ issue.identifier }} in {{ worktree.path }} on {{ worktree.branch }}
 Review #{{ pr.number }} at {{ pr.head_sha }}, round {{ round }}: {{ review.clean_marker }}
 
 ## fix
-Fix #{{ pr.number }}: {{ reason }} [{{ ci.failing }}]
+${fix}
 
 ## update
 Update #{{ pr.number }} from {{ pr.base_ref }}: {{ reason }}
@@ -61,6 +67,9 @@ class FakeGitHub implements Tracker {
 	readonly merged: number[] = [];
 	readonly handoffs: Array<{ issue: number; label: string; comment: string }> = [];
 	readonly takenBack: Array<{ issue: number; label: string; comment: string }> = [];
+	readonly filed: Array<{ title: string; body: string; labels: readonly string[] }> = [];
+	/** The bodies of issues filed before the test: search finds text in them, not in the ones filed since. */
+	readonly searchable: string[] = [];
 	/** Head commits that merged the base branch in. */
 	readonly mergeCommits = new Set<string>();
 	labelsExist = true;
@@ -124,9 +133,14 @@ class FakeGitHub implements Tracker {
 	review(number: number, verdict: "clean" | "changes"): void {
 		const pr = this.prs.get(issueBranch(number));
 		if (!pr) throw new Error("no pull request");
-		const list = this.verdicts.get(pr.number) ?? [];
-		list.push({ headSha: pr.headSha, verdict, createdAt: `t${list.length}` });
-		this.verdicts.set(pr.number, list);
+		this.post(pr.number, reviewMarker(pr.headSha, verdict));
+	}
+
+	/** Post a review of pull request `number` whose body ends with `body`. */
+	post(number: number, body: string): void {
+		const list = this.verdicts.get(number) ?? [];
+		list.push(...parseReviewMarkers(body, `t${list.length}`));
+		this.verdicts.set(number, list);
 	}
 
 	async candidates(labels: readonly string[]): Promise<Issue[]> {
@@ -160,6 +174,14 @@ class FakeGitHub implements Tracker {
 		const current = this.issues.get(issue);
 		if (current) this.setLabels(issue, [...current.labels, label]);
 		return true;
+	}
+	async fileIssue(issue: { title: string; body: string; labels: readonly string[] }): Promise<FiledIssue> {
+		this.filed.push(issue);
+		const number = 900 + this.filed.length;
+		return { number, url: `https://github.com/o/r/issues/${number}` };
+	}
+	async mentioned(text: string): Promise<boolean> {
+		return this.searchable.some((body) => body.includes(text));
 	}
 	async takeBack(issue: number, label: string, comment: string): Promise<void> {
 		this.takenBack.push({ issue, label, comment });
@@ -207,6 +229,61 @@ function fakeAgents(): Agents & { started: StartedRun[]; cancelled: string[] } {
 			finishers.get(id)?.({ status: "cancelled", usage: { tokens: 0, cost: 0 } });
 		},
 	};
+}
+
+interface StartedReview {
+	readonly id: string;
+	readonly pr: number;
+	readonly engine: string;
+	readonly previousRunId?: string;
+	readonly setup?: { command: string; timeoutMs: number };
+	finish(result?: Partial<ReviewResult>): void;
+}
+
+/**
+ * A review engine whose runs the test finishes: publishing posts the review
+ * to `github`, unless `failPublish` says why it cannot. A cancelled run ends
+ * cancelled.
+ */
+function fakeReviews(github: FakeGitHub): Reviews & {
+	started: StartedReview[];
+	cancelled: string[];
+	published: Array<{ id: string; trailer: string; command: readonly string[] }>;
+	findingsOf: Map<string, ReviewFinding[]>;
+	failPublish: string | undefined;
+} {
+	const finishers = new Map<string, (result: ReviewResult) => void>();
+	const reviews = {
+		started: [] as StartedReview[],
+		cancelled: [] as string[],
+		published: [] as Array<{ id: string; trailer: string; command: readonly string[] }>,
+		findingsOf: new Map<string, ReviewFinding[]>(),
+		failPublish: undefined as string | undefined,
+		start: async (options: Omit<StartedReview, "id" | "finish">) => {
+			const id = `review-${reviews.started.length + 1}`;
+			const ended = Promise.withResolvers<ReviewResult>();
+			finishers.set(id, ended.resolve);
+			reviews.started.push({
+				id,
+				...options,
+				finish: (result = {}) =>
+					ended.resolve({ status: "completed", followUps: [], usage: { tokens: 100, cost: 1 }, ...result }),
+			});
+			return { id, ended: ended.promise };
+		},
+		cancel: async (id: string) => {
+			reviews.cancelled.push(id);
+			finishers.get(id)?.({ status: "cancelled", followUps: [], usage: { tokens: 0, cost: 0 } });
+		},
+		publish: async (id: string, options: { trailer: string; command: readonly string[] }) => {
+			if (reviews.failPublish !== undefined) throw new Error(reviews.failPublish);
+			reviews.published.push({ id, ...options });
+			const review = reviews.started.find((started) => started.id === id);
+			if (review) github.post(review.pr, `Volt review (${id})\n\n${options.trailer}`);
+		},
+		findings: async (id: string) => reviews.findingsOf.get(id),
+	};
+	return reviews;
 }
 
 /**
@@ -258,6 +335,7 @@ const workspaces = fakeWorkspaces();
 function setup(config: WorkflowConfig = workflow(), options: { now?: () => number } = {}) {
 	const github = new FakeGitHub();
 	const agents = fakeAgents();
+	const reviews = fakeReviews(github);
 	const workspaces = fakeWorkspaces();
 	const announced: OrchestratorEvent[] = [];
 	const log: string[] = [];
@@ -265,6 +343,7 @@ function setup(config: WorkflowConfig = workflow(), options: { now?: () => numbe
 		loadWorkflow: async () => ({ path: "/repo/.volt/WORKFLOW.md", config }),
 		tracker: async () => github,
 		agents,
+		reviews,
 		workspaces,
 		announce: (event) => announced.push(event),
 		log: (line) => log.push(line),
@@ -280,15 +359,28 @@ function setup(config: WorkflowConfig = workflow(), options: { now?: () => numbe
 		run.finish(result);
 		await vi.waitFor(() => expect(orchestrator.snapshot().running.map((entry) => entry.runId)).not.toContain(run.id));
 	};
+	/** Wait until `count` reviews started. */
+	const reviewRuns = async (count: number) => {
+		await vi.waitFor(() => expect(reviews.started).toHaveLength(count));
+		return reviews.started[count - 1] as StartedReview;
+	};
+	/** Finish review `run` and wait until the orchestrator posted it and filed its follow-ups. */
+	const finishReview = async (run: StartedReview, result?: Partial<ReviewResult>) => {
+		run.finish(result);
+		await vi.waitFor(() => expect(orchestrator.snapshot().running.map((entry) => entry.runId)).not.toContain(run.id));
+	};
 	return {
 		github,
 		agents,
+		reviews,
 		workspaces,
 		announced,
 		log,
 		orchestrator,
 		runs,
 		finish,
+		reviewRuns,
+		finishReview,
 	};
 }
 
@@ -774,6 +866,7 @@ describe("issue orchestrator", () => {
 			},
 			tracker: async () => github,
 			agents,
+			reviews: fakeReviews(github),
 			workspaces,
 			log: (line) => log.push(line),
 		});
@@ -796,6 +889,144 @@ describe("issue orchestrator", () => {
 		await vi.waitFor(() =>
 			expect(agents.started.map((run) => run.cwd)).toEqual(["/worktrees/issue-12", "/worktrees/issue-13"]),
 		);
+	});
+
+	it("reviews on a review engine: posts each verdict, follows the previous round, gives the fixer the findings, and files follow-ups once", async () => {
+		const config = workflow(
+			"review:\n  engine: standard\nworkspace:\n  hooks:\n    after_create: npm ci",
+			"Fix #{{ pr.number }}:\n{{ review.findings }}",
+		);
+		const { github, orchestrator, reviews, workspaces, runs, finish, reviewRuns, finishReview, log } = setup(config);
+		github.addIssue(12);
+		const first = github.push(12);
+		// An issue filed for this follow-up before.
+		github.searchable.push("...\n\nFollow-up fingerprint: fp-known");
+
+		await orchestrator.tick();
+		const review = await reviewRuns(1);
+		expect(review).toEqual({
+			id: "review-1",
+			pr: 112,
+			engine: "standard",
+			setup: { command: "npm ci", timeoutMs: 600_000 },
+			finish: expect.any(Function),
+		});
+		// The host reviews in a checkout of its own: the issue's is not set up for it.
+		expect(workspaces.prepared).toEqual([]);
+		expect(orchestrator.snapshot().running).toMatchObject([{ issue: 12, role: "review", runId: "review-1" }]);
+
+		reviews.findingsOf.set("review-1", [
+			{
+				title: "Off by one",
+				body: "The loop skips\nthe last item.",
+				priority: 1,
+				path: "src/a.ts",
+				startLine: 3,
+				endLine: 4,
+			},
+		]);
+		const followUp = {
+			title: "Stale cache",
+			body: "Never invalidated.",
+			priority: 2,
+			path: "src/cache.ts",
+			startLine: 9,
+			endLine: 9,
+		};
+		await finishReview(review, {
+			verdict: { value: "changes", headSha: first.headSha },
+			followUps: [
+				{ ...followUp, fingerprint: "fp-1" },
+				{ ...followUp, title: "Filed before", fingerprint: "fp-known" },
+			],
+		});
+		expect(reviews.published).toEqual([
+			{ id: "review-1", trailer: reviewMarker(first.headSha, "changes", "review-1"), command: ["gh"] },
+		]);
+		expect(github.filed).toEqual([
+			{
+				title: "Stale cache",
+				labels: ["agent-ready", "agent-filed"],
+				body: [
+					"Never invalidated.",
+					"",
+					"Location: `src/cache.ts:9` (priority P2).",
+					"Found outside the change while reviewing https://github.com/o/r/pull/112 for o/r#12.",
+					"",
+					"Follow-up fingerprint: fp-1",
+					"",
+					"_Volt issue orchestrator_",
+				].join("\n"),
+			},
+		]);
+		expect(log).toContain("#12: posted the review (changes) on pull request #112");
+		expect(log).toContain("#12: filed follow-up #901: https://github.com/o/r/issues/901");
+
+		// The fixer gets the findings, inline ones included, which the pull request's comments leave out.
+		await orchestrator.tick();
+		const fix = await runs(1);
+		expect(fix.task).toBe(
+			"Fix #112:\nThe review's open findings:\n- [P1] Off by one (src/a.ts:3-4)\n  The loop skips\n  the last item.",
+		);
+
+		const second = github.push(12);
+		await finish(fix);
+		await orchestrator.tick();
+		const again = await reviewRuns(2);
+		expect(again).toMatchObject({ pr: 112, previousRunId: "review-1" });
+		// Reported again, and not found by search yet: filed once all the same.
+		await finishReview(again, {
+			verdict: { value: "clean", headSha: second.headSha },
+			followUps: [{ ...followUp, fingerprint: "fp-1" }],
+		});
+		expect(github.filed).toHaveLength(1);
+
+		await orchestrator.tick();
+		expect(github.handoffs).toMatchObject([{ issue: 12, label: "agent-approved" }]);
+		expect(orchestrator.snapshot().totals).toEqual({ runs: 3, tokens: 210, cost: 2.5 });
+	});
+
+	it("tries an engine review again when it is incomplete or cannot be posted, and cancels one whose issue left", async () => {
+		let now = 1_000_000;
+		const { github, orchestrator, reviews, reviewRuns, finishReview } = setup(
+			workflow("review:\n  engine: ext:swarm-review/swarm"),
+			{ now: () => now },
+		);
+		github.addIssue(12);
+		const pr = github.push(12);
+
+		await orchestrator.tick();
+		const first = await reviewRuns(1);
+		// Nothing to set up without the workflow's hook.
+		expect(first).toEqual({
+			id: "review-1",
+			pr: 112,
+			engine: "ext:swarm-review/swarm",
+			finish: expect.any(Function),
+		});
+		await finishReview(first, { error: "a prior finding remains uncertain" });
+		expect(reviews.published).toEqual([]);
+		expect(orchestrator.snapshot().retrying).toMatchObject([
+			{ issue: 12, failures: 1, error: "the review is incomplete: a prior finding remains uncertain" },
+		]);
+
+		now += 10_000;
+		reviews.failPublish = "The pull request head changed since the review";
+		await orchestrator.tick();
+		await finishReview(await reviewRuns(2), { verdict: { value: "clean", headSha: pr.headSha } });
+		expect(orchestrator.snapshot().retrying).toMatchObject([
+			{ issue: 12, failures: 2, error: "posting the review failed: The pull request head changed since the review" },
+		]);
+		expect(github.verdicts.get(112)).toBeUndefined();
+
+		now += 20_000;
+		await orchestrator.tick();
+		const third = await reviewRuns(3);
+		github.setLabels(12, []);
+		await orchestrator.tick();
+		expect(reviews.cancelled).toEqual([third.id]);
+		await vi.waitFor(() => expect(orchestrator.snapshot().running).toEqual([]));
+		expect(orchestrator.snapshot().retrying).toEqual([]);
 	});
 
 	it("decides phases from GitHub alone", () => {
@@ -857,6 +1088,24 @@ describe("issue orchestrator", () => {
 		expect(
 			decidePhase(config, issue, { ...pr, mergeable: "unknown" }, [verdict(2, "clean")], { state: "passing" }),
 		).toEqual({ kind: "wait", reason: "GitHub is still checking whether pull request #7 merges cleanly" });
+		// A review follows the latest round a review engine gave; a fix gets the review that asked for it.
+		expect(
+			decidePhase(
+				config,
+				issue,
+				pr,
+				[{ ...verdict(0, "changes"), runId: "review-1" }, verdict(1, "changes")],
+				undefined,
+			),
+		).toEqual({ kind: "review", pr, round: 3, previousRunId: "review-1" });
+		expect(decidePhase(config, issue, pr, [{ ...verdict(2, "changes"), runId: "review-2" }], undefined)).toEqual({
+			kind: "fix",
+			pr,
+			round: 1,
+			reason: "the review asked for changes",
+			failing: [],
+			runId: "review-2",
+		});
 		// A short head in a verdict matches the full head.
 		expect(
 			decidePhase(config, issue, pr, [{ ...verdict(2, "changes"), headSha: sha(2).slice(0, 12) }], undefined),

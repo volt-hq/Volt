@@ -2,8 +2,9 @@
  * The issue orchestrator extension's wiring: `/orchestrate start` checks the
  * conversation and the workflow, asks, and runs the loop as work; the loop
  * creates the issue's worktree, runs its hook, starts the role's agent there
- * under the work, and shows it in the panel; `/orchestrate stop` cancels the
- * agent and ends the work.
+ * under the work, and shows it in the panel; a review on a review engine runs
+ * through `ctx.reviews` and is posted; `/orchestrate stop` cancels the agent
+ * and ends the work.
  */
 
 import { execFileSync } from "node:child_process";
@@ -19,6 +20,10 @@ import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 	ExtensionPanel,
+	ExtensionReviewEnd,
+	ExtensionReviewPublishOptions,
+	ExtensionReviewResult,
+	ExtensionReviewStartOptions,
 	ExtensionSubagentResult,
 	ExtensionSubagentStartOptions,
 	ExtensionWorktree,
@@ -55,25 +60,53 @@ const ISSUE = {
 	createdAt: "2026-10-01T00:00:00Z",
 };
 
-/** `gh` and `bash` as the extension runs them: GitHub has one labeled issue without a pull request. */
-function exec(calls: Array<{ command: string; args: string[]; cwd?: string }>) {
+const HEAD = "c".repeat(40);
+
+/** The open pull request of issue 12's branch. */
+const PR = {
+	number: 112,
+	url: "https://github.com/o/r/pull/112",
+	state: "OPEN",
+	headRefOid: HEAD,
+	isDraft: false,
+	baseRefName: "main",
+	mergeable: "MERGEABLE",
+};
+
+/**
+ * `gh` and `bash` as the extension runs them: GitHub has one labeled issue,
+ * with no pull request unless `reviews` holds the bodies of its pull
+ * request's reviews by the review author. No issue mentions a follow-up yet.
+ */
+function exec(calls: Array<{ command: string; args: string[]; cwd?: string }>, reviews: string[] | undefined) {
 	return async (command: string, args: string[], options?: ExecOptions): Promise<ExecResult> => {
 		calls.push({ command, args, ...(options?.cwd === undefined ? {} : { cwd: options.cwd }) });
 		const line = args.join(" ");
 		const ok = (stdout: string): ExecResult => ({ stdout, stderr: "", code: 0, killed: false });
 		if (command === "bash") return ok("installed");
+		if (line.startsWith("issue list") && line.includes("--search")) return ok("[]");
 		if (line.startsWith("issue list")) return ok(JSON.stringify([ISSUE]));
 		if (line.startsWith("issue view 12")) return ok(JSON.stringify(ISSUE));
-		if (line.startsWith("pr list")) return ok("[]");
+		if (line.startsWith("issue create")) return ok("https://github.com/o/r/issues/99\n");
+		if (line.startsWith("pr list")) return ok(JSON.stringify(reviews === undefined ? [] : [PR]));
+		if (line.startsWith("pr view 112") && reviews !== undefined) {
+			const posted = reviews.map((body, index) => ({
+				author: { login: "volt-agent" },
+				body,
+				submittedAt: `2026-10-0${index + 1}T00:00:00Z`,
+			}));
+			return ok(JSON.stringify({ comments: [], reviews: posted }));
+		}
+		if (line.startsWith("api repos/o/r/commits/")) return ok("1\n");
 		return { stdout: "", stderr: `unexpected gh ${line}`, code: 1, killed: false };
 	};
 }
 
-function setup(options: { confirm?: boolean } = {}) {
+function setup(options: { confirm?: boolean; workflow?: string; reviews?: string[] } = {}) {
 	const cwd = mkdtempSync(join(tmpdir(), "volt-orchestrator-extension-"));
 	directories.push(cwd);
 	mkdirSync(join(cwd, ".volt"));
-	writeFileSync(join(cwd, ".volt", "WORKFLOW.md"), WORKFLOW);
+	writeFileSync(join(cwd, ".volt", "WORKFLOW.md"), options.workflow ?? WORKFLOW);
 	const commands = new Map<string, Omit<RegisteredCommand, "name" | "sourceInfo">>();
 	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
 	let sessionName: string | undefined;
@@ -84,7 +117,7 @@ function setup(options: { confirm?: boolean } = {}) {
 			commands.set(name, command);
 		},
 		on: vi.fn(),
-		exec: exec(calls),
+		exec: exec(calls, options.reviews),
 		getSessionName: () => sessionName,
 		setSessionName: async (name: string) => {
 			sessionName = name;
@@ -100,6 +133,11 @@ function setup(options: { confirm?: boolean } = {}) {
 	const started: ExtensionSubagentStartOptions[] = [];
 	const cancelled: string[] = [];
 	const ended = Promise.withResolvers<ExtensionSubagentResult>();
+	const reviewStarts: ExtensionReviewStartOptions[] = [];
+	const reviewEnded = Promise.withResolvers<ExtensionReviewEnd>();
+	/** The review runs the conversation holds, by id. */
+	const reviewRuns = new Map<string, ExtensionReviewResult>();
+	const published: Array<{ id: string } & ExtensionReviewPublishOptions> = [];
 	let work: Promise<WorkRunResult> | undefined;
 	const progress: WorkProgress[] = [];
 	let output = "";
@@ -139,6 +177,23 @@ function setup(options: { confirm?: boolean } = {}) {
 				ended.resolve({ status: "cancelled", usage: { tokens: 3, cost: 0.25 } });
 			},
 		},
+		reviews: {
+			engines: () => [
+				{ id: "standard", label: "Standard", description: "The built-in review", targets: ["uncommitted", "pr"] },
+				{ id: "ext:local/diff", label: "Diff", description: "Reviews local changes", targets: ["uncommitted"] },
+			],
+			start: async (start: ExtensionReviewStartOptions) => {
+				reviewStarts.push(start);
+				return { id: `review:${reviewStarts.length}`, ended: reviewEnded.promise };
+			},
+			result: async (id: string) => reviewRuns.get(id),
+			publish: async (id: string, publish: ExtensionReviewPublishOptions) => {
+				published.push({ id, ...publish });
+				// GitHub shows it to the next tick.
+				options.reviews?.push(`Volt review (${id})\n\n${publish.trailer}`);
+				return { inlineFindingIds: [], summaryOnlyFindingIds: [] };
+			},
+		},
 		startWork: async (_kind: string, _options: unknown, run: WorkRun) => {
 			work = run({
 				workId: "work-1",
@@ -168,6 +223,10 @@ function setup(options: { confirm?: boolean } = {}) {
 		cancelled,
 		notes,
 		progress,
+		reviewStarts,
+		reviewEnded,
+		reviewRuns,
+		published,
 		output: () => output,
 		sessionName: () => sessionName,
 		work: () => work,
@@ -289,6 +348,101 @@ describe("issue orchestrator extension", () => {
 		expect(panels.at(-1)).toBeUndefined();
 		await command("status");
 		expect(notifications.at(-1)).toBe("The orchestrator is not running.");
+	});
+
+	it("reviews a pull request on the workflow's review engine under the loop's work, posts it, and files its follow-ups", async () => {
+		const location = { path: "src/a.ts", side: "head", startLine: 3, endLine: 4 };
+		const finding = {
+			title: "Off by one",
+			body: "The loop skips the last item.",
+			priority: 1,
+			changeLocation: location,
+		};
+		const run = {
+			runId: "review:2",
+			status: "completed",
+			completionStatus: "complete",
+			overallCorrectness: "incorrect",
+			target: { identity: { kind: "pr", pullRequest: { number: 112, headRefOid: HEAD } } },
+			findings: [
+				{ ...finding, status: "open" },
+				{ ...finding, title: "Fixed already", status: "fixed" },
+			],
+			followUps: [
+				{
+					fingerprint: "fp-1",
+					title: "Stale cache",
+					body: "Never invalidated.",
+					priority: 2,
+					location: { path: "src/cache.ts", side: "head", startLine: 9, endLine: 9 },
+				},
+			],
+			usage: {
+				status: "complete",
+				costBasis: "model-priced-usd",
+				tokens: { input: 100, output: 20, cacheRead: 5, cacheWrite: 0 },
+				estimatedCost: { input: 0.1, output: 0.2, cacheRead: 0, cacheWrite: 0, total: 0.3 },
+			},
+		} as unknown as ExtensionReviewResult;
+		// An earlier round's review, of an older head, which this conversation holds.
+		const earlier = `<!-- volt-orchestrator review head=${"b".repeat(40)} verdict=changes run=review:0 -->`;
+		const { command, calls, reviewStarts, reviewEnded, reviewRuns, published, started, output, work } = setup({
+			workflow: WORKFLOW.replace("tracker:", "review:\n  engine: standard\ntracker:"),
+			reviews: [earlier],
+		});
+		reviewRuns.set("review:0", run);
+
+		await command("start");
+		await vi.waitFor(() => expect(reviewStarts).toHaveLength(1));
+		expect(reviewStarts[0]).toEqual({
+			target: { kind: "pr", number: 112 },
+			engine: "standard",
+			followUps: true,
+			previousRunId: "review:0",
+			tools: ["bash"],
+			setup: { command: "npm ci --ignore-scripts", timeoutMs: 600_000 },
+			parentWorkId: "work-1",
+		});
+		// The host reviews in a checkout of its own: the issue's is not set up.
+		expect(calls.filter((call) => call.command === "bash")).toEqual([]);
+
+		reviewRuns.set("review:1", run);
+		reviewEnded.resolve({ status: "completed", run });
+		await vi.waitFor(() => expect(output()).toContain("#12: filed follow-up #99: https://github.com/o/r/issues/99"));
+		expect(published).toEqual([
+			{
+				id: "review:1",
+				trailer: `<!-- volt-orchestrator review head=${HEAD} verdict=changes run=review:1 -->`,
+				command: ["gh"],
+			},
+		]);
+		expect(calls).toContainEqual(
+			expect.objectContaining({
+				command: "gh",
+				args: expect.arrayContaining(["issue", "create", "--title", "Stale cache", "--label", "agent-filed"]),
+			}),
+		);
+
+		// GitHub now shows the changes the review asks for: the fixer gets its open findings.
+		await vi.waitFor(() => expect(started).toHaveLength(1));
+		expect(started[0]?.task).toContain(
+			"The review's open findings:\n- [P1] Off by one (src/a.ts:3-4)\n  The loop skips the last item.\n",
+		);
+		expect(started[0]?.task).not.toContain("Fixed already");
+
+		await command("stop");
+		expect(await work()).toMatchObject({ result: { summary: expect.stringContaining("2 runs, $0.55") } });
+	});
+
+	it("starts no workflow whose review engine cannot review pull requests", async () => {
+		const { command, notifications, work } = setup({
+			workflow: WORKFLOW.replace("tracker:", "review:\n  engine: ext:local/diff\ntracker:"),
+		});
+		await command("start");
+		expect(work()).toBeUndefined();
+		expect(notifications.at(-1)).toBe(
+			"Review engine ext:local/diff cannot review pull requests here: set review.engine to agent or one of standard.",
+		);
 	});
 
 	it("starts nothing the user declines", async () => {
