@@ -36,6 +36,9 @@ type AssistantPart = NonNullable<TranscriptItem["parts"]>[number];
 /** Ancestors a tool result's call is looked up through, at most. */
 const TOOL_CALL_SEARCH_DEPTH = 1_024;
 
+/** What separates an assistant item's text blocks in its `text`: a blank line, as each block is its own Markdown. */
+const ASSISTANT_TEXT_BLOCK_SEPARATOR = "\n\n";
+
 /** The first `limit` Unicode scalars of `text`, and whether more remain. */
 export function boundScalars(text: string, limit: number): { text: string; truncated: boolean } {
 	if (text.length <= limit) return { text, truncated: false };
@@ -176,14 +179,17 @@ function assistantItem(
 			});
 		}
 	}
-	const text = parts
-		.filter((part): part is Extract<AssistantPart, { type: "text" }> => part.type === "text")
-		.map((part) => part.text)
-		.join("");
+	// The separators count against the bound too.
+	const text = boundScalars(
+		parts
+			.flatMap((part) => (part.type === "text" && part.text.length > 0 ? [part.text] : []))
+			.join(ASSISTANT_TEXT_BLOCK_SEPARATOR),
+		profile.limits.textScalars,
+	);
 	return {
 		role: "assistant",
-		text,
-		truncated,
+		text: text.text,
+		truncated: truncated || text.truncated,
 		...(parts.length > 0 ? { parts } : {}),
 		...(stopReason === undefined ? {} : { stopReason }),
 	};

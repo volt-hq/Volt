@@ -8,6 +8,7 @@ import type { Api, Model } from "@hansjm10/volt-ai";
 import type { WithdrawnInput } from "@hansjm10/volt-protocol";
 import { resolvePath } from "../../../utils/paths.ts";
 import type { AgentSession } from "../../agent-session.ts";
+import { ClientScope } from "../../host/client-scope.ts";
 import { executePlan } from "../../host/plan-handoff.ts";
 import { findStoredSession, openFork, openNewSession, openStoredSessionById } from "../../host/session-intents.ts";
 import { acknowledgeReviewRun, appendReviewRun, getCanonicalReviewRun } from "../../review-state.ts";
@@ -15,7 +16,14 @@ import { QueueClearPersistenceError } from "../../session/client-inputs.ts";
 import { MissingSessionCwdError } from "../../session-cwd.ts";
 import { SessionManager } from "../../session-manager.ts";
 import type { SessionWriter } from "../../session-writer.ts";
-import { agentModeState, fastModeAvailability, fastModeState } from "./state.ts";
+import {
+	agentModeState,
+	ambiguousInputAvailability,
+	ambiguousInputPreview,
+	ambiguousInputState,
+	fastModeAvailability,
+	fastModeState,
+} from "./state.ts";
 import {
 	defineIntent,
 	INTENT_ENABLED,
@@ -244,6 +252,40 @@ export const withdrawQueuedIntent = defineIntent({
 	whileBusy: "run",
 	async run(ctx) {
 		return { messages: await withdrawQueuedInput(targetOf(ctx).session) };
+	},
+	accept: (result) => ({ result }),
+});
+
+/**
+ * Discard an input whose outcome is ambiguous (its host was lost
+ * mid-dispatch): it fails without being sent again. Queued input it held back
+ * then replays in order, outside any client's scope.
+ */
+export const discardClientInputIntent = defineIntent({
+	name: "discard_client_input",
+	label: "Discard stuck message",
+	description: "Discard a message the host lost while sending it, so later messages can run",
+	category: "session",
+	scope: "conversation",
+	fence: "none",
+	remote: "safe",
+	requires: control,
+	whileBusy: "reject",
+	confirm: {
+		message:
+			"The host stopped while sending this message; it may or may not have reached the agent. It is not sent again.",
+		destructive: true,
+	},
+	slash: { name: "discard-stuck", example: "/discard-stuck" },
+	state: ambiguousInputState,
+	available: ambiguousInputAvailability,
+	async run(ctx, input) {
+		const { session, conversation } = targetOf(ctx);
+		const next = await session.discardAmbiguousClientInput(input.clientMessageId);
+		// Recovered turns belong to no client, whoever discarded the input.
+		if (next === undefined)
+			void ClientScope.exit(() => conversation.startRecoveredClientInputs()).catch(() => undefined);
+		return next === undefined ? {} : { blocker: ambiguousInputPreview(next) };
 	},
 	accept: (result) => ({ result }),
 });

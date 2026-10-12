@@ -158,6 +158,28 @@ async function closeListeningServer(server: Server): Promise<void> {
 	});
 }
 
+/**
+ * Runs with TMPDIR pointed at a private root so remote control directories stay out of the shared
+ * volt-iroh-remote root. getIrohRemoteControlPath falls back to /tmp/volt-iroh-remote when
+ * <tmpdir>/volt-iroh-remote/<hash>/control.sock exceeds 100 bytes, so the root must stay short.
+ */
+async function withPrivateIrohControlTmpdir(run: (tmpRoot: string) => Promise<void>): Promise<void> {
+	const sampleControlPath = join(tmpdir(), "vic-XXXXXX", "volt-iroh-remote", "0".repeat(32), "control.sock");
+	const tmpRoot = await mkdtemp(join(Buffer.byteLength(sampleControlPath) <= 100 ? tmpdir() : "/tmp", "vic-"));
+	const previousTmpdir = process.env.TMPDIR;
+	try {
+		process.env.TMPDIR = tmpRoot;
+		await run(tmpRoot);
+	} finally {
+		if (previousTmpdir === undefined) {
+			delete process.env.TMPDIR;
+		} else {
+			process.env.TMPDIR = previousTmpdir;
+		}
+		await rm(tmpRoot, { force: true, recursive: true });
+	}
+}
+
 /** A value as a paired device sees it: the remote profile's field-aware path redaction. */
 function sanitizeRemoteValue(value: object, options: IrohRemoteSanitizerOptions): unknown {
 	return createIrohRemoteProjectionSanitizer(options).sanitizeValue(value);
@@ -353,19 +375,17 @@ describe("Iroh remote core helpers", () => {
 			return;
 		}
 
-		const stateDir = await mkdtemp(join(tmpdir(), "volt-iroh-core-control-dir-"));
-		const controlPath = getIrohRemoteControlPath(join(stateDir, "host.json"));
-		const controlDir = dirname(controlPath);
-		try {
+		await withPrivateIrohControlTmpdir(async (tmpRoot) => {
+			const controlPath = getIrohRemoteControlPath(join(tmpRoot, "state", "host.json"));
+			const controlDir = dirname(controlPath);
+			expect(dirname(controlDir)).toBe(join(tmpRoot, "volt-iroh-remote"));
 			await mkdir(controlDir, { mode: 0o755, recursive: true });
 			await chmod(controlDir, 0o755);
+
 			await ensureIrohRemoteControlDirectory(controlPath);
 
 			expect((await stat(controlDir)).mode & 0o777).toBe(0o700);
-		} finally {
-			await rm(controlDir, { force: true, recursive: true });
-			await rm(stateDir, { force: true, recursive: true });
-		}
+		});
 	});
 
 	test("creates the shared remote control socket root with owner-only permissions", async () => {
@@ -373,27 +393,17 @@ describe("Iroh remote core helpers", () => {
 			return;
 		}
 
-		const previousTmpdir = process.env.TMPDIR;
-		const tmpRoot = await mkdtemp(join(tmpdir(), "volt-iroh-core-control-root-"));
-		try {
-			process.env.TMPDIR = tmpRoot;
-			const stateDir = join(tmpRoot, "state");
-			const controlPath = getIrohRemoteControlPath(join(stateDir, "host.json"));
+		await withPrivateIrohControlTmpdir(async (tmpRoot) => {
+			const controlPath = getIrohRemoteControlPath(join(tmpRoot, "state", "host.json"));
 			const controlRoot = dirname(dirname(controlPath));
+			expect(controlRoot).toBe(join(tmpRoot, "volt-iroh-remote"));
 			await mkdir(controlRoot, { mode: 0o777, recursive: true });
 			await chmod(controlRoot, 0o777);
 
 			await ensureIrohRemoteControlDirectory(controlPath);
 
 			expect((await stat(controlRoot)).mode & 0o777).toBe(0o700);
-		} finally {
-			if (previousTmpdir === undefined) {
-				delete process.env.TMPDIR;
-			} else {
-				process.env.TMPDIR = previousTmpdir;
-			}
-			await rm(tmpRoot, { force: true, recursive: true });
-		}
+		});
 	});
 
 	test("cleans failed remote control listen listeners before retrying active sockets", async () => {

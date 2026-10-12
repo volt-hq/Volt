@@ -306,7 +306,8 @@ describe("the TUI's input as intents", () => {
 		writeFileSync(image, Buffer.from(TINY_PNG_BASE64, "base64"));
 		harness.faux.setResponses([fauxAssistantMessage("I see it")]);
 		submit(tui, `what is in ${image}`);
-		await vi.waitFor(() => expect(lastAssistantText(session)).toBe("I see it"));
+		// Attaching resizes the image in a fresh worker thread, which can take over a second on a loaded runner.
+		await vi.waitFor(() => expect(lastAssistantText(session)).toBe("I see it"), { timeout: 10_000 });
 		const prompt = session.messages.find((message) => message.role === "user");
 		expect(
 			prompt?.role === "user" && Array.isArray(prompt.content) ? prompt.content.map((part) => part.type) : [],

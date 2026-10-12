@@ -3,9 +3,8 @@
  * to the catalog's reviewed pin, in `volt store update` and the TUI's
  * `/store`, which installs as the TUI (client install, then reload). The TUI
  * reviews an installed package's permissions where it was installed from;
- * declining an update's new permissions reinstalls the reviewed pin and, when
- * that pin follows a branch, reviews what it reinstalled, removing the
- * package when that is declined too.
+ * the reviewed pin installs beside the tracking install, and declining its
+ * new permissions keeps the tracking install as it was.
  */
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -13,17 +12,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
-import type { PackageInstallOptions } from "../src/core/package-manager.ts";
 import { DefaultPackageManager } from "../src/core/package-manager.ts";
 import { main } from "../src/main.ts";
 import type { StoreCatalog } from "../src/store/catalog.ts";
 import type { StorePackageInspection } from "../src/store/inspector.ts";
 import type { ResolveStoreSourceOptions, StoreResolvedSource } from "../src/store/resolver.ts";
-import { testCatalog, testCatalogEntry, testStoreSource } from "./store-catalog-fixtures.ts";
+import { TEST_STORE_COMMIT, testCatalog, testCatalogEntry, testStoreSource } from "./store-catalog-fixtures.ts";
 import { choose, createTuiHarness, type TuiHarness, type TuiModeFixture, waitForScreen } from "./suite/tui-harness.ts";
 
 const trackedGitSource = "git:https://github.com/volt-hq/Volt";
 const pinnedGitSource = testStoreSource();
+
+/** Where the tracking install and the reviewed pin are checked out, under the agent directory `agentDir`. */
+function checkouts(agentDir: string): { tracked: string; pinned: string } {
+	const repo = join(agentDir, "git", "github.com", "volt-hq");
+	return { tracked: join(repo, "Volt"), pinned: join(repo, `Volt@${TEST_STORE_COMMIT}`) };
+}
 
 const resolverMock = vi.hoisted(() => ({
 	resolveStoreSource: vi.fn<(options: ResolveStoreSourceOptions) => Promise<StoreResolvedSource>>(),
@@ -157,16 +161,20 @@ describe("catalog updates of a tracking install", () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 		const updateSpy = vi.spyOn(DefaultPackageManager.prototype, "update").mockResolvedValue(undefined);
+		const { tracked, pinned } = checkouts(agentDir);
+		writeExtensionPackage(tracked, []);
 		const installSpy = vi
-			.spyOn(DefaultPackageManager.prototype, "installAndPersist")
-			.mockImplementation(async () =>
-				writeExtensionPackage(join(agentDir, "git", "github.com", "volt-hq", "Volt"), []),
-			);
+			.spyOn(DefaultPackageManager.prototype, "install")
+			.mockImplementation(async () => writeExtensionPackage(pinned, []));
 
 		await main(["store", "update", "rtk", "--yes"]);
 
 		expect(updateSpy).not.toHaveBeenCalled();
 		expect(installSpy).toHaveBeenCalledWith(pinnedGitSource, { local: false, scripts: "never" });
+		const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"));
+		expect(settings.packages).toEqual([{ source: pinnedGitSource, scripts: "never" }]);
+		expect(existsSync(tracked)).toBe(false);
+		expect(existsSync(pinned)).toBe(true);
 		expect(inspectorMock.inspectStorePackage).toHaveBeenCalledWith(
 			expect.objectContaining({ source: pinnedGitSource }),
 		);
@@ -205,11 +213,11 @@ describe("the TUI's /store", () => {
 	it("moves a tracking install to the reviewed pin during interactive catalog updates", async () => {
 		const { harness, tui } = await startTui(harnesses, { packages: [trackedGitSource] });
 		const update = vi.spyOn(DefaultPackageManager.prototype, "update").mockResolvedValue(undefined);
-		const installAndPersist = vi
-			.spyOn(DefaultPackageManager.prototype, "installAndPersist")
-			.mockImplementation(async () =>
-				writeExtensionPackage(join(harness.tempDir, "git", "github.com", "volt-hq", "Volt"), []),
-			);
+		const { tracked, pinned } = checkouts(harness.tempDir);
+		writeExtensionPackage(tracked, []);
+		const install = vi
+			.spyOn(DefaultPackageManager.prototype, "install")
+			.mockImplementation(async () => writeExtensionPackage(pinned, []));
 
 		void tui.submit("/store update rtk");
 		await choose(tui, "Yes");
@@ -217,38 +225,35 @@ describe("the TUI's /store", () => {
 		await waitForScreen(tui, "Run /reload to load the change.");
 
 		expect(update).not.toHaveBeenCalled();
-		expect(installAndPersist).toHaveBeenCalledWith(pinnedGitSource, { local: false, scripts: "never" });
+		expect(install).toHaveBeenCalledWith(pinnedGitSource, { local: false, scripts: "never" });
+		const settings = JSON.parse(readFileSync(join(harness.tempDir, "settings.json"), "utf8"));
+		expect(settings.packages).toEqual([{ source: pinnedGitSource, scripts: "never" }]);
+		expect(existsSync(tracked)).toBe(false);
 		expect(inspectorMock.inspectStorePackage).toHaveBeenCalledWith(
 			expect.objectContaining({ source: pinnedGitSource }),
 		);
 	});
 
-	it("goes back to the tracked branch when an update's permissions are declined, removing it when its own are declined", async () => {
+	it("keeps the tracking install as it was when an update's permissions are declined", async () => {
 		const { harness, tui } = await startTui(harnesses, { packages: [trackedGitSource] });
-		const installed = join(harness.tempDir, "git", "github.com", "volt-hq", "Volt");
-		const installAndPersist = vi
-			.spyOn(DefaultPackageManager.prototype, "installAndPersist")
-			.mockImplementation(async (source: string, _options?: PackageInstallOptions) => {
-				// Both revisions ask for more than was acknowledged: nothing ever was.
-				writeExtensionPackage(installed, source === pinnedGitSource ? ["exec", "network"] : ["exec"]);
-			});
+		const { tracked, pinned } = checkouts(harness.tempDir);
+		writeExtensionPackage(tracked, ["exec"]);
+		const install = vi
+			.spyOn(DefaultPackageManager.prototype, "install")
+			.mockImplementation(async () => writeExtensionPackage(pinned, ["exec", "network"]));
 
 		void tui.submit("/store update rtk");
 		await choose(tui, "Yes");
 		await waitForScreen(tui, "Extension permissions", "network: use the network");
 		await choose(tui, "No");
-		// The branch it tracks reinstalls at its newest revision: its permissions are reviewed in turn.
-		await waitForScreen(tui, "Extension permissions", "exec: run commands", "Declining removes the package.");
-		await choose(tui, "No");
-		await choose(tui, "Later");
-		await waitForScreen(
-			tui,
-			"Removed git github.com/volt-hq/Volt: the reinstalled revision's permissions were not acknowledged",
-		);
-		expect(installAndPersist.mock.calls.map(([source]) => source)).toEqual([pinnedGitSource, trackedGitSource]);
+		await waitForScreen(tui, "Kept git github.com/volt-hq/Volt: the update's permissions were not acknowledged");
+
+		expect(install.mock.calls.map(([source]) => source)).toEqual([pinnedGitSource]);
+		expect(existsSync(pinned)).toBe(false);
+		expect(existsSync(join(tracked, "package.json"))).toBe(true);
 		expect(existsSync(join(harness.tempDir, "extension-permissions.json"))).toBe(false);
 		const settings = JSON.parse(readFileSync(join(harness.tempDir, "settings.json"), "utf8"));
-		expect(settings.packages).toEqual([]);
+		expect(settings.packages).toEqual([trackedGitSource]);
 	});
 
 	it("reviews the permissions of a package installed by a path relative to the cwd", async () => {
