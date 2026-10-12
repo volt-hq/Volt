@@ -151,7 +151,7 @@ async function start(
 			: `labels approved pull requests' issues "${config.merge.readyLabel}" for a human to merge`;
 	const confirmed = await ctx.ui.confirm(
 		"Start the issue orchestrator?",
-		`It works open issues labeled ${config.tracker.labels.join(" + ")} in ${config.tracker.repo ?? "this repository"}, including the ones its agents file (also labeled "${config.tracker.filedLabel}"), with up to ${config.agent.maxConcurrent} agents at once, and ${merging}.`,
+		`It works open issues labeled ${config.tracker.labels.join(" + ")} in ${config.tracker.repo ?? "this repository"}, including the ones it files for problems found outside an issue's work (also labeled "${config.tracker.filedLabel}"), with up to ${config.agent.maxConcurrent} agents at once, and ${merging}.`,
 		{ signal: ctx.signal },
 	);
 	if (!confirmed) return undefined;
@@ -164,7 +164,7 @@ async function start(
 	}
 	note(
 		volt,
-		`Issue orchestrator started for ${repo} (${relative(ctx.cwd, path) || path}): working open issues labeled ${config.tracker.labels.join(" + ")}, including the ones its agents file, with up to ${config.agent.maxConcurrent} agents at once, and it ${merging}. Its agents run under its work item, which /work shows full screen with every issue and its log; /orchestrate status, refresh, and stop control it.`,
+		`Issue orchestrator started for ${repo} (${relative(ctx.cwd, path) || path}): working open issues labeled ${config.tracker.labels.join(" + ")}, including the ones it files for problems found outside an issue's work, with up to ${config.agent.maxConcurrent} agents at once, and it ${merging}. Its agents run under its work item, which /work shows full screen with every issue and its log; /orchestrate status, refresh, and stop control it.`,
 	);
 
 	const controller = new AbortController();

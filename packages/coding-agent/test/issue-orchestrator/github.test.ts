@@ -121,11 +121,12 @@ describe("issue orchestrator GitHub tracker", () => {
 		);
 	});
 
-	it("files an issue, and searches every issue's body for a follow-up's fingerprint", async () => {
+	it("files an issue, comments on one, and searches every issue's body and comments for a fingerprint", async () => {
 		const gh = scriptedGh({
 			"issue create": "https://github.com/o/r/issues/31\n",
 			'issue list --repo o/r --state all --search "fp-1"': JSON.stringify([{ number: 31 }]),
 			'issue list --repo o/r --state all --search "fp-2"': "[]",
+			"issue comment 31": "",
 		});
 		const tracker = new GitHubTracker(gh.run, "o/r", "bot");
 		expect(
@@ -155,12 +156,14 @@ describe("issue orchestrator GitHub tracker", () => {
 			"--state",
 			"all",
 			"--search",
-			'"fp-1" in:body',
+			'"fp-1" in:body,comments',
 			"--limit",
 			"1",
 			"--json",
 			"number",
 		]);
+		await tracker.comment(31, "Also found here.");
+		expect(gh.calls.at(-1)).toEqual(["issue", "comment", "31", "--repo", "o/r", "--body", "Also found here."]);
 	});
 
 	it("counts only the review author's verdicts", async () => {

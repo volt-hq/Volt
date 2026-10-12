@@ -51,7 +51,16 @@ A verdict is the last line of a pull request comment or review by `tracker.revie
 
 When the orchestrator stops working an issue it comments why and adds `handoff_label` (`agent-needs-human`). Removing the label hands the issue back. Create the labels in the repository first (yours, `agent-filed`, `agent-needs-human`, and `agent-approved`): `gh issue create` refuses a label the repository does not have, and a handoff without its label is only the comment.
 
-Issues the agents file along the way (tech debt, out-of-scope bugs) get the `tracker.labels` labels too, so the orchestrator works them as well, plus `tracker.filed_label` (`agent-filed`) to tell them apart. Their bodies name the issue or pull request the agent found them in. To have a human vet them first instead, add `agent-filed` to `tracker.exclude_labels`.
+Scope: what an issue's agents find in scope is fixed in its pull request: anything with the issue's root cause, and any defect on lines the change touches, even one that predates it. What they find outside it (tech debt, unrelated bugs, wrong docs) gets worked too, through one deterministic check the orchestrator makes:
+
+- Agents never file issues. Each ends its final reply with the problems it found outside its work, as a JSON array (title, body, file, lines, priority) between `<out-of-scope>` tags (`{{ out_of_scope }}` in a prompt says how). The orchestrator reads it once the run ends; a report it cannot read is logged.
+- The orchestrator records each of these problems, and each follow-up a review collects, once:
+  1. one whose fingerprint an issue or comment names already is skipped;
+  2. one at the code of an open issue the workflow works (the same file, within 3 lines of a `path:line` the issue names), other than the issue being worked, is added to that issue as a comment, which its agents read;
+  3. anything else is filed as an issue with the `tracker.labels` labels, so the orchestrator works it, plus `tracker.filed_label` (`agent-filed`), and a `Location:` line the next check reads.
+
+  Recording is one run's at a time, so two runs that end together do not file the same site twice. The check compares places in the code, not wording: the same defect reported in another file is not caught, and two defects within a few lines go to one issue, the second as a comment.
+- To have a human vet filed issues first instead, add `agent-filed` to `tracker.exclude_labels`.
 
 Checkouts: a workspace holds at most 16 managed worktrees, so the orchestrator releases an issue's worktree (keeping its branch) once it hands the issue off, approved or not, finishes it, or the issue closes or loses its label. It deletes the checkout's ignored files first (dependencies and build output: the daemon never removes a checkout that holds any), unless the checkout has changes to tracked or untracked files, in which case it stays for the human. A release the daemon refuses for another reason is tried again each tick, its error logged once. If the issue comes back, its worktree is created again on its branch, and the setup hook runs again. A checkout that cannot be set up, such as while the workspace is full, is retried with backoff and does not count as an attempt. When it starts, and whenever the workspace is full, the orchestrator also releases the checkout of every issue GitHub shows it is done with (closed, approved, handed off, or out of the workflow), including issues an earlier run worked.
 
@@ -68,19 +77,19 @@ State lives in memory. After a restart, `/orchestrate start` again: the next tic
 - Each round's review follows the previous one: it decides each finding the previous round left open, and closes the ones the fix resolved. A run the conversation no longer holds (after `/orchestrate start` in another conversation) is not followed; the review is full either way.
 - The fixer's prompt gets the open findings of the review that asked for changes as `{{ review.findings }}`, since the ones posted on their lines are not in the pull request's comments.
 - A review takes an agent slot (`agent.max_concurrent` and the `review` role's `max_concurrent`); the role's agent, limits, and prompt do not apply. A conversation runs at most 3 reviews at once: one refused for that is tried again with backoff.
-- The review also collects follow-ups, defects it verified outside the change. The orchestrator files each as an issue labeled like the issues agents file (`tracker.labels` and `tracker.filed_label`), with a `Follow-up fingerprint:` line naming the defect, and files none for a fingerprint some issue already names. A follow-up never blocks the pull request.
+- The review also collects follow-ups, defects it verified outside the change, which the orchestrator records as above. A defect on a line the pull request changes is never a follow-up, even one that predates the change: the host refuses it as one, and the review reports it as a finding the fixer addresses in the pull request. A follow-up never blocks the pull request.
 
 ## Safety
 
 - Only issues carrying every `tracker.labels` label are worked. Use a label only maintainers and the orchestrator's agents apply.
-- Agent-filed issues are worked without a human looking at them first, and each can lead to more. If a chain of them runs away, exclude `agent-filed` (or stop the orchestrator); every one of them carries it.
+- Agent-filed issues are worked without a human looking at them first, and each can lead to more. The scope rule and the check above keep a chain from repeating itself; if one still runs away, exclude `agent-filed` (or stop the orchestrator): every one of them carries it.
 - Issue text reaches the agents as data inside the prompt, but agents run the conversation's tools, and a prompt injection in an issue is still an injection. Keep the label gate strict, and keep `merge.mode: handoff` until you trust the setup.
 - `merge.mode: auto` merges only a pull request whose head commit the review author reviewed clean and whose checks pass; with `merge.require_checks` (the default), a pull request without checks goes to a human. Branch protection still applies to the merge.
 - Agents use the same GitHub credentials as you unless `github.command` and the prompts route them elsewhere (for example a bot wrapper). The agents can read `gh`'s stored token like any process you run.
 
 ## Workflow file
 
-The front matter configures the orchestrator; `## implement`, `## review`, `## fix`, and `## update` sections of the body replace the built-in prompt of that role. Templates take `{{ issue.number }}`, `issue.identifier`, `issue.title`, `issue.body`, `issue.url`, `issue.labels`, `repo`, `gh`, `tracker.labels`, `tracker.filed_labels` (the labels agents give the issues they file), `worktree.path`, `worktree.branch`, `attempt`, `round`, `reason`, `pr.number`, `pr.url`, `pr.head_sha`, `pr.base_ref`, `review.max_rounds`, `review.clean_marker`, `review.changes_marker`, `review.findings` (the open findings of the review engine's review that asked for changes, empty otherwise), and `ci.failing`. An unknown variable fails the run.
+The front matter configures the orchestrator; `## implement`, `## review`, `## fix`, and `## update` sections of the body replace the built-in prompt of that role. Templates take `{{ issue.number }}`, `issue.identifier`, `issue.title`, `issue.body`, `issue.url`, `issue.labels`, `repo`, `gh`, `tracker.labels`, `out_of_scope` (how an agent reports problems outside its work), `worktree.path`, `worktree.branch`, `attempt`, `round`, `reason`, `pr.number`, `pr.url`, `pr.head_sha`, `pr.base_ref`, `review.max_rounds`, `review.clean_marker`, `review.changes_marker`, `review.findings` (the open findings of the review engine's review that asked for changes, empty otherwise), and `ci.failing`. An unknown variable fails the run.
 
 ```markdown
 ---
@@ -89,7 +98,7 @@ tracker:
   labels: [agent-ready]             # required: every issue worked has all of them
   exclude_labels: [blocked]         # plus handoff_label and merge.ready_label
   review_author: volt-agent[bot]    # default: the gh user; volt-agent and app/volt-agent match too
-  filed_label: agent-filed          # agents add it, with labels, to the issues they file
+  filed_label: agent-filed          # the orchestrator adds it, with labels, to the issues it files
 github:
   command: [volt-agent, gh]         # default: [gh]
 polling:

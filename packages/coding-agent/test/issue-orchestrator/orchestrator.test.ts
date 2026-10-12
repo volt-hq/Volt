@@ -21,6 +21,7 @@ import {
 	type Agents,
 	Orchestrator,
 	type OrchestratorEvent,
+	outOfScopeProblems,
 	type ReleaseOutcome,
 	type ReviewFinding,
 	type ReviewResult,
@@ -68,6 +69,7 @@ class FakeGitHub implements Tracker {
 	readonly handoffs: Array<{ issue: number; label: string; comment: string }> = [];
 	readonly takenBack: Array<{ issue: number; label: string; comment: string }> = [];
 	readonly filed: Array<{ title: string; body: string; labels: readonly string[] }> = [];
+	readonly comments: Array<{ issue: number; body: string }> = [];
 	/** The bodies of issues filed before the test: search finds text in them, not in the ones filed since. */
 	readonly searchable: string[] = [];
 	/** Head commits that merged the base branch in. */
@@ -77,12 +79,12 @@ class FakeGitHub implements Tracker {
 	listings = 0;
 	private commits = 0;
 
-	addIssue(number: number, labels: string[] = [LABEL]): Issue {
+	addIssue(number: number, labels: string[] = [LABEL], body = `Body ${number}`): Issue {
 		const issue: Issue = {
 			number,
 			identifier: `o/r#${number}`,
 			title: `Issue ${number}`,
-			body: `Body ${number}`,
+			body,
 			url: `https://github.com/o/r/issues/${number}`,
 			labels,
 			open: true,
@@ -174,6 +176,9 @@ class FakeGitHub implements Tracker {
 		const current = this.issues.get(issue);
 		if (current) this.setLabels(issue, [...current.labels, label]);
 		return true;
+	}
+	async comment(issue: number, body: string): Promise<void> {
+		this.comments.push({ issue, body });
 	}
 	async fileIssue(issue: { title: string; body: string; labels: readonly string[] }): Promise<FiledIssue> {
 		this.filed.push(issue);
@@ -984,6 +989,130 @@ describe("issue orchestrator", () => {
 		await orchestrator.tick();
 		expect(github.handoffs).toMatchObject([{ issue: 12, label: "agent-approved" }]);
 		expect(orchestrator.snapshot().totals).toEqual({ runs: 3, tokens: 210, cost: 2.5 });
+	});
+
+	it("records each follow-up once where it is worked: on an open issue at its code, else as an issue of its own", async () => {
+		const { github, orchestrator, reviewRuns, finishReview, log } = setup(workflow("review:\n  engine: standard"));
+		// The issue under review names its own code; another open issue the workflow works names the cache's.
+		github.addIssue(12, [LABEL], "Location: `src/own.ts:5`");
+		github.addIssue(20, [LABEL], "The cache is never invalidated (cache.ts:8-10).");
+		const pr = github.push(12);
+		github.searchable.push("Follow-up fingerprint: fp-recorded");
+
+		await orchestrator.tick();
+		const followUp = (fingerprint: string, path: string, line: number) => ({
+			fingerprint,
+			title: `Defect ${fingerprint}`,
+			body: `Details of ${fingerprint}.`,
+			priority: 2,
+			path,
+			startLine: line,
+			endLine: line,
+		});
+		await finishReview(await reviewRuns(1), {
+			verdict: { value: "clean", headSha: pr.headSha },
+			followUps: [
+				// Within three lines of #20's site, in the same file, which #20 names by its base name.
+				followUp("fp-cache", "src/cache.ts", 11),
+				// At the code only the issue under review names: its pull request would close what it is told.
+				followUp("fp-own", "src/own.ts", 5),
+				// Next to the one just filed.
+				followUp("fp-own-next", "src/own.ts", 7),
+				followUp("fp-recorded", "src/other.ts", 1),
+			],
+		});
+		expect(github.filed.map((issue) => issue.title)).toEqual(["Defect fp-own"]);
+		expect(github.filed[0]?.body).toContain("Location: `src/own.ts:5` (priority P2).");
+		expect(github.comments).toEqual([
+			{ issue: 20, body: expect.stringContaining("**Defect fp-cache**\n\nDetails of fp-cache.") },
+			{ issue: 901, body: expect.stringContaining("Location: `src/own.ts:7` (priority P2).") },
+		]);
+		expect(github.comments[0]?.body).toMatch(
+			/^Another defect at this issue's code\. Found outside the change while reviewing https:\/\/github\.com\/o\/r\/pull\/112 for o\/r#12\./,
+		);
+		expect(log).toContain("#12: added the follow-up at src/cache.ts:11 to #20");
+	});
+
+	it("records the problems an agent reports outside its work through the same check, and logs a report it cannot read", async () => {
+		const { github, agents, orchestrator, runs, finish, log } = setup();
+		github.addIssue(12);
+		github.addIssue(20, [LABEL], "Location: `src/cache.ts:8`");
+
+		// Both issues get an implementer; #12's reports what it found outside its issue.
+		await orchestrator.tick();
+		await runs(2);
+		const implement = agents.started.find((run) => run.task.includes("o/r#12"));
+		if (!implement) throw new Error("Expected #12's implementer");
+		const problem = (title: string, path: string, line: number) => ({
+			title,
+			body: `${title}, in detail.`,
+			path,
+			startLine: line,
+			priority: 1,
+		});
+		await finish(implement, {
+			output: [
+				"Opened the pull request.",
+				"<out-of-scope>",
+				JSON.stringify([
+					problem("Cache keeps stale entries", "src/cache.ts", 10),
+					problem("Docs name a removed flag", "docs/usage.md", 40),
+					{ title: "No location" },
+				]),
+				"</out-of-scope>",
+			].join("\n"),
+		});
+		expect(github.comments).toEqual([{ issue: 20, body: expect.stringContaining("**Cache keeps stale entries**") }]);
+		expect(github.filed).toEqual([
+			{
+				title: "Docs name a removed flag",
+				labels: [LABEL, "agent-filed"],
+				body: expect.stringContaining(
+					"Location: `docs/usage.md:40` (priority P1).\nFound outside the issue's scope while working on o/r#12.",
+				),
+			},
+		]);
+		expect(log).toContain(
+			"#12: the implement agent's report: problem 3 needs a title, body, repository-relative path, lines, and a priority 0-3",
+		);
+	});
+
+	it("reads an agent's report of problems outside its work from its last block", () => {
+		const item = { title: "Stale cache", body: "Never invalidated.", path: "src/cache.ts", startLine: 3 };
+		expect(outOfScopeProblems("Done, nothing else.")).toEqual({ problems: [], errors: [] });
+		// The last block counts, fenced or not; a missing end line and priority take their defaults.
+		const fenced = outOfScopeProblems(
+			`<out-of-scope>[]</out-of-scope>\n<out-of-scope>\n\`\`\`json\n${JSON.stringify([item])}\n\`\`\`\n</out-of-scope>`,
+		);
+		expect(fenced.problems).toEqual([
+			{ ...item, endLine: 3, priority: 2, fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/) },
+		]);
+		// The fingerprint names the file and title, so the same report twice is one problem.
+		expect(
+			outOfScopeProblems(`<out-of-scope>${JSON.stringify([{ ...item, body: "Reworded." }])}</out-of-scope>`)
+				.problems[0]?.fingerprint,
+		).toBe(fenced.problems[0]?.fingerprint);
+		expect(outOfScopeProblems("<out-of-scope>not json</out-of-scope>").errors).toEqual([
+			"the <out-of-scope> block is not JSON",
+		]);
+		expect(outOfScopeProblems('<out-of-scope>{"title": "x"}</out-of-scope>').errors).toEqual([
+			"the <out-of-scope> block is not a JSON array",
+		]);
+		const bad = outOfScopeProblems(
+			`<out-of-scope>${JSON.stringify([
+				{ ...item, path: "/etc/passwd" },
+				{ ...item, path: "../outside.ts" },
+				{ ...item, startLine: 5, endLine: 2 },
+				{ ...item, priority: 7 },
+			])}</out-of-scope>`,
+		);
+		expect(bad.problems).toEqual([]);
+		expect(bad.errors).toHaveLength(4);
+		const many = outOfScopeProblems(
+			`<out-of-scope>${JSON.stringify(Array.from({ length: 12 }, (_, index) => ({ ...item, title: `Problem ${index}` })))}</out-of-scope>`,
+		);
+		expect(many.problems).toHaveLength(10);
+		expect(many.errors).toEqual(["only the first 10 problems were taken"]);
 	});
 
 	it("tries an engine review again when it is incomplete or cannot be posted, and cancels one whose issue left", async () => {

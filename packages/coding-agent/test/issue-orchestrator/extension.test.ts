@@ -291,10 +291,11 @@ describe("issue orchestrator extension", () => {
 			limits: { maxDurationMs: 3_600_000 },
 		});
 		expect(started[0]?.task).toContain("You are working on GitHub issue o/r#12: Fix the thing");
-		// Issues the agent files get the workflow's labels, so the orchestrator works them too.
+		// The agent reports problems outside the issue for the orchestrator to record, rather than filing them.
 		expect(started[0]?.task).toContain(
-			"Label every issue you file agent-ready, agent-filed, and say in its body that you found it while working on o/r#12.",
+			"Leave other problems you find (unrelated bugs, tech debt) for issues of their own. Do not file issues yourself.",
 		);
+		expect(started[0]?.task).toContain("between <out-of-scope> and </out-of-scope>");
 		await vi.waitFor(() =>
 			expect(panels.at(-1)?.node).toMatchObject({
 				type: "card",

@@ -88,7 +88,9 @@ export interface Tracker {
 	takeBack(number: number, label: string, comment: string): Promise<void>;
 	/** File an issue labeled `labels`. */
 	fileIssue(issue: { title: string; body: string; labels: readonly string[] }): Promise<FiledIssue>;
-	/** Whether an issue, open or closed, says `text` in its body: one filed for the same follow-up before. */
+	/** Comment `body` on issue `number`. */
+	comment(number: number, body: string): Promise<void>;
+	/** Whether an issue, open or closed, says `text` in its body or a comment: a follow-up recorded before. */
 	mentioned(text: string): Promise<boolean>;
 }
 
@@ -303,6 +305,10 @@ export class GitHubTracker implements Tracker {
 		return { number, url };
 	}
 
+	async comment(number: number, body: string): Promise<void> {
+		await json(this.run, ["issue", "comment", String(number), "--repo", this.repo, "--body", body], false);
+	}
+
 	async mentioned(text: string): Promise<boolean> {
 		const issues = await json(this.run, [
 			"issue",
@@ -312,7 +318,7 @@ export class GitHubTracker implements Tracker {
 			"--state",
 			"all",
 			"--search",
-			`"${text}" in:body`,
+			`"${text}" in:body,comments`,
 			"--limit",
 			"1",
 			"--json",

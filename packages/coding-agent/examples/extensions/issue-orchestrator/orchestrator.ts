@@ -18,6 +18,7 @@
  * commit, exponential backoff after a failed run, and `review.max_rounds`.
  */
 
+import { createHash } from "node:crypto";
 import type { Issue, PullRequest, ReviewVerdict, Tracker } from "./github.ts";
 import { reviewMarker } from "./github.ts";
 import { inspectIssue, isRoutable, issueBranch, type Phase } from "./phase.ts";
@@ -251,18 +252,145 @@ function location(finding: ReviewFinding): string {
 	return `${finding.path}:${lines}`;
 }
 
-/** The body of a follow-up's issue: the defect, where it is, where it was found, and its fingerprint. */
-function followUpBody(followUp: ReviewFollowUp, issue: Issue, pr: PullRequest): string {
+/** How many lines apart two places in a file may be and still be the same site. */
+const NEARBY_LINES = 3;
+
+/** A place in the code an issue is about, as its body names it: `path:line` or `path:first-last`. */
+interface IssueSite {
+	readonly issue: number;
+	readonly path: string;
+	readonly startLine: number;
+	readonly endLine: number;
+}
+
+/** `path:line` and `path:first-last` mentions, such as `packages/core/safety.ts:67-68` or `safety.ts:72`. */
+const SITE_PATTERN = /([\w@.-]+(?:\/[\w@.-]+)*\.[A-Za-z0-9]+):(\d+)(?:-(\d+))?/g;
+
+/** The sites `body`, the text of issue `issue`, names. */
+function issueSites(issue: number, body: string): IssueSite[] {
+	return [...body.matchAll(SITE_PATTERN)].map((match) => {
+		const first = Number(match[2]);
+		const last = match[3] === undefined ? first : Number(match[3]);
+		return { issue, path: match[1] ?? "", startLine: Math.min(first, last), endLine: Math.max(first, last) };
+	});
+}
+
+/** Whether `site` is about the code `followUp` is: the same file (a site may name it by its base name), nearby lines. */
+function coversFollowUp(site: IssueSite, followUp: ReviewFollowUp): boolean {
+	const sameFile = followUp.path === site.path || followUp.path.endsWith(`/${site.path}`);
+	return (
+		sameFile && site.startLine - NEARBY_LINES <= followUp.endLine && followUp.startLine - NEARBY_LINES <= site.endLine
+	);
+}
+
+/** The comment that adds `followUp` to an issue already about its code; `found` says where it was found. */
+function followUpComment(followUp: ReviewFollowUp, found: string): string {
 	return [
+		`Another defect at this issue's code. ${found}`,
+		"",
+		`**${followUp.title}**`,
+		"",
 		followUp.body,
 		"",
 		`Location: \`${location(followUp)}\` (priority P${followUp.priority}).`,
-		`Found outside the change while reviewing ${pr.url} for ${issue.identifier}.`,
 		"",
 		`Follow-up fingerprint: ${followUp.fingerprint}`,
 		"",
 		"_Volt issue orchestrator_",
 	].join("\n");
+}
+
+/** The body of a follow-up's issue: the defect, where it is, where it was found (`found`), and its fingerprint. */
+function followUpBody(followUp: ReviewFollowUp, found: string): string {
+	return [
+		followUp.body,
+		"",
+		`Location: \`${location(followUp)}\` (priority P${followUp.priority}).`,
+		found,
+		"",
+		`Follow-up fingerprint: ${followUp.fingerprint}`,
+		"",
+		"_Volt issue orchestrator_",
+	].join("\n");
+}
+
+/** Most problems one agent run reports outside its work. */
+const MAX_REPORTED_PROBLEMS = 10;
+
+/**
+ * How an agent reports problems outside its work, for the orchestrator to
+ * record them once each (`{{ out_of_scope }}` in a prompt). The agents never
+ * file issues themselves, so every one goes through the same check.
+ */
+export const OUT_OF_SCOPE_INSTRUCTIONS = `Do not file issues yourself. End your final reply with each problem you found outside this work's scope (unrelated bugs, tech debt, wrong docs) as a JSON array between <out-of-scope> and </out-of-scope>, one object per problem: {"title": "...", "body": "what is wrong, and why it matters", "path": "repository-relative/file.ts", "startLine": 10, "endLine": 12, "priority": 2}, priority 0 (most urgent) to 3, at most ${MAX_REPORTED_PROBLEMS}. The orchestrator files each once, or adds it to the open issue already about that code. Leave the block out when there are none.`;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The problems `output`, an agent's final reply, reports outside its work: its
+ * last `<out-of-scope>` block, a JSON array. Each is checked (a title and body,
+ * a repository-relative path, lines, a priority) and given a fingerprint of
+ * its file and title; what is wrong with the rest is in `errors`.
+ */
+export function outOfScopeProblems(output: string): { problems: ReviewFollowUp[]; errors: string[] } {
+	const block = [...output.matchAll(/<out-of-scope>([\s\S]*?)<\/out-of-scope>/g)].at(-1)?.[1];
+	if (block === undefined) return { problems: [], errors: [] };
+	let parsed: unknown;
+	try {
+		// A model may fence the JSON inside the block.
+		parsed = JSON.parse(
+			block
+				.trim()
+				.replace(/^```(?:json)?\s*/, "")
+				.replace(/\s*```$/, ""),
+		);
+	} catch {
+		return { problems: [], errors: ["the <out-of-scope> block is not JSON"] };
+	}
+	if (!Array.isArray(parsed)) return { problems: [], errors: ["the <out-of-scope> block is not a JSON array"] };
+	const problems: ReviewFollowUp[] = [];
+	const errors: string[] = [];
+	for (const [index, item] of parsed.slice(0, MAX_REPORTED_PROBLEMS).entries()) {
+		const text = (value: unknown, max: number): string | undefined =>
+			typeof value === "string" && value.trim().length > 0 && value.length <= max ? value.trim() : undefined;
+		const line = (value: unknown): number | undefined =>
+			typeof value === "number" && Number.isSafeInteger(value) && value >= 1 ? value : undefined;
+		const title = isRecord(item) ? text(item.title, 200) : undefined;
+		const body = isRecord(item) ? text(item.body, 4_000) : undefined;
+		const path = isRecord(item) ? text(item.path, 500) : undefined;
+		const startLine = isRecord(item) ? line(item.startLine) : undefined;
+		const endLine = isRecord(item) ? (line(item.endLine) ?? startLine) : undefined;
+		const priority = isRecord(item) && item.priority !== undefined ? item.priority : 2;
+		if (
+			title === undefined ||
+			body === undefined ||
+			path === undefined ||
+			path.startsWith("/") ||
+			path.split("/").includes("..") ||
+			startLine === undefined ||
+			endLine === undefined ||
+			endLine < startLine ||
+			typeof priority !== "number" ||
+			![0, 1, 2, 3].includes(priority)
+		) {
+			errors.push(`problem ${index + 1} needs a title, body, repository-relative path, lines, and a priority 0-3`);
+			continue;
+		}
+		const fingerprint = createHash("sha256").update(`${path}\n${title.toLowerCase()}`).digest("hex");
+		problems.push({ fingerprint, title, body, priority, path, startLine, endLine });
+	}
+	if (parsed.length > MAX_REPORTED_PROBLEMS)
+		errors.push(`only the first ${MAX_REPORTED_PROBLEMS} problems were taken`);
+	return { problems, errors };
+}
+
+/** Where problems found by an agent of `phase` on `issue` come from, as the issues and comments say. */
+function foundBy(phase: Extract<Phase, { kind: Role }>, issue: Issue): string {
+	if (!("pr" in phase)) return `Found outside the issue's scope while working on ${issue.identifier}.`;
+	const doing = { review: "reviewing", fix: "fixing", update: "updating" }[phase.kind];
+	return `Found outside the change while ${doing} ${phase.pr.url} for ${issue.identifier}.`;
 }
 
 export class Orchestrator {
@@ -292,6 +420,8 @@ export class Orchestrator {
 	private readonly awaitingPullRequest = new Set<number>();
 	/** The fingerprints of the follow-ups it filed, or found filed, since it started. */
 	private readonly filedFollowUps = new Set<string>();
+	/** Recording follow-ups, one run's at a time: two runs that end together would file the same site twice. */
+	private filing: Promise<void> = Promise.resolve();
 	private readonly finished: NotedIssue[] = [];
 	private totals = { runs: 0, tokens: 0, cost: 0 };
 	private signal: AbortSignal | undefined;
@@ -591,7 +721,31 @@ export class Orchestrator {
 			this.variables(tracker, config, issue, phase, workspace, attempts, findings),
 		);
 		if (entry.cancelled) throw new Error("stopped before it started");
-		return await this.options.agents.start({ agent: role.agent, task, cwd: workspace.path, limits: role.limits });
+		const run = await this.options.agents.start({
+			agent: role.agent,
+			task,
+			cwd: workspace.path,
+			limits: role.limits,
+		});
+		return {
+			id: run.id,
+			ended: run.ended.then((result) => this.concludeAgent(tracker, config, issue, phase, result)),
+		};
+	}
+
+	/** Record the problems a finished agent reports outside its work, as a review's follow-ups are. */
+	private async concludeAgent(
+		tracker: Tracker,
+		config: WorkflowConfig,
+		issue: Issue,
+		phase: Extract<Phase, { kind: Role }>,
+		result: AgentResult,
+	): Promise<AgentResult> {
+		if (result.status !== "completed" || result.output === undefined) return result;
+		const report = outOfScopeProblems(result.output);
+		for (const error of report.errors) this.log(`#${issue.number}: the ${phase.kind} agent's report: ${error}`);
+		await this.recordFollowUps(tracker, config, issue, foundBy(phase, issue), report.problems);
+		return result;
 	}
 
 	/**
@@ -657,33 +811,70 @@ export class Orchestrator {
 			return { status: "failed", error: `posting the review failed: ${errorText(error)}`, usage };
 		}
 		this.log(`#${issue.number}: posted the review (${verdict.value}) on pull request #${pr.number}`);
-		await this.fileFollowUps(tracker, config, issue, pr, result.followUps);
+		const found = `Found outside the change while reviewing ${pr.url} for ${issue.identifier}.`;
+		await this.recordFollowUps(tracker, config, issue, found, result.followUps);
 		return { status: "completed", usage };
 	}
 
+	/** {@link fileFollowUps}, after the filings already under way: two runs that end together would file a site twice. */
+	private async recordFollowUps(
+		tracker: Tracker,
+		config: WorkflowConfig,
+		issue: Issue,
+		found: string,
+		followUps: readonly ReviewFollowUp[],
+	): Promise<void> {
+		if (followUps.length === 0) return;
+		const filing = this.filing.then(() => this.fileFollowUps(tracker, config, issue, found, followUps));
+		this.filing = filing;
+		await filing;
+	}
+
 	/**
-	 * File each follow-up as an issue the workflow works, labeled like the
-	 * issues agents file, unless one names its fingerprint already. A follow-up
-	 * that fails to file is logged; a later round may report it again.
+	 * Record each follow-up once, where the workflow works it: a review's, or a
+	 * problem an agent reported outside its work, found as `found` says. One
+	 * whose fingerprint an issue or comment names already is skipped. One at
+	 * the code of an open issue the workflow works, other than `issue` (whose
+	 * pull request closes it), is added to that issue as a comment, for its
+	 * agents to address with it. Anything else is filed as an issue of its
+	 * own, labeled `tracker.filed_label` besides the workflow's labels. One
+	 * that fails is logged; a later run may report it again.
 	 */
 	private async fileFollowUps(
 		tracker: Tracker,
 		config: WorkflowConfig,
 		issue: Issue,
-		pr: PullRequest,
+		found: string,
 		followUps: readonly ReviewFollowUp[],
 	): Promise<void> {
+		let sites: IssueSite[] | undefined;
 		for (const followUp of followUps) {
 			if (this.filedFollowUps.has(followUp.fingerprint)) continue;
 			try {
 				// GitHub's search lags a filing: what this run filed is remembered as well.
 				if (!(await tracker.mentioned(followUp.fingerprint))) {
-					const filed = await tracker.fileIssue({
-						title: followUp.title,
-						body: followUpBody(followUp, issue, pr),
-						labels: [...config.tracker.labels, config.tracker.filedLabel],
-					});
-					this.log(`#${issue.number}: filed follow-up #${filed.number}: ${filed.url}`);
+					// The issue under review closes with its pull request, and what it was told with it.
+					sites ??= (await tracker.candidates(config.tracker.labels))
+						.filter((candidate) => candidate.number !== issue.number)
+						.flatMap((candidate) => issueSites(candidate.number, candidate.body));
+					const existing = sites.find((site) => coversFollowUp(site, followUp));
+					if (existing) {
+						await tracker.comment(existing.issue, followUpComment(followUp, found));
+						this.log(`#${issue.number}: added the follow-up at ${location(followUp)} to #${existing.issue}`);
+					} else {
+						const filed = await tracker.fileIssue({
+							title: followUp.title,
+							body: followUpBody(followUp, found),
+							labels: [...config.tracker.labels, config.tracker.filedLabel],
+						});
+						sites.push({
+							issue: filed.number,
+							path: followUp.path,
+							startLine: followUp.startLine,
+							endLine: followUp.endLine,
+						});
+						this.log(`#${issue.number}: filed follow-up #${filed.number}: ${filed.url}`);
+					}
 				}
 				this.filedFollowUps.add(followUp.fingerprint);
 			} catch (error) {
@@ -946,10 +1137,8 @@ export class Orchestrator {
 			},
 			repo: tracker.repo,
 			gh: config.ghCommand.join(" "),
-			tracker: {
-				labels: [...config.tracker.labels],
-				filed_labels: [...config.tracker.labels, config.tracker.filedLabel],
-			},
+			tracker: { labels: [...config.tracker.labels] },
+			out_of_scope: OUT_OF_SCOPE_INSTRUCTIONS,
 			worktree: { path: workspace.path, branch: workspace.branch },
 			attempt: attempts === 0 ? null : attempts + 1,
 			round: "round" in phase ? phase.round : null,
