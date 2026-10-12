@@ -21,6 +21,14 @@ function createContext(tokens: number | null, compact = vi.fn()): ExtensionConte
 		compact,
 		getSystemPrompt: () => "",
 		startWork: vi.fn(),
+		reviews: {
+			engines: () => [],
+			start: vi.fn(),
+			result: vi.fn(),
+			cancel: vi.fn(),
+			publish: vi.fn(),
+			recordOutcome: vi.fn(),
+		},
 	};
 }
 

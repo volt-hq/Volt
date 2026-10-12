@@ -6,6 +6,7 @@ import {
 } from "./github-cli-context.ts";
 import { parseGitHubPullRequestUrl, resolveCurrentReviewPullRequest } from "./github-cli-review-target.ts";
 import type {
+	CodeHostCommandOptions,
 	CodeHostProvider,
 	ReviewCodeHostInlineComment,
 	ReviewCodeHostPublishRequest,
@@ -57,9 +58,16 @@ async function probeCurrentPullRequest(cwd: string, signal?: AbortSignal) {
 	}
 }
 
-async function verifyPullRequestHead(cwd: string, pullRequest: ReviewPullRequestIdentity): Promise<void> {
+async function verifyPullRequestHead(
+	cwd: string,
+	pullRequest: ReviewPullRequestIdentity,
+	options: CodeHostCommandOptions = {},
+): Promise<void> {
 	const locator = githubPullRequestLocator(pullRequest);
-	const result = await runGitHubCli(["pr", "view", locator.url, "--json", "headRefOid"], { cwd });
+	const result = await runGitHubCli(["pr", "view", locator.url, "--json", "headRefOid"], {
+		cwd,
+		...(options.command === undefined ? {} : { command: options.command }),
+	});
 	if (!result.ok) throw new Error(`Could not verify the pull request head: ${result.stderr.trim()}`);
 	const current = parseJsonObject(result.stdout.toString("utf8"), "gh pr view");
 	if (current.headRefOid !== pullRequest.headRefOid) {
@@ -90,7 +98,7 @@ async function publishPullRequestReview(request: ReviewCodeHostPublishRequest) {
 			"--input",
 			"-",
 		],
-		{ cwd: request.cwd, input: payload },
+		{ cwd: request.cwd, input: payload, ...(request.command === undefined ? {} : { command: request.command }) },
 	);
 	if (!published.ok) {
 		throw new Error(`GitHub rejected the review; nothing was marked published: ${published.stderr.trim()}`);

@@ -18,13 +18,13 @@ import { CanonicalDataError, cloneCanonicalData } from "../canonical-data.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { DeclaredReviewEngine } from "../review-engine-extensions.ts";
-import type { SessionManager, SessionReference } from "../session-manager.ts";
+import type { ReadonlySessionManager, SessionManager, SessionReference } from "../session-manager.ts";
 import type { ExtensionSessionWriter } from "../session-writer.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import { HOST_CUSTOM_MESSAGE_TYPES } from "../ui/message-presenters.ts";
 import type { MessagePresenter } from "../ui/presentation.ts";
 import type { DeclaredWorkKind, StartWorkHandler } from "../work/extension-kinds.ts";
-import { type PermissionHolder, permissionCheckedModelRegistry } from "./permissions.ts";
+import { type PermissionHolder, permissionCheckedModelRegistry, requirePermission } from "./permissions.ts";
 import {
 	type ExtensionServicesManager,
 	extensionServicesForbidden,
@@ -53,6 +53,8 @@ import type {
 	ExtensionFlag,
 	ExtensionLifetime,
 	ExtensionMode,
+	ExtensionReviews,
+	ExtensionReviewsHandler,
 	ExtensionRuntime,
 	ExtensionUIContext,
 	InputEvent,
@@ -138,6 +140,19 @@ type SessionBeforeEvent = Extract<
 	RunnerEmitEvent,
 	{ type: "session_before_switch" | "session_before_fork" | "session_before_compact" | "session_before_tree" }
 >;
+
+type PreparationEvent = Extract<RunnerEmitEvent, { type: "session_before_compact" | "session_before_tree" }>;
+
+/**
+ * The copy of a compaction or tree preparation event one handler receives: its
+ * data carries the session's own entries and messages, so a handler's change
+ * reaches neither later handlers nor the summary Volt generates. A structured
+ * clone, since `fileOps` holds `Set`s; the abort signal stays shared.
+ */
+function copyPreparationEvent(event: PreparationEvent): PreparationEvent {
+	const { signal, ...data } = event;
+	return { ...structuredClone(data), signal };
+}
 
 type SessionBeforeEventResult =
 	| SessionBeforeSwitchResult
@@ -254,6 +269,17 @@ export class ExtensionMessageRoleMismatchError extends Error {
 		this.extensionId = extensionId;
 		this.expectedRole = expectedRole;
 		this.receivedRole = receivedRole;
+	}
+}
+
+/**
+ * Refuse a custom message of one of the host's types from an extension's hook
+ * result, with the error `volt.sendMessage` gives: the host presents those
+ * messages as its own.
+ */
+function assertExtensionMessageType(customType: unknown): void {
+	if (typeof customType === "string" && HOST_CUSTOM_MESSAGE_TYPES.has(customType)) {
+		throw new Error(`Custom messages of type ${customType} are the host's`);
 	}
 }
 
@@ -453,6 +479,40 @@ function copyPlainData(value: unknown): unknown {
 	return copy;
 }
 
+/**
+ * `manager` as extensions read it through `ctx.sessionManager`: the {@link ReadonlySessionManager}
+ * methods, each returning copies of the entries and header it reads, so an extension cannot change
+ * the session's committed entries.
+ */
+function readonlySessionView(manager: SessionManager): ReadonlySessionManager {
+	return {
+		getCwd: () => manager.getCwd(),
+		getSessionDir: () => manager.getSessionDir(),
+		getSessionId: () => manager.getSessionId(),
+		getSessionRef: () => manager.getSessionRef(),
+		getLeafId: () => manager.getLeafId(),
+		getLeafEntry: () => structuredClone(manager.getLeafEntry()),
+		getEntry: (id) => structuredClone(manager.getEntry(id)),
+		getLabel: (id) => manager.getLabel(id),
+		getBranch: (fromId) => structuredClone(manager.getBranch(fromId)),
+		getBranchWindow: (options) => structuredClone(manager.getBranchWindow(options)),
+		getHeader: () => structuredClone(manager.getHeader()),
+		getEntries: () => structuredClone(manager.getEntries()),
+		getTree: () => {
+			// The nodes are new on every call; only their entries are the manager's. Copying entry by entry
+			// keeps a deep tree from deepening the copy's recursion.
+			const roots = manager.getTree();
+			const stack = [...roots];
+			for (let node = stack.pop(); node !== undefined; node = stack.pop()) {
+				node.entry = structuredClone(node.entry);
+				stack.push(...node.children);
+			}
+			return roots;
+		},
+		getSessionName: () => manager.getSessionName(),
+	};
+}
+
 /** An event one extension hears alone: its activation and deactivation, and its own start or stop at runtime. */
 export type ExtensionLifecycleEvent = ActivateEvent | DeactivateEvent | SessionStartEvent | SessionShutdownEvent;
 
@@ -484,7 +544,8 @@ export class ExtensionRunner {
 	private mode: ExtensionMode = "print";
 	private hasUIFn: () => boolean = () => this.uiFactory !== noOpUIFactory;
 	private cwd: string;
-	private sessionManager: SessionManager;
+	/** The session's manager as extensions read it: copies of its entries. */
+	private sessionManager: ReadonlySessionManager;
 	private modelRegistry: ModelRegistry;
 	private errorListeners: Set<ExtensionErrorListener> = new Set();
 	private getModel: () => Model<any> | undefined = () => undefined;
@@ -510,6 +571,14 @@ export class ExtensionRunner {
 	private staleMessage: string | undefined;
 	private servicesManager: ExtensionServicesManager | undefined;
 	private startWorkFn: StartWorkHandler = () => Promise.reject(new Error("Work is not available in this runtime"));
+	private reviewsHandler: ExtensionReviewsHandler = {
+		engines: () => [],
+		start: () => Promise.reject(new Error("Reviews are not available in this runtime")),
+		result: () => Promise.resolve(undefined),
+		cancel: () => Promise.reject(new Error("Reviews are not available in this runtime")),
+		publish: () => Promise.reject(new Error("Reviews are not available in this runtime")),
+		recordOutcome: () => Promise.reject(new Error("Reviews are not available in this runtime")),
+	};
 
 	/** @throws when an extension's id is not a manifest id or two extensions share one: ownership is by id. */
 	constructor(
@@ -525,7 +594,7 @@ export class ExtensionRunner {
 		this.runtime = runtime;
 		this.uiFactory = noOpUIFactory;
 		this.cwd = cwd;
-		this.sessionManager = sessionManager;
+		this.sessionManager = readonlySessionView(sessionManager);
 		this.modelRegistry = modelRegistry;
 	}
 
@@ -544,6 +613,11 @@ export class ExtensionRunner {
 			this.assertActive();
 			refresh();
 		};
+	}
+
+	/** Run and read the extensions' reviews (`ctx.reviews`) through `handler`. */
+	bindReviews(handler: ExtensionReviewsHandler): void {
+		this.reviewsHandler = handler;
 	}
 
 	emitRequestBoundary(event: RequestBoundaryEvent): void {
@@ -1251,6 +1325,55 @@ export class ExtensionRunner {
 				assertRunning();
 				return runner.startWorkFn(owner, kind, options, run);
 			},
+			get reviews() {
+				assertActive();
+				return runner.reviewsFor(owner, assertActive, assertRunning);
+			},
+		};
+	}
+
+	/** `ctx.reviews` of the extension `owner`: starting, posting, and recording outcomes need `exec`. */
+	private reviewsFor(
+		owner: string | undefined,
+		assertActive: () => void,
+		assertRunning: () => void,
+	): ExtensionReviews {
+		const requireOwner = (use: string): string => {
+			if (owner === undefined)
+				throw new Error(`${use} is available only in an extension's own handlers, commands, and tools`);
+			return owner;
+		};
+		return {
+			engines: () => {
+				assertActive();
+				return this.reviewsHandler.engines();
+			},
+			start: async (options) => {
+				assertRunning();
+				const id = requireOwner("ctx.reviews.start");
+				requirePermission(this.permissionHolder(id), "exec", "ctx.reviews.start");
+				return await this.reviewsHandler.start(id, options);
+			},
+			result: async (runId) => {
+				assertActive();
+				return await this.reviewsHandler.result(runId);
+			},
+			cancel: async (runId) => {
+				assertRunning();
+				await this.reviewsHandler.cancel(requireOwner("ctx.reviews.cancel"), runId);
+			},
+			publish: async (runId, options) => {
+				assertRunning();
+				const id = requireOwner("ctx.reviews.publish");
+				requirePermission(this.permissionHolder(id), "exec", "ctx.reviews.publish");
+				return await this.reviewsHandler.publish(id, runId, options);
+			},
+			recordOutcome: async (runId, findingId, outcome) => {
+				assertRunning();
+				const id = requireOwner("ctx.reviews.recordOutcome");
+				requirePermission(this.permissionHolder(id), "exec", "ctx.reviews.recordOutcome");
+				await this.reviewsHandler.recordOutcome(id, runId, findingId, outcome);
+			},
 		};
 	}
 
@@ -1348,16 +1471,22 @@ export class ExtensionRunner {
 		}
 		let result: SessionBeforeEventResult | undefined;
 		const copyPerHandler = LOOP_EVENT_TYPES.has(event.type);
+		const preparationEvent =
+			event.type === "session_before_compact" || event.type === "session_before_tree"
+				? (event as PreparationEvent)
+				: undefined;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(event.type);
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				// Copied outside the handler's error containment: invalid session data is not the extension's failure.
+				// Copied outside the handler's error containment: a copy failure is not the extension's.
 				const handlerEvent = copyPerHandler
 					? cloneCanonicalData(event, `Extension ${event.type} input for ${ext.id}`)
-					: event;
+					: preparationEvent
+						? copyPreparationEvent(preparationEvent)
+						: event;
 				try {
 					const ctx = this.createContext(ext.id, event.type === "tool_execution_end");
 					const handlerResult = await handler(handlerEvent, ctx);
@@ -1444,6 +1573,14 @@ export class ExtensionRunner {
 						!isDeepStrictEqual(handlerResult.message, currentMessage)
 					) {
 						throw new Error(`Custom messages of type ${currentMessage.customType} are the host's`);
+					}
+					// No extension gives a message one of the host's types.
+					if (
+						handlerResult.message.role === "custom" &&
+						currentMessage.role === "custom" &&
+						handlerResult.message.customType !== currentMessage.customType
+					) {
+						assertExtensionMessageType(handlerResult.message.customType);
 					}
 
 					currentMessage = cloneCanonicalData(
@@ -1747,6 +1884,7 @@ export class ExtensionRunner {
 							`Extension before_agent_start output from ${ext.id}`,
 						);
 						if (result.message) {
+							assertExtensionMessageType(result.message.customType);
 							messages.push(result.message);
 						}
 						if (result.systemPrompt !== undefined) {
