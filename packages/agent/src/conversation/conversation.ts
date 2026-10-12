@@ -224,6 +224,8 @@ interface TurnRun {
 	newMessages: AgentMessage[];
 	turnOpen: boolean;
 	terminalSettling: boolean;
+	/** The loop threw: the failure settling now is the conversation's own, not a response. */
+	loopFailed: boolean;
 	agentEnded: boolean;
 	committedDelivery: boolean;
 	retryAttempt: number;
@@ -1143,6 +1145,7 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 			newMessages: [],
 			turnOpen: false,
 			terminalSettling: false,
+			loopFailed: false,
 			agentEnded: false,
 			committedDelivery: false,
 			retryAttempt: 0,
@@ -1258,6 +1261,7 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		run.agentEnded = false;
 		run.turnOpen = false;
 		run.terminalSettling = false;
+		run.loopFailed = false;
 		try {
 			await runAgentLoop(
 				[],
@@ -1944,7 +1948,12 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 					return undefined;
 				}
 				const terminal = event.message.role === "assistant" && event.message.stopReason !== "toolUse";
-				run.terminalSettling = terminal && !this.hasWakingInput();
+				// Waking input keeps a loop going, which delivers it. A response that failed ends the loop without
+				// delivering it, so the failure settles as any other does: it retries, or ends the turn. A loop that
+				// threw does not: the input pending may be the input that failed to deliver.
+				const failed =
+					!run.loopFailed && event.message.role === "assistant" && event.message.stopReason === "error";
+				run.terminalSettling = terminal && (failed || !this.hasWakingInput());
 				let message = this.withAbortDiagnostic(event.message, run);
 				const hook = this.policy.messageEnd;
 				if (hook) {
@@ -2056,6 +2065,7 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 				return undefined;
 			}
 		};
+		run.loopFailed = true;
 		const retainedBeforeCommit =
 			error instanceof AgentDeliverySettlementError && error.outcome === "retained" && !run.committedDelivery;
 		const aborted = run.signal.aborted;
