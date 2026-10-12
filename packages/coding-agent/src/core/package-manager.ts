@@ -43,6 +43,27 @@ function getNpmVersionRange(version: string | undefined): string | undefined {
 	return version ? (validRange(version) ?? undefined) : undefined;
 }
 
+/** A git source's identity: its host and path, and its ref when pinned. Each pinned ref is its own package. */
+function getGitSourceIdentity(source: GitSource): string {
+	return `git:${source.host}/${source.path}${source.ref ? `@${source.ref}` : ""}`;
+}
+
+/**
+ * Where a git source is checked out below `<install root>/<host>`: its path,
+ * and `<path>@<ref>` beside it for a pinned ref. A ref that is not a plain
+ * name (it has a slash, or a dot not between name characters) is hashed into
+ * one path segment.
+ */
+function getGitSourceInstallPath(source: GitSource): string {
+	if (!source.ref) {
+		return source.path;
+	}
+	const ref = /^[\w-]+(?:\.[\w-]+)*$/.test(source.ref)
+		? source.ref
+		: createHash("sha256").update(source.ref).digest("hex").slice(0, 16);
+	return `${source.path}@${ref}`;
+}
+
 export interface PathMetadata {
 	source: string;
 	scope: SourceScope;
@@ -101,6 +122,15 @@ export interface PackageUpdateOptions {
 	scripts?: PackageInstallScriptPolicy;
 }
 
+export interface PackageSettingsOptions extends PackageInstallOptions {
+	/**
+	 * A configured source the added one takes the place of: when the added
+	 * source has no entry of its own, it takes over this source's entry, with
+	 * its position and filters.
+	 */
+	replace?: string;
+}
+
 export interface PackageManager {
 	resolve(onMissing?: (source: string) => Promise<MissingSourceAction>): Promise<ResolvedPaths>;
 	install(source: string, options?: PackageInstallOptions): Promise<void>;
@@ -113,7 +143,7 @@ export interface PackageManager {
 		sources: string[],
 		options?: { local?: boolean; temporary?: boolean },
 	): Promise<ResolvedPaths>;
-	addSourceToSettings(source: string, options?: PackageInstallOptions): boolean;
+	addSourceToSettings(source: string, options?: PackageSettingsOptions): boolean;
 	removeSourceFromSettings(source: string, options?: { local?: boolean }): boolean;
 	setProgressCallback(callback: ProgressCallback | undefined): void;
 	getInstalledPath(source: string, scope: "user" | "project"): string | undefined;
@@ -745,7 +775,7 @@ export class DefaultPackageManager implements PackageManager {
 		this.progressCallback = callback;
 	}
 
-	addSourceToSettings(source: string, options?: PackageInstallOptions): boolean {
+	addSourceToSettings(source: string, options?: PackageSettingsOptions): boolean {
 		const scope: InstalledSourceScope = options?.local ? "project" : "user";
 		const currentSettings =
 			scope === "project"
@@ -753,7 +783,11 @@ export class DefaultPackageManager implements PackageManager {
 				: this.settingsManager.getGlobalEffectiveSettings();
 		const currentPackages = currentSettings.packages ?? [];
 		const normalizedSource = this.normalizePackageSourceForSettings(source, scope);
-		const matchIndex = currentPackages.findIndex((existing) => this.packageSourcesMatch(existing, source, scope));
+		const replace = options?.replace;
+		let matchIndex = currentPackages.findIndex((existing) => this.packageSourcesMatch(existing, source, scope));
+		if (matchIndex === -1 && replace !== undefined) {
+			matchIndex = currentPackages.findIndex((existing) => this.packageSourcesMatch(existing, replace, scope));
+		}
 		if (matchIndex !== -1) {
 			const existing = currentPackages[matchIndex];
 			const nextPackage = this.updatePackageSourceForSettings(existing, normalizedSource, options?.scripts);
@@ -1164,8 +1198,8 @@ export class DefaultPackageManager implements PackageManager {
 
 		for (const entry of sources) {
 			const parsed = this.parseSource(entry.source);
-			// Pinned npm versions are fixed. Pinned git refs are configured checkout targets,
-			// so include them to reconcile an existing clone when the configured ref changes.
+			// Pinned npm versions are fixed. Pinned git refs are checkout targets: include them to
+			// reconcile each ref's clone with its ref, which a branch or a moved tag changes.
 			if (parsed.type === "npm") {
 				if (!parsed.pinned) {
 					npmCandidates.push({ ...entry, parsed });
@@ -1479,7 +1513,7 @@ export class DefaultPackageManager implements PackageManager {
 			return [`npm:${parsed.name}`];
 		}
 		if (parsed.type === "git") {
-			return [`git:${parsed.host}/${parsed.path}`];
+			return [getGitSourceIdentity(parsed)];
 		}
 		const keys = new Set<string>();
 		keys.add(`local:${this.resolvePath(parsed.path)}`);
@@ -1493,7 +1527,7 @@ export class DefaultPackageManager implements PackageManager {
 			return `npm:${parsed.name}`;
 		}
 		if (parsed.type === "git") {
-			return `git:${parsed.host}/${parsed.path}`;
+			return getGitSourceIdentity(parsed);
 		}
 		const baseDir = this.getBaseDirForScope(scope);
 		return `local:${this.resolvePathFromBase(parsed.path, baseDir)}`;
@@ -1848,10 +1882,11 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	/**
-	 * Get a unique identity for a package, ignoring version/ref.
+	 * Get a unique identity for a package: an npm package's name, ignoring its
+	 * version; a git repository's normalized host/path (so SSH and HTTPS URLs
+	 * for it are identical) with its ref when pinned, since each pinned ref is
+	 * its own package; or a local package's path.
 	 * Used to detect when the same package is in both global and project settings.
-	 * For git packages, uses normalized host/path to ensure SSH and HTTPS URLs
-	 * for the same repository are treated as identical.
 	 */
 	getPackageIdentity(source: string, scope?: "user" | "project"): string {
 		const parsed = this.parseSource(source);
@@ -1859,8 +1894,7 @@ export class DefaultPackageManager implements PackageManager {
 			return `npm:${parsed.name}`;
 		}
 		if (parsed.type === "git") {
-			// Use host/path for identity to normalize SSH and HTTPS
-			return `git:${parsed.host}/${parsed.path}`;
+			return getGitSourceIdentity(parsed);
 		}
 		if (scope) {
 			const baseDir = this.getBaseDirForScope(scope);
@@ -2203,14 +2237,15 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private getGitInstallPath(source: GitSource, scope: SourceScope): string {
+		const path = getGitSourceInstallPath(source);
 		if (scope === "temporary") {
-			return this.getTemporaryDir(`git-${source.host}`, source.path);
+			return this.getTemporaryDir(`git-${source.host}`, path);
 		}
 		const installRoot = this.getGitInstallRoot(scope);
 		if (!installRoot) {
 			throw new Error("Missing git install root");
 		}
-		return this.resolveManagedPath(installRoot, source.host, source.path);
+		return this.resolveManagedPath(installRoot, source.host, path);
 	}
 
 	private getGitInstallRoot(scope: SourceScope): string | undefined {

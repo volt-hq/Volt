@@ -1,6 +1,5 @@
 import { createInterface } from "node:readline";
 import type { ExtensionPermission } from "@hansjm10/volt-protocol";
-import { sanitizeText } from "@hansjm10/volt-tui";
 import chalk from "chalk";
 import { APP_NAME, getAgentDir } from "../config.ts";
 import { type PackagePermissions, readPackagePermissions } from "../core/extensions/permissions.ts";
@@ -42,10 +41,9 @@ import { resolveStoreSource } from "./resolver.ts";
 import {
 	chooseStoreRemoveTarget,
 	chooseStoreUpdateTarget,
+	findStoreCatalogRevision,
 	type StoreScopeTarget,
 	storeReviewSource,
-	storeSourcePinsCommit,
-	storeTargetMatchesUpdateSource,
 	storeUpdateTouches,
 } from "./targets.ts";
 
@@ -510,12 +508,24 @@ async function runInstall(
 		ref: options.ref,
 		pinGit: true,
 	});
+	const scope: StoreInstallScope = options.local ? "project" : "user";
+	const catalogId = resolved.catalogPackage?.id;
+	const installed =
+		catalogId === undefined ? undefined : findStoreCatalogRevision(packageManager, resolved.source, catalogId, scope);
+	if (installed !== undefined) {
+		console.error(
+			chalk.red(
+				`${catalogId} is installed from ${formatStoreSourceSummary(installed.source)}; update it with "${APP_NAME} store update ${catalogId}${options.local ? " -l" : ""}"`,
+			),
+		);
+		process.exitCode = 1;
+		return true;
+	}
 	const inspection = await inspectStorePackage({
 		source: resolved.source,
 		cwd,
 		npmCommand: settingsManager.getNpmCommand(),
 	});
-	const scope: StoreInstallScope = options.local ? "project" : "user";
 	const plan = buildStoreInstallPlan({
 		resolved,
 		inspection,
@@ -591,7 +601,12 @@ async function runRemove(
 		return true;
 	}
 	const resolved = await resolveStoreSource({ input, catalog, pinGit: false });
-	const selection = chooseStoreRemoveTarget(packageManager, resolved.source, options.local);
+	const selection = chooseStoreRemoveTarget(
+		packageManager,
+		resolved.source,
+		options.local,
+		resolved.catalogPackage?.id,
+	);
 	if (selection.conflict === "both-scopes") {
 		console.error(chalk.red("Package is installed in both user and project scopes. Use -l to remove project scope."));
 		process.exitCode = 1;
@@ -668,7 +683,7 @@ async function runUpdate(
 	}
 
 	const resolved = await resolveStoreSource({ input, catalog, pinGit: true });
-	const selection = chooseStoreUpdateTarget(packageManager, resolved.source, options.local);
+	const selection = chooseStoreUpdateTarget(packageManager, resolved.source, options.local, catalogPackage.id);
 	if (selection.conflict === "both-scopes") {
 		console.error(chalk.red("Package is installed in both user and project scopes. Use -l to update project scope."));
 		process.exitCode = 1;
@@ -683,7 +698,8 @@ async function runUpdate(
 		return true;
 	}
 
-	if (storeTargetMatchesUpdateSource(target, resolved.source)) {
+	// Already the catalog pin: update it in place.
+	if (storeUpdateTouches(packageManager, target, resolved.source)) {
 		if (!(await confirmMutation({ yes: options.yes, action: "update" }))) {
 			return true;
 		}
@@ -727,20 +743,8 @@ async function runUpdate(
 		return true;
 	}
 	const local = target.scope === "project";
-	await packageManager.installAndPersist(plan.source, { local, scripts: "never" });
-	await settingsManager.flush();
-	const settingsErrors = settingsManager.drainErrors();
-	if (settingsErrors.length > 0) {
-		const installedPath = packageManager.getInstalledPath(plan.source, target.scope);
-		for (const { scope: errorScope, error } of settingsErrors) {
-			console.error(chalk.yellow(`Warning (${errorScope} settings): ${error.message}`));
-		}
-		if (installedPath) {
-			console.error(chalk.yellow(`Package was installed at ${installedPath}, but settings persistence failed.`));
-		}
-		process.exitCode = 1;
-		return true;
-	}
+	// The new pin installs beside the installed one, which stays configured until the new pin is acknowledged.
+	await packageManager.install(plan.source, { local, scripts: "never" });
 	const permissions = await reviewInstalledPermissions(
 		packageManager,
 		agentDir,
@@ -752,43 +756,26 @@ async function runUpdate(
 	if (permissions === "missing")
 		console.error(chalk.red("Could not find the installed package to review its permissions"));
 	if (permissions === "declined" || permissions === "failed" || permissions === "missing") {
-		process.exitCode = 1;
-		// The declined revision must not stay installed: without the previous one, the package goes.
-		const removeDeclined = async (reason: string): Promise<void> => {
-			await packageManager.removeAndPersist(plan.source, { local });
-			await settingsManager.flush();
-			console.error(chalk.red(`Removed ${currentLabel}: ${reason}`));
-		};
-		// Back to the installed pin: the update's permissions were not acknowledged.
-		try {
-			await packageManager.installAndPersist(target.source, { local, scripts: "never" });
-			await settingsManager.flush();
-		} catch (error: unknown) {
-			const message = sanitizeText(error instanceof Error ? error.message : String(error));
-			console.error(chalk.red(`Could not reinstall ${currentLabel}: ${message}`));
-			await removeDeclined("the update's permissions were not acknowledged");
-			return true;
-		}
-		// A source without a commit pin reinstalls at its newest revision, which has its own permissions:
-		// declining them too removes the package.
-		if (!storeSourcePinsCommit(target.source)) {
-			const rollback = await reviewInstalledPermissions(
-				packageManager,
-				agentDir,
-				target.source,
-				target.scope,
-				"Declining removes the package.",
-				`${APP_NAME} store update ${input}`,
-			);
-			if (rollback === "missing") {
-				console.error(chalk.red("Could not find the installed package to review its permissions"));
-			}
-			if (rollback === "declined" || rollback === "failed" || rollback === "missing" || rollback === "unreviewed") {
-				await removeDeclined("the reinstalled revision's permissions were not acknowledged");
-				return true;
-			}
-		}
+		// The new pin was never configured: dropping its checkout leaves the installed pin as it was.
+		await packageManager.removeAndPersist(plan.source, { local });
 		console.error(chalk.red(`Kept ${currentLabel}: the update's permissions were not acknowledged`));
+		process.exitCode = 1;
+		return true;
+	}
+	// The new pin takes over the installed one's settings entry, and the installed pin's checkout goes.
+	packageManager.addSourceToSettings(plan.source, { local, scripts: "never", replace: target.source });
+	await packageManager.removeAndPersist(target.actionSource ?? target.source, { local });
+	await settingsManager.flush();
+	const settingsErrors = settingsManager.drainErrors();
+	if (settingsErrors.length > 0) {
+		const installedPath = packageManager.getInstalledPath(plan.source, target.scope);
+		for (const { scope: errorScope, error } of settingsErrors) {
+			console.error(chalk.yellow(`Warning (${errorScope} settings): ${error.message}`));
+		}
+		if (installedPath) {
+			console.error(chalk.yellow(`Package was installed at ${installedPath}, but settings persistence failed.`));
+		}
+		process.exitCode = 1;
 		return true;
 	}
 	console.log(chalk.green(`Updated ${currentLabel} to ${formatStoreInstallPlanTarget(plan)}`));

@@ -1,3 +1,4 @@
+import { readPackageManifest } from "../core/extensions/manifest.ts";
 import type { ConfiguredPackage } from "../core/package-manager.ts";
 import { parseGitUrl } from "../utils/git.ts";
 import { isLocalPath, resolvePath } from "../utils/paths.ts";
@@ -21,9 +22,36 @@ export interface StoreTargetPackageManager {
 	listConfiguredPackages(): ConfiguredPackage[];
 }
 
+/**
+ * Whether configured package `pkg` is catalog package `catalogId` at any
+ * revision: a git source of the repository `source` (the catalog pin) names,
+ * whose installed package declares the manifest id `catalogId`. Catalog
+ * packages can share a repository, and each pinned commit is its own package,
+ * so neither the repository nor the identity finds an older pin.
+ */
+function isCatalogPackageRevision(pkg: ConfiguredPackage, source: string, catalogId: string): boolean {
+	const configured = parseGitUrl(pkg.source);
+	const pin = parseGitUrl(source);
+	if (configured === null || pin === null || configured.host !== pin.host || configured.path !== pin.path) {
+		return false;
+	}
+	if (pkg.installedPath === undefined) return false;
+	try {
+		return readPackageManifest(pkg.installedPath)?.manifest.id === catalogId;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * The configured packages `source` names, by identity in their scope. With
+ * `catalogId`, `source` is that catalog package's pin, and the package
+ * installed at another revision of it matches too.
+ */
 export function getMatchingStorePackageScopes(
 	packageManager: StoreTargetPackageManager,
 	source: string,
+	catalogId?: string,
 ): StoreScopeTarget[] {
 	const inputIdentity = packageManager.getPackageIdentity(source);
 	return packageManager
@@ -31,7 +59,11 @@ export function getMatchingStorePackageScopes(
 		.filter((pkg) => {
 			const configuredIdentity = packageManager.getPackageIdentity(pkg.source, pkg.scope);
 			const scopedInputIdentity = packageManager.getPackageIdentity(source, pkg.scope);
-			return configuredIdentity === inputIdentity || configuredIdentity === scopedInputIdentity;
+			return (
+				configuredIdentity === inputIdentity ||
+				configuredIdentity === scopedInputIdentity ||
+				(catalogId !== undefined && isCatalogPackageRevision(pkg, source, catalogId))
+			);
 		})
 		.map((pkg) => ({
 			source: pkg.source,
@@ -44,8 +76,9 @@ export function chooseStoreRemoveTarget(
 	packageManager: StoreTargetPackageManager,
 	source: string,
 	local: boolean,
+	catalogId?: string,
 ): StoreTargetSelection {
-	const matches = getMatchingStorePackageScopes(packageManager, source);
+	const matches = getMatchingStorePackageScopes(packageManager, source, catalogId);
 	if (local) {
 		return { target: matches.find((match) => match.scope === "project") };
 	}
@@ -60,8 +93,9 @@ export function chooseStoreUpdateTarget(
 	packageManager: StoreTargetPackageManager,
 	source: string,
 	local = false,
+	catalogId?: string,
 ): StoreTargetSelection {
-	const matches = getMatchingStorePackageScopes(packageManager, source);
+	const matches = getMatchingStorePackageScopes(packageManager, source, catalogId);
 	if (local) {
 		return { target: matches.find((match) => match.scope === "project") };
 	}
@@ -72,9 +106,20 @@ export function chooseStoreUpdateTarget(
 	return { target: matches[0] };
 }
 
-/** Whether the installed target is already the source an update resolves to. A catalog update otherwise installs the new pin. */
-export function storeTargetMatchesUpdateSource(target: StoreScopeTarget, source: string): boolean {
-	return target.source === source || target.actionSource === source;
+/**
+ * Catalog package `catalogId` installed in `scope` at another revision than
+ * its pin `source`. Installing the pin beside it would configure the package
+ * twice: the store updates it instead.
+ */
+export function findStoreCatalogRevision(
+	packageManager: StoreTargetPackageManager,
+	source: string,
+	catalogId: string,
+	scope: StoreInstallScope,
+): StoreScopeTarget | undefined {
+	return getMatchingStorePackageScopes(packageManager, source, catalogId).find(
+		(match) => match.scope === scope && !storeUpdateTouches(packageManager, match, source),
+	);
 }
 
 /** Whether an update of `source` touched configured package `pkg`: the same package, by its identity in `pkg`'s scope. */
@@ -95,9 +140,4 @@ export function storeUpdateTouches(
  */
 export function storeReviewSource(source: string, cwd: string): string {
 	return isLocalPath(source) ? resolvePath(source, cwd, { trim: true }) : source;
-}
-
-/** Whether `source` pins a git commit: reinstalling it installs the same revision, with the same permissions. */
-export function storeSourcePinsCommit(source: string): boolean {
-	return /^[0-9a-f]{40}$/i.test(parseGitUrl(source)?.ref ?? "");
 }
