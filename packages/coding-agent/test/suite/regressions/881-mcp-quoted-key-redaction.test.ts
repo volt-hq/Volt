@@ -31,6 +31,17 @@ describe("issue #881: MCP redaction of quoted keys and API key", () => {
 		expect(redactMcpText('{"API key": "sk-abc"}')).toBe('{"API key": "[redacted]"}');
 	});
 
+	it("does not let a quoted value or a bare API key take the next key name as its value", () => {
+		expect(redactMcpText('grant_type: "refresh_token"\nrefresh_token: abc123')).toBe(
+			'grant_type: "refresh_token"\nrefresh_token: [redacted]',
+		);
+		expect(redactMcpText('grant_type: "refresh_token"\npassword: "hunter2"')).toBe(
+			'grant_type: "refresh_token"\npassword: "[redacted]"',
+		);
+		expect(redactMcpText("API key\ntoken: abc")).toBe("API key\ntoken: [redacted]");
+		expect(redactMcpText("Set your API key in settings")).toBe("Set your API key in settings");
+	});
+
 	it("never leaves part of an unterminated quoted value visible", () => {
 		expect(redactMcpText('token: "abc123')).toBe("token: [redacted]");
 	});
