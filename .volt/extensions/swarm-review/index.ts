@@ -7,7 +7,10 @@
  *
  *   /review branch main --engine swarm [--workers N] [--wave-size N] [--concurrency N] [--model <ref>]
  *                 [--thinking <level>] [--verifier <ref>] [--verifier-thinking <level>]
- *                 [--verifier-concurrency N] [--exec] [--fresh] [--straggler-grace <seconds>]
+ *                 [--verifier-concurrency N] [--fresh] [--straggler-grace <seconds>]
+ *
+ * Its verifiers run commands when the review grants `bash` (the TUI's `reviewTools` setting, or `tools` of an
+ * extension's `ctx.reviews.start`): each in a checkout of its own, which the review's setup prepared.
  *
  * The host resolves what is reviewed (uncommitted changes, a branch with or without its uncommitted changes, a
  * commit, or a pull request's code) and runs the engine as `review` work, so every client sees its progress (a step
@@ -133,7 +136,10 @@ function stringOf(value: unknown): string | undefined {
  * The run's options: the review's own (focus and scope, from the host), then the engine's parameters, each over the
  * extension's setting for it. The host has checked every parameter against its declaration.
  */
-export function resolveOptions(engine: Pick<ReviewEngineContext, "params" | "target">, settings: Settings): SwarmOptions {
+export function resolveOptions(
+	engine: Pick<ReviewEngineContext, "params" | "target" | "tools">,
+	settings: Settings,
+): SwarmOptions {
 	const { params } = engine;
 	const workers = integerOf(params.workers, integerOf(settings.workers, DEFAULT_WORKERS));
 	const waveSize = Math.min(workers, integerOf(params.waveSize, integerOf(settings.waveSize, DEFAULT_WAVE_SIZE)));
@@ -157,7 +163,7 @@ export function resolveOptions(engine: Pick<ReviewEngineContext, "params" | "tar
 			params.verifierConcurrency,
 			integerOf(settings.verifierConcurrency, DEFAULT_VERIFIER_CONCURRENCY),
 		),
-		exec: params.exec === true,
+		exec: engine.tools.includes("bash"),
 		fresh: params.fresh === true,
 		...(stragglerGrace !== undefined ? { stragglerGrace } : {}),
 		...(focus ? { focus } : {}),
@@ -431,7 +437,7 @@ export default function swarmReview(volt: ExtensionAPI) {
 		cost: "Much slower and costlier than the standard review: dozens of model sessions.",
 		targets: ["uncommitted", "branch", "branch_uncommitted", "commit", "pr"],
 		// Audited for paired remote clients: the options select models, counts, and timing, and the review is read-only
-		// against a throwaway checkout. --exec (arbitrary commands) is local-only, so a remote client can never set it.
+		// against a throwaway checkout. Commands run only with bash the host grants, which it never grants a remote review.
 		remoteSafe: true,
 		parameters: {
 			type: "object",
@@ -500,16 +506,8 @@ export default function swarmReview(volt: ExtensionAPI) {
 					title: "Fresh",
 					description: "Ignore the issues earlier reviews of this repository rejected.",
 				},
-				exec: {
-					type: "boolean",
-					title: "Run commands",
-					description:
-						"Give verifiers bash in a throwaway checkout, with your node_modules linked. Commands run with your full permissions and a prompt injection in the change could steer them: use it only for code you trust.",
-				},
 			},
 		},
-		// Only a client at the host may let verifiers run commands.
-		localOnly: ["exec"],
 		run: (engine) => runSwarmReview(engine, volt.settings),
 	});
 }

@@ -11085,6 +11085,25 @@
 					},
 					"maxItems": 64,
 					"uniqueItems": true
+				},
+				"setup": {
+					"type": "object",
+					"required": [
+						"command"
+					],
+					"properties": {
+						"command": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 10000
+						},
+						"timeoutMs": {
+							"type": "integer",
+							"minimum": 1,
+							"maximum": 3600000
+						}
+					},
+					"additionalProperties": false
 				}
 			},
 			"additionalProperties": false,

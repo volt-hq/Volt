@@ -1,6 +1,6 @@
 import type { ReviewEngineChangedFile, ReviewEngineContext } from "@hansjm10/volt-coding-agent";
 import { createBaseReader } from "./base.ts";
-import { linkDependencies, repositoryOf } from "./git.ts";
+import { repositoryOf } from "./git.ts";
 import type { DiffShard, ReviewTarget } from "./types.ts";
 
 /** What one worker's part of the diff holds at most, in bytes of patch text. */
@@ -66,11 +66,8 @@ export async function buildTarget(engine: ReviewEngineContext, signal: AbortSign
 		return `No reviewable changes in ${engine.target.description}${engine.target.controls.scope.length > 0 ? " match the scope" : ""}.`;
 	}
 	const { shards, fileHunks, hunkBytes } = packShards(reviewable);
-	const createCheckout = async (): Promise<string> => {
-		const checkout = await engine.checkout();
-		await linkDependencies(checkout, repository.repoRoot, signal);
-		return checkout;
-	};
+	// The host sets up each checkout as the review asked, such as installing its dependencies.
+	const createCheckout = (): Promise<string> => engine.checkout();
 	return {
 		repoRoot: repository.repoRoot,
 		checkout: await createCheckout(),

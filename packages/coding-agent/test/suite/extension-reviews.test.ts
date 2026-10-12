@@ -2,12 +2,15 @@
  * Extension reviews (`ctx.reviews`): an extension with the `exec` permission starts a review as the
  * conversation's `review` work, on the standard engine or a registered one, and learns how it ended from the
  * run's record. It cancels only its own reviews, disabling it cancels those still running, and reloading the
- * extensions cancels those still starting.
+ * extensions cancels those still starting. Every engine gets the tools and checkout setup the review grants, and
+ * the host decides the earlier findings an engine leaves undecided, so review rounds converge on any engine.
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { type FauxProvider, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
+import { Type } from "typebox";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createLoopbackClient, type LoopbackClient } from "../../src/client/protocol-client.ts";
 import type { ExtensionContext, ExtensionFactory } from "../../src/core/extensions/index.ts";
@@ -18,6 +21,7 @@ import { createHostHarness } from "./host-harness.ts";
 const PROBE = "ext:reviewer/probe";
 const SLOW = "ext:reviewer/slow";
 const DECIDER = "ext:reviewer/decider";
+const RUNNER = "ext:reviewer/runner";
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -57,10 +61,11 @@ const CANDIDATE = {
 };
 
 /**
- * How the decider engine settles the previous findings it is given: all `fixed` (reporting nothing), or the first
- * still `open` and reported again by its candidate.
+ * How the decider engine settles the previous findings it is given: all `fixed` (reporting nothing), the first
+ * still `open` and reported again by its candidate, or none of them (`skip`, reporting nothing), as an engine that
+ * cannot decide earlier findings does.
  */
-type Decide = "open" | "fixed";
+type Decide = "open" | "fixed" | "skip";
 
 /** An engine that follows an earlier run: it decides each previous finding as `decide` says. */
 function decider(decide: () => Decide, seen: ReviewEngineContext["previousFindings"][]) {
@@ -77,7 +82,7 @@ function decider(decide: () => Decide, seen: ReviewEngineContext["previousFindin
 				decisions: open
 					? [{ candidateId: "c1", outcome: "accept", method: "Read it.", rationale: "It is 3.", confidence: 0.9 }]
 					: [],
-				priorFindingDecisions: ctx.previousFindings.map((finding) => ({
+				priorFindingDecisions: (decide() === "skip" ? [] : ctx.previousFindings).map((finding) => ({
 					findingId: finding.id,
 					outcome: open ? ("open" as const) : ("fixed" as const),
 					...(open ? { candidateId: "c1" } : {}),
@@ -170,6 +175,12 @@ interface Fixture {
 	decide: { next: Decide };
 	/** The previous findings each run of the decider engine was given. */
 	decided: ReviewEngineContext["previousFindings"][];
+	/** What each run of the runner engine was granted, and what the setup left in the checkout it asked for. */
+	ran: Array<{ tools: readonly string[]; marker: string | undefined }>;
+	/** The conversation's model, which the host's own verification passes run on. */
+	faux: FauxProvider;
+	/** How many times the reviewer extension's `review_probe` tool ran. */
+	probed: () => number;
 }
 
 async function setup(): Promise<Fixture> {
@@ -177,6 +188,8 @@ async function setup(): Promise<Fixture> {
 	const slowStarted = Promise.withResolvers<void>();
 	const decide: { next: Decide } = { next: "open" };
 	const decided: ReviewEngineContext["previousFindings"][] = [];
+	const ran: Fixture["ran"] = [];
+	let probed = 0;
 	const recordContext =
 		(id: string): ExtensionFactory =>
 		(volt) => {
@@ -192,6 +205,16 @@ async function setup(): Promise<Fixture> {
 				factory: (volt) => {
 					recordContext("reviewer")(volt);
 					volt.registerWorkKind("loop", {});
+					volt.registerTool({
+						name: "review_probe",
+						label: "review_probe",
+						description: "An extension tool a review may be granted.",
+						parameters: Type.Object({}),
+						async execute() {
+							probed++;
+							return { content: [{ type: "text", text: "probed" }], details: {} };
+						},
+					});
 					volt.registerReviewEngine("probe", {
 						label: "Probe",
 						description: "Reports one finding.",
@@ -208,6 +231,20 @@ async function setup(): Promise<Fixture> {
 						description: "Decides the findings of the run it follows.",
 						targets: ["uncommitted", "commit"],
 						run: decider(() => decide.next, decided),
+					});
+					volt.registerReviewEngine("runner", {
+						label: "Runner",
+						description: "Runs commands in a checkout, then reports as the probe does.",
+						targets: ["uncommitted"],
+						async run(ctx) {
+							const checkout = await ctx.checkout();
+							const marker = join(checkout, "setup-marker");
+							ran.push({
+								tools: ctx.tools,
+								marker: existsSync(marker) ? readFileSync(marker, "utf8") : undefined,
+							});
+							await probe(ctx);
+						},
 					});
 					volt.registerReviewEngine("slow", {
 						label: "Slow",
@@ -243,6 +280,9 @@ async function setup(): Promise<Fixture> {
 		slowStarted: slowStarted.promise,
 		decide,
 		decided,
+		ran,
+		faux: harness.faux,
+		probed: () => probed,
 	};
 }
 
@@ -257,6 +297,12 @@ describe("ctx.reviews", () => {
 				label: "Decider",
 				description: "Decides the findings of the run it follows.",
 				targets: ["uncommitted", "commit"],
+			},
+			{
+				id: RUNNER,
+				label: "Runner",
+				description: "Runs commands in a checkout, then reports as the probe does.",
+				targets: ["uncommitted"],
 			},
 			{ id: SLOW, label: "Slow", description: "Runs until cancelled.", targets: ["uncommitted"] },
 		]);
@@ -356,11 +402,6 @@ describe("ctx.reviews", () => {
 			/depth must be at most 3/,
 		],
 		[
-			"tools for an engine's review",
-			{ target: { kind: "uncommitted" }, engine: PROBE, tools: ["bash"] },
-			/tools apply to the standard review only/,
-		],
-		[
 			"an earlier run it does not have",
 			{ target: { kind: "uncommitted" }, previousRunId: "review:nowhere" },
 			/Unknown review run/,
@@ -406,6 +447,180 @@ describe("ctx.reviews", () => {
 				errorMessage: "The review checkout's setup failed (exit 7): cannot-install",
 			},
 		});
+	});
+
+	test("grants an engine's review its tools, and sets up each checkout the engine asks for", async () => {
+		const { reviewer, ran } = await setup();
+		const granted = await reviewer.reviews.start({
+			target: { kind: "uncommitted" },
+			engine: RUNNER,
+			tools: ["bash"],
+			setup: { command: "printf ready > setup-marker" },
+		});
+		expect(await granted.ended).toMatchObject({ status: "completed" });
+		const plain = await reviewer.reviews.start({ target: { kind: "uncommitted" }, engine: RUNNER });
+		expect(await plain.ended).toMatchObject({ status: "completed" });
+		expect(ran).toEqual([
+			{ tools: ["bash"], marker: "ready" },
+			{ tools: [], marker: undefined },
+		]);
+
+		// A setup that fails rejects the checkout, and the engine's review with it.
+		const failing = await reviewer.reviews.start({
+			target: { kind: "uncommitted" },
+			engine: RUNNER,
+			tools: ["bash"],
+			setup: { command: "echo no-registry >&2; exit 3" },
+		});
+		expect(await failing.ended).toMatchObject({
+			status: "failed",
+			error: "The review checkout's setup failed (exit 3): no-registry",
+		});
+	});
+
+	test("decides the earlier findings an engine leaves undecided, so the next round converges", async () => {
+		const { reviewer, decide, faux } = await setup();
+		const first = await reviewer.reviews.start({ target: { kind: "uncommitted" }, engine: PROBE });
+		const found = (await first.ended).run?.findings?.[0];
+		if (!found) throw new Error("Expected a finding");
+
+		// The engine decides nothing; the host's verifier finds the earlier finding fixed.
+		decide.next = "skip";
+		faux.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall("report_review_verification", {
+					summary: "The earlier finding is gone.",
+					assessment: "complete",
+					decisions: [],
+					priorFindingDecisions: [
+						{
+							findingId: found.id,
+							outcome: "fixed",
+							method: "Read the head.",
+							rationale: "Back to 2.",
+							confidence: 0.9,
+						},
+					],
+					limitations: [],
+				}),
+				{ stopReason: "toolUse" },
+			),
+		]);
+		const second = await reviewer.reviews.start({
+			target: { kind: "uncommitted" },
+			engine: DECIDER,
+			previousRunId: first.id,
+		});
+		expect((await second.ended).run).toMatchObject({
+			completionStatus: "complete",
+			overallCorrectness: "correct",
+			findings: [],
+		});
+		expect((await reviewer.reviews.result(first.id))?.findings).toEqual([
+			expect.objectContaining({ id: found.id, status: "fixed" }),
+		]);
+	});
+
+	test("leaves a round incomplete, not wrong, when it cannot decide what the engine left undecided", async () => {
+		const { reviewer, decide, faux } = await setup();
+		const first = await reviewer.reviews.start({ target: { kind: "uncommitted" }, engine: PROBE });
+		const found = (await first.ended).run?.findings?.[0];
+		if (!found) throw new Error("Expected a finding");
+
+		// The host's verifier never reports: the earlier finding is uncertain, and stays open where it was found.
+		decide.next = "skip";
+		faux.setResponses(Array.from({ length: 6 }, () => fauxAssistantMessage("No report.")));
+		const second = await reviewer.reviews.start({
+			target: { kind: "uncommitted" },
+			engine: DECIDER,
+			previousRunId: first.id,
+		});
+		expect((await second.ended).run).toMatchObject({
+			status: "incomplete",
+			completionStatus: "incomplete",
+			findings: [expect.objectContaining({ id: found.id, status: "uncertain" })],
+		});
+		expect((await reviewer.reviews.result(first.id))?.findings).toEqual([
+			expect.objectContaining({ id: found.id, status: "open" }),
+		]);
+	});
+
+	test("decides earlier findings with the review's tools in a set-up checkout, extension tools among them, and records its commands", async () => {
+		const { reviewer, decide, faux, probed } = await setup();
+		const first = await reviewer.reviews.start({ target: { kind: "uncommitted" }, engine: PROBE });
+		const found = (await first.ended).run?.findings?.[0];
+		if (!found) throw new Error("Expected a finding");
+
+		decide.next = "skip";
+		const seen: string[] = [];
+		const call = (name: string, args: Parameters<typeof fauxToolCall>[1]) =>
+			fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
+		faux.setResponses([
+			call("bash", { command: "cat setup-marker" }),
+			(context) => {
+				seen.push(JSON.stringify(context.messages.at(-1)));
+				return call("review_probe", {});
+			},
+			(context) => {
+				seen.push(JSON.stringify(context.messages.at(-1)));
+				return call("report_review_verification", {
+					summary: "Checked.",
+					assessment: "complete",
+					decisions: [],
+					priorFindingDecisions: [
+						{ findingId: found.id, outcome: "fixed", method: "Ran it.", rationale: "Gone.", confidence: 0.9 },
+					],
+					limitations: [],
+				});
+			},
+		]);
+		const second = await reviewer.reviews.start({
+			target: { kind: "uncommitted" },
+			engine: DECIDER,
+			previousRunId: first.id,
+			tools: ["bash", "review_probe"],
+			setup: { command: "printf ready > setup-marker" },
+		});
+		const run = (await second.ended).run;
+		expect(seen[0]).toContain("ready");
+		expect(seen[1]).toContain("probed");
+		expect(probed()).toBe(1);
+		expect(run).toMatchObject({ completionStatus: "complete", findings: [] });
+		// The review ran a command after all: it is not a static one.
+		expect(run?.coverage?.commandsRun).toEqual(["cat setup-marker"]);
+		expect(run?.coverage?.residualRisk).not.toContain(
+			"Static review only. This review did not run tests or runtime checks.",
+		);
+	});
+
+	test("cancels with the review while the host decides the earlier findings, closing none", async () => {
+		const { reviewer, decide, faux } = await setup();
+		const first = await reviewer.reviews.start({ target: { kind: "uncommitted" }, engine: PROBE });
+		const found = (await first.ended).run?.findings?.[0];
+		if (!found) throw new Error("Expected a finding");
+
+		decide.next = "skip";
+		const deciding = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		faux.setResponses([
+			async () => {
+				deciding.resolve();
+				await release.promise;
+				return fauxAssistantMessage("Too late.");
+			},
+		]);
+		const second = await reviewer.reviews.start({
+			target: { kind: "uncommitted" },
+			engine: DECIDER,
+			previousRunId: first.id,
+		});
+		await deciding.promise;
+		await reviewer.reviews.cancel(second.id);
+		release.resolve();
+		expect(await second.ended).toMatchObject({ status: "cancelled" });
+		expect((await reviewer.reviews.result(first.id))?.findings).toEqual([
+			expect.objectContaining({ id: found.id, status: "open" }),
+		]);
 	});
 
 	test("shows a review it starts from its own work under that work", async () => {
