@@ -4,7 +4,13 @@ import { minimatch } from "minimatch";
 import type { ReviewRunControls } from "./review.ts";
 import { ReviewSourceUnavailableError, resolveCanonicalReviewSource } from "./review-links.ts";
 import { createReviewAccountingMessage } from "./review-presentation.ts";
-import type { ParsedReview, ReviewFinding, ReviewFindingOutcomeReason, ReviewFindingStatus } from "./review-report.ts";
+import type {
+	ParsedReview,
+	ReviewFinding,
+	ReviewFindingOutcomeReason,
+	ReviewFindingStatus,
+	ReviewPriorFindingDecision,
+} from "./review-report.ts";
 import type {
 	ReviewBranchBase,
 	ReviewChangedFile,
@@ -1007,6 +1013,118 @@ function planReviewFromPreviousRun(
 		.filter((finding) => finding.status === "dismissed")
 		.map((finding) => finding.fingerprint);
 	return { mode: "incremental", previousRun, changedPaths, priorOpenFindings, suppressedDismissedFingerprints };
+}
+
+/**
+ * The plan of a full review that follows `previousRun`, an earlier review of the same target: it reviews every
+ * changed path, and its verifier decides each finding `previousRun` left open. Findings `previousRun` dismissed
+ * are not reported again.
+ */
+export function followUpReviewPlan(previousRun: ReviewRunRecord, snapshot: ReviewSnapshot): ReviewIncrementalPlan {
+	const findings = previousRun.result?.findings ?? [];
+	return {
+		mode: "full",
+		previousRun,
+		changedPaths: snapshot.changedFiles.map((file) => file.path),
+		priorOpenFindings: findings.filter((finding) => finding.status !== "fixed" && finding.status !== "dismissed"),
+		suppressedDismissedFingerprints: findings
+			.filter((finding) => finding.status === "dismissed")
+			.map((finding) => finding.fingerprint),
+	};
+}
+
+/** Whether `plan` is a full review that decides the findings of the run it follows ({@link followUpReviewPlan}). */
+export function decidesPreviousFindings(
+	plan: ReviewIncrementalPlan | undefined,
+): plan is ReviewIncrementalPlan & { previousRun: ReviewRunRecord } {
+	return plan?.mode === "full" && plan.previousRun !== undefined;
+}
+
+/** Throws unless `previousRun` reviewed the target `snapshot` reviews: the same kind, and the same pull request. */
+export function assertFollowsReviewOf(previousRun: ReviewRunRecord, snapshot: ReviewSnapshot): void {
+	const previous = previousRun.target.identity;
+	const current = snapshot.identity;
+	if (
+		previous.kind !== current.kind ||
+		(current.kind === "pr" &&
+			(previous.pullRequest?.providerId !== current.pullRequest?.providerId ||
+				previous.pullRequest?.url !== current.pullRequest?.url))
+	) {
+		throw new Error(`Review ${previousRun.runId} reviewed another target; a review follows one of its own target.`);
+	}
+}
+
+/**
+ * The findings of a full review that follows an earlier run, once its verifier decided that run's open findings:
+ * a finding decided open keeps its id in the finding that reports it now (`candidateFingerprints` maps candidate ids
+ * to the fingerprints of their findings), or, reported by none, is carried as it was; one decided uncertain is
+ * carried as uncertain. Findings decided fixed are not carried: they are returned, to be closed where they were found.
+ */
+export function applyPreviousFindingDecisions(
+	findings: readonly ReviewFinding[],
+	priorOpenFindings: readonly ReviewFinding[],
+	decisions: readonly ReviewPriorFindingDecision[],
+	candidateFingerprints: ReadonlyMap<string, string>,
+): { findings: ReviewFinding[]; fixed: ReviewPriorFindingDecision[] } {
+	const result = findings.map((finding) => structuredClone(finding));
+	const fixed: ReviewPriorFindingDecision[] = [];
+	for (const prior of priorOpenFindings) {
+		const decision = decisions.find((candidate) => candidate.findingId === prior.id);
+		if (!decision) continue;
+		if (decision.outcome === "fixed") {
+			fixed.push(decision);
+			continue;
+		}
+		const fingerprint =
+			decision.candidateId === undefined ? undefined : candidateFingerprints.get(decision.candidateId);
+		const current =
+			fingerprint === undefined ? undefined : result.find((finding) => finding.fingerprint === fingerprint);
+		// Reported again with the same anchor, it already has its id.
+		const kept = result.some((finding) => finding.id === prior.id);
+		if (current && decision.outcome === "open") {
+			if (!kept) current.id = prior.id;
+			continue;
+		}
+		if (!kept) result.push({ ...structuredClone(prior), status: decision.outcome });
+	}
+	return { findings: result, fixed };
+}
+
+/** The most runs {@link closeFixedFindings} walks back through. */
+const MAX_FOLLOWED_RUNS = 16;
+
+/**
+ * Close the findings a complete review that followed `previousRunId` decided fixed: in that run and in each run it
+ * followed in turn, wherever the finding (which keeps its id from run to run) is still open. A run this conversation
+ * does not hold, or whose outcome it cannot record, is left as it is.
+ */
+export async function closeFixedFindings(
+	writer: SessionWriter,
+	previousRunId: string,
+	reviewRunId: string,
+	fixed: readonly ReviewPriorFindingDecision[],
+): Promise<void> {
+	if (fixed.length === 0) return;
+	const seen = new Set<string>();
+	let runId: string | undefined = previousRunId;
+	while (runId !== undefined && !seen.has(runId) && seen.size < MAX_FOLLOWED_RUNS) {
+		seen.add(runId);
+		const run: HydratedReviewRunRecord | undefined = await getCanonicalReviewRun(writer.sessionManager, runId).catch(
+			() => undefined,
+		);
+		if (!run) return;
+		for (const decision of fixed) {
+			const finding = run.result?.findings.find((candidate) => candidate.id === decision.findingId);
+			if (!finding || finding.status === "fixed" || finding.status === "dismissed") continue;
+			await recordReviewFindingOutcome(writer, {
+				runId: run.runId,
+				findingId: finding.id,
+				status: "fixed",
+				note: `Review ${reviewRunId} found it fixed: ${decision.rationale}`,
+			}).catch(() => undefined);
+		}
+		runId = run.parentRunId;
+	}
 }
 
 export function reconcileFindingIdentities(

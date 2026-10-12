@@ -54,6 +54,11 @@ export interface ReviewVerificationDecision {
 export interface ReviewPriorFindingDecision {
 	findingId: string;
 	outcome: "open" | "fixed" | "uncertain";
+	/**
+	 * For a finding still open in a review that follows an earlier run: the accepted candidate of this review that
+	 * reports it at its current location, which keeps the finding's id.
+	 */
+	candidateId?: string;
 	method: string;
 	rationale: string;
 	confidence: number;
@@ -250,6 +255,7 @@ const PriorFindingDecisionSchema = Type.Object(
 	{
 		findingId: Type.String({ minLength: 1, maxLength: 120 }),
 		outcome: Type.Union([Type.Literal("open"), Type.Literal("fixed"), Type.Literal("uncertain")]),
+		candidateId: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })),
 		method: Type.String({ minLength: 1, maxLength: 1_000 }),
 		rationale: Type.String({ minLength: 1, maxLength: 2_000 }),
 		confidence: Type.Number({ minimum: 0, maximum: 1 }),
@@ -537,10 +543,22 @@ export async function validateReviewCandidates(
 	return { candidates, errors };
 }
 
+/** How a verification report decides the prior findings it was given. */
+export interface ReviewPriorDecisionRules {
+	/**
+	 * The review follows an earlier run and re-reviews everything: a prior finding still open must be reported again,
+	 * so a complete report names the accepted candidate that reports it now.
+	 */
+	reportedAgain?: boolean;
+	/** Every prior finding needs a decision; true by default. */
+	decideEvery?: boolean;
+}
+
 export function validateReviewVerification(
 	candidates: readonly ValidatedReviewCandidate[],
 	report: ReviewVerificationReport,
 	priorFindings: readonly ReviewFinding[] = [],
+	rules: ReviewPriorDecisionRules = {},
 ): string[] {
 	const errors: string[] = [];
 	const expectedIds = new Set(candidates.map((candidate) => candidate.candidateId));
@@ -558,19 +576,37 @@ export function validateReviewVerification(
 	for (const candidateId of expectedIds)
 		if (!seen.has(candidateId)) errors.push(`Missing verification decision for ${candidateId}`);
 	const expectedPriorIds = new Set(priorFindings.map((finding) => finding.id));
+	const accepted = new Set(
+		report.decisions.filter((decision) => decision.outcome === "accept").map((decision) => decision.candidateId),
+	);
 	const seenPrior = new Set<string>();
+	const reportedBy = new Set<string>();
 	for (const [index, decision] of report.priorFindingDecisions.entries()) {
+		const label = `priorFindingDecisions[${index}]`;
 		if (!expectedPriorIds.has(decision.findingId))
-			errors.push(`priorFindingDecisions[${index}] references unknown finding ${decision.findingId}`);
-		if (seenPrior.has(decision.findingId))
-			errors.push(`priorFindingDecisions[${index}] duplicates finding ${decision.findingId}`);
+			errors.push(`${label} references unknown finding ${decision.findingId}`);
+		if (seenPrior.has(decision.findingId)) errors.push(`${label} duplicates finding ${decision.findingId}`);
 		seenPrior.add(decision.findingId);
 		if (!Number.isFinite(decision.confidence) || decision.confidence < 0 || decision.confidence > 1) {
-			errors.push(`priorFindingDecisions[${index}].confidence must be finite and between 0 and 1`);
+			errors.push(`${label}.confidence must be finite and between 0 and 1`);
+		}
+		if (decision.candidateId !== undefined) {
+			if (decision.outcome !== "open") errors.push(`${label} names a candidate for a finding that is not open`);
+			else if (!accepted.has(decision.candidateId))
+				errors.push(`${label}.candidateId must name an accepted candidate of this review`);
+			else if (reportedBy.has(decision.candidateId))
+				errors.push(`${label}.candidateId reports another prior finding already`);
+			reportedBy.add(decision.candidateId);
+		} else if (rules.reportedAgain && decision.outcome === "open" && report.assessment === "complete") {
+			errors.push(
+				`${label} keeps finding ${decision.findingId} open: name in candidateId the accepted candidate that reports it now, or set assessment=incomplete with a challenge at its current location`,
+			);
 		}
 	}
-	for (const findingId of expectedPriorIds)
-		if (!seenPrior.has(findingId)) errors.push(`Missing prior finding decision for ${findingId}`);
+	if (rules.decideEvery !== false) {
+		for (const findingId of expectedPriorIds)
+			if (!seenPrior.has(findingId)) errors.push(`Missing prior finding decision for ${findingId}`);
+	}
 	if (report.assessment === "incomplete" && !report.challenge?.trim())
 		errors.push("Incomplete verification requires a challenge");
 	if (report.assessment === "complete" && (report.challenge !== undefined || report.challengeLocations !== undefined))
@@ -715,6 +751,29 @@ export function hostReviewSummary(completionStatus: ReviewCompletionStatus, find
 	return completionStatus === "complete"
 		? `Review completed with ${findings}.`
 		: `Review incomplete with ${findings}.`;
+}
+
+/**
+ * Settle `parsed`'s verdict over its findings as they finally stand, prior findings included: one still uncertain
+ * leaves the review incomplete, and a complete review is incorrect while it keeps a P0-P2 finding open.
+ */
+export function settleReviewVerdict(parsed: ParsedReview): void {
+	if (parsed.findings.some((finding) => finding.status === "uncertain")) {
+		parsed.completionStatus = "incomplete";
+		delete parsed.overallCorrectness;
+		parsed.overallExplanation =
+			"Review verification is incomplete because at least one prior finding remains uncertain.";
+	} else if (parsed.completionStatus === "complete") {
+		parsed.overallCorrectness = parsed.findings.some(
+			(finding) => finding.priority <= 2 && finding.status !== "fixed" && finding.status !== "dismissed",
+		)
+			? "incorrect"
+			: "correct";
+		parsed.overallExplanation =
+			parsed.overallCorrectness === "incorrect"
+				? "The host retained at least one independently verified P0-P2 finding."
+				: "Independent verification completed with no retained P0-P2 findings.";
+	}
 }
 
 export function buildParsedReview(options: BuildParsedReviewOptions): ParsedReview {

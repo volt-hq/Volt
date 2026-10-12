@@ -311,10 +311,10 @@ export class ExtensionReviewRuns implements ExtensionReviewsHandler {
 		if (params !== undefined && extensionEngine === undefined) {
 			throw invalid("params need an engine other than standard");
 		}
-		const parentRunId = optionalText(options.parentRunId, "parentRunId");
+		const previousRunId = optionalText(options.previousRunId, "previousRunId");
 		const tools = textList(options.tools, "tools");
-		if (extensionEngine !== undefined && (parentRunId !== undefined || tools !== undefined)) {
-			throw invalid("parentRunId and tools apply to the standard review only");
+		if (extensionEngine !== undefined && tools !== undefined) {
+			throw invalid("tools apply to the standard review only");
 		}
 		if (tools !== undefined) {
 			const available = new Set(this.host.toolNames());
@@ -341,8 +341,8 @@ export class ExtensionReviewRuns implements ExtensionReviewsHandler {
 			...(scope === undefined ? {} : { scope }),
 			...(options.effort === undefined ? {} : { effort: options.effort }),
 			...(options.includeOptional === undefined ? {} : { includeOptional: options.includeOptional }),
-			// An incremental review builds only on the run it names: never on whatever review ran last here.
-			scopeMode: parentRunId === undefined ? "full" : "incremental",
+			// Never incremental: a review an extension starts reviews everything.
+			scopeMode: "full",
 		};
 		return {
 			target,
@@ -352,7 +352,7 @@ export class ExtensionReviewRuns implements ExtensionReviewsHandler {
 				...(extensionEngine === undefined ? {} : { engine: extensionEngine }),
 				...(params === undefined ? {} : { engineParams: params }),
 				controls,
-				...(parentRunId === undefined ? {} : { parentRunId }),
+				...(previousRunId === undefined ? {} : { previousRunId }),
 				...(tools === undefined ? {} : { tools }),
 				...(parentWorkId === undefined ? {} : { parentWorkId }),
 			},

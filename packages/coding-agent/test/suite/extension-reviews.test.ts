@@ -16,6 +16,7 @@ import { createHostHarness } from "./host-harness.ts";
 
 const PROBE = "ext:reviewer/probe";
 const SLOW = "ext:reviewer/slow";
+const DECIDER = "ext:reviewer/decider";
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -38,6 +39,55 @@ function initializeRepository(cwd: string): void {
 	git("add", ".");
 	git("commit", "-m", "initial");
 	writeFileSync(join(cwd, "src", "value.ts"), "export const value = 1;\nexport const other = 3;\n");
+}
+
+const CANDIDATE = {
+	candidateId: "c1",
+	title: "Other changed",
+	body: "The constant changed from 2 to 3.",
+	trigger: "Read other.",
+	impact: "Callers see 3.",
+	category: "correctness",
+	rootCauseKey: "other-changed",
+	priority: 1 as const,
+	confidence: 0.9,
+	changeLocation: { path: "src/value.ts", side: "head" as const, startLine: 2, endLine: 2 },
+	evidenceLocations: [],
+};
+
+/**
+ * How the decider engine settles the previous findings it is given: all `fixed` (reporting nothing), or the first
+ * still `open` and reported again by its candidate.
+ */
+type Decide = "open" | "fixed";
+
+/** An engine that follows an earlier run: it decides each previous finding as `decide` says. */
+function decider(decide: () => Decide, seen: ReviewEngineContext["previousFindings"][]) {
+	return async (ctx: ReviewEngineContext): Promise<void> => {
+		seen.push(ctx.previousFindings);
+		const hunks = ctx.changedFiles().flatMap((file) => file.hunks.map((hunk) => hunk.id));
+		ctx.pass().diff(hunks, 64 * 1024);
+		const open = decide() === "open";
+		await ctx.submit({
+			candidates: { summary: "Decided.", limitations: [], candidates: open ? [CANDIDATE] : [] },
+			verification: {
+				summary: "Decided.",
+				assessment: "complete",
+				decisions: open
+					? [{ candidateId: "c1", outcome: "accept", method: "Read it.", rationale: "It is 3.", confidence: 0.9 }]
+					: [],
+				priorFindingDecisions: ctx.previousFindings.map((finding) => ({
+					findingId: finding.id,
+					outcome: open ? ("open" as const) : ("fixed" as const),
+					...(open ? { candidateId: "c1" } : {}),
+					method: "Read the head.",
+					rationale: open ? "Still 3." : "Back to 2.",
+					confidence: 0.9,
+				})),
+				limitations: [],
+			},
+		});
+	};
 }
 
 /** An engine that reviews every hunk and reports one finding on the changed line. */
@@ -86,11 +136,17 @@ interface Fixture {
 	bystander: ExtensionContext;
 	/** Resolves once the slow engine's run started; its run ends when cancelled. */
 	slowStarted: Promise<void>;
+	/** How the decider engine settles previous findings next. */
+	decide: { next: Decide };
+	/** The previous findings each run of the decider engine was given. */
+	decided: ReviewEngineContext["previousFindings"][];
 }
 
 async function setup(): Promise<Fixture> {
 	const contexts = new Map<string, ExtensionContext>();
 	const slowStarted = Promise.withResolvers<void>();
+	const decide: { next: Decide } = { next: "open" };
+	const decided: ReviewEngineContext["previousFindings"][] = [];
 	const recordContext =
 		(id: string): ExtensionFactory =>
 		(volt) => {
@@ -117,6 +173,12 @@ async function setup(): Promise<Fixture> {
 						},
 						run: probe,
 					});
+					volt.registerReviewEngine("decider", {
+						label: "Decider",
+						description: "Decides the findings of the run it follows.",
+						targets: ["uncommitted", "commit"],
+						run: decider(() => decide.next, decided),
+					});
 					volt.registerReviewEngine("slow", {
 						label: "Slow",
 						description: "Runs until cancelled.",
@@ -142,7 +204,7 @@ async function setup(): Promise<Fixture> {
 	const reviewer = contexts.get("reviewer");
 	const bystander = contexts.get("bystander");
 	if (!reviewer || !bystander) throw new Error("The extensions did not start");
-	return { conversation, client, reviewer, bystander, slowStarted: slowStarted.promise };
+	return { conversation, client, reviewer, bystander, slowStarted: slowStarted.promise, decide, decided };
 }
 
 describe("ctx.reviews", () => {
@@ -151,6 +213,12 @@ describe("ctx.reviews", () => {
 		expect(reviewer.reviews.engines()).toEqual([
 			expect.objectContaining({ id: "standard", label: "Standard", targets: expect.arrayContaining(["pr"]) }),
 			{ id: PROBE, label: "Probe", description: "Reports one finding.", cost: "Cheap.", targets: ["uncommitted"] },
+			{
+				id: DECIDER,
+				label: "Decider",
+				description: "Decides the findings of the run it follows.",
+				targets: ["uncommitted", "commit"],
+			},
 			{ id: SLOW, label: "Slow", description: "Runs until cancelled.", targets: ["uncommitted"] },
 		]);
 	});
@@ -187,7 +255,7 @@ describe("ctx.reviews", () => {
 		expect(await reviewer.reviews.result("no-such-run")).toBeUndefined();
 	});
 
-	test("starts the standard review, full unless it names an earlier run, and records how it ended", async () => {
+	test("starts the standard review, always full, and records how it ended", async () => {
 		const { conversation, reviewer } = await setup();
 		const review = await reviewer.reviews.start({ target: { kind: "uncommitted" }, effort: "low" });
 		expect(conversation.session.work.get(review.id)).toMatchObject({ kind: "review" });
@@ -224,9 +292,14 @@ describe("ctx.reviews", () => {
 			/depth must be at most 3/,
 		],
 		[
-			"an earlier run for an engine's review",
-			{ target: { kind: "uncommitted" }, engine: PROBE, parentRunId: "run-1" },
-			/apply to the standard review only/,
+			"tools for an engine's review",
+			{ target: { kind: "uncommitted" }, engine: PROBE, tools: ["bash"] },
+			/tools apply to the standard review only/,
+		],
+		[
+			"an earlier run it does not have",
+			{ target: { kind: "uncommitted" }, previousRunId: "review:nowhere" },
+			/Unknown review run/,
 		],
 		["a workspace file tool", { target: { kind: "uncommitted" }, tools: ["read"] }, /not available to reviews: read/],
 		["a tool the conversation does not have", { target: { kind: "uncommitted" }, tools: ["teleport"] }, /teleport/],
@@ -253,6 +326,47 @@ describe("ctx.reviews", () => {
 		});
 		const reviewId = await started.promise;
 		expect(conversation.session.work.get(reviewId)).toMatchObject({ kind: "review", parentWorkId: workId });
+	});
+
+	test("follows the previous round: a finding still open keeps its id, and one found fixed closes where it was found", async () => {
+		const { reviewer, decide, decided } = await setup();
+		const first = await reviewer.reviews.start({ target: { kind: "uncommitted" }, engine: PROBE });
+		const found = (await first.ended).run?.findings?.[0];
+		if (!found) throw new Error("Expected a finding");
+
+		// The next round keeps it open: the finding that reports it now has its id.
+		decide.next = "open";
+		const second = await reviewer.reviews.start({
+			target: { kind: "uncommitted" },
+			engine: DECIDER,
+			previousRunId: first.id,
+		});
+		const kept = (await second.ended).run;
+		expect(decided.at(-1)?.map((finding) => finding.id)).toEqual([found.id]);
+		expect(kept).toMatchObject({
+			parentRunId: first.id,
+			options: { scopeMode: "full" },
+			findings: [{ id: found.id, status: "open", title: "Other changed" }],
+		});
+
+		// The round after finds it fixed: it closes in both earlier rounds.
+		decide.next = "fixed";
+		const third = await reviewer.reviews.start({
+			target: { kind: "uncommitted" },
+			engine: DECIDER,
+			previousRunId: second.id,
+		});
+		expect((await third.ended).run).toMatchObject({ completionStatus: "complete", findings: [] });
+		for (const round of [first.id, second.id]) {
+			expect((await reviewer.reviews.result(round))?.findings).toEqual([
+				expect.objectContaining({ id: found.id, status: "fixed" }),
+			]);
+		}
+
+		// A review follows only a review of its own target.
+		await expect(
+			reviewer.reviews.start({ target: { kind: "commit", ref: "HEAD" }, engine: DECIDER, previousRunId: first.id }),
+		).rejects.toThrow(/reviewed another target/);
 	});
 
 	test("records what became of the findings of its own reviews", async () => {

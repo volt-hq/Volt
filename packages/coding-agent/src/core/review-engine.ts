@@ -47,14 +47,17 @@ import {
 	type ParsedReview,
 	type ReviewCandidateReport,
 	ReviewCandidateReportSchema,
+	type ReviewFinding,
+	type ReviewPriorFindingDecision,
 	type ReviewVerificationReport,
 	ReviewVerificationReportSchema,
+	settleReviewVerdict,
 	type ValidatedReviewCandidate,
 	validateReviewCandidates,
 	validateReviewVerification,
 } from "./review-report.ts";
 import type { ReviewChangedFileStatus, ReviewSnapshot, ReviewSnapshotIdentity } from "./review-snapshot.ts";
-import { isExtensionReviewEngine } from "./review-state.ts";
+import { applyPreviousFindingDecisions, isExtensionReviewEngine } from "./review-state.ts";
 import {
 	createReviewSnapshotTools,
 	deliverReviewDiff,
@@ -406,6 +409,13 @@ export interface ReviewEngineContext {
 	/** Aborted when the review is cancelled or the conversation closes. */
 	readonly signal: AbortSignal;
 	readonly target: ReviewEngineTarget;
+	/**
+	 * When this review follows an earlier review of its target: the findings that run left open, which the code may
+	 * have fixed or moved since. A decision for one in the verification's `priorFindingDecisions` settles it: `fixed`
+	 * closes it in the run where it was found, and `open` with the `candidateId` of the accepted candidate that
+	 * reports it now keeps its id there. One without a decision stays open where it was found. Empty otherwise.
+	 */
+	readonly previousFindings: readonly ReviewFinding[];
 	/** The conversation's working directory. */
 	readonly cwd: string;
 	/**
@@ -487,6 +497,8 @@ export interface ReviewEngineRunOptions {
 	target: ReviewTarget;
 	controls: ReviewRunControls;
 	cwd: string;
+	/** The findings the earlier run this review follows left open. */
+	previousFindings?: readonly ReviewFinding[];
 }
 
 /** The state of one engine run: its passes' coverage, and the result it submitted. */
@@ -495,10 +507,12 @@ export class ReviewEngineRun {
 	private readonly target: ReviewTarget;
 	private readonly controls: ReviewRunControls;
 	private readonly cwd: string;
+	private readonly previousFindings: readonly ReviewFinding[];
 	private readonly coverage = new ReviewRunCoverage();
 	private readonly inScopeHunkIds: ReadonlySet<string>;
 	private inventory: ReviewCoverageTracker | undefined;
 	private submitted: ParsedReview | undefined;
+	private fixed: ReviewPriorFindingDecision[] = [];
 	private ended = false;
 
 	constructor(options: ReviewEngineRunOptions) {
@@ -506,6 +520,7 @@ export class ReviewEngineRun {
 		this.target = options.target;
 		this.controls = controlsWithDefaults(options.controls);
 		this.cwd = options.cwd;
+		this.previousFindings = structuredClone(options.previousFindings ?? []);
 		this.inScopeHunkIds = new Set(
 			this.snapshot.changedFiles
 				.filter((file) => file.reviewable && inRunScope(file.path, this.controls, undefined))
@@ -516,6 +531,11 @@ export class ReviewEngineRun {
 	/** The result the engine submitted, if it did. */
 	result(): ParsedReview | undefined {
 		return this.submitted;
+	}
+
+	/** The decisions of the submitted result that found previous findings fixed. */
+	fixedPriorFindings(): ReviewPriorFindingDecision[] {
+		return [...this.fixed];
 	}
 
 	/** The run is over: its context refuses further calls. */
@@ -547,6 +567,7 @@ export class ReviewEngineRun {
 		const context: ReviewEngineContext = {
 			...channels,
 			cwd: this.cwd,
+			previousFindings: Object.freeze(structuredClone(this.previousFindings)),
 			target: Object.freeze({
 				kind: this.target.kind,
 				description: snapshot.description,
@@ -674,8 +695,17 @@ export class ReviewEngineRun {
 		const verification: ReviewVerificationReport = {
 			...result.verification,
 			decisions: result.verification.decisions.filter((decision) => !dropped.has(decision.candidateId)),
+			// A previous finding reported by a dropped candidate is open without a current report.
+			priorFindingDecisions: result.verification.priorFindingDecisions.map((decision) => {
+				if (decision.candidateId === undefined || !dropped.has(decision.candidateId)) return decision;
+				const { candidateId: _dropped, ...rest } = decision;
+				return rest;
+			}),
 		};
-		const verificationErrors = validateReviewVerification(validated, verification);
+		// An engine settles the previous findings it can; one without a decision stays as it was.
+		const verificationErrors = validateReviewVerification(validated, verification, this.previousFindings, {
+			decideEvery: false,
+		});
 		if (verificationErrors.length > 0) throw new ReviewEngineSubmissionError(verificationErrors);
 		const observed = this.coverage.snapshot();
 		const commandsRun = reportedCommands("commandsRun", result.commandsRun);
@@ -696,6 +726,17 @@ export class ReviewEngineRun {
 			excludedPaths: reviewExclusions(this.snapshot, this.controls, undefined),
 		});
 		if (commandsRun.length === 0) parsed.coverage.residualRisk.unshift(STATIC_REVIEW_LIMITATION);
+		if (this.previousFindings.length > 0) {
+			const decided = applyPreviousFindingDecisions(
+				parsed.findings,
+				this.previousFindings,
+				verification.priorFindingDecisions,
+				new Map(validated.map((candidate) => [candidate.candidateId, candidate.fingerprint])),
+			);
+			parsed.findings = decided.findings;
+			this.fixed = decided.fixed;
+			settleReviewVerdict(parsed);
+		}
 		this.submitted = parsed;
 		return {
 			completionStatus: parsed.completionStatus,

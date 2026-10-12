@@ -44,6 +44,7 @@ import type {
 import { type ReviewSnapshot, resolveReviewSnapshot } from "../../src/core/review-snapshot.ts";
 import {
 	createReviewRunRecord,
+	followUpReviewPlan,
 	getReviewRun,
 	listReviewRuns,
 	type ReviewRunRecord,
@@ -1548,6 +1549,127 @@ describe("review pipeline", () => {
 			overallCorrectness: "correct",
 			summary: "Review completed with 1 verified finding.",
 		});
+	});
+
+	it("follows an earlier run: reviews everything, keeps the id of a finding still open, and returns the fixed ones", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const snapshot = await createSnapshotRepository(harness);
+		snapshots.push(snapshot);
+		const prior = (id: string, fingerprint: string): ReviewFinding => ({
+			id,
+			fingerprint,
+			status: "open",
+			title: `Earlier ${id}`,
+			body: "Found by the earlier round.",
+			trigger: "Call divide.",
+			impact: "Wrong result.",
+			category: "correctness",
+			rootCauseKey: id,
+			priority: 2,
+			confidence: 0.9,
+			changeLocation: { path: "src/value.ts", side: "head", startLine: 1, endLine: 1 },
+			evidenceLocations: [],
+			verification: { outcome: "accepted", method: "Read it.", rationale: "It was there.", confidence: 0.9 },
+		});
+		const previousRun = createReviewRunRecord({
+			workflowId: "review:previous-round",
+			workflowAction: "review.uncommitted",
+			startedAt: 1,
+			snapshot,
+			controls: { ...DEFAULT_REVIEW_RUN_CONTROLS, scopeMode: "full" },
+			status: "completed",
+			result: {
+				completionStatus: "complete",
+				summary: "Two findings.",
+				findings: [prior("still-open", "a".repeat(64)), prior("was-fixed", "b".repeat(64))],
+				coverage: {
+					changedFileInventoryComplete: true,
+					filesInspected: [],
+					hunksInspected: [],
+					commandsRun: [],
+					failedVerificationAttempts: [],
+					exclusions: [],
+					uncheckedAreas: [],
+					residualRisk: [],
+					modelReportedLimitations: [],
+				},
+				overallCorrectness: "incorrect",
+				overallExplanation: "Two findings remain.",
+			},
+		});
+		const prompts: string[] = [];
+		const pageDiffs = [
+			fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("review_diff", { path: "REVIEW.md" }), { stopReason: "toolUse" }),
+		];
+		// Each pass pages the changed files first, and its prompt is recorded.
+		const recordPrompt: FauxResponseFactory = (context) => {
+			prompts.push(JSON.stringify(context.messages));
+			return fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" });
+		};
+		harness.setResponses([
+			recordPrompt,
+			...pageDiffs,
+			fauxAssistantMessage(fauxToolCall("report_review_candidates", candidateReport() as never), {
+				stopReason: "toolUse",
+			}),
+			recordPrompt,
+			...pageDiffs,
+			fauxAssistantMessage(
+				fauxToolCall("report_review_verification", {
+					...verificationReport(),
+					priorFindingDecisions: [
+						{
+							findingId: "still-open",
+							outcome: "open",
+							candidateId: "candidate-1",
+							method: "Read the head.",
+							rationale: "It moved to line 2.",
+							confidence: 0.9,
+						},
+						{
+							findingId: "was-fixed",
+							outcome: "fixed",
+							method: "Read the head.",
+							rationale: "The guard is gone.",
+							confidence: 0.9,
+						},
+					],
+				} as never),
+				{ stopReason: "toolUse" },
+			),
+		]);
+
+		const run = await runReview({
+			cwd: harness.tempDir,
+			agentDir: harness.tempDir,
+			model: harness.getModel(),
+			verifierModel: harness.getModel(),
+			authStorage: harness.authStorage,
+			modelRegistry: harness.session.modelRegistry,
+			settingsManager: harness.settingsManager,
+			resolved: snapshot,
+			controls: { scopeMode: "full" },
+			incrementalPlan: followUpReviewPlan(previousRun, snapshot),
+		});
+		snapshots.splice(snapshots.indexOf(snapshot), 1);
+		expect(run.errorMessage).toBeUndefined();
+		// Both passes were given the earlier round's open findings, and the whole change to review.
+		expect(prompts[0]).toContain('previous_review run_id=\\"review:previous-round\\"');
+		expect(prompts[0]).not.toContain("incremental_context");
+		expect(prompts[1]).toContain("prior_finding_guidance");
+		expect(prompts[1]).toContain("still-open");
+		expect(run.parsed?.findings).toEqual([
+			expect.objectContaining({
+				id: "still-open",
+				status: "open",
+				title: "Zero returns the numerator",
+				changeLocation: { path: "src/value.ts", side: "head", startLine: 2, endLine: 2 },
+			}),
+		]);
+		expect(run.fixedPriorFindings).toEqual([expect.objectContaining({ findingId: "was-fixed", outcome: "fixed" })]);
+		expect(run.parsed).toMatchObject({ completionStatus: "complete", overallCorrectness: "incorrect" });
 	});
 
 	it("projects active-pass context and cumulative usage across both isolated sessions", async () => {

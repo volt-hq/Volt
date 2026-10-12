@@ -361,13 +361,15 @@ export interface ExtensionReviewStartOptions {
 	/** Whether optional (P3) findings are kept. */
 	readonly includeOptional?: boolean;
 	/**
-	 * An earlier standard review of the same target to build on: this one reviews
-	 * only what changed since, and decides whether each finding the earlier run
-	 * left open in an unchanged file was fixed. When the earlier run cannot be
-	 * built on (another base, an incomplete run), the review is full, and its
-	 * record says why. Without it the review is full.
+	 * An earlier review of the same target this one follows, such as the
+	 * previous round of a review loop. The review is full either way; following
+	 * a run, it also decides each finding that run left open. A finding still
+	 * there keeps its id in this review; one found fixed is closed in the run
+	 * where it was found (and in the runs that run followed), once this review
+	 * completes. The standard review decides every such finding; an engine
+	 * decides the ones it can.
 	 */
-	readonly parentRunId?: string;
+	readonly previousRunId?: string;
 	/**
 	 * Tools of the conversation the standard review's passes may use beside
 	 * their read-only snapshot tools, such as `bash` to run checks and tests:

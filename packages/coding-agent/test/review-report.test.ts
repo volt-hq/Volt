@@ -10,6 +10,7 @@ import {
 	createReviewVerificationReportCollector,
 	declassifyReviewFindings,
 	type ReviewCandidateReport,
+	type ReviewFinding,
 	type ReviewPresentationReport,
 	type ReviewVerificationReport,
 	validateReviewCandidates,
@@ -381,6 +382,75 @@ describe("structured review reports", () => {
 				.join(" ")
 				.toLowerCase(),
 		).toContain("missing verification decision");
+	});
+
+	it("holds a review that follows an earlier run to report again each prior finding it keeps open", async () => {
+		const snapshot = await setup();
+		const valid = await validateReviewCandidates(snapshot, report(), validationOptions(snapshot));
+		const prior = (id: string): ReviewFinding => ({
+			id,
+			fingerprint: "a".repeat(64),
+			status: "open",
+			title: "Earlier finding",
+			body: "Found by the earlier review.",
+			trigger: "Call it.",
+			impact: "It breaks.",
+			category: "correctness",
+			rootCauseKey: id,
+			priority: 2,
+			confidence: 0.9,
+			changeLocation: { path: "src/divide.ts", side: "head", startLine: 2, endLine: 2 },
+			evidenceLocations: [],
+			verification: { outcome: "accepted", method: "Read it.", rationale: "It is there.", confidence: 0.9 },
+		});
+		const verification = (
+			priorFindingDecisions: ReviewVerificationReport["priorFindingDecisions"],
+			assessment: "complete" | "incomplete" = "complete",
+		): ReviewVerificationReport => ({
+			summary: "Decided.",
+			assessment,
+			...(assessment === "incomplete" ? { challenge: "One earlier finding was not reported again." } : {}),
+			decisions: [
+				{ candidateId: "candidate-1", outcome: "accept", method: "Read it.", rationale: "It is.", confidence: 0.9 },
+			],
+			priorFindingDecisions,
+			limitations: [],
+		});
+		const decided = (findingId: string, outcome: "open" | "fixed" | "uncertain", candidateId?: string) => ({
+			findingId,
+			outcome,
+			...(candidateId === undefined ? {} : { candidateId }),
+			method: "Read the head.",
+			rationale: "Settled.",
+			confidence: 0.9,
+		});
+		const errors = (report: ReviewVerificationReport, priors = [prior("p1")]) =>
+			validateReviewVerification(valid.candidates, report, priors, { reportedAgain: true });
+
+		expect(errors(verification([decided("p1", "open", "candidate-1")]))).toEqual([]);
+		expect(errors(verification([decided("p1", "fixed")]))).toEqual([]);
+		// Kept open without the candidate that reports it now: only an incomplete report may leave it so.
+		expect(errors(verification([decided("p1", "open")])).join(" ")).toContain("keeps finding p1 open");
+		expect(errors(verification([decided("p1", "open")], "incomplete"))).toEqual([]);
+		expect(errors(verification([decided("p1", "fixed", "candidate-1")])).join(" ")).toContain(
+			"names a candidate for a finding that is not open",
+		);
+		expect(errors(verification([decided("p1", "open", "candidate-9")])).join(" ")).toContain(
+			"must name an accepted candidate",
+		);
+		expect(
+			errors(verification([decided("p1", "open", "candidate-1"), decided("p2", "open", "candidate-1")]), [
+				prior("p1"),
+				prior("p2"),
+			]).join(" "),
+		).toContain("reports another prior finding already");
+		// An engine may leave a prior finding undecided.
+		expect(
+			validateReviewVerification(valid.candidates, verification([]), [prior("p1")], { decideEvery: false }),
+		).toEqual([]);
+		expect(validateReviewVerification(valid.candidates, verification([]), [prior("p1")]).join(" ")).toContain(
+			"Missing prior finding decision for p1",
+		);
 	});
 
 	it("derives completeness, correctness, and coverage from host observations", async () => {

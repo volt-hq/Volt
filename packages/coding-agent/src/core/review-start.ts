@@ -61,6 +61,11 @@ export interface ConversationReviewOptions {
 	readonly controls?: Partial<ReviewRunControls>;
 	/** The earlier run of the built-in pipeline an incremental review builds on. */
 	readonly parentRunId?: string;
+	/**
+	 * An earlier review of the same target this one follows: it reviews everything, decides each finding that run
+	 * left open, and closes the ones it finds fixed.
+	 */
+	readonly previousRunId?: string;
 	/** Auxiliary tools of the conversation the built-in pipeline's passes may use besides their snapshot tools. */
 	readonly tools?: readonly string[];
 	/** Running work the review belongs to: clients show it under that work. */
@@ -102,6 +107,7 @@ export async function startConversationReview(
 			sessionManager: session.sessionManager,
 			sessionWriter: session.sessionWriter,
 			...(options.parentWorkId === undefined ? {} : { parentWorkId: options.parentWorkId }),
+			...(options.previousRunId === undefined ? {} : { previousRunId: options.previousRunId }),
 		});
 	}
 	// The fast preflight runs inline so target errors fail the start; the review then runs as the conversation's work.
@@ -109,6 +115,7 @@ export async function startConversationReview(
 		target,
 		controls: options.controls,
 		...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
+		...(options.previousRunId ? { previousRunId: options.previousRunId } : {}),
 		cwd: environment.cwd,
 		settingsManager: session.settingsManager,
 		modelRegistry: session.modelRegistry,

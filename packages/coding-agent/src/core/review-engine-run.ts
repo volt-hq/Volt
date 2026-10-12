@@ -24,8 +24,13 @@ import {
 import { type ReviewEngineDeclaration, ReviewEngineRun, resolveReviewEngineParameters } from "./review-engine.ts";
 import {
 	appendReviewRunDurably,
+	assertFollowsReviewOf,
 	assertReviewControlsPersistLosslessly,
+	closeFixedFindings,
 	createReviewRunRecord,
+	followUpReviewPlan,
+	getCanonicalReviewRun,
+	type ReviewIncrementalPlan,
 	type ReviewRunStatus,
 } from "./review-state.ts";
 import { type ReviewWorkData, reviewWorkInput } from "./review-work.ts";
@@ -57,6 +62,11 @@ export interface StartEngineReviewOptions {
 	sessionWriter: SessionWriter;
 	/** Running work the review belongs to: clients show it under that work. */
 	parentWorkId?: string;
+	/**
+	 * An earlier review of the same target this one follows: the engine gets the findings it left open to decide, and
+	 * the ones it finds fixed are closed there.
+	 */
+	previousRunId?: string;
 }
 
 /**
@@ -73,8 +83,19 @@ export async function startEngineReview(options: StartEngineReviewOptions): Prom
 		throw new Error("Project trust is required before running a remote review.");
 	}
 	const params = resolveReviewEngineParameters(engine, options.params, { remote });
-	const controls = controlsWithDefaults(options.controls);
+	// A review that follows an earlier run reviews everything.
+	const controls = controlsWithDefaults({
+		...options.controls,
+		...(options.previousRunId === undefined ? {} : { scopeMode: "full" as const }),
+	});
 	assertReviewControlsPersistLosslessly(controls);
+	const previousRun =
+		options.previousRunId === undefined
+			? undefined
+			: await getCanonicalReviewRun(options.sessionManager, options.previousRunId);
+	if (options.previousRunId !== undefined && !previousRun) {
+		throw new Error(`Unknown review run: ${options.previousRunId}`);
+	}
 	// An engine reviews a pull request's code, not its discussion: the snapshot has its identity only.
 	const { target, resolution } = await resolveBoundReviewSnapshot({
 		target: options.target,
@@ -83,13 +104,29 @@ export async function startEngineReview(options: StartEngineReviewOptions): Prom
 		pullRequestContext: false,
 		sanitizeRemoteErrors: remote,
 	});
+	let followUp: ReviewIncrementalPlan | undefined;
+	try {
+		if (previousRun) {
+			assertFollowsReviewOf(previousRun, resolution);
+			followUp = followUpReviewPlan(previousRun, resolution);
+		}
+	} catch (error) {
+		await resolution.dispose();
+		throw error;
+	}
 	const workId = createReviewWorkflowId();
 	const startedAt = Date.now();
 	const action = reviewActionIdForTarget(options.target);
 	const shown = `${reviewWorkTarget(resolution)} with ${engine.label}`;
 
 	const execute = async (work: WorkContext): Promise<WorkExecution> => {
-		const run = new ReviewEngineRun({ snapshot: resolution, target, controls, cwd: options.cwd });
+		const run = new ReviewEngineRun({
+			snapshot: resolution,
+			target,
+			controls,
+			cwd: options.cwd,
+			...(followUp === undefined ? {} : { previousFindings: followUp.priorOpenFindings }),
+		});
 		let failure: Error | undefined;
 		try {
 			if (target.kind === "pr") {
@@ -139,8 +176,13 @@ export async function startEngineReview(options: StartEngineReviewOptions): Prom
 				status,
 				...(parsed && (status === "completed" || status === "incomplete") ? { result: parsed } : {}),
 				...(errorMessage === undefined ? {} : { errorMessage }),
+				...(followUp === undefined ? {} : { incrementalPlan: followUp }),
 			});
 			await appendReviewRunDurably(options.sessionWriter, record);
+			// A complete review closes what it found fixed; an incomplete one may not have settled the rest.
+			if (status === "completed" && record.parentRunId) {
+				await closeFixedFindings(options.sessionWriter, record.parentRunId, record.runId, run.fixedPriorFindings());
+			}
 			if (status === "cancelled") return { outcome: "cancelled" };
 			if (errorMessage !== undefined) return { outcome: "failed", error: errorMessage };
 			const result = record.result;
