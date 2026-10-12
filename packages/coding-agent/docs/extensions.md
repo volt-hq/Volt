@@ -1108,7 +1108,7 @@ Use this before reading project-local extension configuration that should only b
 
 ### ctx.sessionManager
 
-A read-only view of the session's log. It holds committed entries only: an entry appears after its write commits. It has no write methods; write through `volt.appendEntry()`, `volt.setLabel()`, and `volt.setSessionName()`, which resolve after their entries commit. See [Session Format](session-format.md) for entry types.
+A read-only view of the session's log. It holds committed entries only: an entry appears after its write commits. Its methods return copies of the entries and header they read, so changing one does not change the session. It has no write methods; write through `volt.appendEntry()`, `volt.setLabel()`, and `volt.setSessionName()`, which resolve after their entries commit. See [Session Format](session-format.md) for entry types.
 
 For `tool_call`, the view includes the assistant message that requested the tool. In parallel tool execution mode it is still not guaranteed to include sibling tool results from the same assistant message.
 
@@ -1453,7 +1453,7 @@ Lifecycle and footguns:
 - `withSession` runs only after the new extension instance has received `session_start` and, in an RPC or SDK host, the old session has emitted `session_shutdown` and closed.
 - The callback still executes in the original closure, not inside the new extension instance. That means your old extension instance may already have run its shutdown cleanup before `withSession` starts.
 - Captured old `volt` / old command `ctx` session-bound objects are stale once the session changed and will throw if used. Use only the `ctx` passed to `withSession` for session-bound work.
-- Previously extracted raw objects are still your responsibility. For example, if you capture `const sm = ctx.sessionManager` before the change, `sm` is still the old `SessionManager` object. Do not reuse it afterwards.
+- Previously extracted raw objects are still your responsibility. For example, if you capture `const sm = ctx.sessionManager` before the change, `sm` still reads the old session. Do not reuse it afterwards.
 - Code in `withSession` should assume any state invalidated by your `session_shutdown` handler is already gone. Only capture plain data that survives shutdown cleanly, such as strings, ids, and serialized config.
 - `withSession` is not guaranteed to run even when the operation is not cancelled: if recovered durable client input fails to replay into the new session, the callback is skipped and the result reports `seeded: false`. Check `seeded` whenever your callback delivers state the rest of your flow depends on.
 
