@@ -468,10 +468,16 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 	const terminal = options.terminal ?? new ProcessTerminal();
 	if (options.tuiMode === "fullscreen") {
 		const styleSearchMatch = (text: string) => theme.bg("searchMatchBg", theme.fg("searchMatchText", text));
-		return new TuiAltScreen(terminal, options.showHardwareCursor, options.logDirectory, {
+		const tui: TuiAltScreen = new TuiAltScreen(terminal, options.showHardwareCursor, options.logDirectory, {
 			searchMatchStyle: (text) => theme.underline(styleSearchMatch(text)),
 			searchCurrentMatchStyle: (text) => theme.bold(theme.inverse(styleSearchMatch(text))),
-			openUrl: openBrowser,
+			openUrl: (url) => {
+				// Link targets come from rendered transcript content, which model and tool output
+				// control, and platform openers also launch file:, smb:, and custom scheme handlers.
+				const target = URL.parse(url);
+				if (target?.protocol === "https:" || target?.protocol === "http:") openBrowser(target.href);
+				else tui.flash("Link not opened: only http and https links open", 3000);
+			},
 			onRightClickPaste: options.onRightClickPaste,
 			copySelection: async (text) => {
 				try {
@@ -482,6 +488,7 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 				}
 			},
 		});
+		return tui;
 	}
 	return new TuiMainScreen(terminal, options.showHardwareCursor, options.logDirectory);
 }
