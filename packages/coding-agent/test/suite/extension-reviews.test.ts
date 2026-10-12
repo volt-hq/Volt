@@ -162,6 +162,8 @@ interface Fixture {
 	reviewer: ExtensionContext;
 	/** The `bystander` extension's context, which does not. */
 	bystander: ExtensionContext;
+	/** The extensions' latest contexts, by id: a reload replaces them. */
+	contexts: ReadonlyMap<string, ExtensionContext>;
 	/** Resolves once the slow engine's run started; its run ends when cancelled. */
 	slowStarted: Promise<void>;
 	/** How the decider engine settles previous findings next. */
@@ -232,7 +234,16 @@ async function setup(): Promise<Fixture> {
 	const reviewer = contexts.get("reviewer");
 	const bystander = contexts.get("bystander");
 	if (!reviewer || !bystander) throw new Error("The extensions did not start");
-	return { conversation, client, reviewer, bystander, slowStarted: slowStarted.promise, decide, decided };
+	return {
+		conversation,
+		client,
+		reviewer,
+		bystander,
+		contexts,
+		slowStarted: slowStarted.promise,
+		decide,
+		decided,
+	};
 }
 
 describe("ctx.reviews", () => {
@@ -532,7 +543,7 @@ describe("ctx.reviews", () => {
 	});
 
 	test("reloading the extensions cancels a review still starting, which no active work held back", async () => {
-		const { conversation, reviewer } = await setup();
+		const { conversation, reviewer, contexts } = await setup();
 		const work = conversation.session.work;
 		const start = work.start.bind(work);
 		const reloaded = Promise.withResolvers<void>();
@@ -560,5 +571,11 @@ describe("ctx.reviews", () => {
 			expect.objectContaining({ outcome: "cancelled" }),
 		]);
 		expect(work.running()).toEqual([]);
+
+		// The reloaded extension starts reviews as before.
+		const restarted = contexts.get("reviewer");
+		if (!restarted || restarted === reviewer) throw new Error("The reviewer did not start again");
+		const again = await restarted.reviews.start({ target: { kind: "uncommitted" }, engine: PROBE });
+		expect((await again.ended).status).toBe("completed");
 	});
 });

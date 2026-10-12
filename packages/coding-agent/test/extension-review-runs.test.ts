@@ -1,8 +1,8 @@
 /**
  * The reviews extensions start (`ctx.reviews`), on a host whose review starts wait until the test lets them:
  * disabling an extension cancels its reviews still starting as well as those running and waits for them to stop,
- * reloading the extensions does so for every extension, cancelling a review that ends meanwhile leaves it alone,
- * and a finding discussion starts none.
+ * reloading the extensions does so for every extension and starts none until the reloaded ones are bound,
+ * cancelling a review that ends meanwhile leaves it alone, and a finding discussion starts none.
  */
 
 import { Conversation, InMemoryConversationLog, type StreamFn } from "@hansjm10/volt-agent-core";
@@ -192,11 +192,32 @@ describe("extension review runs", () => {
 
 		// The reloaded extensions start reviews as before.
 		fixture.preflight = Promise.resolve();
+		runs.open();
 		const again = await runs.start(OWNER, UNCOMMITTED);
 		expect(work.get(again.id)?.state).toBe("running");
 		fixture.finish.resolve();
 		await again.ended;
 		expect(work.get(again.id)?.outcome).toBe("completed");
+	});
+
+	it("starts no review from the replaced extensions until the reloaded ones are bound", async () => {
+		const { fixture, work, runs, startReview } = await setup();
+		fixture.stopping = "slowly";
+		const running = await runs.start(OWNER, UNCOMMITTED);
+		const clearing = runs.clear();
+		// While the reload waits for the reviews it cancelled, and after, until the next generation is bound.
+		const refusal = `ctx.reviews.start: extension ${OWNER} is reloading; no review starts`;
+		await expect(runs.start(OWNER, UNCOMMITTED)).rejects.toThrow(refusal);
+		await clearing;
+		await expect(runs.start(OWNER, UNCOMMITTED)).rejects.toThrow(refusal);
+		expect(startReview).toHaveBeenCalledOnce();
+		expect(work.list().map((review) => review.workId)).toEqual([running.id]);
+
+		runs.open();
+		const again = await runs.start(OWNER, UNCOMMITTED);
+		expect(work.get(again.id)?.state).toBe("running");
+		fixture.finish.resolve();
+		await again.ended;
 	});
 
 	it("stops waiting for a review that ignores its cancellation once the grace has passed", async () => {

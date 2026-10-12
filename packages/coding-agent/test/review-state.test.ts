@@ -34,6 +34,7 @@ import {
 	restoreReviewStateFromHandoff,
 	reviewRunEngine,
 	STANDARD_REVIEW_ENGINE,
+	settlePreviousFindings,
 } from "../src/core/review-state.ts";
 import { createReviewFileMetadata } from "../src/core/review-target-metadata.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -872,6 +873,49 @@ describe("durable review state", () => {
 			expect(decided.findings.map(({ id, status }) => ({ id, status }))).toEqual([
 				{ id: "moved-1", status: "open" },
 				{ id: "undecided-1", status: "open" },
+			]);
+		});
+
+		it("returns what a complete review decided fixed to close, and leaves it out of the review", () => {
+			const review = result([]);
+			const fixed = settlePreviousFindings(
+				review,
+				[finding({ id: "fixed-1" })],
+				[decision("fixed-1", "fixed")],
+				new Map(),
+			);
+			expect(fixed).toEqual([decision("fixed-1", "fixed")]);
+			expect(review.findings).toEqual([]);
+			expect(review).toMatchObject({ completionStatus: "complete", overallCorrectness: "correct" });
+		});
+
+		it("carries what an incomplete review decided fixed as it was, for the round that follows it to decide", () => {
+			const review: ParsedReview = { ...result([]), completionStatus: "incomplete" };
+			const priors = [finding({ id: "fixed-1", status: "accepted" })];
+			const fixed = settlePreviousFindings(review, priors, [decision("fixed-1", "fixed")], new Map());
+			expect(fixed).toEqual([]);
+			expect(review.findings).toEqual(priors);
+			const next = followUpReviewPlan(
+				{ ...record("run-2", 2), status: "incomplete", result: review },
+				snapshot("blob-3"),
+				[],
+			);
+			expect(next.priorOpenFindings.map(({ id }) => id)).toEqual(["fixed-1"]);
+		});
+
+		it("carries what a review an uncertain finding leaves incomplete decided fixed", () => {
+			const review = result([]);
+			const fixed = settlePreviousFindings(
+				review,
+				[finding({ id: "fixed-1" }), finding({ id: "uncertain-1", fingerprint: "b".repeat(64) })],
+				[decision("fixed-1", "fixed"), decision("uncertain-1", "uncertain")],
+				new Map(),
+			);
+			expect(fixed).toEqual([]);
+			expect(review.completionStatus).toBe("incomplete");
+			expect(review.findings.map(({ id, status }) => ({ id, status }))).toEqual([
+				{ id: "uncertain-1", status: "uncertain" },
+				{ id: "fixed-1", status: "open" },
 			]);
 		});
 

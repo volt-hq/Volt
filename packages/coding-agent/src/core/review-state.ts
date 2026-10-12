@@ -11,6 +11,7 @@ import {
 	type ReviewFindingOutcomeReason,
 	type ReviewFindingStatus,
 	type ReviewPriorFindingDecision,
+	settleReviewVerdict,
 } from "./review-report.ts";
 import type {
 	ReviewBranchBase,
@@ -1126,6 +1127,33 @@ export function applyPreviousFindingDecisions(
 		} else result.push(structuredClone(prior));
 	}
 	return { findings: result, fixed };
+}
+
+/**
+ * Settle `parsed`, a full review that follows an earlier run, with its verifier's decisions on that run's open
+ * findings ({@link applyPreviousFindingDecisions}), and its verdict with them. Returns the findings decided fixed, to
+ * be closed where they were found. Only a complete review closes them: an incomplete one carries them as they were,
+ * so the round that follows it decides them again.
+ */
+export function settlePreviousFindings(
+	parsed: ParsedReview,
+	priorOpenFindings: readonly ReviewFinding[],
+	decisions: readonly ReviewPriorFindingDecision[],
+	candidateFingerprints: ReadonlyMap<string, string>,
+): ReviewPriorFindingDecision[] {
+	const findings = parsed.findings;
+	const decided = applyPreviousFindingDecisions(findings, priorOpenFindings, decisions, candidateFingerprints);
+	parsed.findings = decided.findings;
+	settleReviewVerdict(parsed);
+	if (parsed.completionStatus === "complete" || decided.fixed.length === 0) return decided.fixed;
+	parsed.findings = applyPreviousFindingDecisions(
+		findings,
+		priorOpenFindings,
+		decisions.filter((decision) => decision.outcome !== "fixed"),
+		candidateFingerprints,
+	).findings;
+	settleReviewVerdict(parsed);
+	return [];
 }
 
 /** The most runs {@link closeFixedFindings} and {@link dismissedFingerprintsOfFollowedRuns} walk back through. */

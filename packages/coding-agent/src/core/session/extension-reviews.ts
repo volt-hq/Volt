@@ -192,6 +192,8 @@ export class ExtensionReviewRuns implements ExtensionReviewsHandler {
 	private readonly running = new Set<string>();
 	/** The starts of each extension still under way, by manifest id. */
 	private readonly starting = new Map<string, Set<ReviewStart>>();
+	/** From {@link clear} until {@link open}: the runner generation was replaced, and no review starts. */
+	private closed = false;
 
 	constructor(host: ExtensionReviewRunsHost) {
 		this.host = host;
@@ -218,6 +220,8 @@ export class ExtensionReviewRuns implements ExtensionReviewsHandler {
 		if (this.host.sessionManager.getReviewDiscussion()) {
 			throw new Error(`ctx.reviews.start: ${REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE}`);
 		}
+		// A callback of the replaced generation still passes its active check until the next one is bound.
+		if (this.closed) throw new Error(`ctx.reviews.start: extension ${owner} is reloading; no review starts`);
 		const { target, review } = this.check(owner, options);
 		const done = Promise.withResolvers<string | undefined>();
 		const start: ReviewStart = { retired: false, done: done.promise };
@@ -383,10 +387,19 @@ export class ExtensionReviewRuns implements ExtensionReviewsHandler {
 		}
 	}
 
-	/** Retire the reviews of every extension, as {@link retire} does: their runner generation was replaced (reload). */
+	/**
+	 * Retire the reviews of every extension, as {@link retire} does: their runner generation was replaced (reload). No
+	 * review starts until the next generation is bound ({@link open}).
+	 */
 	async clear(graceMs = EXTENSION_DISABLE_GRACE_MS): Promise<void> {
+		this.closed = true;
 		const owners = new Set([...this.owned.keys(), ...this.starting.keys()]);
 		await Promise.all([...owners].map((owner) => this.retire(owner, graceMs)));
+	}
+
+	/** A runner generation was bound: its extensions start reviews. */
+	open(): void {
+		this.closed = false;
 	}
 
 	private requireOwned(owner: string, runId: unknown, verb: string): void {

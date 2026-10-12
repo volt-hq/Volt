@@ -946,6 +946,8 @@ export class SessionExtensionBinding {
 		const kinds = this.host.extensionKinds();
 		runner.bindWork(kinds.start, () => this.refuseDeclarations(runner));
 		runner.bindReviews(this.reviews);
+		// Bound after the replaced generation was invalidated: a reload's reviews start again.
+		this.reviews.open();
 		// Each `sourceInfo` is a copy: the session's own attribute extension resources and describe the loaded skills.
 		const getCommands = (): SlashCommandInfo[] => {
 			const extensionCommands: SlashCommandInfo[] = runner.getRegisteredCommands().map((command) => ({

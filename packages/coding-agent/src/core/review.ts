@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { Api, DeepReadonly, Model } from "@hansjm10/volt-ai";
@@ -47,6 +47,7 @@ import {
 	declassifyReviewFindings,
 	declassifyReviewFollowUps,
 	hostReviewSummary,
+	keptFollowUpDecisions,
 	type ParsedReview,
 	REVIEW_FOLLOW_UPS_MAX,
 	type ReviewCandidateReport,
@@ -75,7 +76,6 @@ import {
 } from "./review-snapshot.ts";
 import {
 	appendReviewRunDurably,
-	applyPreviousFindingDecisions,
 	assertFollowsReviewOf,
 	assertReviewControlsPersistLosslessly,
 	closeFixedFindings,
@@ -88,6 +88,7 @@ import {
 	type ReviewIncrementalPlan,
 	type ReviewRunRecord,
 	reconcileFindingIdentities,
+	settlePreviousFindings,
 } from "./review-state.ts";
 import {
 	createReviewSnapshotTools,
@@ -672,6 +673,8 @@ async function setUpReviewCheckout(
 	const result = await executeBashWithOperations(setup.command, cwd, createLocalBashOperations({ shellPath }), {
 		signal: signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
 	});
+	// The full output of a long setup goes to a temporary log, which nothing reads.
+	if (result.fullOutputPath) await rm(result.fullOutputPath, { force: true });
 	if (signal?.aborted) throw new Error("Review aborted");
 	if (result.cancelled || result.exitCode !== 0) {
 		const output = result.output.trim().slice(-REVIEW_SETUP_ERROR_OUTPUT_CHARS);
@@ -1247,7 +1250,8 @@ interface ReviewPassOptions<TReport> {
 	activeTools: string[];
 	collector: ReviewReportCollector<TReport>;
 	prompt: string;
-	repair: (report: TReport | undefined) => Promise<string[]> | string[];
+	/** What is wrong with `report`, if anything. `final` is the repair attempt's: its errors fail the pass. */
+	repair: (report: TReport | undefined, final: boolean) => Promise<string[]> | string[];
 	priorUsage: SessionUsageTotals;
 	signal?: AbortSignal;
 	onPass?: RunReviewOptions["onPass"];
@@ -1431,7 +1435,7 @@ async function runReviewPass<TReport>(options: ReviewPassOptions<TReport>): Prom
 				throw new ReviewPassError(options.name, "request", lastAssistant.error?.message);
 			}
 			const report = options.collector.getReport();
-			const errors = await options.repair(report);
+			const errors = await options.repair(report, attempt === 1);
 			if (report && errors.length === 0) return { report, usage: publishUsage(), staticInspectionOnly };
 			previousErrors = errors.length > 0 ? errors : ["The terminating report tool was not called."];
 			if (attempt === 1) throw new ReviewPassError(options.name, "report", previousErrors);
@@ -1572,7 +1576,7 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 							options.incrementalPlan,
 							options.followUps === true,
 						) + followUp,
-					repair: async (report) => {
+					repair: async (report, final) => {
 						if (!report) return ["report_review_candidates was not called with a valid payload"];
 						const validation = await validateReviewCandidates(snapshot, report, {
 							includeOptional: controls.includeOptional,
@@ -1600,11 +1604,12 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 							validation.errors.push(
 								"The combined report exceeds 50 candidates; consolidate duplicate root causes.",
 							);
-						// Follow-ups a review does not collect are left out.
+						// Follow-ups a review does not collect are left out. The others never fail the pass: the repair
+						// attempt corrects what is wrong with them, and after it the invalid ones are left out.
 						roundFollowUps = [...validatedFollowUps];
 						if (options.followUps) {
 							const followUps = await validateReviewFollowUps(snapshot, report.followUps ?? []);
-							validation.errors.push(...followUps.errors);
+							if (!final) validation.errors.push(...followUps.errors);
 							for (const followUp of followUps.followUps) {
 								if (roundFollowUps.some((prior) => prior.fingerprint === followUp.fingerprint)) continue;
 								roundFollowUps.push({
@@ -1614,10 +1619,13 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 										: followUp.followUpId,
 								});
 							}
-							if (roundFollowUps.length > REVIEW_FOLLOW_UPS_MAX)
-								validation.errors.push(
-									`The combined report exceeds ${REVIEW_FOLLOW_UPS_MAX} follow-ups; keep the most important.`,
-								);
+							if (roundFollowUps.length > REVIEW_FOLLOW_UPS_MAX) {
+								if (final) roundFollowUps = roundFollowUps.slice(0, REVIEW_FOLLOW_UPS_MAX);
+								else
+									validation.errors.push(
+										`The combined report exceeds ${REVIEW_FOLLOW_UPS_MAX} follow-ups; keep the most important.`,
+									);
+							}
 						}
 						return validation.errors;
 					},
@@ -1666,7 +1674,7 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 							options.incrementalPlan,
 							roundFollowUps,
 						) + followUp,
-					repair: async (report) => {
+					repair: async (report, final) => {
 						if (!report) return ["report_review_verification was not called with a valid payload"];
 						const validation = await validateReviewChallenge(snapshot, report, inScopeHunkIds);
 						roundChallenge = validation.challenge;
@@ -1679,7 +1687,8 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 								options.incrementalPlan?.priorOpenFindings,
 								{ reportedAgain: decidesPreviousFindings(options.incrementalPlan) },
 							),
-							...validateFollowUpDecisions(roundFollowUps, report),
+							// Follow-ups never fail the pass: after the repair attempt, one without a valid decision is not verified.
+							...(final ? [] : validateFollowUpDecisions(roundFollowUps, report)),
 						];
 					},
 					priorUsage: usage,
@@ -1694,7 +1703,10 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 				usage = verificationPass.usage;
 				staticInspectionOnly &&= verificationPass.staticInspectionOnly;
 				candidateReport = { ...candidatePass.report, candidates: roundCandidates };
-				verificationReport = verificationPass.report;
+				verificationReport = {
+					...verificationPass.report,
+					followUpDecisions: keptFollowUpDecisions(roundFollowUps, verificationPass.report),
+				};
 				validatedCandidates = roundCandidates;
 				validatedFollowUps = roundFollowUps;
 				unresolvedChallenge = roundChallenge;
@@ -1841,14 +1853,12 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 		parsed.findings = reconcileFindingIdentities(parsed.findings, options.incrementalPlan);
 		let fixedPriorFindings: ReviewPriorFindingDecision[] | undefined;
 		if (decidesPreviousFindings(options.incrementalPlan)) {
-			const decided = applyPreviousFindingDecisions(
-				parsed.findings,
+			fixedPriorFindings = settlePreviousFindings(
+				parsed,
 				options.incrementalPlan.priorOpenFindings,
 				verificationReport.priorFindingDecisions,
 				new Map(validatedCandidates.map((candidate) => [candidate.candidateId, candidate.fingerprint])),
 			);
-			parsed.findings = decided.findings;
-			fixedPriorFindings = decided.fixed;
 		} else {
 			const currentByFingerprint = new Map(parsed.findings.map((finding) => [finding.fingerprint, finding]));
 			for (const prior of options.incrementalPlan?.priorOpenFindings ?? []) {
@@ -1861,8 +1871,8 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 				finding.status = decision.outcome;
 				if (!currentByFingerprint.has(prior.fingerprint)) parsed.findings.push(finding);
 			}
+			settleReviewVerdict(parsed);
 		}
-		settleReviewVerdict(parsed);
 		if (options.followUps) {
 			parsed.followUps = buildReviewFollowUps({
 				followUps: validatedFollowUps,

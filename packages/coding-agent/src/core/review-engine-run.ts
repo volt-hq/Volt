@@ -107,6 +107,8 @@ export async function startEngineReview(options: StartEngineReviewOptions): Prom
 		target: options.target,
 		cwd: options.cwd,
 		sessionManager: options.sessionManager,
+		// A run it follows holds the pull request's binding when this conversation does not.
+		parentRunId: options.previousRunId,
 		pullRequestContext: false,
 		sanitizeRemoteErrors: remote,
 	});
@@ -142,7 +144,7 @@ export async function startEngineReview(options: StartEngineReviewOptions): Prom
 		let failure: Error | undefined;
 		try {
 			if (target.kind === "pr") {
-				const binding = await readPrReviewBinding(options.sessionManager);
+				const binding = await readPrReviewBinding(options.sessionManager, previousRun?.runId);
 				if (binding) await verifyBoundPullRequest(binding, resolution, options.cwd, work.signal);
 			}
 			work.progress({ text: `Reviewing ${shown}` });

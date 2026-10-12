@@ -731,6 +731,23 @@ export function validateFollowUpDecisions(
 	return errors;
 }
 
+/**
+ * The follow-up decisions a review keeps, whatever {@link validateFollowUpDecisions} found: the first decision for each
+ * of `followUps`, unless its confidence is invalid. A follow-up without one is not verified.
+ */
+export function keptFollowUpDecisions(
+	followUps: readonly ValidatedReviewFollowUp[],
+	report: ReviewVerificationReport,
+): ReviewFollowUpDecision[] {
+	const expected = new Set(followUps.map((followUp) => followUp.followUpId));
+	const seen = new Set<string>();
+	return (report.followUpDecisions ?? []).filter((decision) => {
+		if (!expected.has(decision.followUpId) || seen.has(decision.followUpId)) return false;
+		seen.add(decision.followUpId);
+		return Number.isFinite(decision.confidence) && decision.confidence >= 0 && decision.confidence <= 1;
+	});
+}
+
 /** The follow-ups the verifier accepted, stripped of prose for a context-blind presentation pass. */
 export function declassifyReviewFollowUps(
 	followUps: readonly ValidatedReviewFollowUp[],

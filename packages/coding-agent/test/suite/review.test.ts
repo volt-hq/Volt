@@ -1734,6 +1734,16 @@ describe("review pipeline", () => {
 			const slow = await reviewWithSetup({ command: "sleep 5", timeoutMs: 100 }, []);
 			expect(slow.run.errorMessage).toBe("The review checkout's setup timed out");
 		});
+
+		it("leaves no log of a long setup's output behind", async () => {
+			const scratch = mkdtempSync(join(tmpdir(), "review-setup-log-"));
+			// After afterEach, which removes the harness made under it.
+			onTestFinished(() => rm(scratch, { recursive: true, force: true }));
+			vi.stubEnv("TMPDIR", scratch);
+			const { run } = await reviewWithSetup({ command: "yes setup-output | head -n 20000; exit 3" }, []);
+			expect(run.errorMessage).toMatch(/^The review checkout's setup failed \(exit 3\): .*setup-output$/s);
+			expect(readdirSync(scratch).filter((name) => name.startsWith("volt-bash-"))).toEqual([]);
+		});
 	});
 
 	describe("follow-ups", () => {
@@ -1840,6 +1850,80 @@ describe("review pipeline", () => {
 			expect(prompts[0]).not.toContain("follow_up_guidance");
 			expect(prompts[1]).not.toContain("follow_up_candidates");
 			expect(run.parsed).not.toHaveProperty("followUps");
+		});
+
+		it("leaves out follow-ups still invalid after the repair attempt, rather than fail the review", async () => {
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const snapshot = await createSnapshotRepository(harness);
+			snapshots.push(snapshot);
+			const repairs: string[] = [];
+			const report =
+				(name: string, payload: object): FauxResponseFactory =>
+				(context) => {
+					const prompt = JSON.stringify(context.messages.at(-1));
+					if (prompt.includes("This is the only repair attempt")) repairs.push(prompt);
+					return fauxAssistantMessage(fauxToolCall(name, payload as never), { stopReason: "toolUse" });
+				};
+			const page = [
+				fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), { stopReason: "toolUse" }),
+			];
+			// A follow-up on the base side is invalid, and so is a decision about a follow-up the review did not keep.
+			const candidates = {
+				summary: "No defect in the change.",
+				candidates: [],
+				followUps: [
+					followUp(),
+					{
+						...followUp(),
+						followUpId: "f2",
+						rootCauseKey: "base-side",
+						location: { path: "AGENTS.md", side: "base", startLine: 1, endLine: 1 },
+					},
+				],
+				limitations: [],
+			};
+			const verification = {
+				summary: "Nothing omitted.",
+				assessment: "complete",
+				decisions: [],
+				priorFindingDecisions: [],
+				followUpDecisions: [acceptFollowUp, { ...acceptFollowUp, followUpId: "f2" }],
+				limitations: [],
+			};
+			harness.setResponses([
+				...page,
+				report("report_review_candidates", candidates),
+				report("report_review_candidates", candidates),
+				...page,
+				report("report_review_verification", verification),
+				report("report_review_verification", verification),
+			]);
+			const run = await runReview({
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				model: harness.getModel(),
+				verifierModel: harness.getModel(),
+				authStorage: harness.authStorage,
+				modelRegistry: harness.session.modelRegistry,
+				settingsManager: harness.settingsManager,
+				resolved: snapshot,
+				controls: { scopeMode: "full", scope: ["src/**"] },
+				followUps: true,
+			});
+			snapshots.splice(snapshots.indexOf(snapshot), 1);
+			expect(run.errorMessage).toBeUndefined();
+			// Each pass was asked once to correct its follow-ups.
+			expect(repairs).toHaveLength(2);
+			expect(repairs[0]).toContain("followUps[1].location must be on the head side");
+			expect(repairs[1]).toContain("references unknown follow-up f2");
+			expect(run.parsed).toMatchObject({
+				completionStatus: "complete",
+				overallCorrectness: "correct",
+				findings: [],
+			});
+			expect(run.parsed?.followUps).toEqual([expect.objectContaining({ title: "Policy file is terse" })]);
 		});
 
 		it("renders a pull request review's follow-ups without its discussion", async () => {

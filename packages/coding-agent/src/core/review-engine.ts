@@ -46,6 +46,7 @@ import {
 	buildReviewFollowUps,
 	declassifyReviewFindings,
 	declassifyReviewFollowUps,
+	keptFollowUpDecisions,
 	type ParsedReview,
 	type ReviewCandidateReport,
 	ReviewCandidateReportSchema,
@@ -53,7 +54,6 @@ import {
 	type ReviewPriorFindingDecision,
 	type ReviewVerificationReport,
 	ReviewVerificationReportSchema,
-	settleReviewVerdict,
 	type ValidatedReviewCandidate,
 	validateFollowUpDecisions,
 	validateReviewCandidates,
@@ -61,7 +61,7 @@ import {
 	validateReviewVerification,
 } from "./review-report.ts";
 import type { ReviewChangedFileStatus, ReviewSnapshot, ReviewSnapshotIdentity } from "./review-snapshot.ts";
-import { applyPreviousFindingDecisions, isExtensionReviewEngine } from "./review-state.ts";
+import { isExtensionReviewEngine, settlePreviousFindings } from "./review-state.ts";
 import {
 	createReviewSnapshotTools,
 	deliverReviewDiff,
@@ -760,13 +760,10 @@ export class ReviewEngineRun {
 				...validateFollowUpDecisions(checkedFollowUps.followUps, result.verification),
 			);
 			// A follow-up is kept when its first decision accepts it; one without a decision is not verified.
-			const kept = new Set(checkedFollowUps.followUps.map((followUp) => followUp.followUpId));
-			const decisions = (result.verification.followUpDecisions ?? []).filter(
-				(decision, index, all) =>
-					kept.has(decision.followUpId) &&
-					all.findIndex((other) => other.followUpId === decision.followUpId) === index,
-			);
-			const decided = { ...verification, followUpDecisions: decisions };
+			const decided = {
+				...verification,
+				followUpDecisions: keptFollowUpDecisions(checkedFollowUps.followUps, result.verification),
+			};
 			parsed.followUps = buildReviewFollowUps({
 				followUps: checkedFollowUps.followUps,
 				verification: decided,
@@ -774,15 +771,12 @@ export class ReviewEngineRun {
 			});
 		}
 		if (this.previousFindings.length > 0) {
-			const decided = applyPreviousFindingDecisions(
-				parsed.findings,
+			this.fixed = settlePreviousFindings(
+				parsed,
 				this.previousFindings,
 				verification.priorFindingDecisions,
 				new Map(validated.map((candidate) => [candidate.candidateId, candidate.fingerprint])),
 			);
-			parsed.findings = decided.findings;
-			this.fixed = decided.fixed;
-			settleReviewVerdict(parsed);
 		}
 		this.submitted = parsed;
 		return {
