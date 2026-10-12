@@ -697,6 +697,40 @@ export type ReadonlySessionManager = Pick<
 	| "getSessionName"
 >;
 
+/**
+ * `manager` as code outside the host reads it: the {@link ReadonlySessionManager} methods, each
+ * returning copies of the entries and header it reads, so the reader cannot change the session's
+ * committed entries.
+ */
+export function readonlySessionView(manager: ReadonlySessionManager): ReadonlySessionManager {
+	return Object.freeze({
+		getCwd: () => manager.getCwd(),
+		getSessionDir: () => manager.getSessionDir(),
+		getSessionId: () => manager.getSessionId(),
+		getSessionRef: () => manager.getSessionRef(),
+		getLeafId: () => manager.getLeafId(),
+		getLeafEntry: () => structuredClone(manager.getLeafEntry()),
+		getEntry: (id: string) => structuredClone(manager.getEntry(id)),
+		getLabel: (id: string) => manager.getLabel(id),
+		getBranch: (fromId?: string) => structuredClone(manager.getBranch(fromId)),
+		getBranchWindow: (options: SessionBranchWindowOptions) => structuredClone(manager.getBranchWindow(options)),
+		getHeader: () => structuredClone(manager.getHeader()),
+		getEntries: () => structuredClone(manager.getEntries()),
+		getTree: () => {
+			// The nodes are new on every call; only their entries are the manager's. Copying entry by entry
+			// keeps a deep tree from deepening the copy's recursion.
+			const roots = manager.getTree();
+			const stack = [...roots];
+			for (let node = stack.pop(); node !== undefined; node = stack.pop()) {
+				node.entry = structuredClone(node.entry);
+				stack.push(...node.children);
+			}
+			return roots;
+		},
+		getSessionName: () => manager.getSessionName(),
+	});
+}
+
 function createSessionId(): string {
 	return uuidv7();
 }

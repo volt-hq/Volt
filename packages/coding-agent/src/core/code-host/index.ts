@@ -9,6 +9,7 @@ export {
 export { githubCliCodeHostProvider } from "./github-cli-provider.ts";
 export type {
 	CanonicalCodeHostRepository,
+	CodeHostCommandOptions,
 	CodeHostProvider,
 	CodeHostPullRequestAssociation,
 	CodeHostPullRequestDiscoveryOutcome,

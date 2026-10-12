@@ -23,7 +23,7 @@ import { AcceptedFrameSchema, QueryErrorFrameSchema, RejectedFrameSchema, Result
 import { openStringEnum, stringEnum } from "./helpers.ts";
 import { type BuiltinIntentName, INTENT_FRAME_SCHEMAS, type IntentFrameEnvelope, type IntentInput } from "./intents.ts";
 import { HostPromptRequestSchema, HostResponseSchema } from "./live.ts";
-import { RpcThinkingLevelSchema } from "./primitives.ts";
+import { RpcEpochMillisecondsSchema, RpcThinkingLevelSchema } from "./primitives.ts";
 import { IrohRemotePushNotificationDeliveryStatusSchema, IrohRemotePushNotificationSchema } from "./push.ts";
 import { QUERY_FRAME_SCHEMAS, type QueryFrame, type QueryName } from "./queries.ts";
 import { RemoteAccessPresetNameSchema, RemoteCapabilitiesSchema, RemoteGrantSchema } from "./remote-access.ts";
@@ -108,7 +108,7 @@ export const ControlWorktreeStatusSchema = Type.Object(
 		path: Type.String(),
 		branch: Type.String(),
 		baseRef: Type.Optional(Type.String()),
-		createdAt: Type.Number(),
+		createdAt: RpcEpochMillisecondsSchema,
 		sessionIds: Type.Array(Type.String()),
 		available: Type.Optional(Type.Boolean()),
 		dirty: Type.Optional(Type.Boolean()),
@@ -125,8 +125,8 @@ export const ControlClientStatusSchema = Type.Object(
 	{
 		clientNodeId: Type.String(),
 		label: Type.Optional(Type.String()),
-		pairedAtMs: Type.Number(),
-		lastSeenAtMs: Type.Optional(Type.Number()),
+		pairedAtMs: RpcEpochMillisecondsSchema,
+		lastSeenAtMs: Type.Optional(RpcEpochMillisecondsSchema),
 		/** Resolved device grant, before workspace and daemon ceilings apply. */
 		allowedTools: Type.Optional(Type.Array(Type.String())),
 		/** True when the device has no customized grant and tracks the daemon's current default. */
@@ -141,11 +141,11 @@ export const ControlRevokedClientStatusSchema = Type.Object(
 	{
 		clientNodeId: Type.String(),
 		label: Type.Optional(Type.String()),
-		pairedAtMs: Type.Number(),
-		lastSeenAtMs: Type.Optional(Type.Number()),
-		revokedAtMs: Type.Number(),
+		pairedAtMs: RpcEpochMillisecondsSchema,
+		lastSeenAtMs: Type.Optional(RpcEpochMillisecondsSchema),
+		revokedAtMs: RpcEpochMillisecondsSchema,
 		/** Present after the desktop explicitly allows this identity to use a fresh pairing ticket. */
-		rePairApprovedAtMs: Type.Optional(Type.Number()),
+		rePairApprovedAtMs: Type.Optional(RpcEpochMillisecondsSchema),
 		rpcGrant: Type.Optional(RemoteGrantSchema),
 	},
 	closed,
@@ -1089,7 +1089,7 @@ export const CONTROL_RESPONSE_SCHEMAS = {
 		version: Type.String(),
 		protocolVersion: Type.Number(),
 		pid: Type.Number(),
-		startedAtMs: Type.Number(),
+		startedAtMs: RpcEpochMillisecondsSchema,
 		environment: DaemonEnvironmentStatusSchema,
 		/** Optional feature flags. */
 		capabilities: Type.Optional(Type.Array(Type.String())),

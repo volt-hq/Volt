@@ -349,7 +349,7 @@ export function parseIrohRemoteWorkspaceWorktree(value: unknown): IrohRemoteWork
 			: { prReviewLaunches: parsePrReviewLaunches(worktree.prReviewLaunches) }),
 		branch: expectString(worktree.branch, "worktree branch"),
 		...(baseRef === undefined ? {} : { baseRef }),
-		createdAt: expectNumber(worktree.createdAt, "worktree createdAt"),
+		createdAt: expectNonNegativeSafeInteger(worktree.createdAt, "worktree createdAt"),
 		sessionIds: parseArray(worktree.sessionIds, "worktree sessionIds", (entry) =>
 			expectString(entry, "worktree session id"),
 		),
@@ -387,8 +387,8 @@ export function parseIrohRemoteClient(value: unknown, options?: IrohRemoteStateP
 		),
 		...(allowedTools === undefined ? {} : { allowedTools }),
 		rpcGrant: parseIrohRemoteRpcGrant(client.rpcGrant, "client rpcGrant"),
-		pairedAt: expectNumber(client.pairedAt, "client pairedAt"),
-		lastSeenAt: expectNumber(client.lastSeenAt, "client lastSeenAt"),
+		pairedAt: expectNonNegativeSafeInteger(client.pairedAt, "client pairedAt"),
+		lastSeenAt: expectNonNegativeSafeInteger(client.lastSeenAt, "client lastSeenAt"),
 		...parseOptionalStringRecordProperty(
 			client.lastSessionIdByWorkspace,
 			"client lastSessionIdByWorkspace",
@@ -419,7 +419,10 @@ export function parseIrohRemoteRevokedClient(
 	options?: IrohRemoteStateParseOptions,
 ): IrohRemoteRevokedClient {
 	const client = expectRecord(value, "Iroh remote revoked client");
-	const rePairApprovedAt = expectOptionalNumber(client.rePairApprovedAt, "revoked client rePairApprovedAt");
+	const rePairApprovedAt =
+		client.rePairApprovedAt === undefined
+			? undefined
+			: expectNonNegativeSafeInteger(client.rePairApprovedAt, "revoked client rePairApprovedAt");
 	const allowedTools = canonicalizePersistedIrohRemoteAllowTools(
 		expectOptionalAllowTools(client.allowedTools, "revoked client allowedTools"),
 		options?.defaultAllowTools,
@@ -432,9 +435,9 @@ export function parseIrohRemoteRevokedClient(
 		),
 		...(allowedTools === undefined ? {} : { allowedTools }),
 		rpcGrant: parseIrohRemoteRpcGrant(client.rpcGrant, "revoked client rpcGrant"),
-		pairedAt: expectNumber(client.pairedAt, "revoked client pairedAt"),
-		lastSeenAt: expectNumber(client.lastSeenAt, "revoked client lastSeenAt"),
-		revokedAt: expectNumber(client.revokedAt, "revoked client revokedAt"),
+		pairedAt: expectNonNegativeSafeInteger(client.pairedAt, "revoked client pairedAt"),
+		lastSeenAt: expectNonNegativeSafeInteger(client.lastSeenAt, "revoked client lastSeenAt"),
+		revokedAt: expectNonNegativeSafeInteger(client.revokedAt, "revoked client revokedAt"),
 		...parseOptionalStringRecordProperty(
 			client.lastSessionIdByWorkspace,
 			"revoked client lastSessionIdByWorkspace",
