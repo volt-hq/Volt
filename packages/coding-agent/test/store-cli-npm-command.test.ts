@@ -88,11 +88,22 @@ describe("store CLI npm command inspection", () => {
 		);
 	});
 
-	/** The package a mocked install leaves where the store reviews it: one that asks for no permissions. */
+	/**
+	 * The package a mocked install leaves where the store reviews it: the catalog's theme, asking for no
+	 * permissions. An update finds the installed pin by that manifest id.
+	 */
 	function stubInstalledPackage(): void {
 		const root = join(tempDir, "installed");
 		mkdirSync(root, { recursive: true });
-		writeFileSync(join(root, "package.json"), JSON.stringify({ name: "installed", version: "1.0.0" }));
+		writeFileSync(
+			join(root, "package.json"),
+			JSON.stringify({
+				name: "installed",
+				version: "1.0.0",
+				volt: { id: "theme", displayName: "theme", entry: "index.js" },
+			}),
+		);
+		writeFileSync(join(root, "index.js"), "export default function () {}\n");
 		vi.spyOn(DefaultPackageManager.prototype, "getInstalledPath").mockReturnValue(root);
 	}
 	afterEach(() => {
@@ -195,7 +206,7 @@ describe("store CLI npm command inspection", () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 		stubInstalledPackage();
-		const installSpy = vi.spyOn(DefaultPackageManager.prototype, "installAndPersist").mockResolvedValue(undefined);
+		const installSpy = vi.spyOn(DefaultPackageManager.prototype, "install").mockResolvedValue(undefined);
 
 		await main(["store", "update", "theme", "--yes"]);
 

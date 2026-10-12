@@ -1,9 +1,10 @@
 /**
  * `volt store install` and `volt store update` review an extension package's
- * permissions as `volt install` does (RFC §8.2). Without a terminal, an update
- * to a catalog package's new pin reads the new pin's manifest before
- * installing it, and keeps the installed pin when the new one declares
- * permissions the installed one does not.
+ * permissions as `volt install` does (RFC §8.2). An update installs a catalog
+ * package's new pin beside the installed one and replaces it only once the new
+ * pin's permissions are acknowledged. Without a terminal, it reads the new
+ * pin's manifest before installing it, and keeps the installed pin when the
+ * new one declares permissions the installed one does not.
  */
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -109,7 +110,7 @@ describe("store CLI permission review", () => {
 		vi.spyOn(DefaultPackageManager.prototype, "getInstalledPath").mockImplementation((source) =>
 			source === testStoreSource() ? installedRoot : source === testStoreSource(commit) ? updatedRoot : undefined,
 		);
-		return vi.spyOn(DefaultPackageManager.prototype, "installAndPersist").mockResolvedValue(undefined);
+		return vi.spyOn(DefaultPackageManager.prototype, "install").mockResolvedValue(undefined);
 	}
 
 	beforeEach(() => {
@@ -273,19 +274,21 @@ describe("store CLI permission review", () => {
 		});
 		expect(process.exitCode).toBeUndefined();
 		expect(promptConfirm).not.toHaveBeenCalled();
+		expect(packages()).toEqual([{ source: testStoreSource(NEXT_TEST_STORE_COMMIT), scripts: "never" }]);
 		expect(acknowledged().rtk).toMatchObject({
 			permissions: ["exec"],
 			fingerprint: `git:github.com/volt-hq/Volt@${NEXT_TEST_STORE_COMMIT}`,
 		});
 	});
 
-	it("asks for an update's new permissions in a terminal and goes back to the installed pin when declined", async () => {
+	it("asks for an update's new permissions in a terminal and keeps the installed pin when declined", async () => {
 		setTerminal(true);
 		const install = catalogUpdate(
 			NEXT_TEST_STORE_COMMIT,
 			writePackage("installed", ["exec"]),
 			writePackage("updated", ["exec", "network"]),
 		);
+		const remove = vi.spyOn(DefaultPackageManager.prototype, "removeAndPersist").mockResolvedValue(false);
 		inspectorMock.inspectStorePackage.mockImplementation(async ({ source }) =>
 			inspection(source, ["exec", "network"]),
 		);
@@ -294,81 +297,92 @@ describe("store CLI permission review", () => {
 		await handleStoreCommand(["store", "update", "rtk", "--yes"]);
 
 		expect(promptConfirm).toHaveBeenCalledOnce();
-		expect(install.mock.calls).toEqual([
-			[testStoreSource(NEXT_TEST_STORE_COMMIT), { local: false, scripts: "never" }],
-			[testStoreSource(), { local: false, scripts: "never" }],
-		]);
+		expect(install).toHaveBeenCalledExactlyOnceWith(testStoreSource(NEXT_TEST_STORE_COMMIT), {
+			local: false,
+			scripts: "never",
+		});
+		// The new pin's checkout goes; the installed pin stays configured as it was.
+		expect(remove).toHaveBeenCalledExactlyOnceWith(testStoreSource(NEXT_TEST_STORE_COMMIT), { local: false });
+		expect(packages()).toEqual([testStoreSource()]);
 		expect(process.exitCode).toBe(1);
 		expect(acknowledged()).toEqual({});
 		const output = logs.join("\n");
 		expect(output).toContain("network: use the network (not enforced)");
-		expect(output).toContain("the update's permissions were not acknowledged");
-	});
-
-	it("reviews the revision a declined update reinstalls when the installed source has no commit pin", async () => {
-		setTerminal(true);
-		const unpinned = "git:https://github.com/volt-hq/Volt";
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async () => Response.json(testCatalog(testCatalogEntry("rtk", {}, NEXT_TEST_STORE_COMMIT)))),
-		);
-		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [unpinned] }, null, 2));
-		const roots = new Map([
-			[unpinned, writePackage("installed", ["exec"])],
-			[testStoreSource(NEXT_TEST_STORE_COMMIT), writePackage("updated", ["exec", "network"])],
-		]);
-		vi.spyOn(DefaultPackageManager.prototype, "getInstalledPath").mockImplementation((source) => roots.get(source));
-		const install = vi.spyOn(DefaultPackageManager.prototype, "installAndPersist").mockResolvedValue(undefined);
-		inspectorMock.inspectStorePackage.mockImplementation(async ({ source }) =>
-			inspection(source, ["exec", "network"]),
-		);
-		vi.mocked(promptConfirm).mockResolvedValueOnce(false).mockResolvedValueOnce(true);
-
-		await handleStoreCommand(["store", "update", "rtk", "--yes"]);
-
-		expect(install.mock.calls.map(([source]) => source)).toEqual([testStoreSource(NEXT_TEST_STORE_COMMIT), unpinned]);
-		// Asked for the new pin, declined, then asked for the head the unpinned source went back to.
-		expect(promptConfirm).toHaveBeenCalledTimes(2);
-		expect(acknowledged().rtk).toMatchObject({ permissions: ["exec"] });
-		expect(process.exitCode).toBe(1);
-	});
-
-	it("removes the package when the revision a declined update reinstalls is declined too", async () => {
-		setTerminal(true);
-		const unpinned = "git:https://github.com/volt-hq/Volt";
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async () => Response.json(testCatalog(testCatalogEntry("rtk", {}, NEXT_TEST_STORE_COMMIT)))),
-		);
-		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [unpinned] }, null, 2));
-		const roots = new Map([
-			[unpinned, writePackage("installed", ["exec"])],
-			[testStoreSource(NEXT_TEST_STORE_COMMIT), writePackage("updated", ["exec", "network"])],
-		]);
-		vi.spyOn(DefaultPackageManager.prototype, "getInstalledPath").mockImplementation((source) => roots.get(source));
-		vi.spyOn(DefaultPackageManager.prototype, "installAndPersist").mockResolvedValue(undefined);
-		const remove = vi.spyOn(DefaultPackageManager.prototype, "removeAndPersist").mockResolvedValue(true);
-		inspectorMock.inspectStorePackage.mockImplementation(async ({ source }) =>
-			inspection(source, ["exec", "network"]),
-		);
-		vi.mocked(promptConfirm).mockResolvedValue(false);
-
-		await handleStoreCommand(["store", "update", "rtk", "--yes"]);
-
-		expect(promptConfirm).toHaveBeenCalledTimes(2);
-		expect(remove).toHaveBeenCalledExactlyOnceWith(testStoreSource(NEXT_TEST_STORE_COMMIT), { local: false });
-		expect(acknowledged()).toEqual({});
-		expect(process.exitCode).toBe(1);
-		const output = logs.join("\n");
 		expect(output).toContain(
-			"Removed git github.com/volt-hq/Volt: the reinstalled revision's permissions were not acknowledged",
+			`Kept git github.com/volt-hq/Volt @ ${TEST_STORE_COMMIT.slice(0, 12)}: the update's permissions were not acknowledged`,
 		);
-		expect(output).not.toContain("Kept git github.com/volt-hq/Volt");
+	});
+
+	it("keeps an install without a commit pin as it is when the update's permissions are declined", async () => {
+		setTerminal(true);
+		const unpinned = "git:https://github.com/volt-hq/Volt";
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => Response.json(testCatalog(testCatalogEntry("rtk", {}, NEXT_TEST_STORE_COMMIT)))),
+		);
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [unpinned] }, null, 2));
+		const roots = new Map([
+			[unpinned, writePackage("installed", ["exec"])],
+			[testStoreSource(NEXT_TEST_STORE_COMMIT), writePackage("updated", ["exec", "network"])],
+		]);
+		vi.spyOn(DefaultPackageManager.prototype, "getInstalledPath").mockImplementation((source) => roots.get(source));
+		const install = vi.spyOn(DefaultPackageManager.prototype, "install").mockResolvedValue(undefined);
+		const remove = vi.spyOn(DefaultPackageManager.prototype, "removeAndPersist").mockResolvedValue(false);
+		inspectorMock.inspectStorePackage.mockImplementation(async ({ source }) =>
+			inspection(source, ["exec", "network"]),
+		);
+		vi.mocked(promptConfirm).mockResolvedValueOnce(false);
+
+		await handleStoreCommand(["store", "update", "rtk", "--yes"]);
+
+		expect(install.mock.calls.map(([source]) => source)).toEqual([testStoreSource(NEXT_TEST_STORE_COMMIT)]);
+		expect(remove).toHaveBeenCalledExactlyOnceWith(testStoreSource(NEXT_TEST_STORE_COMMIT), { local: false });
+		// Only the new pin was asked about: the tracked install was never touched.
+		expect(promptConfirm).toHaveBeenCalledOnce();
+		expect(packages()).toEqual([unpinned]);
+		expect(process.exitCode).toBe(1);
+		expect(logs.join("\n")).toContain(
+			"Kept git github.com/volt-hq/Volt: the update's permissions were not acknowledged",
+		);
+	});
+
+	it("replaces the installed pin's entry and checkout once the update's permissions are acknowledged", async () => {
+		setTerminal(true);
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({ packages: [{ source: testStoreSource(), skills: [] }, "npm:other"] }, null, 2),
+		);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => Response.json(testCatalog(testCatalogEntry("rtk", {}, NEXT_TEST_STORE_COMMIT)))),
+		);
+		const roots = new Map([
+			[testStoreSource(), writePackage("installed", ["exec"])],
+			[testStoreSource(NEXT_TEST_STORE_COMMIT), writePackage("updated", ["exec", "network"])],
+		]);
+		vi.spyOn(DefaultPackageManager.prototype, "getInstalledPath").mockImplementation((source) => roots.get(source));
+		vi.spyOn(DefaultPackageManager.prototype, "install").mockResolvedValue(undefined);
+		const remove = vi.spyOn(DefaultPackageManager.prototype, "remove").mockResolvedValue(undefined);
+		inspectorMock.inspectStorePackage.mockImplementation(async ({ source }) =>
+			inspection(source, ["exec", "network"]),
+		);
+		vi.mocked(promptConfirm).mockResolvedValueOnce(true);
+
+		await handleStoreCommand(["store", "update", "rtk", "--yes"]);
+
+		expect(process.exitCode).toBeUndefined();
+		expect(remove).toHaveBeenCalledExactlyOnceWith(testStoreSource(), { local: false });
+		expect(packages()).toEqual([
+			{ source: testStoreSource(NEXT_TEST_STORE_COMMIT), skills: [], scripts: "never" },
+			"npm:other",
+		]);
+		expect(acknowledged().rtk).toMatchObject({ permissions: ["exec", "network"] });
 	});
 
 	it("removes a package it installed but cannot find to review", async () => {
 		setTerminal(true);
-		const install = catalogUpdate(TEST_STORE_COMMIT, writePackage("installed", ["exec"]));
+		catalogUpdate(TEST_STORE_COMMIT, writePackage("installed", ["exec"]));
+		const install = vi.spyOn(DefaultPackageManager.prototype, "installAndPersist").mockResolvedValue(undefined);
 		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [] }, null, 2));
 		vi.spyOn(DefaultPackageManager.prototype, "getInstalledPath").mockReturnValue(undefined);
 		const remove = vi.spyOn(DefaultPackageManager.prototype, "removeAndPersist").mockResolvedValue(true);
@@ -381,32 +395,5 @@ describe("store CLI permission review", () => {
 		expect(promptConfirm).not.toHaveBeenCalled();
 		expect(process.exitCode).toBe(1);
 		expect(logs.join("\n")).toContain("Could not find the installed package to review its permissions");
-	});
-
-	it("removes the package when the declined update cannot go back to the installed pin", async () => {
-		setTerminal(true);
-		const install = catalogUpdate(
-			NEXT_TEST_STORE_COMMIT,
-			writePackage("installed", ["exec"]),
-			writePackage("updated", ["exec", "network"]),
-		);
-		install
-			.mockResolvedValueOnce(undefined)
-			.mockRejectedValueOnce(new Error("git fetch failed: \u001b[31mred\u001b[0m"));
-		const remove = vi.spyOn(DefaultPackageManager.prototype, "removeAndPersist").mockResolvedValue(true);
-		inspectorMock.inspectStorePackage.mockImplementation(async ({ source }) =>
-			inspection(source, ["exec", "network"]),
-		);
-		vi.mocked(promptConfirm).mockResolvedValueOnce(false);
-
-		await handleStoreCommand(["store", "update", "rtk", "--yes"]);
-
-		expect(install).toHaveBeenCalledTimes(2);
-		expect(remove).toHaveBeenCalledExactlyOnceWith(testStoreSource(NEXT_TEST_STORE_COMMIT), { local: false });
-		expect(process.exitCode).toBe(1);
-		const output = logs.join("\n");
-		expect(output).toContain(`Could not reinstall git github.com/volt-hq/Volt @ ${TEST_STORE_COMMIT.slice(0, 12)}`);
-		expect(output).toContain("Removed git github.com/volt-hq/Volt");
-		expect(output).not.toContain("\u001b[31m");
 	});
 });

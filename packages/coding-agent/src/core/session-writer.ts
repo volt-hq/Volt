@@ -44,6 +44,7 @@ import type {
 	ModelChangeEntry,
 	PlanningStateChangeEntry,
 	PrReviewBindingEntry,
+	ReadonlySessionManager,
 	ReviewAliasEntry,
 	ReviewDiscussionEntry,
 	ReviewDiscussionLinkEntry,
@@ -57,6 +58,7 @@ import type {
 	SessionWrite,
 	ThinkingLevelChangeEntry,
 } from "./session-manager.ts";
+import { readonlySessionView } from "./session-manager.ts";
 import { HOST_CUSTOM_MESSAGE_TYPES } from "./ui/message-presenters.ts";
 
 type RecordOf<E extends SessionEntry> = Omit<E, "id" | "parentId" | "timestamp">;
@@ -250,7 +252,10 @@ export function admitReviewRecord(record: ReviewRecord): SessionEntry {
  * writes (`recordReviewState`, and the `custom` entries whose type starts with {@link HOST_REVIEW_ENTRY_TYPE_PREFIX}),
  * and the host's custom messages ({@link reservedCustomType}).
  */
-export type ExtensionSessionWriter = Omit<SessionWriter, "recordReviewState">;
+export interface ExtensionSessionWriter extends Omit<SessionWriter, "sessionManager" | "recordReviewState"> {
+	/** The read-only view of the session this writer writes. */
+	readonly sessionManager: ReadonlySessionManager;
+}
 
 /** The `custom` entry types of the host's review records start with this prefix: `volt.review.run` and its siblings. */
 export const HOST_REVIEW_ENTRY_TYPE_PREFIX = "volt.review.";
@@ -276,10 +281,13 @@ export function reservedCustomType(
 		: undefined;
 }
 
-/** `writer` as code outside the host gets it: its writes, without `recordReviewState` or any other method. */
+/**
+ * `writer` as code outside the host gets it: its writes, without `recordReviewState` or any other method, and a
+ * read-only view of its session whose methods return copies of the entries and header they read.
+ */
 export function extensionSessionWriter(writer: ExtensionSessionWriter): ExtensionSessionWriter {
 	return Object.freeze({
-		sessionManager: writer.sessionManager,
+		sessionManager: readonlySessionView(writer.sessionManager),
 		appendMessage: async (message: Message | CustomMessage | BashExecutionMessage): Promise<string> => {
 			const reserved = message.role === "custom" ? reservedCustomType(message) : undefined;
 			if (reserved) throw reserved;

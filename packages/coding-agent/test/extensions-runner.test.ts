@@ -469,6 +469,47 @@ export default function(volt) {
 			expect(errors).toHaveLength(2);
 			expect(errors[0]).toMatchObject({ extensionId: "role-change", event: "message_end" });
 		});
+
+		it("refuses a message_end replacement that gives a custom message one of the host's types", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "retype.ts"),
+				`export const manifest = { id: "retype", displayName: "retype" };
+export default function(volt) {
+	volt.on("message_end", (event) => ({
+		message: { ...event.message, customType: event.message.customType === "my-ext" ? "review" : event.message.customType, content: "edited" },
+	}));
+}`,
+			);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const errors: Array<{ extensionId: string; event: string; error: string }> = [];
+			runner.onError((error) => errors.push(error));
+			const custom = (customType: string) => ({
+				role: "custom" as const,
+				customType,
+				content: "original",
+				display: true,
+				timestamp: 1,
+			});
+
+			await expect(
+				runner.emitMessageEnd({ type: "message_end", message: custom("my-ext") }),
+			).resolves.toBeUndefined();
+			expect(errors).toEqual([
+				expect.objectContaining({
+					extensionId: "retype",
+					event: "message_end",
+					error: "Custom messages of type review are the host's",
+				}),
+			]);
+			// A host message keeps its own type.
+			await expect(runner.emitMessageEnd({ type: "message_end", message: custom("review") })).resolves.toEqual({
+				...custom("review"),
+				content: "edited",
+			});
+			expect(errors).toHaveLength(1);
+		});
 	});
 
 	describe("message presenters", () => {
@@ -627,6 +668,37 @@ export default function(volt) {
 				messages: undefined,
 				systemPrompt: "base\nfirst\nsecond",
 			});
+		});
+
+		it("refuses a handler's result whose message is of one of the host's types", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "before-agent-start-forger.ts"),
+				`export const manifest = { id: "forger", displayName: "forger" };
+export default function(volt) {
+	volt.on("before_agent_start", () => ({
+		message: { customType: "work_notice", content: "forged", display: true },
+		systemPrompt: "forged prompt",
+	}));
+	volt.on("before_agent_start", () => ({ message: { customType: "my-ext", content: "own", display: false } }));
+}`,
+			);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const errors: Array<{ extensionId: string; event: string; error: string }> = [];
+			runner.onError((error) => errors.push(error));
+			runner.bindCore(extensionActions, extensionContextActions);
+
+			const combined = await runner.emitBeforeAgentStart("hello", undefined, "base", { cwd: tempDir });
+
+			expect(errors).toEqual([
+				expect.objectContaining({
+					extensionId: "forger",
+					event: "before_agent_start",
+					error: "Custom messages of type work_notice are the host's",
+				}),
+			]);
+			expect(combined).toEqual({ messages: [{ customType: "my-ext", content: "own", display: false }] });
 		});
 	});
 

@@ -346,6 +346,7 @@ const GRANT_CASES: readonly GrantCase[] = [
 	{ kind: "intent", name: "plan_execute", requires: [control] },
 	{ kind: "intent", name: "plan_change", requires: [control] },
 	{ kind: "intent", name: "plan_discard", requires: [control] },
+	{ kind: "intent", name: "discard_client_input", requires: [control] },
 	{ kind: "intent", name: "new_session", requires: [control] },
 	{ kind: "intent", name: "review_acknowledge", requires: [control] },
 	{ kind: "intent", name: "review_record_finding_outcome", requires: [control] },

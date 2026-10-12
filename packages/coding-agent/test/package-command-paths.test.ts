@@ -144,6 +144,38 @@ describe("package commands", () => {
 		expect(removedSettings.packages ?? []).toHaveLength(0);
 	});
 
+	it("should remove a pinned git package by its repository source", async () => {
+		const pinned = "git:https://github.com/foo/bar@0123456789abcdef0123456789abcdef01234567";
+		const checkout = join(agentDir, "git", "github.com", "foo", "bar@0123456789abcdef0123456789abcdef01234567");
+		mkdirSync(checkout, { recursive: true });
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(settingsPath, JSON.stringify({ packages: [pinned, "npm:other"] }));
+		vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await main(["remove", "git:github.com/foo/bar"]);
+
+		expect(process.exitCode).toBeUndefined();
+		const settings = JSON.parse(readFileSync(settingsPath, "utf-8")) as { packages?: string[] };
+		expect(settings.packages).toEqual(["npm:other"]);
+		expect(existsSync(checkout)).toBe(false);
+	});
+
+	it("should refuse to remove a repository source configured at several pinned refs", async () => {
+		const refs = ["git:github.com/foo/bar@v1", "git:github.com/foo/bar@v2"];
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(settingsPath, JSON.stringify({ packages: refs }));
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await main(["remove", "git:github.com/foo/bar"]);
+
+		expect(process.exitCode).toBe(1);
+		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+			"git:github.com/foo/bar is configured at several refs (git:github.com/foo/bar@v1, git:github.com/foo/bar@v2)",
+		);
+		const settings = JSON.parse(readFileSync(settingsPath, "utf-8")) as { packages?: string[] };
+		expect(settings.packages).toEqual(refs);
+	});
+
 	it("skips untrusted project package settings", async () => {
 		mkdirSync(join(projectDir, ".volt"), { recursive: true });
 		writeFileSync(join(projectDir, ".volt", "settings.json"), JSON.stringify({ packages: ["npm:@project/pkg"] }));

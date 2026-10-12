@@ -27,13 +27,17 @@ import { ANTHROPIC_SUBSCRIPTION_AUTH_WARNING, usesAnthropicSubscription } from "
 
 type SlimAssistantEvent = Extract<LiveItem, { type: "assistant_delta" }>["event"];
 
-/** Entry types whose commit changes what the live `intents` value reads. */
+/**
+ * Entry types whose commit changes what the live `intents` value reads. A
+ * branch move commits a host-only `leaf` entry, which entry listeners never
+ * see: the activity change that ends its navigation, and the plan state
+ * restored after it, refresh the value.
+ */
 const INTENT_STATE_ENTRY_TYPES: ReadonlySet<string> = new Set([
 	"model_change",
 	"thinking_level_change",
 	"fast_mode_change",
 	"planning_state_change",
-	"leaf",
 ]);
 
 export interface LiveFeed {
@@ -117,7 +121,7 @@ function toolResult(value: unknown): ToolResultView | undefined {
 
 /** The retry an `auto_retry_start` scheduled: when its attempt starts, and what failed the one before. */
 interface ScheduledRetry {
-	readonly retryAt: number;
+	readonly retryAt?: number;
 	readonly error: string;
 }
 
@@ -300,11 +304,17 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 				updatePhase();
 				updateIntents();
 				return;
-			case "auto_retry_start":
-				scheduledRetry = { retryAt: Date.now() + event.delayMs, error: event.errorMessage };
+			case "auto_retry_start": {
+				// The backoff scales the configured base delay, which may be fractional or too large for a timestamp.
+				const retryAt = Math.round(Date.now() + event.delayMs);
+				scheduledRetry = {
+					...(Number.isSafeInteger(retryAt) && retryAt >= 0 ? { retryAt } : {}),
+					error: event.errorMessage,
+				};
 				updatePhase();
 				updateIntents();
 				return;
+			}
 			case "auto_retry_end":
 				scheduledRetry = undefined;
 				updatePhase();
@@ -369,6 +379,7 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 			case "thinking_level_changed":
 			case "planning_state_changed":
 			case "fast_mode_changed":
+			case "ambiguous_client_input_changed":
 				updateIntents();
 				return;
 			default:

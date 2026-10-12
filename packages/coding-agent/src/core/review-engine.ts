@@ -43,18 +43,25 @@ import {
 import { STATIC_REVIEW_LIMITATION } from "./review-presentation.ts";
 import {
 	buildParsedReview,
+	buildReviewFollowUps,
 	declassifyReviewFindings,
+	declassifyReviewFollowUps,
+	keptFollowUpDecisions,
 	type ParsedReview,
 	type ReviewCandidateReport,
 	ReviewCandidateReportSchema,
+	type ReviewFinding,
+	type ReviewPriorFindingDecision,
 	type ReviewVerificationReport,
 	ReviewVerificationReportSchema,
 	type ValidatedReviewCandidate,
+	validateFollowUpDecisions,
 	validateReviewCandidates,
+	validateReviewFollowUps,
 	validateReviewVerification,
 } from "./review-report.ts";
 import type { ReviewChangedFileStatus, ReviewSnapshot, ReviewSnapshotIdentity } from "./review-snapshot.ts";
-import { isExtensionReviewEngine } from "./review-state.ts";
+import { isExtensionReviewEngine, settlePreviousFindings } from "./review-state.ts";
 import {
 	createReviewSnapshotTools,
 	deliverReviewDiff,
@@ -380,9 +387,11 @@ export interface ReviewEngineSubmission {
 	completionStatus: ParsedReview["completionStatus"];
 	/** The findings the run keeps. */
 	findings: number;
+	/** The follow-ups the run keeps: valid, and accepted by a decision. */
+	followUps: number;
 	/** The ids of candidates the host did not accept; their decisions were dropped. */
 	rejected: string[];
-	/** Why it rejected them. */
+	/** Why it rejected them, and the follow-ups it left out. */
 	errors: string[];
 }
 
@@ -406,6 +415,21 @@ export interface ReviewEngineContext {
 	/** Aborted when the review is cancelled or the conversation closes. */
 	readonly signal: AbortSignal;
 	readonly target: ReviewEngineTarget;
+	/**
+	 * When this review follows an earlier review of its target: the findings that run left open, which the code may
+	 * have fixed or moved since. A decision for one in the verification's `priorFindingDecisions` settles it: `fixed`
+	 * closes it in the run where it was found, and `open` with the `candidateId` of the accepted candidate that
+	 * reports it now keeps its id there. One without a decision is carried into this review as it was, with its id
+	 * and status. Empty otherwise.
+	 */
+	readonly previousFindings: readonly ReviewFinding[];
+	/**
+	 * Whether the review collects follow-ups: defects outside the change, such as pre-existing ones, which a tool may
+	 * file as issues. When it does, report them in the candidates' `followUps` (each in a file of the reviewed head, at
+	 * most 10 lines) and decide each in the verification's `followUpDecisions`; the host keeps the valid ones accepted.
+	 * They never affect the verdict. When it does not, they are ignored.
+	 */
+	readonly followUps: boolean;
 	/** The conversation's working directory. */
 	readonly cwd: string;
 	/**
@@ -487,6 +511,12 @@ export interface ReviewEngineRunOptions {
 	target: ReviewTarget;
 	controls: ReviewRunControls;
 	cwd: string;
+	/** The findings the earlier run this review follows left open. */
+	previousFindings?: readonly ReviewFinding[];
+	/** The fingerprints of the findings that run dismissed: they are not reported again. */
+	suppressedFingerprints?: readonly string[];
+	/** Whether the review collects follow-ups. */
+	followUps?: boolean;
 }
 
 /** The state of one engine run: its passes' coverage, and the result it submitted. */
@@ -495,10 +525,14 @@ export class ReviewEngineRun {
 	private readonly target: ReviewTarget;
 	private readonly controls: ReviewRunControls;
 	private readonly cwd: string;
+	private readonly previousFindings: readonly ReviewFinding[];
+	private readonly suppressedFingerprints: ReadonlySet<string>;
+	private readonly followUps: boolean;
 	private readonly coverage = new ReviewRunCoverage();
 	private readonly inScopeHunkIds: ReadonlySet<string>;
 	private inventory: ReviewCoverageTracker | undefined;
 	private submitted: ParsedReview | undefined;
+	private fixed: ReviewPriorFindingDecision[] = [];
 	private ended = false;
 
 	constructor(options: ReviewEngineRunOptions) {
@@ -506,6 +540,9 @@ export class ReviewEngineRun {
 		this.target = options.target;
 		this.controls = controlsWithDefaults(options.controls);
 		this.cwd = options.cwd;
+		this.previousFindings = structuredClone(options.previousFindings ?? []);
+		this.suppressedFingerprints = new Set(options.suppressedFingerprints);
+		this.followUps = options.followUps === true;
 		this.inScopeHunkIds = new Set(
 			this.snapshot.changedFiles
 				.filter((file) => file.reviewable && inRunScope(file.path, this.controls, undefined))
@@ -516,6 +553,11 @@ export class ReviewEngineRun {
 	/** The result the engine submitted, if it did. */
 	result(): ParsedReview | undefined {
 		return this.submitted;
+	}
+
+	/** The decisions of the submitted result that found previous findings fixed. */
+	fixedPriorFindings(): ReviewPriorFindingDecision[] {
+		return [...this.fixed];
 	}
 
 	/** The run is over: its context refuses further calls. */
@@ -547,6 +589,8 @@ export class ReviewEngineRun {
 		const context: ReviewEngineContext = {
 			...channels,
 			cwd: this.cwd,
+			previousFindings: Object.freeze(structuredClone(this.previousFindings)),
+			followUps: this.followUps,
 			target: Object.freeze({
 				kind: this.target.kind,
 				description: snapshot.description,
@@ -674,8 +718,17 @@ export class ReviewEngineRun {
 		const verification: ReviewVerificationReport = {
 			...result.verification,
 			decisions: result.verification.decisions.filter((decision) => !dropped.has(decision.candidateId)),
+			// A previous finding reported by a dropped candidate is open without a current report.
+			priorFindingDecisions: result.verification.priorFindingDecisions.map((decision) => {
+				if (decision.candidateId === undefined || !dropped.has(decision.candidateId)) return decision;
+				const { candidateId: _dropped, ...rest } = decision;
+				return rest;
+			}),
 		};
-		const verificationErrors = validateReviewVerification(validated, verification);
+		// An engine settles the previous findings it can; one without a decision is carried as it was.
+		const verificationErrors = validateReviewVerification(validated, verification, this.previousFindings, {
+			decideEvery: false,
+		});
 		if (verificationErrors.length > 0) throw new ReviewEngineSubmissionError(verificationErrors);
 		const observed = this.coverage.snapshot();
 		const commandsRun = reportedCommands("commandsRun", result.commandsRun);
@@ -688,7 +741,9 @@ export class ReviewEngineRun {
 			candidateReport: { ...result.candidates, candidates: validated },
 			validatedCandidates: validated,
 			verificationReport: verification,
-			declassifiedFindings: declassifyReviewFindings(validated, verification),
+			declassifiedFindings: declassifyReviewFindings(validated, verification).filter(
+				(finding) => !this.suppressedFingerprints.has(finding.fingerprint),
+			),
 			discoveryCoverage: observed,
 			verificationCoverage: observed,
 			commandsRun,
@@ -696,12 +751,40 @@ export class ReviewEngineRun {
 			excludedPaths: reviewExclusions(this.snapshot, this.controls, undefined),
 		});
 		if (commandsRun.length === 0) parsed.coverage.residualRisk.unshift(STATIC_REVIEW_LIMITATION);
+		const followUpErrors: string[] = [];
+		if (this.followUps) {
+			const checkedFollowUps = await validateReviewFollowUps(this.snapshot, result.candidates.followUps ?? []);
+			// Follow-ups never affect the verdict: a missing, duplicate, or unknown decision is reported, not refused.
+			followUpErrors.push(
+				...checkedFollowUps.errors,
+				...validateFollowUpDecisions(checkedFollowUps.followUps, result.verification),
+			);
+			// A follow-up is kept when its first decision accepts it; one without a decision is not verified.
+			const decided = {
+				...verification,
+				followUpDecisions: keptFollowUpDecisions(checkedFollowUps.followUps, result.verification),
+			};
+			parsed.followUps = buildReviewFollowUps({
+				followUps: checkedFollowUps.followUps,
+				verification: decided,
+				declassified: declassifyReviewFollowUps(checkedFollowUps.followUps, decided),
+			});
+		}
+		if (this.previousFindings.length > 0) {
+			this.fixed = settlePreviousFindings(
+				parsed,
+				this.previousFindings,
+				verification.priorFindingDecisions,
+				new Map(validated.map((candidate) => [candidate.candidateId, candidate.fingerprint])),
+			);
+		}
 		this.submitted = parsed;
 		return {
 			completionStatus: parsed.completionStatus,
 			findings: parsed.findings.length,
+			followUps: parsed.followUps?.length ?? 0,
 			rejected,
-			errors: checked.errors,
+			errors: [...checked.errors, ...followUpErrors],
 		};
 	}
 }

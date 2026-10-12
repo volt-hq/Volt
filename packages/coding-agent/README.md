@@ -184,6 +184,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
 | `/compact [prompt]` | Manually compact context, optional custom instructions |
+| `/discard-stuck` | Discard a message Volt stopped while sending (it may or may not have reached the model), so later messages can run |
 | `/copy` | Copy last assistant message to clipboard |
 | `/export [file]` | Export session to HTML file |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
@@ -466,7 +467,7 @@ volt update npm:@foo/volt-tools             # update one package
 volt config                               # enable/disable extensions, skills, prompts, themes
 ```
 
-Packages install to `~/.volt/agent/git/` (git) or `~/.volt/agent/npm/` (npm). Use `-l` for project-local installs (`.volt/git/`, `.volt/npm/`). Git `@ref` values are pinned tags or commits; pinned packages are skipped by `volt update`, so use `volt install git:host/user/repo@new-ref` to move an existing package to a new ref. Git packages install dependencies with `npm install --omit=dev` by default, so runtime deps must be listed under `dependencies`; when `npmCommand` is configured, git packages use plain `install` for compatibility with wrappers. If you use a Node version manager and want package installs to reuse a stable npm context, set `npmCommand` in `settings.json`, for example `["mise", "exec", "node@20", "--", "npm"]`.
+Packages install to `~/.volt/agent/git/` (git) or `~/.volt/agent/npm/` (npm). Use `-l` for project-local installs (`.volt/git/`, `.volt/npm/`). Git `@ref` values are pinned tags or commits, and each pinned ref is its own package installed beside the repository's other refs; pinned packages are skipped by `volt update`, so to move a package to a new ref, `volt remove` the old ref and `volt install git:host/user/repo@new-ref`. Git packages install dependencies with `npm install --omit=dev` by default, so runtime deps must be listed under `dependencies`; when `npmCommand` is configured, git packages use plain `install` for compatibility with wrappers. If you use a Node version manager and want package installs to reuse a stable npm context, set `npmCommand` in `settings.json`, for example `["mise", "exec", "node@20", "--", "npm"]`.
 
 Create a package by adding a `volt` key to `package.json`:
 
