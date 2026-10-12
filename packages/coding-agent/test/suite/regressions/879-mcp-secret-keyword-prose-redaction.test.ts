@@ -11,7 +11,7 @@ import {
 } from "../../../src/core/mcp/config.ts";
 import { startMcpOAuthBrowserAuth, startMcpOAuthDeviceAuth } from "../../../src/core/mcp/oauth-flow.ts";
 import { McpOAuthStore } from "../../../src/core/mcp/oauth-store.ts";
-import { redactMcpText } from "../../../src/core/mcp/safety.ts";
+import { redactMcpText, sanitizeMcpArguments } from "../../../src/core/mcp/safety.ts";
 import type { McpResolvedServerConfig } from "../../../src/core/mcp/types.ts";
 
 const directories: string[] = [];
@@ -82,6 +82,9 @@ describe("issue #879: MCP redaction keeps secret-keyword prose readable", () => 
 			"passwd file not found",
 			"api key rotation is pending",
 			"credential helper exited with code 1",
+			"refresh failed for the access token.",
+			"invalid token 'endpoint'",
+			"token secret password",
 		]) {
 			expect(redactMcpText(message)).toBe(message);
 		}
@@ -103,6 +106,24 @@ describe("issue #879: MCP redaction keeps secret-keyword prose readable", () => 
 		expect(redactMcpText("sent Bearer abc.def to the token endpoint")).toBe(
 			"sent Bearer [redacted] to the token endpoint",
 		);
+	});
+
+	it("still redacts credential-like values separated from the keyword by whitespace", () => {
+		expect(redactMcpText("--password hunter2")).toBe("--password [redacted]");
+		expect(redactMcpText("login --token ghp_abc123 --verbose")).toBe("login --token [redacted] --verbose");
+		expect(redactMcpText("secret s3cr3t")).toBe("secret [redacted]");
+		expect(redactMcpText("credential AKIAIOSFODNN7EXAMPLE")).toBe("credential [redacted]");
+		expect(redactMcpText("invalid token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln")).toBe("invalid token [redacted]");
+		expect(redactMcpText("private sk-proj-abcdef")).toBe("private [redacted]");
+		expect(redactMcpText("passwd CorrectHorseBatteryStaple")).toBe("passwd [redacted]");
+		expect(redactMcpText("token secret s3cr3t")).toBe("token secret [redacted]");
+	});
+
+	it("redacts credentials embedded in string arguments", () => {
+		expect(sanitizeMcpArguments({ command: "login --token ghp_abc123", note: "rotate the token endpoint" })).toEqual({
+			command: "login --token [redacted]",
+			note: "rotate the token endpoint",
+		});
 	});
 
 	it("reports the failed token endpoint check from the browser flow", async () => {
