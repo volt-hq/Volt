@@ -62,8 +62,20 @@ const READ_NAME_PATTERN = new RegExp(
 	"i",
 );
 const SECRET_KEY_PATTERN = /token|secret|password|passwd|api[-_]?key|authorization|credential|private/i;
-const SECRET_VALUE_PATTERN =
-	/(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:token|secret|password|passwd|api[-_]?key|authorization|credential|private)[\s:=]+)[^\s,;]+/gi;
+// A secret key may be quoted (`"password": "x"`), and an HTTP auth scheme may sit between the key and the
+// credential (`Authorization: Bearer x`). Both stay visible; only the credential after them is redacted.
+const SECRET_KEY_PREFIX = String.raw`(?:${SECRET_KEY_PATTERN.source})["']?[\s:=]+`;
+const AUTH_SCHEME = String.raw`(?:(?:bearer|basic|token)\s+)?`;
+const SECRET_VALUE_PATTERN = new RegExp(
+	[
+		String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+`,
+		// A quoted value is redacted up to its closing quote, which is kept.
+		String.raw`(${SECRET_KEY_PREFIX}(["'])${AUTH_SCHEME})(?:(?!\3)[^\\]|\\.)*(?=\3)`,
+		// An unquoted value ends at whitespace, `,`, or `;`; a trailing quote that closes an enclosing string is kept.
+		String.raw`(${SECRET_KEY_PREFIX}${AUTH_SCHEME})[^\s,;]*[^\s,;"']`,
+	].join("|"),
+	"gi",
+);
 
 function tokenizeRiskText(value: string): string {
 	return value
@@ -100,15 +112,13 @@ export function isMcpToolTrustedReadCandidate(tool: Pick<SdkTool, "name" | "desc
 export function redactMcpText(value: string): string {
 	return value.replace(
 		SECRET_VALUE_PATTERN,
-		(_match, bearerPrefix: string | undefined, keyPrefix: string | undefined) => {
-			if (bearerPrefix) {
-				return `${bearerPrefix}[redacted]`;
-			}
-			if (keyPrefix) {
-				return `${keyPrefix}[redacted]`;
-			}
-			return "[redacted]";
-		},
+		(
+			_match,
+			bearerPrefix: string | undefined,
+			quotedKeyPrefix: string | undefined,
+			_quote: string | undefined,
+			keyPrefix: string | undefined,
+		) => `${bearerPrefix ?? quotedKeyPrefix ?? keyPrefix ?? ""}[redacted]`,
 	);
 }
 
