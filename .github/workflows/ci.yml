@@ -13,20 +13,66 @@ concurrency:
 permissions: {}
 
 jobs:
-  # Keep the required branch-protection check green only when all Linux work passes.
+  # Keep the required branch-protection check green only when all selected Linux work passes.
   build-check-test:
-    needs: [build-check, test-linux]
+    needs: [changes, build-check, test-linux]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Require build, checks, and every Linux test shard
+      - name: Require change detection, build, checks, and every selected Linux test shard
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
           BUILD_RESULT: ${{ needs.build-check.result }}
           TEST_RESULT: ${{ needs.test-linux.result }}
+          TESTS_SELECTED: ${{ needs.changes.outputs.tests }}
         run: |
+          test "$CHANGES_RESULT" = success
           test "$BUILD_RESULT" = success
-          test "$TEST_RESULT" = success
+          if [ "$TESTS_SELECTED" = false ]; then
+            test "$TEST_RESULT" = skipped
+          else
+            test "$TEST_RESULT" = success
+          fi
+
+  # Pull requests run only the jobs whose inputs changed (scripts/ci-changed-areas.mjs);
+  # build-check always runs. Pushes to main run every job as the full cross-platform
+  # checkpoint: main runs cancel each other, so a diff against the previous push could
+  # skip work that no completed run covered.
+  changes:
+    name: Select jobs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      tests: ${{ steps.areas.outputs.tests }}
+      workspace-fs-native: ${{ steps.areas.outputs.workspace-fs-native }}
+      iroh-native: ${{ steps.areas.outputs.iroh-native }}
+      relay-credential-broker: ${{ steps.areas.outputs.relay-credential-broker }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22.23.1'
+          package-manager-cache: false
+
+      - name: Select changed areas
+        id: areas
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = pull_request ]; then
+            node scripts/ci-changed-areas.mjs --base HEAD^1
+          else
+            node scripts/ci-changed-areas.mjs --all
+          fi
 
   build-check:
     runs-on: ubuntu-24.04
@@ -87,6 +133,8 @@ jobs:
 
   test-linux:
     name: Linux tests (${{ matrix.shard }}/4)
+    needs: changes
+    if: needs.changes.outputs.tests == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
@@ -131,6 +179,8 @@ jobs:
         run: ./test.sh test --workspace packages/coding-agent -- --shard="${SHARD}/4"
 
   relay-credential-broker:
+    needs: changes
+    if: needs.changes.outputs.relay-credential-broker == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -177,6 +227,8 @@ jobs:
 
   test-windows:
     name: Windows tests (${{ matrix.shard }}/6)
+    needs: changes
+    if: needs.changes.outputs.tests == 'true'
     runs-on: windows-latest
     timeout-minutes: 45
     strategy:
@@ -235,6 +287,8 @@ jobs:
 
   iroh-native-darwin-arm64:
     name: Iroh native load (Darwin arm64)
+    needs: changes
+    if: needs.changes.outputs.iroh-native == 'true'
     runs-on: macos-15
     timeout-minutes: 15
     permissions:
@@ -263,6 +317,8 @@ jobs:
 
   workspace-fs-native:
     name: Workspace fs native (${{ matrix.target }})
+    needs: changes
+    if: needs.changes.outputs.workspace-fs-native == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -327,16 +383,33 @@ jobs:
           node scripts/workspace-fs-native.mjs manifest
           node scripts/workspace-fs-native.mjs verify
 
+      # Main-scope caches are written only by main runs; a pull request's cache stays in its own scope.
+      - name: Restore cargo-deny 0.20.2
+        id: cargo-deny
+        if: matrix.target == 'linux-x64-gnu'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo-deny
+          key: cargo-deny-0.20.2-${{ runner.os }}-${{ runner.arch }}
+
       - name: Check Rust advisories and licenses
         if: matrix.target == 'linux-x64-gnu'
         shell: bash
+        env:
+          CARGO_DENY_CACHE_HIT: ${{ steps.cargo-deny.outputs.cache-hit }}
         run: |
-          cargo install cargo-deny --version 0.20.2 --locked
+          if [ "$CARGO_DENY_CACHE_HIT" != true ]; then
+            cargo install cargo-deny --version 0.20.2 --locked --root ~/.cargo-deny
+          fi
+          export PATH="$HOME/.cargo-deny/bin:$PATH"
+          cargo deny --version
           cd packages/coding-agent/native/workspace-fs
           cargo deny check advisories licenses bans sources
 
   workspace-fs-musl-load:
     name: Workspace fs musl load (${{ matrix.arch }})
+    needs: changes
+    if: needs.changes.outputs.workspace-fs-native == 'true'
     strategy:
       fail-fast: false
       matrix:
