@@ -85,6 +85,7 @@ interface ReviewControlsInput {
 	includeOptional?: boolean;
 	scopeMode?: "incremental" | "full";
 	tools?: string[];
+	setup?: { command: string; timeoutMs?: number };
 	/** A pull request review's pinned pull request. */
 	url?: string;
 }
@@ -100,9 +101,12 @@ interface ReviewStartInput extends ReviewControlsInput {
 	ref?: string;
 }
 
-/** A review start: refused on remote profiles that name auxiliary tools or pin a pull request, else as reviews are available. */
+/**
+ * A review start: refused on remote profiles that name auxiliary tools, a checkout setup, or pin a pull request, else
+ * as reviews are available.
+ */
 function reviewStartAvailability(view: IntentView, input?: ReviewControlsInput): IntentAvailability {
-	const localOnly = localOnlyInput<ReviewControlsInput>(["tools", "url"])(view, input);
+	const localOnly = localOnlyInput<ReviewControlsInput>(["tools", "setup", "url"])(view, input);
 	return localOnly.enabled ? reviewAvailability(view) : localOnly;
 }
 
@@ -175,12 +179,21 @@ function reviewOptions(
 ): IntentReviewOptions {
 	const remote = ctx.profile.name === "remote";
 	const tools = remote ? undefined : reviewTools(ctx, input.tools);
+	const setup = remote ? undefined : input.setup;
+	// A setup prepares the checkout auxiliary tools run in: without them there is none.
+	if (setup !== undefined && (tools === undefined || tools.length === 0)) {
+		throw new IntentRejectedError(
+			"invalid_input",
+			"A review's setup applies with auxiliary tools: name them in tools",
+		);
+	}
 	return {
 		remote,
 		requireConfirmation: remote,
 		...(engine === undefined ? {} : { engine: engine.id }),
 		...(engine?.params === undefined ? {} : { engineParams: engine.params }),
 		...(tools === undefined ? {} : { tools }),
+		...(setup === undefined ? {} : { setup }),
 		controls: {
 			...(input.focus ? { focus: input.focus } : {}),
 			...(input.scope

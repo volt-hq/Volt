@@ -1016,7 +1016,8 @@ describe("TUI reviews", () => {
 			const swarm = swarmExtension();
 			const { harness, tui } = await start({
 				extension: swarm.extension,
-				globalSettings: { reviewEngine: "swarm" },
+				// A setup without auxiliary tools has no checkout to prepare, so it is not sent.
+				globalSettings: { reviewEngine: "swarm", reviewSetup: { command: "npm ci" } },
 			});
 			reviewRepository(harness.tempDir);
 			const discovery = heldTurn("never");
@@ -1089,12 +1090,12 @@ describe("TUI reviews", () => {
 			await stopReviews(tui);
 		});
 
-		it("starts the engine the line names, with its own flags and the configured auxiliary tools", async () => {
+		it("starts the engine the line names, with its own flags and the configured auxiliary tools and setup", async () => {
 			const swarm = swarmExtension();
-			// The tools configured for reviews are every engine's, as the built-in review's.
+			// The tools and checkout setup configured for reviews are every engine's, as the built-in review's.
 			const { harness, tui } = await start({
 				extension: swarm.extension,
-				globalSettings: { reviewTools: ["bash"] },
+				globalSettings: { reviewTools: ["bash"], reviewSetup: { command: "npm ci --ignore-scripts" } },
 			});
 			reviewRepository(harness.tempDir);
 			const intent = vi.spyOn(tui.store.client, "intent");
@@ -1109,6 +1110,7 @@ describe("TUI reviews", () => {
 					focus: "auth",
 					engineParams: { workers: 4, waveSize: 2 },
 					tools: ["bash"],
+					setup: { command: "npm ci --ignore-scripts" },
 				},
 			]);
 			expect(swarm.runs[0]).toMatchObject({

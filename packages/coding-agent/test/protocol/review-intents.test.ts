@@ -290,6 +290,33 @@ describe("review intent with an engine", () => {
 		);
 	});
 
+	test("hands the checkout setup of a review with tools on, refusing one without tools and a remote client's", async () => {
+		const checkoutSetup = { command: "npm ci --ignore-scripts", timeoutMs: 900_000 };
+		const { ctx, runReview } = setup();
+		await intentRegistry.invoke(ctx, "review", {
+			target: "uncommitted",
+			engine: SWARM,
+			tools: ["bash"],
+			setup: checkoutSetup,
+		});
+		expect(runReview).toHaveBeenCalledWith(
+			{ kind: "uncommitted" },
+			expect.objectContaining({ engine: SWARM, tools: ["bash"], setup: checkoutSetup }),
+		);
+		await expect(
+			intentRegistry.invoke(ctx, "review", { target: "uncommitted", setup: checkoutSetup }),
+		).rejects.toMatchObject({
+			code: "invalid_input",
+			message: "A review's setup applies with auxiliary tools: name them in tools",
+		});
+		const remote = setup(swarm({ remoteSafe: true }), true);
+		await expect(
+			intentRegistry.invoke(remote.ctx, "review", { target: "uncommitted", engine: SWARM, setup: checkoutSetup }),
+		).rejects.toMatchObject({ code: "not_allowed" });
+		expect(runReview).toHaveBeenCalledTimes(1);
+		expect(remote.runReview).not.toHaveBeenCalled();
+	});
+
 	test("lets a remote client name only an engine that allows it", async () => {
 		const refused = setup(swarm(), true);
 		await expect(

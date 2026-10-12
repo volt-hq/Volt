@@ -85,6 +85,8 @@ export interface IntentReviewOptions {
 	readonly parentRunId?: string;
 	/** Auxiliary tools of the conversation the passes may use besides their snapshot tools (local clients only). */
 	readonly tools?: readonly string[];
+	/** Prepares each checkout the auxiliary tools run in, such as installing dependencies (local clients only). */
+	readonly setup?: { readonly command: string; readonly timeoutMs?: number };
 }
 
 /** Subagents of the conversation, on hosts that let clients start them. */

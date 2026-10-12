@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import type { ToolArgumentLimits, Transport } from "@hansjm10/volt-ai";
+import { REVIEW_SETUP_COMMAND_MAX_CHARS, REVIEW_SETUP_TIMEOUT_MAX_MS } from "@hansjm10/volt-protocol";
 import type { TuiMode as RendererTuiMode, ScrollViewScrollbar } from "@hansjm10/volt-tui";
 import { randomUUID } from "crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync } from "fs";
@@ -79,6 +80,14 @@ export interface PromptCacheSettings {
 export interface PromptCacheKeepAliveConfig {
 	enabled: boolean;
 	idleWindowMs: number;
+}
+
+/** The `reviewSetup` setting: prepares the checkout a review's auxiliary tools run in, such as installing dependencies. */
+export interface ReviewSetupSettings {
+	/** A shell command run in the checkout's root. */
+	command: string;
+	/** How long it may run, in milliseconds: ten minutes by default, an hour at most. */
+	timeoutMs?: number;
 }
 
 export interface WarningSettings {
@@ -169,6 +178,7 @@ export interface Settings {
 	reviewModel?: string; // Discovery model for /review (falls back to the session model)
 	reviewVerifierModel?: string; // Independent verification model for /review (falls back to reviewModel)
 	reviewTools?: string[]; // Optional auxiliary tool names; immutable review snapshot tools are always active
+	reviewSetup?: ReviewSetupSettings; // A shell command run in each checkout a review's auxiliary tools run in
 	reviewEngine?: string; // The engine /review runs on without --engine: an extension's engine by name (default: standard)
 	doubleEscapeAction?: "fork" | "tree" | "none"; // Action for double-escape with empty editor (default: "tree")
 	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default filter when opening /tree
@@ -2133,6 +2143,24 @@ export class SettingsManager {
 		}
 		const normalized = tools.map((tool) => tool.trim()).filter(Boolean);
 		return normalized.length > 0 ? [...new Set(normalized)] : undefined;
+	}
+
+	/**
+	 * The `reviewSetup` setting: the shell command a review with auxiliary tools runs in each checkout they run in,
+	 * and how long it may run. Undefined when it is unset or names no command; a timeout out of bounds is left out.
+	 */
+	getReviewSetup(): ReviewSetupSettings | undefined {
+		const setup = this.settings.reviewSetup;
+		if (typeof setup !== "object" || setup === null) return undefined;
+		const command = typeof setup.command === "string" ? setup.command.trim() : "";
+		if (command.length === 0 || command.length > REVIEW_SETUP_COMMAND_MAX_CHARS) return undefined;
+		const { timeoutMs } = setup;
+		const bounded =
+			typeof timeoutMs === "number" &&
+			Number.isSafeInteger(timeoutMs) &&
+			timeoutMs >= 1 &&
+			timeoutMs <= REVIEW_SETUP_TIMEOUT_MAX_MS;
+		return { command, ...(bounded ? { timeoutMs } : {}) };
 	}
 
 	setReviewTools(toolNames: string[] | undefined): void {
