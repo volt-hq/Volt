@@ -124,6 +124,16 @@ type SessionBeforeEvent = Extract<
 	{ type: "session_before_switch" | "session_before_fork" | "session_before_compact" | "session_before_tree" }
 >;
 
+/**
+ * Events that carry the session manager's committed entries (`compactionEntry`,
+ * `summaryEntry`): each handler gets its own copy, so its changes reach neither
+ * the session nor later handlers.
+ */
+const COMMITTED_ENTRY_EVENT_TYPES: ReadonlySet<RunnerEmitEvent["type"]> = new Set<RunnerEmitEvent["type"]>([
+	"session_compact",
+	"session_tree",
+]);
+
 type SessionBeforeEventResult =
 	| SessionBeforeSwitchResult
 	| SessionBeforeForkResult
@@ -1332,15 +1342,20 @@ export class ExtensionRunner {
 			return undefined as RunnerEmitResult<TEvent>;
 		}
 		let result: SessionBeforeEventResult | undefined;
+		const copyPerHandler = COMMITTED_ENTRY_EVENT_TYPES.has(event.type);
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(event.type);
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
+				// Copied outside the handler's error containment: invalid session data is not the extension's failure.
+				const handlerEvent = copyPerHandler
+					? cloneCanonicalData(event, `Extension ${event.type} input for ${ext.id}`)
+					: event;
 				try {
 					const ctx = this.createContext(ext.id, event.type === "tool_execution_end");
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await handler(handlerEvent, ctx);
 
 					if (this.isSessionBeforeEvent(event) && handlerResult) {
 						result = cloneCanonicalData(

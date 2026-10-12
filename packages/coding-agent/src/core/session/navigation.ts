@@ -301,12 +301,12 @@ export class SessionNavigation {
 		}
 		this.notifyGenerationChange(conversationGenerationChange);
 
-		// Emit session_tree event
+		// Emit session_tree event; absent fields are omitted, since each handler gets a JSON-data copy
 		await this.host.extensionRunner().emit({
 			type: "session_tree",
 			newLeafId: sessionManager.getLeafId(),
 			oldLeafId,
-			summaryEntry,
+			...(summaryEntry === undefined ? {} : { summaryEntry }),
 			...(fromExtension ? { fromExtension: true } : {}),
 		});
 
