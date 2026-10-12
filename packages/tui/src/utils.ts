@@ -408,10 +408,14 @@ export function extractAnsiCode(str: string, pos: number): { code: string; lengt
 
 	const next = str[pos + 1];
 
-	// CSI sequence: ESC [ ... m/G/K/H/J
+	// CSI sequence: ESC [ <parameter and intermediate bytes> <final byte 0x40-0x7E> (ECMA-48)
 	if (next === "[") {
 		let j = pos + 2;
-		while (j < str.length && !/[mGKHJ]/.test(str[j]!)) j++;
+		while (j < str.length) {
+			const code = str.charCodeAt(j);
+			if (code >= 0x40 && code <= 0x7e) break;
+			j++;
+		}
 		if (j < str.length) return { code: str.substring(pos, j + 1), length: j + 1 - pos };
 		return null;
 	}

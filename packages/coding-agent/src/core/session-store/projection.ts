@@ -38,6 +38,8 @@ export interface SessionDerivedState {
 	headerTimestamp: string;
 	messageSummary: SessionMessageSummaryAccumulator;
 	hasPlanningState: boolean;
+	/** Whether the log records work (a `work_started`), which lists the session like a message does. */
+	hasWork: boolean;
 	name: string | undefined;
 	startingGitContext: RpcGitContext | null | undefined;
 	prReviewBinding: PrReviewPlacement | undefined;
@@ -80,6 +82,7 @@ function createEmptySessionDerivedState(headerTimestamp: string): SessionDerived
 		headerTimestamp,
 		messageSummary: createSessionMessageSummaryAccumulator(),
 		hasPlanningState: false,
+		hasWork: false,
 		name: undefined,
 		startingGitContext: undefined,
 		prReviewBinding: undefined,
@@ -193,6 +196,7 @@ export function cloneSessionDerivedState(state: SessionDerivedState): SessionDer
 		headerTimestamp: state.headerTimestamp,
 		messageSummary: { ...state.messageSummary },
 		hasPlanningState: state.hasPlanningState,
+		hasWork: state.hasWork,
 		name: state.name,
 		startingGitContext: cloneStartingGitContext(state.startingGitContext),
 		prReviewBinding: state.prReviewBinding === undefined ? undefined : structuredClone(state.prReviewBinding),
@@ -510,6 +514,7 @@ export function applySessionEntry(state: SessionDerivedState, entry: SessionEntr
 
 	state.messageSummary = nextMessageSummary;
 	if (entry.type === "planning_state_change") state.hasPlanningState = true;
+	if (entry.type === "work_started") state.hasWork = true;
 	if (entry.type === "session_info") state.name = entry.name?.trim() || undefined;
 	if (entry.type === "session_start_git_context") {
 		state.startingGitContext = cloneStartingGitContext(entry.gitContext);
@@ -563,7 +568,7 @@ export function sessionStoreProjection(state: SessionDerivedState): SessionStore
 		startingGitContextRecorded: state.startingGitContext !== undefined,
 		startingGitContext: cloneStartingGitContext(state.startingGitContext) ?? null,
 		name: state.name ?? null,
-		visible: summary.messageCount > 0 || state.hasPlanningState,
+		visible: summary.messageCount > 0 || state.hasPlanningState || state.hasWork,
 		leafId: state.leafId,
 		messageCount: summary.messageCount,
 		firstMessage: summary.firstMessage === "(no messages)" ? "" : summary.firstMessage,

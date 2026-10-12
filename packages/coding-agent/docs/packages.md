@@ -63,7 +63,8 @@ volt store remove <id|source> [-l]
 ```
 
 - **Reviewed pins.** Each catalog entry pins one reviewed commit of its package and carries a review record (the commit, the reviewer, the date, and notes), and repeats the package's manifest id, display name, version, and permissions. Installing or updating a catalog package moves only to the commit the catalog pins; `--ref` and `--track` are refused for catalog packages, and apply only to sources outside the catalog.
-- **Permissions.** `/store install` and `volt store install` review a package's declared permissions as `volt install` does: in a terminal they ask, and declining (or a failed review) removes the package; without a terminal they list the permissions, leave them unacknowledged, and suggest running `volt store install <id|source>` in a terminal. `volt store update` reviews every package it updated once it updated them, and fails (exit code 1) when you decline or a review fails. When an installed catalog package moves to a new pin, `volt store update` in a terminal installs the new pin, asks about permissions it adds, and reinstalls the previous pin if you decline (removing the package when the previous pin cannot be reinstalled). Without a terminal it reads the new pin's manifest before installing, and keeps the installed pin (exit code 1) when that manifest declares a permission the installed pin did not, or cannot be read; update it from a terminal to review the new permissions.
+- **Permissions.** `/store install` and `volt store install` review a package's declared permissions as `volt install` does: in a terminal they ask, and declining (or a failed review) removes the package; without a terminal they list the permissions, leave them unacknowledged, and suggest running `volt store install <id|source>` in a terminal. `volt store update` reviews every package it updated once it updated them, and fails (exit code 1) when you decline or a review fails. When an installed catalog package moves to a new pin, `volt store update` in a terminal installs the new pin beside the installed one, asks about permissions it adds, and replaces the installed pin once you acknowledge them; declining removes the new pin and keeps the installed one. Without a terminal it reads the new pin's manifest before installing, and keeps the installed pin (exit code 1) when that manifest declares a permission the installed pin did not, or cannot be read; update it from a terminal to review the new permissions.
+- **Several packages from one repository.** Catalog packages can share a repository at different commits; each pinned commit is its own package, so they install side by side. Installing a catalog package that is already installed at another pin in the same scope fails and points you to `volt store update <id>`.
 - **Submissions.** New and updated entries arrive as pull requests to the catalog; CI checks every entry against its pinned commit without running package code. See the [site README](https://github.com/volt-hq/Volt/blob/main/site/README.md).
 
 Store packages are packages with a `volt` manifest in `package.json`; single-file extensions cannot be catalog entries.
@@ -107,8 +108,9 @@ ssh://git@github.com/user/repo@v1
 - SSH URLs use your configured SSH keys automatically (respects `~/.ssh/config`).
 - For non-interactive runs (for example CI), you can set `GIT_TERMINAL_PROMPT=0` to disable credential prompts and set `GIT_SSH_COMMAND` (for example `ssh -o BatchMode=yes -o ConnectTimeout=5`) to fail fast.
 - Refs are pinned tags or commits. `volt update` and `volt update --extensions` do not move them to newer refs, but they do reconcile an existing clone to the configured ref.
-- Use `volt install git:host/user/repo@new-ref` to update settings and move an existing package to a new pinned ref.
-- Cloned to `~/.volt/agent/git/<host>/<path>` (global) or `.volt/git/<host>/<path>` (project).
+- Each pinned ref is its own package: `volt install git:host/user/repo@new-ref` installs it beside the repository's other refs. To move a package to a new ref, `volt remove` the old ref and `volt install` the new one.
+- `volt remove`, `volt update`, and `volt store remove` with a repository source without a ref act on that unpinned entry when the scope configures it, and otherwise on the repository's pinned ref. When the scope configures several pinned refs of the repository, they fail; name the ref.
+- Cloned to `~/.volt/agent/git/<host>/<path>` (global) or `.volt/git/<host>/<path>` (project), and a pinned ref to `<path>@<ref>` beside it. A ref with characters other than letters, digits, `_`, and `-` (single dots between them are fine) is replaced by a hash of it in that directory name.
 - When reconciliation changes the checkout, volt resets and cleans the clone, then runs `npm install` if `package.json` exists.
 
 **SSH examples:**
@@ -226,8 +228,8 @@ In a running session, `/extensions` lists every extension with its state, permis
 
 ## Scope and Deduplication
 
-Packages can appear in both global and project settings. If the same package appears in both, the project entry wins. Identity is determined by:
+Packages can appear in both global and project settings. If the same package appears in both, the project entry wins. A git repository pinned to a different ref in each is two packages, so both load; when they declare the same extension id, the global one's extension runs and the project one's is reported as not loaded (see [Manifest](extensions.md#manifest)). Identity is determined by:
 
 - npm: package name
-- git: repository URL without ref
+- git: repository URL, with its ref when pinned (each pinned ref is a separate package)
 - local: resolved absolute path

@@ -327,9 +327,11 @@ export class SessionEvents {
 		switch (event.type) {
 			case "committed":
 				// The session manager's view already includes the batch. A client input's
-				// state can change the queue without the conversation's queue changing.
+				// state can change the queue without the conversation's queue changing,
+				// and settle the ambiguous input that held later input back.
 				if (event.entries.some((entry) => entry.type.startsWith("client_input_"))) {
 					this.host.clientInputs().publishQueue();
+					this.host.clientInputs().publishAmbiguous();
 				}
 				if (event.entries.some((entry) => entry.type.startsWith("work_"))) {
 					this.host.jobs().runtime.changed();

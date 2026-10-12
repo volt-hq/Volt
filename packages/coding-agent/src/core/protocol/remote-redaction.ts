@@ -9,8 +9,12 @@
  * live items of each subscription and sends the redacted text the client does
  * not hold yet. A path split across deltas is held back until its token ends,
  * and when redaction rewrites text the client already holds, the streaming
- * message is sent again in full. `seq` is renumbered per subscription, since
- * a frame left empty by redaction is not sent.
+ * message is sent again in full. Text up to a line break that redacts the same
+ * alone as with the text after it is redacted for good, so a delta redacts
+ * only the text after its block's last such line break; a long stretch
+ * without one is redacted again only once it has grown by an eighth. `seq` is
+ * renumbered per subscription, since a frame left empty by redaction is not
+ * sent.
  *
  * A patched panel or work item is redacted as a whole value, as a set one is:
  * the redactor folds the raw patch, redacts the patched value, and sends the
@@ -238,14 +242,53 @@ function settledPrefix(text: string): string {
 	return text;
 }
 
+/**
+ * Raw text after a streaming block's checkpoint, in UTF-16 code units, that
+ * each delta redacts again. A longer tail, such as a tool call's arguments on
+ * one line, is redacted again only once it has grown by an eighth, so its
+ * stream costs linear time.
+ */
+const EAGER_TAIL_LENGTH = 2048;
+
+/**
+ * What a client holds of one streaming block's text (a text or thinking
+ * block's, or a tool call's argument text), redacted. The text before the
+ * block's checkpoint, a line break, is redacted for good: a delta redacts only
+ * the raw text after it.
+ */
+interface StreamedText {
+	/** Raw length before the checkpoint. */
+	cut: number;
+	/** Redacted text before the checkpoint. */
+	head: string;
+	/** Raw text after the checkpoint. */
+	raw: string;
+	/** Redacted text the client holds after `head`. */
+	tail: string;
+	/** Length of `raw` when a delta last redacted it; 0 before the first. */
+	redactedLength: number;
+}
+
+/** A block whose client holds `held`, redacted from `raw`, with no checkpoint yet. */
+function streamedText(raw: string, held: string): StreamedText {
+	return { cut: 0, head: "", raw, tail: held, redactedLength: 0 };
+}
+
+/** The text of a text or thinking block. */
+function blockText(block: DeepReadonly<AssistantMessage["content"][number]> | undefined): string | undefined {
+	if (block?.type === "text") return block.text;
+	if (block?.type === "thinking") return block.thinking;
+	return undefined;
+}
+
 /** What one subscription's client holds of the streaming assistant message, redacted. */
 interface StreamingView {
 	/** The raw live state the subscription was sent, folded as the client folds it. */
 	raw: LiveFoldState;
-	/** Redacted text of each text and thinking block the client holds. */
-	readonly text: Map<number, string>;
-	/** Redacted argument text of each streaming tool call the client holds. */
-	readonly args: Map<number, string>;
+	/** What the client holds of each text and thinking block. */
+	readonly text: Map<number, StreamedText>;
+	/** What the client holds of each streaming tool call's argument text. */
+	readonly args: Map<number, StreamedText>;
 	/** Blocks no longer streamed: over budget, or not redactable incrementally. The commit brings them. */
 	readonly frozen: Set<number>;
 	/** Redacted content bytes the client holds of the message. */
@@ -336,7 +379,7 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 				view.frozen.add(index);
 			}
 			budget = Math.max(0, budget - Buffer.byteLength(kept, "utf8"));
-			view.text.set(index, kept);
+			view.text.set(index, streamedText(blockText(message.content[index]) ?? "", kept));
 			view.bytes += Buffer.byteLength(kept, "utf8");
 			return block.type === "text" ? { ...block, text: kept } : { ...block, thinking: kept };
 		});
@@ -360,7 +403,7 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 				event: { type: "toolcall_start", contentIndex, id: block.id, name: block.name },
 			});
 			const redacted = sanitizeText(settled(argsText));
-			view.args.set(contentIndex, redacted);
+			view.args.set(contentIndex, streamedText(argsText, redacted));
 			if (redacted.length > 0) {
 				items.push({
 					type: "assistant_delta",
@@ -373,33 +416,73 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 	};
 
 	/** The streaming text of a block as the raw state holds it. */
-	const rawText = (view: StreamingView, index: number): string | undefined => {
-		const block = view.raw.assistant?.message.content[index];
-		if (block?.type === "text") return block.text;
-		if (block?.type === "thinking") return block.thinking;
-		return undefined;
+	const rawText = (view: StreamingView, index: number): string | undefined =>
+		blockText(view.raw.assistant?.message.content[index]);
+
+	/**
+	 * Text the client may append to what it holds, or `undefined` when its text
+	 * must be replaced. Nothing while `next` falls short of it: a token the
+	 * client holds part of is held back again until it ends.
+	 */
+	const appendable = (held: string, next: string): string | undefined => {
+		if (next.startsWith(held)) return next.slice(held.length);
+		return held.startsWith(next) ? "" : undefined;
 	};
 
-	/** Text the client may append to what it holds, or `undefined` when its text must be replaced. */
-	const appendable = (held: string, next: string): string | undefined =>
-		next.startsWith(held) ? next.slice(held.length) : undefined;
+	/**
+	 * The redacted text after `block`'s checkpoint once the fold grew the
+	 * block's raw text to `raw` by `delta`; none while a long tail waits to grow
+	 * enough to be redacted again.
+	 */
+	const redactTail = (block: StreamedText, raw: string, delta: string): string | undefined => {
+		// The tail grows by the delta as the fold's text did, so the whole text is not copied.
+		block.raw = raw.length === block.cut + block.raw.length + delta.length ? block.raw + delta : raw.slice(block.cut);
+		const length = block.raw.length;
+		if (length > EAGER_TAIL_LENGTH && (length - block.redactedLength) * 8 < block.redactedLength) return undefined;
+		block.redactedLength = length;
+		return sanitizeText(settled(block.raw));
+	};
+
+	/**
+	 * Record that the client holds `tail` after `block`'s head, and move the
+	 * checkpoint past the last line break of the settled raw tail when the text
+	 * up to it redacts the same alone as with the rest. No root then spans the
+	 * checkpoint: one that does redacts differently apart, and the start of one
+	 * is never settled.
+	 */
+	const holdTail = (block: StreamedText, tail: string): void => {
+		block.tail = tail;
+		const ready = settled(block.raw);
+		const end = ready.lastIndexOf("\n") + 1;
+		if (end === 0) return;
+		const head = sanitizeText(ready.slice(0, end));
+		const rest = sanitizeText(ready.slice(end));
+		// On Windows, redacting a root turns every backslash of the text into a slash: lines apart may differ.
+		if (head + rest !== tail) return;
+		block.cut += end;
+		block.head += head;
+		block.raw = block.raw.slice(end);
+		block.tail = rest;
+		block.redactedLength = block.raw.length;
+	};
 
 	const redactDelta = (view: StreamingView, event: SlimAssistantEvent): LiveItem[] => {
 		const index = event.contentIndex;
 		switch (event.type) {
 			case "text_start":
 			case "thinking_start":
-				view.text.set(index, "");
+				view.text.set(index, streamedText("", ""));
 				view.frozen.delete(index);
 				return [{ type: "assistant_delta", event }];
 			case "text_delta":
 			case "thinking_delta": {
 				if (view.frozen.has(index)) return [];
 				const raw = rawText(view, index);
-				const held = view.text.get(index);
-				if (raw === undefined || held === undefined) return [];
-				const next = sanitizeText(settled(raw));
-				const delta = appendable(held, next);
+				const block = view.text.get(index);
+				if (raw === undefined || block === undefined) return [];
+				const next = redactTail(block, raw, event.delta);
+				if (next === undefined) return [];
+				const delta = appendable(block.tail, next);
 				if (delta === undefined) return replacement(view);
 				if (delta.length === 0) return [];
 				const bytes = Buffer.byteLength(delta, "utf8");
@@ -408,36 +491,38 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 					return [];
 				}
 				view.bytes += bytes;
-				view.text.set(index, next);
+				holdTail(block, next);
 				return [{ type: "assistant_delta", event: { type: event.type, contentIndex: index, delta } }];
 			}
 			case "text_end":
 			case "thinking_end": {
 				const content = sanitizeText(event.content);
-				const held = view.text.get(index) ?? "";
+				const block = view.text.get(index);
+				const held = block === undefined ? "" : block.head + block.tail;
 				view.bytes += Math.max(0, Buffer.byteLength(content, "utf8") - Buffer.byteLength(held, "utf8"));
-				view.text.set(index, content);
+				view.text.set(index, streamedText(event.content, content));
 				view.frozen.delete(index);
 				return [{ type: "assistant_delta", event: { ...event, content } }];
 			}
 			case "toolcall_start":
-				view.args.set(index, "");
+				view.args.set(index, streamedText("", ""));
 				view.frozen.delete(index);
 				return [{ type: "assistant_delta", event: sanitize(event) }];
 			case "toolcall_delta": {
 				if (view.frozen.has(index)) return [];
 				const raw = view.raw.assistant?.argsText.get(index);
-				const held = view.args.get(index);
-				if (raw === undefined || held === undefined) return [];
-				const next = sanitizeText(settled(raw));
-				const delta = appendable(held, next);
+				const block = view.args.get(index);
+				if (raw === undefined || block === undefined) return [];
+				const next = redactTail(block, raw, event.argsTextDelta);
+				if (next === undefined) return [];
+				const delta = appendable(block.tail, next);
 				if (delta === undefined || view.bytes + delta.length > RPC_ACTIVE_TOOL_ARGS_MAX_SERIALIZED_BYTES * 4) {
 					// Arguments that redaction rewrites mid-stream arrive whole with the call's end.
 					view.frozen.add(index);
 					return [];
 				}
 				if (delta.length === 0) return [];
-				view.args.set(index, next);
+				holdTail(block, next);
 				view.bytes += Buffer.byteLength(delta, "utf8");
 				return [
 					{

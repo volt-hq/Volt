@@ -1162,26 +1162,27 @@ export class SessionExtensionBinding {
 		runner.bindWork(kinds.start, () => this.refuseDeclarations(runner));
 		runner.bindSubagents(this.subagents);
 		runner.bindWorktrees(this.worktrees);
+		// Each `sourceInfo` is a copy: the session's own attribute extension resources and describe the loaded skills.
 		const getCommands = (): SlashCommandInfo[] => {
 			const extensionCommands: SlashCommandInfo[] = runner.getRegisteredCommands().map((command) => ({
 				name: command.invocationName,
 				description: command.description,
 				source: "extension",
-				sourceInfo: command.sourceInfo,
+				sourceInfo: { ...command.sourceInfo },
 			}));
 
 			const templates: SlashCommandInfo[] = session.promptTemplates.map((template) => ({
 				name: template.name,
 				description: template.description,
 				source: "prompt",
-				sourceInfo: template.sourceInfo,
+				sourceInfo: { ...template.sourceInfo },
 			}));
 
 			const skills: SlashCommandInfo[] = this.host.resourceLoader.getSkills().skills.map((skill) => ({
 				name: `skill:${skill.name}`,
 				description: skill.description,
 				source: "skill",
-				sourceInfo: skill.sourceInfo,
+				sourceInfo: { ...skill.sourceInfo },
 			}));
 
 			return [...extensionCommands, ...templates, ...skills];

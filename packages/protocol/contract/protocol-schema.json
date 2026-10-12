@@ -202,6 +202,7 @@
 				"follow_up",
 				"abort",
 				"withdraw_queued",
+				"discard_client_input",
 				"abort_retry",
 				"bash",
 				"abort_bash",
@@ -5377,6 +5378,9 @@
 					"$ref": "#/$defs/Frame.intent.withdraw_queued"
 				},
 				{
+					"$ref": "#/$defs/Frame.intent.discard_client_input"
+				},
+				{
 					"$ref": "#/$defs/Frame.intent.abort_retry"
 				},
 				{
@@ -5903,6 +5907,35 @@
 				},
 				"input": {
 					"$ref": "#/$defs/IntentInput.delete_session"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.discard_client_input": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "discard_client_input"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.discard_client_input"
 				}
 			},
 			"additionalProperties": false
@@ -10435,6 +10468,18 @@
 			},
 			"additionalProperties": false
 		},
+		"IntentInput.discard_client_input": {
+			"type": "object",
+			"required": [
+				"clientMessageId"
+			],
+			"properties": {
+				"clientMessageId": {
+					"$ref": "#/$defs/RpcClientMessageId"
+				}
+			},
+			"additionalProperties": false
+		},
 		"IntentInput.export_html": {
 			"type": "object",
 			"properties": {
@@ -11798,6 +11843,29 @@
 			"properties": {
 				"trashed": {
 					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentOutput.discard_client_input": {
+			"type": "object",
+			"properties": {
+				"blocker": {
+					"type": "object",
+					"required": [
+						"clientMessageId",
+						"preview"
+					],
+					"properties": {
+						"clientMessageId": {
+							"$ref": "#/$defs/RpcClientMessageId"
+						},
+						"preview": {
+							"type": "string",
+							"maxLength": 200
+						}
+					},
+					"additionalProperties": false
 				}
 			},
 			"additionalProperties": false

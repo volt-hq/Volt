@@ -755,7 +755,7 @@ Content`,
 
 		it("should reconcile an existing git checkout to a pinned ref during install", async () => {
 			const source = "git:github.com/user/repo@v2";
-			const targetDir = join(agentDir, "git", "github.com", "user", "repo");
+			const targetDir = join(agentDir, "git", "github.com", "user", "repo@v2");
 			mkdirSync(targetDir, { recursive: true });
 			writeFileSync(join(targetDir, "package.json"), JSON.stringify({ name: "repo", version: "1.0.0" }));
 
@@ -1170,6 +1170,33 @@ Content`,
 				);
 			}
 		});
+
+		it("should check out each pinned ref beside the repository's unpinned checkout", () => {
+			const managerWithInternals = packageManager as unknown as PackageManagerInternals;
+			const installPath = (source: string, scope: "user" | "temporary" = "user") => {
+				const parsed = managerWithInternals.parseSource(source);
+				if (parsed.type !== "git") {
+					throw new Error("Expected git source");
+				}
+				return managerWithInternals.getGitInstallPath(parsed, scope);
+			};
+			const repoDir = join(agentDir, "git", "github.com", "user");
+
+			expect(installPath("git:github.com/user/repo")).toBe(join(repoDir, "repo"));
+			expect(installPath("git:github.com/user/repo@v1.2.3")).toBe(join(repoDir, "repo@v1.2.3"));
+			expect(installPath("git:git@github.com:user/repo@v1.2.3")).toBe(join(repoDir, "repo@v1.2.3"));
+			expect(installPath("git:github.com/user/repo@v2")).toBe(join(repoDir, "repo@v2"));
+
+			// A ref that is not a plain name is hashed into one directory name.
+			const branchPath = installPath("git:github.com/user/repo@feature/x");
+			expect(relative(repoDir, branchPath)).toMatch(/^repo@[0-9a-f]{16}$/);
+			expect(installPath("git:github.com/user/repo@feature-x")).toBe(join(repoDir, "repo@feature-x"));
+			expect(installPath("git:github.com/user/repo@..")).toMatch(/repo@[0-9a-f]{16}$/);
+
+			expect(installPath("git:github.com/user/repo@v1", "temporary")).not.toBe(
+				installPath("git:github.com/user/repo@v2", "temporary"),
+			);
+		});
 	});
 
 	describe("temporary install paths", () => {
@@ -1241,15 +1268,18 @@ Content`,
 			expect(settingsManager.getGlobalSettings().packages).toEqual(["git:github.com/user/repo@v1"]);
 		});
 
-		it("should update the ref when adding the same git source with a different ref", () => {
+		it("should add a git source at another ref beside the configured one", () => {
 			packageManager.addSourceToSettings("git:github.com/user/repo@v1");
 
-			const updated = packageManager.addSourceToSettings("git:github.com/user/repo@v2");
-			expect(updated).toBe(true);
-			expect(settingsManager.getGlobalSettings().packages).toEqual(["git:github.com/user/repo@v2"]);
+			const added = packageManager.addSourceToSettings("git:github.com/user/repo@v2");
+			expect(added).toBe(true);
+			expect(settingsManager.getGlobalSettings().packages).toEqual([
+				"git:github.com/user/repo@v1",
+				"git:github.com/user/repo@v2",
+			]);
 		});
 
-		it("should preserve package filters when replacing a package source ref", () => {
+		it("should take over the replaced source's entry, with its position and filters", () => {
 			settingsManager.setPackages([
 				{
 					source: "git:github.com/user/repo@v1",
@@ -1258,9 +1288,12 @@ Content`,
 					prompts: ["prompts/review.md"],
 					themes: ["themes/dark.json"],
 				},
+				"npm:other",
 			]);
 
-			const updated = packageManager.addSourceToSettings("git:github.com/user/repo@v2");
+			const updated = packageManager.addSourceToSettings("git:github.com/user/repo@v2", {
+				replace: "git:github.com/user/repo@v1",
+			});
 			expect(updated).toBe(true);
 			expect(settingsManager.getGlobalSettings().packages).toEqual([
 				{
@@ -1270,6 +1303,21 @@ Content`,
 					prompts: ["prompts/review.md"],
 					themes: ["themes/dark.json"],
 				},
+				"npm:other",
+			]);
+		});
+
+		it("should update a source's own entry rather than the one it replaces", () => {
+			settingsManager.setPackages(["git:github.com/user/repo@v1", "git:github.com/user/repo@v2"]);
+
+			const updated = packageManager.addSourceToSettings("git:github.com/user/repo@v2", {
+				scripts: "never",
+				replace: "git:github.com/user/repo@v1",
+			});
+			expect(updated).toBe(true);
+			expect(settingsManager.getGlobalSettings().packages).toEqual([
+				"git:github.com/user/repo@v1",
+				{ source: "git:github.com/user/repo@v2", scripts: "never" },
 			]);
 		});
 	});
@@ -1345,9 +1393,9 @@ Content`,
 			const identity3 = (packageManager as any).getPackageIdentity("git:github.com/user/repo");
 			const identity4 = (packageManager as any).getPackageIdentity("https://github.com/user/repo.git");
 
-			// All should have the same identity (normalized)
+			// Normalized: the same repository has one identity, and each pinned ref its own
 			expect(identity1).toBe("git:github.com/user/repo");
-			expect(identity2).toBe("git:github.com/user/repo");
+			expect(identity2).toBe("git:github.com/user/repo@v1.0.0");
 			expect(identity3).toBe("git:github.com/user/repo");
 			expect(identity4).toBe("git:github.com/user/repo");
 		});
@@ -1908,10 +1956,20 @@ Content`,
 			const httpsIdentity = (packageManager as any).getPackageIdentity(httpsUrl);
 			const sshIdentity = (packageManager as any).getPackageIdentity(sshUrl);
 
-			// Identity should ignore ref (version)
-			expect(httpsIdentity).toBe("git:github.com/user/repo");
-			expect(sshIdentity).toBe("git:github.com/user/repo");
+			// Identity keeps the ref: each pinned ref is its own package
+			expect(httpsIdentity).toBe("git:github.com/user/repo@v1.0.0");
+			expect(sshIdentity).toBe("git:github.com/user/repo@v1.0.0");
 			expect(httpsIdentity).toBe(sshIdentity);
+		});
+
+		it("should keep the same repo at different pinned refs separate", async () => {
+			const first = "git:https://github.com/volt-hq/Volt@3de085f180654df6a5553e930e266f350dc3fb71";
+			const second = "git:https://github.com/volt-hq/Volt@97fda802eeacc70ab3d99ce8bc9d13fa4fce850d";
+
+			expect(packageManager.getPackageIdentity(first)).not.toBe(packageManager.getPackageIdentity(second));
+			expect(packageManager.getPackageIdentity(first)).not.toBe(
+				packageManager.getPackageIdentity("git:https://github.com/volt-hq/Volt"),
+			);
 		});
 
 		it("should dedupe SSH URL with ssh:// protocol and git@ format", async () => {

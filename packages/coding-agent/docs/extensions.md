@@ -702,7 +702,7 @@ volt.on("before_agent_start", async (event, ctx) => {
 });
 ```
 
-The `systemPromptOptions` field gives extensions access to the same structured data Volt uses to build the system prompt. This lets you inspect what Volt has loaded — custom prompts, guidelines, tool snippets, context files, skills — without re-discovering resources or re-parsing flags. Use it when your extension needs to make deep, informed changes to the system prompt while respecting user-provided configuration.
+The `systemPromptOptions` field gives extensions access to the same structured data Volt uses to build the system prompt. This lets you inspect what Volt has loaded — custom prompts, guidelines, tool snippets, context files, skills — without re-discovering resources or re-parsing flags. Use it when your extension needs to make deep, informed changes to the system prompt while respecting user-provided configuration. Each handler receives its own copy: changing it does not change the skills or context files Volt loaded, or what later handlers see. Change the prompt by returning `systemPrompt`.
 
 Inside `before_agent_start`, `event.systemPrompt` and `ctx.getSystemPrompt()` both reflect the chained system prompt as of the current handler. Later `before_agent_start` handlers can still modify it again. An injected message must satisfy the [JSON data boundary](#json-data-boundary); Volt diagnoses and skips only the invalid optional message while continuing the turn.
 
@@ -806,7 +806,7 @@ volt.on("context", async (event, ctx) => {
 
 #### before_provider_request
 
-Fired after the provider-specific payload is built, right before the request is sent. Handlers run in extension load order. Returning `undefined` keeps the payload unchanged. Returning any other value replaces the payload for later handlers and for the actual request.
+Fired after the provider-specific payload is built, right before the request is sent. Handlers run in extension load order. `event.payload` is a copy of the payload's arrays and plain objects (other objects, such as an abort signal, are shared), so editing it in place changes only this request, not the session's tools or messages. Returning `undefined` keeps the payload as the handler left it. Returning any other value replaces the payload for later handlers and for the actual request.
 
 This hook can rewrite provider-level system instructions or remove them entirely. Those payload-level changes are not reflected by `ctx.getSystemPrompt()`, which reports Volt's system prompt string rather than the final serialized provider payload.
 
@@ -1045,7 +1045,7 @@ Fired when user input is received, after extension commands are checked but befo
 ```typescript
 volt.on("input", async (event, ctx) => {
   // event.text - raw input (before skill/template expansion)
-  // event.images - attached images, if any
+  // event.images - a copy of the attached images, if any; only a transform result changes them
   // event.source - "interactive" (typed), "rpc" (API), or "extension" (via sendUserMessage)
   // event.streamingBehavior - "steer" | "followUp" | undefined
   //   undefined when idle, "steer" for mid-stream interrupts,
@@ -1317,7 +1317,7 @@ const options = ctx.getSystemPromptOptions();
 const contextPaths = options.contextFiles?.map((file) => file.path) ?? [];
 ```
 
-This has the same shape and mutability as `before_agent_start` `event.systemPromptOptions`: custom prompt, active tools, tool snippets, prompt guidelines, appended system prompt text, cwd, loaded context files, and loaded skills. It may include full context file contents, so treat it as sensitive extension-local data and avoid exposing it through command lists, logs, or autocomplete metadata.
+Each call returns a new copy with the same shape as `before_agent_start` `event.systemPromptOptions`, so changing it does not change the session: custom prompt, active tools, tool snippets, prompt guidelines, appended system prompt text, cwd, loaded context files, and loaded skills. It may include full context file contents, so treat it as sensitive extension-local data and avoid exposing it through command lists, logs, or autocomplete metadata.
 
 This reports the current base prompt inputs. It does not include per-turn `before_agent_start` chained system-prompt changes, later `context` event message mutations, or `before_provider_request` payload rewrites.
 
@@ -1843,6 +1843,7 @@ Each entry has this shape:
 ```
 
 Use `sourceInfo` as the canonical provenance field. Do not infer ownership from command names or from ad hoc path parsing.
+Each call returns copies: changing an entry's `sourceInfo` does not change the session.
 
 Built-in interactive commands (like `/model` and `/settings`) are not included here. They are handled only in interactive
 mode and would not execute if sent via `prompt`.
@@ -2043,7 +2044,7 @@ volt.setActiveTools([...new Set([...active, "my_custom_tool"])]); // Keep curren
 volt.setActiveTools(["read", "bash"]); // Switch to read-only
 ```
 
-`volt.getAllTools()` returns `name`, `description`, `parameters`, `promptGuidelines`, and `sourceInfo`.
+`volt.getAllTools()` returns `name`, `description`, `parameters`, `promptGuidelines`, and `sourceInfo`. Each `parameters`, `promptGuidelines`, and `sourceInfo` is a copy: changing it does not change the session, the schema the model is offered and arguments are validated against, the system prompt, or which tools the session treats as built-in.
 
 Typical `sourceInfo.source` values:
 - `builtin` for built-in tools

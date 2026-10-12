@@ -808,7 +808,10 @@ export async function handlePackageCommand(
 			}
 
 			case "remove": {
-				const removed = await packageManager.removeAndPersist(source!, { local: options.local });
+				const removed = await packageManager.removeAndPersist(
+					packageManager.resolveRemoveSource(source!, { local: options.local }),
+					{ local: options.local },
+				);
 				if (!removed) {
 					console.error(chalk.red(`No matching package found for ${source}`));
 					process.exitCode = 1;

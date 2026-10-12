@@ -43,6 +43,7 @@ import type { HostClient } from "../../host/targets.ts";
 import type { PlanningState } from "../../planning.ts";
 import type { ReviewRunControls, ReviewTarget, ReviewWorkflowResult } from "../../review.ts";
 import type { ReviewDiscussionService } from "../../review-discussions.ts";
+import type { AmbiguousClientInput } from "../../session/client-inputs.ts";
 import type { SessionManager } from "../../session-manager.ts";
 import type { SettingsManager } from "../../settings-manager.ts";
 import type { SubscriptionUsageService } from "../../subscription-usage.ts";
@@ -223,6 +224,8 @@ export interface IntentState {
 	readonly fastModeEnabled?: boolean;
 	readonly planningState?: PlanningState;
 	readonly settingsManager?: SettingsManager;
+	/** The input whose outcome is ambiguous, which holds later input back until it is discarded. */
+	readonly ambiguousInput?: AmbiguousClientInput;
 }
 
 export const IDLE_INTENT_STATE: IntentState = Object.freeze({ isStreaming: false, isCompacting: false });
