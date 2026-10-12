@@ -62,8 +62,10 @@ const READ_NAME_PATTERN = new RegExp(
 	"i",
 );
 const SECRET_KEY_PATTERN = /token|secret|password|passwd|api[-_]?key|authorization|credential|private/i;
+// A secret value may start with an authorization scheme (`Authorization: Bearer abc`, `Basic dXNlcjpwYXNz`,
+// GitHub's `token ghp_abc`). The scheme stays visible and the credential after it is redacted.
 const SECRET_VALUE_PATTERN =
-	/(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:token|secret|password|passwd|api[-_]?key|authorization|credential|private)[\s:=]+)[^\s,;]+/gi;
+	/(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:token|secret|password|passwd|api[-_]?key|authorization|credential|private)[\s:=]+(?:(?:bearer|basic|token)\s+)?)[^\s,;]+/gi;
 
 function tokenizeRiskText(value: string): string {
 	return value
