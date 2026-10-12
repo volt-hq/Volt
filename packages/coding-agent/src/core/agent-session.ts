@@ -168,6 +168,15 @@ export type AgentSessionEvent =
 			outcome: "failed";
 			reason: "queue_cleared" | "dispatch_failed";
 	  }
+	| {
+			/**
+			 * The client input whose outcome is ambiguous changed
+			 * ({@link AgentSession.ambiguousClientInput}): `input` holds later input
+			 * back now, if any.
+			 */
+			type: "ambiguous_client_input_changed";
+			input?: AmbiguousClientInput;
+	  }
 	| { type: "compaction_start"; reason: CompactionReason }
 	| { type: "session_info_changed"; name?: string }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
@@ -948,6 +957,7 @@ export class AgentSession {
 			this._clientInputs.publishQueue();
 			await this._clientInputs.readmitRecovered();
 			this._clientInputs.fenceRecovered();
+			this._clientInputs.publishAmbiguous();
 		} catch (error) {
 			this._disposed = true;
 			void this._extensionServices?.close();

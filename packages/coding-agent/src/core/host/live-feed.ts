@@ -34,8 +34,6 @@ const INTENT_STATE_ENTRY_TYPES: ReadonlySet<string> = new Set([
 	"fast_mode_change",
 	"planning_state_change",
 	"leaf",
-	// An input's outcome: whether an ambiguous input holds later input back.
-	"client_input_state",
 ]);
 
 export interface LiveFeed {
@@ -371,6 +369,7 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 			case "thinking_level_changed":
 			case "planning_state_changed":
 			case "fast_mode_changed":
+			case "ambiguous_client_input_changed":
 				updateIntents();
 				return;
 			default:

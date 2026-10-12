@@ -209,6 +209,8 @@ export class SessionClientInputs {
 	private readonly admissions = new Set<Promise<unknown>>();
 	/** The queue the session last published, serialized, so it publishes only changes. */
 	private publishedQueue: string | undefined;
+	/** The id of the ambiguous input the session last published (`null` for none), so it publishes only changes. */
+	private publishedAmbiguous: string | null | undefined;
 	/**
 	 * Queue text handed back once the queue can no longer be cleared durably:
 	 * captured by the synchronous dispose fence, or by the first clear after
@@ -281,7 +283,17 @@ export class SessionClientInputs {
 		}
 		if (this.recoveredReplayPending) this.fenceRecovered();
 		this.publishQueue();
+		this.publishAmbiguous();
 		return this.ambiguous();
+	}
+
+	/** Publish the ambiguous input ({@link ambiguous}) when it changed since the session last published it. */
+	publishAmbiguous(): void {
+		const input = this.ambiguous();
+		const clientMessageId = input?.clientMessageId ?? null;
+		if (clientMessageId === this.publishedAmbiguous) return;
+		this.publishedAmbiguous = clientMessageId;
+		this.host.emit({ type: "ambiguous_client_input_changed", ...(input === undefined ? {} : { input }) });
 	}
 
 	private ambiguousRecoveredError(clientMessageId: string): ClientInputOutcomeAmbiguousError {

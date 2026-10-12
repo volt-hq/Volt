@@ -2,8 +2,8 @@ import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import type { HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
+import { feedLiveState } from "../../../src/core/host/live-feed.ts";
 import { type IntentContext, IntentRejectedError, intentRegistry } from "../../../src/core/protocol/intents/index.ts";
-import { liveIntentAvailability } from "../../../src/core/protocol/intents/state.ts";
 import { rejectionReason } from "../../../src/core/protocol/server/connection.ts";
 import {
 	ClientInputRecoveryBlockedError,
@@ -158,23 +158,73 @@ describe("#492 discarding an ambiguous started client input", () => {
 		expect(harness.sessionManager.getClientInput("live-a")?.state).toBe("completed");
 	});
 
-	it("publishes the stuck input as the live availability of discard_client_input", async () => {
-		const harness = await blockedHarness();
-		const discard = () =>
-			liveIntentAvailability(harness.session).find((intent) => intent.name === "discard_client_input");
-		expect(discard()).toEqual({
+	describe("the live intents value", () => {
+		const stuck = (value: string, label: string) => ({
 			name: "discard_client_input",
 			enabled: true,
-			state: { type: "string", value: "lost-a", label: "lost while sending" },
+			state: { type: "string", value, label },
 		});
-
-		harness.setResponses([fauxAssistantMessage("replayed reply")]);
-		await harness.session.discardAmbiguousClientInput("lost-a");
-		expect(discard()).toEqual({
+		const noneStuck = {
 			name: "discard_client_input",
 			enabled: false,
 			reason: "No message is stuck",
 			state: { type: "string", value: null },
+		};
+
+		/** Discard over the intent, as a client does, while the live feed publishes the session's live state. */
+		async function fedHarness(inputs: ReadonlyArray<readonly [string, string]>) {
+			const harness = await createHarness({
+				log: "sqlite",
+				seed: (seed) => {
+					for (const [clientMessageId, message] of inputs) {
+						seed.clientInput(clientMessageId, "prompt", { message }, { states: ["started"] });
+					}
+					return seed;
+				},
+			});
+			harnesses.push(harness);
+			const feed = feedLiveState(harness.session);
+			const { conversation, recoveries } = recoveringConversation(harness);
+			const ctx = intentContext(harness, conversation);
+			return {
+				feed,
+				recoveries,
+				discard: (clientMessageId: string) =>
+					intentRegistry.invoke(ctx, "discard_client_input", { clientMessageId }),
+				published: () => {
+					const value = harness.session.liveState.get("intents");
+					if (value?.kind !== "intents") return undefined;
+					return value.availability.find((intent) => intent.name === "discard_client_input");
+				},
+			};
+		}
+
+		it("stops naming the one stuck input once it is discarded", async () => {
+			const { feed, recoveries, discard, published } = await fedHarness([["lost-a", "lost while sending"]]);
+			expect(published()).toEqual(stuck("lost-a", "lost while sending"));
+
+			await discard("lost-a");
+			expect(published()).toEqual(noneStuck);
+			await Promise.all(recoveries);
+			feed.close();
+		});
+
+		it("names the next stuck input after each discard", async () => {
+			const { feed, recoveries, discard, published } = await fedHarness([
+				["lost-a", "first"],
+				["lost-b", "second"],
+			]);
+			expect(published()).toEqual(stuck("lost-a", "first"));
+
+			expect((await discard("lost-a")).result).toEqual({
+				blocker: { clientMessageId: "lost-b", preview: "second" },
+			});
+			expect(published()).toEqual(stuck("lost-b", "second"));
+
+			expect((await discard("lost-b")).result).toEqual({});
+			expect(published()).toEqual(noneStuck);
+			await Promise.all(recoveries);
+			feed.close();
 		});
 	});
 
