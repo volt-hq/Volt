@@ -252,13 +252,26 @@ describe("issue orchestrator extension", () => {
 			}),
 		);
 
-		// The work lists the issue and logs what the loop did, for /work to show.
+		// The work lists the issue and logs what the loop did, with links, for /work to show.
 		expect(progress.at(-1)).toEqual({
 			text: "o/r: 1 running, 0 waiting, 0 retrying, 0 handed off, 0 runs, $0.00",
 			steps: [{ key: "12", label: "#12 Fix the thing · implementing · for <1m", status: "active" }],
 		});
-		expect(output()).toMatch(
-			/^\d\d:\d\d:\d\d {2}started for o\/r\n\d\d:\d\d:\d\d {2}#12: starting implement \(general\)\n/,
+		expect(
+			output()
+				.replace(/^\d\d:\d\d:\d\d {2}/gm, "")
+				.split("\n")
+				.slice(0, 3),
+		).toEqual([
+			"started for o/r",
+			"#12: picked up: https://github.com/o/r/issues/12",
+			"#12: starting implement (general)",
+		]);
+		// And the conversation gets the note with the link.
+		await vi.waitFor(() =>
+			expect(notes.map((note) => note.content)).toContain(
+				"Picked up **\\#12** Fix the thing: implementing it.\n\nhttps://github.com/o/r/issues/12",
+			),
 		);
 
 		await command("start");

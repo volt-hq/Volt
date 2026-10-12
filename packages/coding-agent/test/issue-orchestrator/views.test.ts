@@ -11,7 +11,7 @@ import type { UiCardNode, UiNode, UiTableNode } from "@hansjm10/volt-protocol";
 import { Markdown, setCapabilities, setKeybindings } from "@hansjm10/volt-tui";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { OrchestratorSnapshot } from "../../examples/extensions/issue-orchestrator/orchestrator.ts";
-import { issueSteps, noteText, panel } from "../../examples/extensions/issue-orchestrator/views.ts";
+import { issueSteps, logLine, noteText, panel } from "../../examples/extensions/issue-orchestrator/views.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
 import { getMarkdownTheme, initTheme } from "../../src/core/theme/runtime.ts";
 import { DEFAULT_PANEL_MAX_ROWS, UiPanels } from "../../src/modes/interactive/ui-node/panels.ts";
@@ -108,6 +108,27 @@ describe("issue orchestrator notes", () => {
 		expect(noteText({ kind: "picked_up", issue: { ...issue, url: "javascript:alert(1)" }, role: "implement" })).toBe(
 			"Picked up **\\#12** Fix the thing: implementing it.",
 		);
+	});
+
+	it("give the work log the same links, as plain addresses", () => {
+		expect(logLine({ kind: "picked_up", issue, role: "implement" })).toBe(
+			"#12: picked up: https://github.com/o/r/issues/12",
+		);
+		expect(logLine({ kind: "picked_up", issue, role: "fix", pr })).toBe(
+			"#12: picked up: https://github.com/o/r/pull/112",
+		);
+		expect(logLine({ kind: "pr_opened", issue, pr })).toBe(
+			"#12: pull request #112 is open: https://github.com/o/r/pull/112",
+		);
+		expect(logLine({ kind: "handed_off", issue, ready: true, reason: "clean", pr })).toBe(
+			"#12: pull request #112 is ready for you to merge: https://github.com/o/r/pull/112",
+		);
+		expect(logLine({ kind: "handed_off", issue, ready: false, reason: "stuck" })).toBe(
+			"#12: needs you: https://github.com/o/r/issues/12",
+		);
+		expect(
+			logLine({ kind: "handed_off", issue: { ...issue, url: "file:///etc/passwd" }, ready: false, reason: "" }),
+		).toBe("#12: needs you");
 	});
 });
 

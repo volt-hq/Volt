@@ -11,7 +11,8 @@
  *   value holds.
  * - Notes in the conversation link to an issue or pull request a human may
  *   want to follow: when the orchestrator picks an issue up, when the issue
- *   gets its pull request, and when it is handed to a human.
+ *   gets its pull request, and when it is handed to a human. The work's log
+ *   carries the same links, under the issues in `/work`.
  */
 
 import { Buffer } from "node:buffer";
@@ -309,4 +310,32 @@ export function noteText(event: OrchestratorEvent): string {
 	}
 	const link = linkable(url);
 	return link === undefined ? text : `${text}\n\n${link}`;
+}
+
+/**
+ * The work log's line for `event`: what happened, then the link as a plain
+ * address, which a terminal opens. `/work` shows the log full width.
+ */
+export function logLine(event: OrchestratorEvent): string {
+	let text: string;
+	let url: string;
+	switch (event.kind) {
+		case "picked_up":
+			text = `#${event.issue.number}: picked up`;
+			url = event.pr?.url ?? event.issue.url;
+			break;
+		case "pr_opened":
+			text = `#${event.issue.number}: pull request #${event.pr.number} is open`;
+			url = event.pr.url;
+			break;
+		case "handed_off":
+			text =
+				event.ready && event.pr !== undefined
+					? `#${event.issue.number}: pull request #${event.pr.number} is ready for you to merge`
+					: `#${event.issue.number}: needs you`;
+			url = event.pr?.url ?? event.issue.url;
+			break;
+	}
+	const link = linkable(url);
+	return link === undefined ? text : `${text}: ${link}`;
 }

@@ -24,7 +24,7 @@ import {
 import { type GhRunner, GitHubTracker, type Tracker } from "./github.ts";
 import { Orchestrator, type OrchestratorSnapshot, type ReleaseOutcome, type Workspaces } from "./orchestrator.ts";
 import { issueBranch, issueWorktree } from "./phase.ts";
-import { issueSteps, noteText, panel } from "./views.ts";
+import { issueSteps, logLine, noteText, panel } from "./views.ts";
 import { loadWorkflow, type WorkflowConfig } from "./workflow.ts";
 
 export const manifest = defineManifest({
@@ -235,7 +235,10 @@ async function start(
 			ctx.ui.setPanel("orchestrator", panel(snapshot, `extension.command.${manifest.id}.${COMMAND}`));
 			report(snapshot);
 		},
-		announce: (event) => note(volt, noteText(event)),
+		announce: (event) => {
+			note(volt, noteText(event));
+			log(logLine(event));
+		},
 		log,
 	});
 
