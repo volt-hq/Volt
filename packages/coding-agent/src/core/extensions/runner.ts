@@ -1338,9 +1338,11 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
+				// Each session_before_switch handler gets its own copy: it changes neither the reference the host opens nor what later handlers see.
+				const handlerEvent = event.type === "session_before_switch" ? structuredClone(event) : event;
 				try {
 					const ctx = this.createContext(ext.id, event.type === "tool_execution_end");
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await handler(handlerEvent, ctx);
 
 					if (this.isSessionBeforeEvent(event) && handlerResult) {
 						result = cloneCanonicalData(

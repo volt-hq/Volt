@@ -564,6 +564,8 @@ volt.on("session_before_switch", async (event, ctx) => {
 });
 ```
 
+Each handler receives its own copy of the event: changing `event.targetSessionRef` affects neither the session Volt opens nor later handlers. To stop the switch, return `{ cancel: true }`.
+
 In a host that moves its client in place (RPC mode, the SDK), a switch or new-session action opens the new session before it closes the old one. The new session's extension instance receives `session_start` with `reason: "new" | "resume"` and optional `previousSessionRef`, then the old instance receives `session_shutdown`. If the new session fails to open (its cwd is missing, another process has it open), the current session stays open and receives no `session_shutdown`.
 
 In the interactive TUI, `/clear` writes the new session (`/resume` names a stored one), and the TUI reconnects to it through the [daemon](daemon.md#conversation-workers): it opens in a worker with `session_start` `reason: "new"` (`"resume"` for `/resume`) and `previousSessionRef`, and the old session stays open in its own worker for its other clients until that worker closes it (`session_shutdown` with `reason: "quit"`). A session runs in one worker at a time and never moves to another process while it runs: another terminal or a phone attaching to it joins the instance already running there, without a new `session_start`.
