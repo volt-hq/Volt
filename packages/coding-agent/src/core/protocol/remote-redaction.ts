@@ -9,8 +9,10 @@
  * live items of each subscription and sends the redacted text the client does
  * not hold yet. A path split across deltas is held back until its token ends,
  * and when redaction rewrites text the client already holds, the streaming
- * message is sent again in full. `seq` is renumbered per subscription, since
- * a frame left empty by redaction is not sent.
+ * message is sent again in full. A message sent in full, so also to a client
+ * that joins mid-stream, holds back the same of each block whose end the
+ * client was not sent. `seq` is renumbered per subscription, since a frame
+ * left empty by redaction is not sent.
  *
  * A patched panel or work item is redacted as a whole value, as a set one is:
  * the redactor folds the raw patch, redacts the patched value, and sends the
@@ -238,6 +240,13 @@ function settledPrefix(text: string): string {
 	return text;
 }
 
+/** The text of a text or thinking block. */
+function blockText(block: DeepReadonly<AssistantMessage["content"][number]> | undefined): string | undefined {
+	if (block?.type === "text") return block.text;
+	if (block?.type === "thinking") return block.thinking;
+	return undefined;
+}
+
 /** What one subscription's client holds of the streaming assistant message, redacted. */
 interface StreamingView {
 	/** The raw live state the subscription was sent, folded as the client folds it. */
@@ -248,6 +257,8 @@ interface StreamingView {
 	readonly args: Map<number, string>;
 	/** Blocks no longer streamed: over budget, or not redactable incrementally. The commit brings them. */
 	readonly frozen: Set<number>;
+	/** Text and thinking blocks whose end the client was sent: their text no longer grows. */
+	readonly ended: Set<number>;
 	/** Redacted content bytes the client holds of the message. */
 	bytes: number;
 	/** The last `seq` sent; 0 before the first frame. */
@@ -266,6 +277,7 @@ function newView(basedOn: number): StreamingView {
 		text: new Map(),
 		args: new Map(),
 		frozen: new Set(),
+		ended: new Set(),
 		bytes: 0,
 		seq: 0,
 		held: new Map(),
@@ -278,6 +290,7 @@ function clearStreaming(view: StreamingView): void {
 	view.text.clear();
 	view.args.clear();
 	view.frozen.clear();
+	view.ended.clear();
 	view.bytes = 0;
 }
 
@@ -328,7 +341,9 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 				}
 				return block;
 			}
-			const text = block.type === "text" ? block.text : block.thinking;
+			let text = block.type === "text" ? block.text : block.thinking;
+			// A block that may still grow holds back what its next delta may complete, as its deltas do.
+			if (!view.ended.has(index)) text = sanitizeText(settled(blockText(message.content[index]) ?? ""));
 			let kept = text;
 			const bytes = Buffer.byteLength(text, "utf8");
 			if (bytes > budget) {
@@ -373,12 +388,8 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 	};
 
 	/** The streaming text of a block as the raw state holds it. */
-	const rawText = (view: StreamingView, index: number): string | undefined => {
-		const block = view.raw.assistant?.message.content[index];
-		if (block?.type === "text") return block.text;
-		if (block?.type === "thinking") return block.thinking;
-		return undefined;
-	};
+	const rawText = (view: StreamingView, index: number): string | undefined =>
+		blockText(view.raw.assistant?.message.content[index]);
 
 	/** Text the client may append to what it holds, or `undefined` when its text must be replaced. */
 	const appendable = (held: string, next: string): string | undefined =>
@@ -391,6 +402,7 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 			case "thinking_start":
 				view.text.set(index, "");
 				view.frozen.delete(index);
+				view.ended.delete(index);
 				return [{ type: "assistant_delta", event }];
 			case "text_delta":
 			case "thinking_delta": {
@@ -418,6 +430,7 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 				view.bytes += Math.max(0, Buffer.byteLength(content, "utf8") - Buffer.byteLength(held, "utf8"));
 				view.text.set(index, content);
 				view.frozen.delete(index);
+				view.ended.add(index);
 				return [{ type: "assistant_delta", event: { ...event, content } }];
 			}
 			case "toolcall_start":
@@ -675,6 +688,8 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 		const sent = (items: LiveItem[]): Sent[] => items.map((each) => ({ item: each }));
 		switch (item.type) {
 			case "assistant_start":
+				// A new message, or one a client joins mid-stream: which of its blocks ended is not known.
+				view.ended.clear();
 				return sent([{ type: "assistant_start", message: redactMessage(item.message, view) }]);
 			case "assistant_delta":
 				return sent(redactDelta(view, item.event));
