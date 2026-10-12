@@ -20,6 +20,7 @@ import type { DeclaredReviewEngine } from "../review-engine-extensions.ts";
 import type { ReadonlySessionManager, SessionManager, SessionReference } from "../session-manager.ts";
 import type { ExtensionSessionWriter } from "../session-writer.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
+import { HOST_CUSTOM_MESSAGE_TYPES } from "../ui/message-presenters.ts";
 import type { MessagePresenter } from "../ui/presentation.ts";
 import type { DeclaredWorkKind, StartWorkHandler } from "../work/extension-kinds.ts";
 import { type PermissionHolder, permissionCheckedModelRegistry, requirePermission } from "./permissions.ts";
@@ -267,6 +268,17 @@ export class ExtensionMessageRoleMismatchError extends Error {
 		this.extensionId = extensionId;
 		this.expectedRole = expectedRole;
 		this.receivedRole = receivedRole;
+	}
+}
+
+/**
+ * Refuse a custom message of one of the host's types from an extension's hook
+ * result, with the error `volt.sendMessage` gives: the host presents those
+ * messages as its own.
+ */
+function assertExtensionMessageType(customType: unknown): void {
+	if (typeof customType === "string" && HOST_CUSTOM_MESSAGE_TYPES.has(customType)) {
+		throw new Error(`Custom messages of type ${customType} are the host's`);
 	}
 }
 
@@ -1553,6 +1565,14 @@ export class ExtensionRunner {
 						}
 						throw error;
 					}
+					// A host message keeps its type, but no extension gives a message one of the host's.
+					if (
+						handlerResult.message.role === "custom" &&
+						currentMessage.role === "custom" &&
+						handlerResult.message.customType !== currentMessage.customType
+					) {
+						assertExtensionMessageType(handlerResult.message.customType);
+					}
 
 					currentMessage = cloneCanonicalData(
 						handlerResult.message,
@@ -1855,6 +1875,7 @@ export class ExtensionRunner {
 							`Extension before_agent_start output from ${ext.id}`,
 						);
 						if (result.message) {
+							assertExtensionMessageType(result.message.customType);
 							messages.push(result.message);
 						}
 						if (result.systemPrompt !== undefined) {
