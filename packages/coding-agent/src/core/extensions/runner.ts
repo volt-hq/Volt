@@ -10,6 +10,7 @@
  * sees belongs to that instance and throws once it is retired.
  */
 
+import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { ImageContent, JsonValue, Model } from "@hansjm10/volt-ai";
 import { EXTENSION_ID_PATTERN } from "@hansjm10/volt-protocol";
@@ -20,6 +21,7 @@ import type { DeclaredReviewEngine } from "../review-engine-extensions.ts";
 import type { SessionManager, SessionReference } from "../session-manager.ts";
 import type { ExtensionSessionWriter } from "../session-writer.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
+import { HOST_CUSTOM_MESSAGE_TYPES } from "../ui/message-presenters.ts";
 import type { MessagePresenter } from "../ui/presentation.ts";
 import type { DeclaredWorkKind, StartWorkHandler } from "../work/extension-kinds.ts";
 import { type PermissionHolder, permissionCheckedModelRegistry } from "./permissions.ts";
@@ -1434,6 +1436,14 @@ export class ExtensionRunner {
 							// violation and downgrade transport handling to an ambiguous error.
 						}
 						throw error;
+					}
+					// A host message commits as the host sent it: a handler can only pass it through unchanged.
+					if (
+						currentMessage.role === "custom" &&
+						HOST_CUSTOM_MESSAGE_TYPES.has(currentMessage.customType) &&
+						!isDeepStrictEqual(handlerResult.message, currentMessage)
+					) {
+						throw new Error(`Custom messages of type ${currentMessage.customType} are the host's`);
 					}
 
 					currentMessage = cloneCanonicalData(

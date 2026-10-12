@@ -469,6 +469,53 @@ export default function(volt) {
 			expect(errors).toHaveLength(2);
 			expect(errors[0]).toMatchObject({ extensionId: "role-change", event: "message_end" });
 		});
+
+		it("refuses a message_end replacement that changes one of the host's custom messages", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "edit-custom.ts"),
+				`export const manifest = { id: "edit-custom", displayName: "edit-custom" };
+export default function(volt) {
+	volt.on("message_end", (event) => ({ message: event.message }));
+	volt.on("message_end", (event) => ({ message: { ...event.message, content: "edited" } }));
+	volt.on("message_end", (event) => ({ message: { ...event.message, customType: "my-other" } }));
+}`,
+			);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const errors: Array<{ extensionId: string; event: string; error: string }> = [];
+			runner.onError((error) => errors.push(error));
+			const custom = (customType: string) => ({
+				role: "custom" as const,
+				customType,
+				content: "original",
+				display: true,
+				timestamp: 1,
+			});
+
+			// The pass-through is accepted; the edit and the type change are refused.
+			await expect(runner.emitMessageEnd({ type: "message_end", message: custom("review") })).resolves.toEqual(
+				custom("review"),
+			);
+			expect(errors).toEqual([
+				expect.objectContaining({
+					extensionId: "edit-custom",
+					event: "message_end",
+					error: "Custom messages of type review are the host's",
+				}),
+				expect.objectContaining({
+					extensionId: "edit-custom",
+					event: "message_end",
+					error: "Custom messages of type review are the host's",
+				}),
+			]);
+			// An extension's own custom message can still be edited.
+			await expect(runner.emitMessageEnd({ type: "message_end", message: custom("my-ext") })).resolves.toEqual({
+				...custom("my-other"),
+				content: "edited",
+			});
+			expect(errors).toHaveLength(2);
+		});
 	});
 
 	describe("message presenters", () => {

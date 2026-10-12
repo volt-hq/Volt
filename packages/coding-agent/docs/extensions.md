@@ -740,7 +740,7 @@ Fired for message lifecycle updates.
 
 - `message_start` and `message_end` fire for user, assistant, and toolResult messages.
 - `message_update` fires for assistant streaming updates.
-- `message_end` handlers can return `{ message }` to replace the finalized message. The replacement must keep the same `role` and satisfy the [JSON data boundary](#json-data-boundary). An invalid replacement fails message preparation before it commits.
+- `message_end` handlers can return `{ message }` to replace the finalized message. The replacement must keep the same `role` and satisfy the [JSON data boundary](#json-data-boundary). An invalid replacement fails message preparation before it commits. The host's own custom messages (`work_notice`, `review`, `subagent_recovery`, `volt-plan-checkpoint`, and `volt-plan-execution`) commit as the host sent them: a handler can pass one through unchanged, but Volt refuses any other replacement, reports the handler's error, and keeps the message as it was.
 
 ```typescript
 volt.on("message_start", async (event, ctx) => {
