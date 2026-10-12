@@ -18760,7 +18760,7 @@
 			],
 			"properties": {
 				"startedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				}
 			},
 			"additionalProperties": false
@@ -18781,7 +18781,7 @@
 					]
 				},
 				"startedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				}
 			},
 			"additionalProperties": false
@@ -19314,6 +19314,13 @@
 				}
 			},
 			"additionalProperties": false
+		},
+		"RpcEpochMilliseconds": {
+			"type": "integer",
+			"minimum": 0,
+			"maximum": 9007199254740991,
+			"x-volt-expected": "be a safe non-negative integer",
+			"description": "Unix epoch milliseconds"
 		},
 		"RpcGitChangeCounts": {
 			"type": "object",
@@ -20825,7 +20832,7 @@
 					"type": "string"
 				},
 				"acknowledgedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				}
 			},
 			"additionalProperties": false
@@ -21326,10 +21333,10 @@
 					"$ref": "#/$defs/RpcReviewRunStatus"
 				},
 				"startedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"endedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"usage": {
 					"anyOf": [
@@ -21474,10 +21481,10 @@
 					]
 				},
 				"usageUpdatedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"acknowledgedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"target": {
 					"type": "object",
@@ -21620,7 +21627,7 @@
 									"additionalProperties": false
 								},
 								"observedAt": {
-									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+									"$ref": "#/$defs/RpcEpochMilliseconds"
 								}
 							},
 							"additionalProperties": false
@@ -21902,10 +21909,10 @@
 					"$ref": "#/$defs/RpcReviewRunStatus"
 				},
 				"startedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"endedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"usage": {
 					"anyOf": [
@@ -22050,10 +22057,10 @@
 					]
 				},
 				"usageUpdatedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"acknowledgedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"target": {
 					"type": "object",
@@ -22196,7 +22203,7 @@
 									"additionalProperties": false
 								},
 								"observedAt": {
-									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+									"$ref": "#/$defs/RpcEpochMilliseconds"
 								}
 							},
 							"additionalProperties": false

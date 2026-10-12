@@ -5,7 +5,7 @@
 
 import { Type } from "typebox";
 import { stringEnum } from "./helpers.ts";
-import { RpcSafeNonNegativeIntegerSchema } from "./primitives.ts";
+import { RpcEpochMillisecondsSchema, RpcSafeNonNegativeIntegerSchema } from "./primitives.ts";
 import { ReviewUsageAccountingSchema, ReviewUsageSummarySchema } from "./review-usage.ts";
 
 const reviewPullRequestReferenceProperties = {
@@ -46,7 +46,7 @@ export const RpcReviewPullRequestMetadataSchema = Type.Object(
 				{ additionalProperties: false },
 			),
 		),
-		observedAt: Type.Optional(RpcSafeNonNegativeIntegerSchema),
+		observedAt: Type.Optional(RpcEpochMillisecondsSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -200,16 +200,16 @@ const reviewRunProperties = {
 	/** The review engine that produced the run: `standard`, or `ext:<extension id>/<engine name>`. */
 	engine: Type.String(),
 	status: RpcReviewRunStatusSchema,
-	startedAt: Type.Number(),
-	endedAt: Type.Number(),
+	startedAt: RpcEpochMillisecondsSchema,
+	endedAt: RpcEpochMillisecondsSchema,
 	usage: Type.Optional(
 		Type.Union([
 			ReviewUsageSummarySchema,
 			Type.Object({ status: Type.Literal("unavailable") }, { additionalProperties: false }),
 		]),
 	),
-	usageUpdatedAt: Type.Optional(Type.Number()),
-	acknowledgedAt: Type.Optional(Type.Number()),
+	usageUpdatedAt: Type.Optional(RpcEpochMillisecondsSchema),
+	acknowledgedAt: Type.Optional(RpcEpochMillisecondsSchema),
 	target: Type.Object(
 		{
 			description: Type.String(),
@@ -276,7 +276,7 @@ export const RpcReviewWorkflowListResponseSchema = Type.Object(
 export const RpcReviewAcknowledgmentResponseSchema = Type.Object(
 	{
 		runId: Type.String(),
-		acknowledgedAt: Type.Number(),
+		acknowledgedAt: RpcEpochMillisecondsSchema,
 	},
 	{ additionalProperties: false },
 );
