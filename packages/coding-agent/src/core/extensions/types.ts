@@ -1622,7 +1622,7 @@ export interface ExtensionAPI<TSettings extends ExtensionSettingsShape = Extensi
 	/** Get the list of currently active tool names. */
 	getActiveTools(): string[];
 
-	/** Get all configured tools with parameter schema, prompt guidelines, and a copy of their source metadata. */
+	/** Get all configured tools with copies of their parameter schema, prompt guidelines, and source metadata. */
 	getAllTools(): ToolInfo[];
 
 	/** Set the active tools by name. */

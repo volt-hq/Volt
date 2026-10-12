@@ -1999,7 +1999,7 @@ volt.setActiveTools([...new Set([...active, "my_custom_tool"])]); // Keep curren
 volt.setActiveTools(["read", "bash"]); // Switch to read-only
 ```
 
-`volt.getAllTools()` returns `name`, `description`, `parameters`, `promptGuidelines`, and `sourceInfo`. Each `sourceInfo` is a copy: changing it does not change the session or which tools it treats as built-in.
+`volt.getAllTools()` returns `name`, `description`, `parameters`, `promptGuidelines`, and `sourceInfo`. Each `parameters`, `promptGuidelines`, and `sourceInfo` is a copy: changing it does not change the session, the schema the model is offered and arguments are validated against, the system prompt, or which tools the session treats as built-in.
 
 Typical `sourceInfo.source` values:
 - `builtin` for built-in tools
