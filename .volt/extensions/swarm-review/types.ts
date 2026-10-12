@@ -15,6 +15,7 @@ export interface SwarmOptions {
 	verifierThinking: ModelThinkingLevel;
 	/** Concurrent verifier sessions (each cluster uses two). */
 	verifierConcurrency: number;
+	/** Verifiers may run commands: the review granted bash. */
 	exec: boolean;
 	fresh: boolean;
 	/** Seconds; undefined derives the grace from finished workers' durations. */
@@ -32,7 +33,7 @@ export interface DiffShard {
 }
 
 export interface ReviewTarget {
-	/** Original repository root. Dependency symlinks in the checkout resolve here. */
+	/** Original repository root. */
 	repoRoot: string;
 	/** Frozen, materialized checkout of the reviewed state; the working directory of every pass. */
 	checkout: string;
@@ -52,7 +53,7 @@ export interface ReviewTarget {
 	commonDir: string;
 	/** A file as it was before the change, from the host's snapshot; undefined when it did not exist or is not text. */
 	readBase(path: string, signal: AbortSignal): Promise<string | undefined>;
-	/** Materializes another private checkout of the reviewed state, with dependencies linked; the caller removes it. */
+	/** Materializes another private checkout of the reviewed state, set up as the review asked; the caller removes it. */
 	createCheckout(): Promise<string>;
 }
 
@@ -157,7 +158,7 @@ export interface SwarmState {
 	/** One clustering pass per wave. */
 	clusterPasses: PassState[];
 	nextCandidate: number;
-	/** Commands verifiers ran (--exec), one line each, and the ones that failed. */
+	/** Commands verifiers ran with bash, one line each, and the ones that failed. */
 	commands: string[];
 	failedCommands: string[];
 	cancelling: boolean;

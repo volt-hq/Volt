@@ -268,13 +268,53 @@ describe("review intent with an engine", () => {
 			{ target: "commit" as const, ref: "abc123", engine: SWARM },
 			"The Swarm engine does not review a commit target",
 		],
-		["auxiliary tools", { engine: SWARM, tools: ["bash"] }, "Auxiliary tools do not apply to an engine's review"],
+		[
+			"a tool the conversation does not have",
+			{ engine: SWARM, tools: ["python"] },
+			"Not available to reviews: python",
+		],
 	])("refuses %s before anything starts", async (_name, input, message) => {
 		const { ctx, runReview } = setup();
 		await expect(
 			intentRegistry.invoke(ctx, "review", { target: "uncommitted", ...input } as never),
 		).rejects.toMatchObject({ code: "invalid_input", message });
 		expect(runReview).not.toHaveBeenCalled();
+	});
+
+	test("grants an engine's review the auxiliary tools a local client names, as the built-in pipeline's", async () => {
+		const { ctx, runReview } = setup();
+		await intentRegistry.invoke(ctx, "review", { target: "uncommitted", engine: SWARM, tools: ["bash"] });
+		expect(runReview).toHaveBeenCalledWith(
+			{ kind: "uncommitted" },
+			expect.objectContaining({ engine: SWARM, tools: ["bash"] }),
+		);
+	});
+
+	test("hands the checkout setup of a review with tools on, refusing one without tools and a remote client's", async () => {
+		const checkoutSetup = { command: "npm ci --ignore-scripts", timeoutMs: 900_000 };
+		const { ctx, runReview } = setup();
+		await intentRegistry.invoke(ctx, "review", {
+			target: "uncommitted",
+			engine: SWARM,
+			tools: ["bash"],
+			setup: checkoutSetup,
+		});
+		expect(runReview).toHaveBeenCalledWith(
+			{ kind: "uncommitted" },
+			expect.objectContaining({ engine: SWARM, tools: ["bash"], setup: checkoutSetup }),
+		);
+		await expect(
+			intentRegistry.invoke(ctx, "review", { target: "uncommitted", setup: checkoutSetup }),
+		).rejects.toMatchObject({
+			code: "invalid_input",
+			message: "A review's setup applies with auxiliary tools: name them in tools",
+		});
+		const remote = setup(swarm({ remoteSafe: true }), true);
+		await expect(
+			intentRegistry.invoke(remote.ctx, "review", { target: "uncommitted", engine: SWARM, setup: checkoutSetup }),
+		).rejects.toMatchObject({ code: "not_allowed" });
+		expect(runReview).toHaveBeenCalledTimes(1);
+		expect(remote.runReview).not.toHaveBeenCalled();
 	});
 
 	test("lets a remote client name only an engine that allows it", async () => {

@@ -1,7 +1,9 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as review from "../../src/core/review.ts";
 import { REMOTE_REVIEW_FAILURE_MESSAGE } from "../../src/core/review.ts";
 import {
 	type ReviewEngineContext,
@@ -18,6 +20,7 @@ import { startEngineReview } from "../../src/core/review-engine-run.ts";
 import type { ReviewCandidateReport, ReviewVerificationReport } from "../../src/core/review-report.ts";
 import * as reviewSnapshots from "../../src/core/review-snapshot.ts";
 import { listReviewRuns, recordReviewFindingOutcome } from "../../src/core/review-state.ts";
+import type { SettingsManager } from "../../src/core/settings-manager.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 const SWARM = "ext:swarm-review/swarm";
@@ -44,6 +47,12 @@ function initializeRepository(cwd: string): void {
 		join(cwd, "src", "value.ts"),
 		"export function divide(amount: number, divisor: number) {\n\tif (divisor === 0) return amount;\n\treturn amount / divisor;\n}\n",
 	);
+}
+
+/** `settings`, for a project the user did or did not trust. */
+function trustedAs(settings: SettingsManager, trusted: boolean): SettingsManager {
+	vi.spyOn(settings, "isProjectTrusted").mockReturnValue(trusted);
+	return settings;
 }
 
 function candidates(overrides: Partial<ReviewCandidateReport["candidates"][number]> = {}): ReviewCandidateReport {
@@ -157,6 +166,8 @@ describe("review engines", () => {
 				target?: Parameters<typeof startEngineReview>[0]["target"];
 				previousRunId?: string;
 				followUps?: boolean;
+				/** Start it in a conversation with no model, as the host's own verification then has none. */
+				noModel?: boolean;
 			} = {},
 		) => {
 			const { workId } = await startEngineReview({
@@ -168,8 +179,9 @@ describe("review engines", () => {
 				cwd: harness.tempDir,
 				work: harness.session.work,
 				modelRegistry: harness.session.modelRegistry,
-				model: harness.session.model,
-				settingsManager: { isProjectTrusted: () => options.trusted ?? true },
+				...(options.noModel ? {} : { model: harness.session.model }),
+				agentDir: harness.tempDir,
+				settingsManager: trustedAs(harness.settingsManager, options.trusted ?? true),
 				sessionManager: harness.session.sessionManager!,
 				sessionWriter: harness.session.sessionWriter,
 			});
@@ -633,6 +645,186 @@ describe("review engines", () => {
 		});
 	});
 
+	describe("following an earlier run", () => {
+		/** The host's verification of earlier findings, reporting `decisions`. */
+		const hostDecides = (
+			decisions: Array<{ findingId: string; outcome: "open" | "fixed" | "uncertain"; candidateId?: string }>,
+		) =>
+			fauxAssistantMessage(
+				fauxToolCall("report_review_verification", {
+					summary: "Decided the earlier findings.",
+					assessment: "complete",
+					decisions: [],
+					priorFindingDecisions: decisions.map((decision) => ({
+						...decision,
+						method: "Read the head.",
+						rationale: "Checked it.",
+						confidence: 0.9,
+					})),
+					limitations: [],
+				}),
+				{ stopReason: "toolUse" },
+			);
+		const second = (rootCauseKey: string, title: string) =>
+			candidates({ candidateId: "candidate-2", rootCauseKey, title });
+		const accept = (candidateId: string) => ({
+			candidateId,
+			outcome: "accept" as const,
+			method: "Read it.",
+			rationale: "It is there.",
+			confidence: 0.9,
+		});
+		const nothing = { summary: "Nothing new.", limitations: [], candidates: [] };
+
+		/** A first round that finds candidate-1, and also `extra` when given; resolves with the run and its findings. */
+		async function firstRound(
+			start: Awaited<ReturnType<typeof fixture>>["start"],
+			extra?: ReviewCandidateReport["candidates"][number],
+		) {
+			const first = await start(
+				engine(async (ctx) => {
+					await reviewCarefully(ctx, {
+						candidates: { ...candidates(), candidates: [...candidates().candidates, ...(extra ? [extra] : [])] },
+						verification: {
+							...verification(),
+							decisions: [...verification().decisions, ...(extra ? [accept(extra.candidateId)] : [])],
+						},
+					});
+				}),
+			);
+			const findings = first.runs.runs.find((run) => run.runId === first.workId)?.result?.findings ?? [];
+			return { runId: first.workId, findings };
+		}
+
+		it("counts a finding the engine reports again as open there, without the host, whatever an earlier round left it", async () => {
+			const { harness, start } = await fixture();
+			const first = await firstRound(start);
+			const found = first.findings[0]!;
+			// The second round leaves it uncertain: incomplete.
+			const uncertain = await start(
+				engine(async (ctx) => {
+					await reviewCarefully(ctx, {
+						candidates: nothing,
+						verification: {
+							...verification(),
+							decisions: [],
+							priorFindingDecisions: [
+								{
+									findingId: found.id,
+									outcome: "uncertain",
+									method: "Ran out.",
+									rationale: "Unsure.",
+									confidence: 0.4,
+								},
+							],
+						},
+					});
+				}),
+				{ previousRunId: first.runId },
+			);
+			expect(uncertain.work).toMatchObject({ outcome: "completed" });
+			// The third reports it again without deciding it: open at its report, and the host has nothing to decide.
+			const calls = harness.faux.state.callCount;
+			const third = await start(
+				engine(async (ctx) => {
+					await reviewCarefully(ctx);
+				}),
+				{ previousRunId: uncertain.workId },
+			);
+			expect(third.runs.runs.find((run) => run.runId === third.workId)?.result).toMatchObject({
+				completionStatus: "complete",
+				overallCorrectness: "incorrect",
+				findings: [{ id: found.id, status: "open" }],
+			});
+			expect(harness.faux.state.callCount).toBe(calls);
+		});
+
+		it("has the host decide an earlier finding the engine neither decided nor kept, even when its fingerprint went to another", async () => {
+			const { harness, start } = await fixture();
+			const first = await firstRound(start, second("other-cause", "Another defect").candidates[0]);
+			const [a, b] = first.findings;
+			if (!a || !b) throw new Error("Expected two findings");
+			// The engine moves A to the candidate that carries B's fingerprint, and says nothing of B.
+			harness.setResponses([hostDecides([{ findingId: b.id, outcome: "fixed" }])]);
+			const next = await start(
+				engine(async (ctx) => {
+					await reviewCarefully(ctx, {
+						candidates: second("other-cause", "Another defect"),
+						verification: {
+							...verification(),
+							decisions: [accept("candidate-2")],
+							priorFindingDecisions: [
+								{
+									findingId: a.id,
+									outcome: "open",
+									candidateId: "candidate-2",
+									method: "Read it.",
+									rationale: "Moved.",
+									confidence: 0.9,
+								},
+							],
+						},
+					});
+				}),
+				{ previousRunId: first.runId },
+			);
+			expect(harness.faux.state.callCount).toBe(1);
+			expect(next.runs.runs.find((run) => run.runId === next.workId)?.result?.findings).toEqual([
+				expect.objectContaining({ id: a.id, status: "open" }),
+			]);
+			expect(next.runs.runs.find((run) => run.runId === first.runId)?.result?.findings).toEqual([
+				expect.objectContaining({ id: a.id, status: "open" }),
+				expect.objectContaining({ id: b.id, status: "fixed" }),
+			]);
+		});
+
+		it("keeps an earlier finding's id at the engine's report of it under another root cause, rather than twice", async () => {
+			const { harness, start } = await fixture();
+			const first = await firstRound(start);
+			const found = first.findings[0]!;
+			harness.setResponses([hostDecides([{ findingId: found.id, outcome: "open", candidateId: "candidate-2" }])]);
+			const next = await start(
+				engine(async (ctx) => {
+					await reviewCarefully(ctx, {
+						candidates: second("renamed-cause", "Zero returns the numerator, again"),
+						verification: { ...verification(), decisions: [accept("candidate-2")] },
+					});
+				}),
+				{ previousRunId: first.runId },
+			);
+			expect(next.runs.runs.find((run) => run.runId === next.workId)?.result?.findings).toEqual([
+				expect.objectContaining({ id: found.id, status: "open", title: "Zero returns the numerator, again" }),
+			]);
+		});
+
+		it("leaves what it could not decide uncertain, not dropped, without a model or when deciding fails", async () => {
+			for (const failure of ["no model", "throws"] as const) {
+				const { start } = await fixture();
+				const first = await firstRound(start);
+				const found = first.findings[0]!;
+				if (failure === "throws") {
+					vi.spyOn(review, "decidePreviousFindings").mockRejectedValueOnce(new Error("registry unavailable"));
+				}
+				const next = await start(
+					engine(async (ctx) => {
+						await reviewCarefully(ctx, {
+							candidates: nothing,
+							verification: { ...verification(), decisions: [] },
+						});
+					}),
+					{ previousRunId: first.runId, noModel: failure === "no model" },
+				);
+				expect(next.runs.runs.find((run) => run.runId === next.workId)).toMatchObject({
+					status: "incomplete",
+					result: { completionStatus: "incomplete", findings: [{ id: found.id, status: "uncertain" }] },
+				});
+				expect(next.runs.runs.find((run) => run.runId === first.runId)?.result?.findings).toEqual([
+					expect.objectContaining({ id: found.id, status: "open" }),
+				]);
+			}
+		});
+	});
+
 	it("does not report again a finding the user dismissed in the review it follows", async () => {
 		const { harness, start } = await fixture();
 		const both = {
@@ -718,7 +910,8 @@ describe("review engines", () => {
 				work: harness.session.work,
 				modelRegistry: harness.session.modelRegistry,
 				model: harness.session.model,
-				settingsManager: { isProjectTrusted: () => true },
+				agentDir: harness.tempDir,
+				settingsManager: harness.settingsManager,
 				sessionManager: harness.session.sessionManager!,
 				sessionWriter: harness.session.sessionWriter,
 			});
@@ -841,7 +1034,8 @@ describe("review engines", () => {
 				work: harness.session.work,
 				modelRegistry: harness.session.modelRegistry,
 				model: harness.session.model,
-				settingsManager: { isProjectTrusted: () => true },
+				agentDir: harness.tempDir,
+				settingsManager: harness.settingsManager,
 				sessionManager: harness.session.sessionManager!,
 				sessionWriter: harness.session.sessionWriter,
 			});
@@ -908,7 +1102,8 @@ describe("review engines", () => {
 					work: harness.session.work,
 					modelRegistry: harness.session.modelRegistry,
 					model: harness.session.model,
-					settingsManager: { isProjectTrusted: () => true },
+					agentDir: harness.tempDir,
+					settingsManager: harness.settingsManager,
 					sessionManager: harness.session.sessionManager!,
 					sessionWriter: harness.session.sessionWriter,
 				});
@@ -952,7 +1147,8 @@ describe("review engines", () => {
 			work: harness.session.work,
 			modelRegistry: harness.session.modelRegistry,
 			model: harness.session.model,
-			settingsManager: { isProjectTrusted: () => true },
+			agentDir: harness.tempDir,
+			settingsManager: harness.settingsManager,
 			sessionManager: harness.session.sessionManager!,
 			sessionWriter: harness.session.sessionWriter,
 		});

@@ -323,11 +323,13 @@ describe("the options of a run", () => {
 	const engine = (
 		params: Record<string, string | boolean | number>,
 		controls: { focus?: string; scope?: string[] } = {},
+		tools: string[] = [],
 	) =>
 		({
 			params,
 			target: { controls: { scope: [], effort: "standard", includeOptional: false, ...controls } },
-		}) as unknown as Pick<ReviewEngineContext, "params" | "target">;
+			tools,
+		}) as unknown as Pick<ReviewEngineContext, "params" | "target" | "tools">;
 
 	it("takes the extension's setting for what the run does not set, and a hard default for what neither sets", () => {
 		expect(resolveOptions(engine({}), {})).toMatchObject({
@@ -360,7 +362,6 @@ describe("the options of a run", () => {
 					waveSize: 20,
 					concurrency: 2,
 					thinking: "high",
-					exec: true,
 					fresh: true,
 					stragglerGrace: 40,
 				}),
@@ -371,10 +372,16 @@ describe("the options of a run", () => {
 			waveSize: 3,
 			concurrency: 2,
 			thinking: "high",
-			exec: true,
 			fresh: true,
 			stragglerGrace: 40,
 		});
+	});
+
+	it("lets verifiers run commands only when the review grants bash", () => {
+		expect(resolveOptions(engine({}), {})).toMatchObject({ exec: false });
+		expect(resolveOptions(engine({}, {}, ["bash"]), {})).toMatchObject({ exec: true });
+		// Not a parameter of its own any more: the grant is the review's.
+		expect(resolveOptions(engine({ exec: true }), {})).toMatchObject({ exec: false });
 	});
 
 	it("passes the review's focus and scope on, and ignores a setting of the wrong type", () => {

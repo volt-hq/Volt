@@ -62,7 +62,7 @@ export interface PassOptions {
 	state: PassState;
 	/** Repository inspection tools (default true). */
 	inspect?: boolean;
-	/** Built-in tools to enable in addition, such as bash for --exec verifiers. */
+	/** Built-in tools to enable in addition, such as bash for verifiers the review lets run commands. */
 	extraTools?: string[];
 	/** Working checkout for this pass (default: the shared frozen checkout). */
 	checkout?: string;

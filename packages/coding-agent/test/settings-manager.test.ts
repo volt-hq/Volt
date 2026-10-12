@@ -416,6 +416,31 @@ describe("SettingsManager", () => {
 			expect(manager.getReviewEngine()).toBeUndefined();
 		});
 
+		it("reads the review setup as a command and a timeout in bounds, and nothing else", () => {
+			const setupOf = (reviewSetup: unknown) => {
+				writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ reviewSetup }));
+				return SettingsManager.create(projectDir, agentDir).getReviewSetup();
+			};
+			expect(setupOf(undefined)).toBeUndefined();
+			expect(setupOf({ command: "  npm ci --ignore-scripts ", timeoutMs: 900_000 })).toEqual({
+				command: "npm ci --ignore-scripts",
+				timeoutMs: 900_000,
+			});
+			// A timeout out of bounds is left out, so the default applies.
+			for (const timeoutMs of [0, 1.5, 7_200_000, "600000"]) {
+				expect(setupOf({ command: "npm ci", timeoutMs })).toEqual({ command: "npm ci" });
+			}
+			// No command, a blank one, or one too long is no setup.
+			for (const reviewSetup of [
+				"npm ci",
+				{ timeoutMs: 1000 },
+				{ command: "   " },
+				{ command: "x".repeat(10_001) },
+			]) {
+				expect(setupOf(reviewSetup)).toBeUndefined();
+			}
+		});
+
 		it("should let project profile clears override inherited global settings", () => {
 			writeFileSync(
 				join(agentDir, "settings.json"),

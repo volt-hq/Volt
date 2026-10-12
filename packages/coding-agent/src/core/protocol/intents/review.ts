@@ -85,6 +85,7 @@ interface ReviewControlsInput {
 	includeOptional?: boolean;
 	scopeMode?: "incremental" | "full";
 	tools?: string[];
+	setup?: { command: string; timeoutMs?: number };
 	/** A pull request review's pinned pull request. */
 	url?: string;
 }
@@ -100,9 +101,12 @@ interface ReviewStartInput extends ReviewControlsInput {
 	ref?: string;
 }
 
-/** A review start: refused on remote profiles that name auxiliary tools or pin a pull request, else as reviews are available. */
+/**
+ * A review start: refused on remote profiles that name auxiliary tools, a checkout setup, or pin a pull request, else
+ * as reviews are available.
+ */
 function reviewStartAvailability(view: IntentView, input?: ReviewControlsInput): IntentAvailability {
-	const localOnly = localOnlyInput<ReviewControlsInput>(["tools", "url"])(view, input);
+	const localOnly = localOnlyInput<ReviewControlsInput>(["tools", "setup", "url"])(view, input);
 	return localOnly.enabled ? reviewAvailability(view) : localOnly;
 }
 
@@ -130,8 +134,8 @@ function reviewTools(ctx: IntentContext, tools: readonly string[] | undefined): 
 
 /**
  * The extension engine a review start names, or none for the built-in pipeline. The conversation must have the
- * engine, it must review the target, a remote device may start only an engine that allows it, and an engine
- * takes no auxiliary tools: its passes are its own.
+ * engine, it must review the target, and a remote device may start only an engine that allows it. Auxiliary tools
+ * reach an engine as they do the built-in pipeline.
  */
 function reviewEngineOf(
 	ctx: IntentContext,
@@ -155,9 +159,6 @@ function reviewEngineOf(
 	if (ctx.profile.name === "remote" && !engine.remoteSafe) {
 		throw new IntentRejectedError("not_allowed", `The ${engine.label} engine is not available to remote clients`);
 	}
-	if (input.tools !== undefined) {
-		throw new IntentRejectedError("invalid_input", "Auxiliary tools do not apply to an engine's review");
-	}
 	try {
 		// Checked here to refuse early and by name; the run checks them again against the engine it runs.
 		resolveReviewEngineParameters(engine, input.engineParams, { remote: ctx.profile.name === "remote" });
@@ -178,12 +179,21 @@ function reviewOptions(
 ): IntentReviewOptions {
 	const remote = ctx.profile.name === "remote";
 	const tools = remote ? undefined : reviewTools(ctx, input.tools);
+	const setup = remote ? undefined : input.setup;
+	// A setup prepares the checkout auxiliary tools run in: without them there is none.
+	if (setup !== undefined && (tools === undefined || tools.length === 0)) {
+		throw new IntentRejectedError(
+			"invalid_input",
+			"A review's setup applies with auxiliary tools: name them in tools",
+		);
+	}
 	return {
 		remote,
 		requireConfirmation: remote,
 		...(engine === undefined ? {} : { engine: engine.id }),
 		...(engine?.params === undefined ? {} : { engineParams: engine.params }),
 		...(tools === undefined ? {} : { tools }),
+		...(setup === undefined ? {} : { setup }),
 		controls: {
 			...(input.focus ? { focus: input.focus } : {}),
 			...(input.scope
