@@ -139,6 +139,19 @@ type SessionBeforeEvent = Extract<
 	{ type: "session_before_switch" | "session_before_fork" | "session_before_compact" | "session_before_tree" }
 >;
 
+type PreparationEvent = Extract<RunnerEmitEvent, { type: "session_before_compact" | "session_before_tree" }>;
+
+/**
+ * The copy of a compaction or tree preparation event one handler receives: its
+ * data carries the session's own entries and messages, so a handler's change
+ * reaches neither later handlers nor the summary Volt generates. A structured
+ * clone, since `fileOps` holds `Set`s; the abort signal stays shared.
+ */
+function copyPreparationEvent(event: PreparationEvent): PreparationEvent {
+	const { signal, ...data } = event;
+	return { ...structuredClone(data), signal };
+}
+
 type SessionBeforeEventResult =
 	| SessionBeforeSwitchResult
 	| SessionBeforeForkResult
@@ -1410,16 +1423,22 @@ export class ExtensionRunner {
 		}
 		let result: SessionBeforeEventResult | undefined;
 		const copyPerHandler = LOOP_EVENT_TYPES.has(event.type);
+		const preparationEvent =
+			event.type === "session_before_compact" || event.type === "session_before_tree"
+				? (event as PreparationEvent)
+				: undefined;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(event.type);
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				// Copied outside the handler's error containment: invalid session data is not the extension's failure.
+				// Copied outside the handler's error containment: a copy failure is not the extension's.
 				const handlerEvent = copyPerHandler
 					? cloneCanonicalData(event, `Extension ${event.type} input for ${ext.id}`)
-					: event;
+					: preparationEvent
+						? copyPreparationEvent(preparationEvent)
+						: event;
 				try {
 					const ctx = this.createContext(ext.id, event.type === "tool_execution_end");
 					const handlerResult = await handler(handlerEvent, ctx);
