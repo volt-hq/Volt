@@ -3,7 +3,8 @@
  * does, on the standard engine or one the conversation's extensions registered, and ends with the same run
  * record. An extension acts only on the reviews it started: it cancels them, posts them to their pull request,
  * and records what became of their findings; its UI may open and cancel them. Disabling or reloading it cancels
- * those still running.
+ * those still starting or running, and waits up to {@link EXTENSION_DISABLE_GRACE_MS} for them to stop. A finding
+ * discussion starts none: what its reviews would record belongs to the source review.
  */
 
 import type { QueryResult } from "@hansjm10/volt-protocol";
@@ -26,6 +27,7 @@ import {
 	type ReviewRunControls,
 	type ReviewTarget,
 } from "../review.ts";
+import { REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE } from "../review-discussion-policy.ts";
 import type { ReviewEngineRegistry } from "../review-engine.ts";
 import { projectReviewRun } from "../review-projection.ts";
 import { publishReviewRun } from "../review-publish.ts";
@@ -39,6 +41,7 @@ import {
 } from "../review-state.ts";
 import type { SessionManager } from "../session-manager.ts";
 import type { SessionWriter } from "../session-writer.ts";
+import { EXTENSION_DISABLE_GRACE_MS } from "../work/extension-kinds.ts";
 import type { WorkRegistry } from "../work/registry.ts";
 
 const TARGET_KINDS: readonly ExtensionReviewTarget[] = ["uncommitted", "branch", "branch_uncommitted", "pr", "commit"];
@@ -64,6 +67,14 @@ const STANDARD_ENGINE: ExtensionReviewEngine = Object.freeze({
 	description: "The built-in review: discovery and independent verification passes over a snapshot of the change.",
 	targets: Object.freeze([...TARGET_KINDS]),
 });
+
+/** An extension's review start still under way: retiring the extension waits for it. */
+interface ReviewStart {
+	/** Its extension was retired meanwhile: the review is cancelled as soon as it starts. */
+	retired: boolean;
+	/** Resolves once the start ended: with the id of the review it started, undefined when none started. */
+	readonly done: Promise<string | undefined>;
+}
 
 export interface ExtensionReviewRunsHost {
 	readonly sessionManager: SessionManager;
@@ -179,6 +190,8 @@ export class ExtensionReviewRuns implements ExtensionReviewsHandler {
 	private readonly owned = new Map<string, Set<string>>();
 	/** The extensions' reviews that have not ended. */
 	private readonly running = new Set<string>();
+	/** The starts of each extension still under way, by manifest id. */
+	private readonly starting = new Map<string, Set<ReviewStart>>();
 
 	constructor(host: ExtensionReviewRunsHost) {
 		this.host = host;
@@ -201,8 +214,34 @@ export class ExtensionReviewRuns implements ExtensionReviewsHandler {
 	}
 
 	async start(owner: string, options: ExtensionReviewStartOptions): Promise<ExtensionReviewRun> {
+		// A finding discussion's outcomes and publications belong to its source review.
+		if (this.host.sessionManager.getReviewDiscussion()) {
+			throw new Error(`ctx.reviews.start: ${REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE}`);
+		}
 		const { target, review } = this.check(owner, options);
-		const { workId } = await this.host.startReview(target, review);
+		const done = Promise.withResolvers<string | undefined>();
+		const start: ReviewStart = { retired: false, done: done.promise };
+		const starting = this.starting.get(owner) ?? new Set<ReviewStart>();
+		this.starting.set(owner, starting);
+		starting.add(start);
+		let workId: string | undefined;
+		try {
+			({ workId } = await this.host.startReview(target, review));
+			if (start.retired) {
+				// Its extension was disabled meanwhile: retiring it waits for the review to stop.
+				await this.host
+					.work()
+					.cancel(workId)
+					.catch(() => undefined);
+				throw new Error(
+					`ctx.reviews.start: extension ${owner} was disabled while the review started; it was cancelled`,
+				);
+			}
+		} finally {
+			starting.delete(start);
+			if (starting.size === 0 && this.starting.get(owner) === starting) this.starting.delete(owner);
+			done.resolve(workId);
+		}
 		let owned = this.owned.get(owner);
 		if (!owned) {
 			owned = new Set();
@@ -234,9 +273,12 @@ export class ExtensionReviewRuns implements ExtensionReviewsHandler {
 		this.requireOwned(owner, runId, "cancels");
 		if (!this.running.has(runId)) return;
 		const work = this.host.work();
-		// It may have ended since.
-		if (work.get(runId)?.outcome !== undefined) return;
-		await work.cancel(runId);
+		try {
+			await work.cancel(runId);
+		} catch (error) {
+			// One that ended meanwhile is left alone.
+			if (work.get(runId)?.outcome === undefined) throw error;
+		}
 	}
 
 	async publish(
@@ -309,11 +351,36 @@ export class ExtensionReviewRuns implements ExtensionReviewsHandler {
 		return this.owned.get(owner)?.has(workId) === true;
 	}
 
-	/** Cancel the reviews of the extension `owner` that have not ended. */
-	async retire(owner: string): Promise<void> {
+	/**
+	 * Cancel the reviews of the extension `owner`, which was disabled, that are still starting or have not ended,
+	 * waiting up to `graceMs` for them to stop. A start under way cancels its review once it started, and rejects.
+	 */
+	async retire(owner: string, graceMs = EXTENSION_DISABLE_GRACE_MS): Promise<void> {
 		const work = this.host.work();
 		const running = [...(this.owned.get(owner) ?? [])].filter((runId) => this.running.has(runId));
+		const starting = [...(this.starting.get(owner) ?? [])];
+		// Starts after this, as the extension's when it is enabled again, are not retired.
+		this.starting.delete(owner);
+		for (const start of starting) start.retired = true;
+		if (running.length === 0 && starting.length === 0) return;
 		await Promise.all(running.map((runId) => work.cancel(runId).catch(() => undefined)));
+		// A start still resolving its target cancels its review whenever it starts: the grace bounds waiting for it too.
+		const stopped = Promise.all([
+			...running.map((runId) => work.settled(runId).catch(() => undefined)),
+			...starting.map(async (start) => {
+				const workId = await start.done;
+				if (workId !== undefined) await work.settled(workId).catch(() => undefined);
+			}),
+		]);
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const grace = new Promise<void>((resolve) => {
+			timer = setTimeout(resolve, graceMs);
+		});
+		try {
+			await Promise.race([stopped, grace]);
+		} finally {
+			clearTimeout(timer);
+		}
 	}
 
 	private requireOwned(owner: string, runId: unknown, verb: string): void {

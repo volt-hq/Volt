@@ -55,6 +55,7 @@ import {
 	ReviewVerificationReportSchema,
 	settleReviewVerdict,
 	type ValidatedReviewCandidate,
+	validateFollowUpDecisions,
 	validateReviewCandidates,
 	validateReviewFollowUps,
 	validateReviewVerification,
@@ -418,7 +419,8 @@ export interface ReviewEngineContext {
 	 * When this review follows an earlier review of its target: the findings that run left open, which the code may
 	 * have fixed or moved since. A decision for one in the verification's `priorFindingDecisions` settles it: `fixed`
 	 * closes it in the run where it was found, and `open` with the `candidateId` of the accepted candidate that
-	 * reports it now keeps its id there. One without a decision stays open where it was found. Empty otherwise.
+	 * reports it now keeps its id there. One without a decision is carried into this review as it was, with its id
+	 * and status. Empty otherwise.
 	 */
 	readonly previousFindings: readonly ReviewFinding[];
 	/**
@@ -511,6 +513,8 @@ export interface ReviewEngineRunOptions {
 	cwd: string;
 	/** The findings the earlier run this review follows left open. */
 	previousFindings?: readonly ReviewFinding[];
+	/** The fingerprints of the findings that run dismissed: they are not reported again. */
+	suppressedFingerprints?: readonly string[];
 	/** Whether the review collects follow-ups. */
 	followUps?: boolean;
 }
@@ -522,6 +526,7 @@ export class ReviewEngineRun {
 	private readonly controls: ReviewRunControls;
 	private readonly cwd: string;
 	private readonly previousFindings: readonly ReviewFinding[];
+	private readonly suppressedFingerprints: ReadonlySet<string>;
 	private readonly followUps: boolean;
 	private readonly coverage = new ReviewRunCoverage();
 	private readonly inScopeHunkIds: ReadonlySet<string>;
@@ -536,6 +541,7 @@ export class ReviewEngineRun {
 		this.controls = controlsWithDefaults(options.controls);
 		this.cwd = options.cwd;
 		this.previousFindings = structuredClone(options.previousFindings ?? []);
+		this.suppressedFingerprints = new Set(options.suppressedFingerprints);
 		this.followUps = options.followUps === true;
 		this.inScopeHunkIds = new Set(
 			this.snapshot.changedFiles
@@ -719,7 +725,7 @@ export class ReviewEngineRun {
 				return rest;
 			}),
 		};
-		// An engine settles the previous findings it can; one without a decision stays as it was.
+		// An engine settles the previous findings it can; one without a decision is carried as it was.
 		const verificationErrors = validateReviewVerification(validated, verification, this.previousFindings, {
 			decideEvery: false,
 		});
@@ -735,7 +741,9 @@ export class ReviewEngineRun {
 			candidateReport: { ...result.candidates, candidates: validated },
 			validatedCandidates: validated,
 			verificationReport: verification,
-			declassifiedFindings: declassifyReviewFindings(validated, verification),
+			declassifiedFindings: declassifyReviewFindings(validated, verification).filter(
+				(finding) => !this.suppressedFingerprints.has(finding.fingerprint),
+			),
 			discoveryCoverage: observed,
 			verificationCoverage: observed,
 			commandsRun,
@@ -746,8 +754,12 @@ export class ReviewEngineRun {
 		const followUpErrors: string[] = [];
 		if (this.followUps) {
 			const checkedFollowUps = await validateReviewFollowUps(this.snapshot, result.candidates.followUps ?? []);
-			followUpErrors.push(...checkedFollowUps.errors);
-			// A follow-up is kept once one decision accepts it; one without a decision is not verified.
+			// Follow-ups never affect the verdict: a missing, duplicate, or unknown decision is reported, not refused.
+			followUpErrors.push(
+				...checkedFollowUps.errors,
+				...validateFollowUpDecisions(checkedFollowUps.followUps, result.verification),
+			);
+			// A follow-up is kept when its first decision accepts it; one without a decision is not verified.
 			const kept = new Set(checkedFollowUps.followUps.map((followUp) => followUp.followUpId));
 			const decisions = (result.verification.followUpDecisions ?? []).filter(
 				(decision, index, all) =>

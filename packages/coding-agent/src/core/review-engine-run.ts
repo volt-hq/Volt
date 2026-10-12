@@ -127,7 +127,12 @@ export async function startEngineReview(options: StartEngineReviewOptions): Prom
 			target,
 			controls,
 			cwd: options.cwd,
-			...(followUp === undefined ? {} : { previousFindings: followUp.priorOpenFindings }),
+			...(followUp === undefined
+				? {}
+				: {
+						previousFindings: followUp.priorOpenFindings,
+						suppressedFingerprints: followUp.suppressedDismissedFingerprints,
+					}),
 			...(options.followUps ? { followUps: true } : {}),
 		});
 		let failure: Error | undefined;

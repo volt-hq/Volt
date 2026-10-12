@@ -1071,10 +1071,13 @@ export function assertFollowsReviewOf(previousRun: ReviewRunRecord, snapshot: Re
 }
 
 /**
- * The findings of a full review that follows an earlier run, once its verifier decided that run's open findings:
- * a finding decided open keeps its id in the finding that reports it now (`candidateFingerprints` maps candidate ids
- * to the fingerprints of their findings), or, reported by none, is carried as it was; one decided uncertain is
- * carried as uncertain. Findings decided fixed are not carried: they are returned, to be closed where they were found.
+ * The findings of a full review that follows an earlier run, once its verifier decided that run's open findings. A
+ * finding decided open or uncertain takes that status in the finding that holds its id; held by none, one decided open
+ * gives its id to the finding that reports it now (`candidateFingerprints` maps candidate ids to the fingerprints of
+ * their findings), or, reported by none, is carried with that status. One without a decision stays as it was: in the
+ * finding that holds its id, else its id and status go to a finding with its fingerprint that holds no other earlier
+ * finding's id, else it is carried unchanged. Findings decided fixed are not carried: they are returned, to be closed
+ * where they were found.
  */
 export function applyPreviousFindingDecisions(
 	findings: readonly ReviewFinding[],
@@ -1084,24 +1087,39 @@ export function applyPreviousFindingDecisions(
 ): { findings: ReviewFinding[]; fixed: ReviewPriorFindingDecision[] } {
 	const result = findings.map((finding) => structuredClone(finding));
 	const fixed: ReviewPriorFindingDecision[] = [];
+	const undecided: ReviewFinding[] = [];
 	for (const prior of priorOpenFindings) {
 		const decision = decisions.find((candidate) => candidate.findingId === prior.id);
-		if (!decision) continue;
+		if (!decision) {
+			undecided.push(prior);
+			continue;
+		}
 		if (decision.outcome === "fixed") {
 			fixed.push(decision);
 			continue;
 		}
 		const fingerprint =
 			decision.candidateId === undefined ? undefined : candidateFingerprints.get(decision.candidateId);
-		const current =
-			fingerprint === undefined ? undefined : result.find((finding) => finding.fingerprint === fingerprint);
 		// Reported again with the same anchor, it already has its id.
-		const kept = result.some((finding) => finding.id === prior.id);
-		if (current && decision.outcome === "open") {
-			if (!kept) current.id = prior.id;
-			continue;
-		}
-		if (!kept) result.push({ ...structuredClone(prior), status: decision.outcome });
+		const current =
+			result.find((finding) => finding.id === prior.id) ??
+			(decision.outcome === "open" && fingerprint !== undefined
+				? result.find((finding) => finding.fingerprint === fingerprint)
+				: undefined);
+		if (current) {
+			current.id = prior.id;
+			current.status = decision.outcome;
+		} else result.push({ ...structuredClone(prior), status: decision.outcome });
+	}
+	// After the decided ones, so one does not take a finding a decision gave its id.
+	const priorIds = new Set(priorOpenFindings.map((prior) => prior.id));
+	for (const prior of undecided) {
+		if (result.some((finding) => finding.id === prior.id)) continue;
+		const current = result.find((finding) => finding.fingerprint === prior.fingerprint && !priorIds.has(finding.id));
+		if (current) {
+			current.id = prior.id;
+			current.status = prior.status;
+		} else result.push(structuredClone(prior));
 	}
 	return { findings: result, fixed };
 }

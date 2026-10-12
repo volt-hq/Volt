@@ -465,7 +465,8 @@ export interface ExtensionReviews {
 	 * Start a review as the conversation's `review` work. Resolves once it
 	 * started; what is reviewed is resolved first, so a target that cannot be
 	 * reviewed rejects. It counts against the conversation's limit of reviews
-	 * at once. Needs the `exec` permission.
+	 * at once. Needs the `exec` permission. A finding discussion starts none:
+	 * what a review records there belongs to the source review.
 	 */
 	start(options: ExtensionReviewStartOptions): Promise<ExtensionReviewRun>;
 	/** A review run of the conversation by id, as clients see it; undefined when the conversation does not hold it. */
