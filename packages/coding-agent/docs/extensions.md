@@ -564,6 +564,8 @@ volt.on("session_before_switch", async (event, ctx) => {
 });
 ```
 
+Each handler receives its own copy of the event: changing `event.targetSessionRef` affects neither the session Volt opens nor later handlers. To stop the switch, return `{ cancel: true }`.
+
 In a host that moves its client in place (RPC mode, the SDK), a switch or new-session action opens the new session before it closes the old one. The new session's extension instance receives `session_start` with `reason: "new" | "resume"` and optional `previousSessionRef`, then the old instance receives `session_shutdown`. If the new session fails to open (its cwd is missing, another process has it open), the current session stays open and receives no `session_shutdown`.
 
 In the interactive TUI, `/clear` writes the new session (`/resume` names a stored one), and the TUI reconnects to it through the [daemon](daemon.md#conversation-workers): it opens in a worker with `session_start` `reason: "new"` (`"resume"` for `/resume`) and `previousSessionRef`, and the old session stays open in its own worker for its other clients until that worker closes it (`session_shutdown` with `reason: "quit"`). A session runs in one worker at a time and never moves to another process while it runs: another terminal or a phone attaching to it joins the instance already running there, without a new `session_start`.
@@ -637,6 +639,8 @@ volt.on("session_tree", async (event, ctx) => {
   // event.newLeafId, oldLeafId, summaryEntry, fromExtension
 });
 ```
+
+Each `session_compact` and `session_tree` handler receives its own copy of the event: changing `event.compactionEntry` or `event.summaryEntry` affects neither the session's saved entry nor later handlers.
 
 #### activate / deactivate
 
@@ -740,7 +744,7 @@ Fired for message lifecycle updates.
 
 - `message_start` and `message_end` fire for user, assistant, and toolResult messages, and for custom messages delivered to a turn: [`volt.sendMessage()`](#voltsendmessagemessage-options) messages queued while the agent streams or sent with `triggerTurn`, `"nextTurn"` and [`before_agent_start`](#before_agent_start) messages with the prompt that carries them, and the host's own custom messages delivered the same way, such as `volt-plan-execution`. A custom message appended while the agent is idle, such as a `volt.sendMessage()` message without `triggerTurn`, gets neither.
 - `message_update` fires for assistant streaming updates.
-- `message_end` handlers can return `{ message }` to replace the finalized message. The replacement must keep the same `role` and satisfy the [JSON data boundary](#json-data-boundary). An invalid replacement fails message preparation before it commits. A custom message's replacement cannot change its `customType` to one of the host's message types (`work_notice`, `review`, `subagent_recovery`, `volt-plan-checkpoint`, or `volt-plan-execution`): Volt reports the handler's error and keeps the message as it was.
+- `message_end` handlers can return `{ message }` to replace the finalized message. The replacement must keep the same `role` and satisfy the [JSON data boundary](#json-data-boundary). An invalid replacement fails message preparation before it commits. A custom message's replacement cannot change its `customType` to one of the host's message types (`work_notice`, `review`, `subagent_recovery`, `volt-plan-checkpoint`, or `volt-plan-execution`), and the host's own messages commit as the host sent them: a handler can pass one through unchanged, but Volt refuses any other replacement. Volt reports the handler's error and keeps the message as it was.
 
 ```typescript
 volt.on("message_start", async (event, ctx) => {
@@ -2989,7 +2993,7 @@ volt.registerMessagePresenter<{ level: string }>("status-update", (message) => {
 volt.sendMessage({ customType: "status-update", content: "Deployed", display: true, details: { level: "info" } });
 ```
 
-The presenter receives `{ customType, content, details? }` and returns `{ title?, summary?, body }`: clients show `summary` while the message is collapsed and `body` while it is expanded. The rules of [tool presentation](#tool-presentation) apply: the presenter is pure, synchronous, and stateless, and what it returns is normalized and bounded on the host. A message of a type without a presenter, or one its presenter throws for, shows its text. The host's own message types (`work_notice`, `review`, `subagent_recovery`, `volt-plan-checkpoint`, and `volt-plan-execution`) are not an extension's: `registerMessagePresenter()` throws for them, and `volt.sendMessage()` refuses them. See [message-presenter.ts](../examples/extensions/message-presenter.ts).
+The presenter receives `{ customType, content, details? }` and returns `{ title?, summary?, body }`: clients show `summary` while the message is collapsed and `body` while it is expanded. The rules of [tool presentation](#tool-presentation) apply: the presenter is pure, synchronous, and stateless, and what it returns is normalized and bounded on the host. A message of a type without a presenter, or one its presenter throws for, shows its text. The host's own message types (`work_notice`, `review`, `subagent_recovery`, `volt-plan-checkpoint`, and `volt-plan-execution`) are not an extension's: `registerMessagePresenter()` throws for them, and `volt.sendMessage()` and the writer `ctx.newSession({ setup })` gives you refuse them. See [message-presenter.ts](../examples/extensions/message-presenter.ts).
 
 ### Work Detail
 

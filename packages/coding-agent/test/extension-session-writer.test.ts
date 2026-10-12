@@ -1,6 +1,7 @@
 /**
- * The writer extension code gets (`newSession` setup) and the `custom` entry types the host keeps for itself: the
- * host's review records start with one prefix, extensions may not write them, and every other type passes through.
+ * The writer extension code gets (`newSession` setup) and the types the host keeps for itself: the host's review
+ * records start with one prefix, the host's custom messages are the types it presents as its own, extensions may not
+ * write either, and every other type passes through.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -16,6 +17,7 @@ import {
 	extensionSessionWriter,
 	HOST_REVIEW_ENTRY_TYPE_PREFIX,
 } from "../src/core/session-writer.ts";
+import { HOST_CUSTOM_MESSAGE_TYPES } from "../src/core/ui/message-presenters.ts";
 
 const HOST_REVIEW_TYPES = [
 	REVIEW_RUN_CUSTOM_ENTRY_TYPE,
@@ -25,13 +27,18 @@ const HOST_REVIEW_TYPES = [
 ];
 
 function fakeWriter() {
+	const appendMessage = vi.fn(async (_message: unknown) => "message-1");
 	const appendCustomEntry = vi.fn(async (_customType: string, _data?: unknown) => "entry-1");
+	const appendCustomMessageEntry = vi.fn(
+		async (_customType: string, _content: unknown, _display: boolean, _details?: unknown, _timestamp?: number) =>
+			"custom-message-1",
+	);
 	const unused = vi.fn(async () => undefined);
 	const writer = {
 		sessionManager: {},
-		appendMessage: unused,
+		appendMessage,
 		appendCustomEntry,
-		appendCustomMessageEntry: unused,
+		appendCustomMessageEntry,
 		appendModelChange: unused,
 		appendThinkingLevelChange: unused,
 		appendFastModeChange: unused,
@@ -41,7 +48,7 @@ function fakeWriter() {
 		recordStartingGitContext: unused,
 		recordPrReviewBinding: unused,
 	} as unknown as ExtensionSessionWriter;
-	return { writer, appendCustomEntry };
+	return { writer, appendMessage, appendCustomEntry, appendCustomMessageEntry };
 }
 
 describe("the host's review record types", () => {
@@ -77,5 +84,41 @@ describe("the writer an extension gets", () => {
 		const guarded = extensionSessionWriter(writer);
 		await expect(guarded.appendCustomEntry("my-extension.state", { count: 1 })).resolves.toBe("entry-1");
 		expect(appendCustomEntry).toHaveBeenCalledExactlyOnceWith("my-extension.state", { count: 1 });
+	});
+
+	it("refuses the host's custom message types without writing them", async () => {
+		const { writer, appendMessage, appendCustomMessageEntry } = fakeWriter();
+		const guarded = extensionSessionWriter(writer);
+		expect(HOST_CUSTOM_MESSAGE_TYPES.size).toBeGreaterThan(0);
+		for (const type of HOST_CUSTOM_MESSAGE_TYPES) {
+			const error = `Custom messages of type ${type} are the host's`;
+			await expect(guarded.appendCustomMessageEntry(type, "forged", true, { forged: true })).rejects.toThrow(error);
+			await expect(
+				guarded.appendMessage({ role: "custom", customType: type, content: "forged", display: true, timestamp: 1 }),
+			).rejects.toThrow(error);
+		}
+		expect(appendCustomMessageEntry).not.toHaveBeenCalled();
+		expect(appendMessage).not.toHaveBeenCalled();
+	});
+
+	it("passes every other message through to the session", async () => {
+		const { writer, appendMessage, appendCustomMessageEntry } = fakeWriter();
+		const guarded = extensionSessionWriter(writer);
+		await expect(guarded.appendCustomMessageEntry("my-extension", "hello", true, { count: 1 }, 5)).resolves.toBe(
+			"custom-message-1",
+		);
+		expect(appendCustomMessageEntry).toHaveBeenCalledExactlyOnceWith("my-extension", "hello", true, { count: 1 }, 5);
+
+		const custom = {
+			role: "custom",
+			customType: "my-extension",
+			content: "hello",
+			display: false,
+			timestamp: 1,
+		} as const;
+		const user = { role: "user", content: "hello", timestamp: 2 } as const;
+		await expect(guarded.appendMessage(custom)).resolves.toBe("message-1");
+		await expect(guarded.appendMessage(user)).resolves.toBe("message-1");
+		expect(appendMessage.mock.calls).toEqual([[custom], [user]]);
 	});
 });

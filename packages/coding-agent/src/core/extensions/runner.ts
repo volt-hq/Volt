@@ -10,6 +10,7 @@
  * sees belongs to that instance and throws once it is retired.
  */
 
+import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { ImageContent, JsonValue, Model } from "@hansjm10/volt-ai";
 import { EXTENSION_ID_PATTERN } from "@hansjm10/volt-protocol";
@@ -143,6 +144,16 @@ type SessionBeforeEvent = Extract<
 	RunnerEmitEvent,
 	{ type: "session_before_switch" | "session_before_fork" | "session_before_compact" | "session_before_tree" }
 >;
+
+/**
+ * Events that carry the session manager's committed entries (`compactionEntry`,
+ * `summaryEntry`): each handler gets its own copy, so its changes reach neither
+ * the session nor later handlers.
+ */
+const COMMITTED_ENTRY_EVENT_TYPES: ReadonlySet<RunnerEmitEvent["type"]> = new Set<RunnerEmitEvent["type"]>([
+	"session_compact",
+	"session_tree",
+]);
 
 type PreparationEvent = Extract<RunnerEmitEvent, { type: "session_before_compact" | "session_before_tree" }>;
 
@@ -1564,7 +1575,7 @@ export class ExtensionRunner {
 			return undefined as RunnerEmitResult<TEvent>;
 		}
 		let result: SessionBeforeEventResult | undefined;
-		const copyPerHandler = LOOP_EVENT_TYPES.has(event.type);
+		const copyPerHandler = LOOP_EVENT_TYPES.has(event.type) || COMMITTED_ENTRY_EVENT_TYPES.has(event.type);
 		const preparationEvent =
 			event.type === "session_before_compact" || event.type === "session_before_tree"
 				? (event as PreparationEvent)
@@ -1576,11 +1587,14 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				// Copied outside the handler's error containment: a copy failure is not the extension's.
+				// Each session_before_switch handler gets its own copy: it changes neither the reference the host opens nor what later handlers see.
 				const handlerEvent = copyPerHandler
 					? cloneCanonicalData(event, `Extension ${event.type} input for ${ext.id}`)
 					: preparationEvent
 						? copyPreparationEvent(preparationEvent)
-						: event;
+						: event.type === "session_before_switch"
+							? structuredClone(event)
+							: event;
 				try {
 					const ctx = this.createContext(ext.id, event.type === "tool_execution_end");
 					const handlerResult = await handler(handlerEvent, ctx);
@@ -1660,7 +1674,15 @@ export class ExtensionRunner {
 						}
 						throw error;
 					}
-					// A host message keeps its type, but no extension gives a message one of the host's.
+					// A host message commits as the host sent it: a handler can only pass it through unchanged.
+					if (
+						currentMessage.role === "custom" &&
+						HOST_CUSTOM_MESSAGE_TYPES.has(currentMessage.customType) &&
+						!isDeepStrictEqual(handlerResult.message, currentMessage)
+					) {
+						throw new Error(`Custom messages of type ${currentMessage.customType} are the host's`);
+					}
+					// No extension gives a message one of the host's types.
 					if (
 						handlerResult.message.role === "custom" &&
 						currentMessage.role === "custom" &&
