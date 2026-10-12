@@ -230,12 +230,14 @@ export class DefaultMcpClientFactory implements McpClientFactory {
 		}
 		const url = new URL(server.url);
 		const requestInit = createRequestInit(server, this.env, url);
+		// No redirectUrl: a connection presents the client that browser or device sign-in
+		// stored, whichever loopback URL it was registered for, so a token refresh uses the
+		// client that was issued the refresh token.
 		const authProvider =
 			server.auth?.type === "oauth" && this.oauthStore
 				? new VoltMcpOAuthProvider({
 						server,
 						store: this.oauthStore,
-						redirectUrl: "http://127.0.0.1/mcp/oauth/callback",
 						clientName: this.clientName,
 						clientVersion: this.clientVersion,
 					})
