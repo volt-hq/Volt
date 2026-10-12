@@ -62,8 +62,10 @@ const READ_NAME_PATTERN = new RegExp(
 	"i",
 );
 const SECRET_KEY_PATTERN = /token|secret|password|passwd|api[-_]?key|authorization|credential|private/i;
+// Secret keywords are also ordinary prose ("token endpoint", "private key"), so they only match
+// key-value forms: the separator must contain at least one `:` or `=`.
 const SECRET_VALUE_PATTERN =
-	/(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:token|secret|password|passwd|api[-_]?key|authorization|credential|private)[\s:=]+)[^\s,;]+/gi;
+	/(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:token|secret|password|passwd|api[-_]?key|authorization|credential|private)\s*[:=][\s:=]*)[^\s,;]+/gi;
 
 function tokenizeRiskText(value: string): string {
 	return value
