@@ -1533,12 +1533,12 @@ describe.skipIf(!nativeAvailable)("voltd iroh live workspace unregister", () => 
 				ordinals: [],
 				result: { workspaceName: "ws", unregistered: true },
 			});
-			// The stream ends after the answer: fatal{workspace_unregistered} is its last frame, unless
-			// native Iroh exposes the ensuing transport retirement as a reset first.
+			// The stream ends after the answer: fatal{workspace_unregistered} is its last frame, even
+			// when the pipelined frame finds the worker's relay socket closed.
 			await device.ended;
-			const tail = device.frames.slice(device.frames.indexOf(accepted) + 1);
-			expect(tail.length === 0 || (tail.length === 1 && tail[0]?.type === "fatal")).toBe(true);
-			if (tail[0]) expect(tail[0]).toEqual({ type: "fatal", code: "workspace_unregistered" });
+			expect(device.frames.slice(device.frames.indexOf(accepted) + 1)).toEqual([
+				{ type: "fatal", code: "workspace_unregistered" },
+			]);
 			expect(
 				device.frames.some(
 					(frame) => (frame.type === "result" || frame.type === "query_error") && frame.queryId === "pipelined",

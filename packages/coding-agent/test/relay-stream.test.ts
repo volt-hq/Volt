@@ -312,7 +312,10 @@ describe("relay framing (§12.2.3)", () => {
 		const phone = new FakePhoneIrohStream();
 		const writeGate = createDeferred<void>();
 		const writtenChunks: Buffer[] = [];
-		const finish = vi.fn(async () => {});
+		let bytesBeforeFin: Buffer | undefined;
+		const finish = vi.fn(async () => {
+			bytesBeforeFin = Buffer.concat(writtenChunks);
+		});
 		const reset = vi.fn(async () => {});
 		phone.send.writeAll = vi.fn((bytes: Array<number>) => {
 			writtenChunks.push(Buffer.from(bytes));
@@ -340,9 +343,12 @@ describe("relay framing (§12.2.3)", () => {
 		expect(reset).not.toHaveBeenCalled();
 		writeGate.resolve(undefined);
 		await vi.waitFor(() => expect(finish).toHaveBeenCalledTimes(1));
-		expect(Buffer.concat(writtenChunks).subarray(0, answer.length)).toEqual(answer);
+		// The last frame, read by the paused socket before the write failed, reaches the phone before FIN.
+		const lastBytes = Buffer.concat([answer, Buffer.from(fatal, "utf8")]);
+		expect(bytesBeforeFin).toEqual(lastBytes);
+		expect(Buffer.concat(writtenChunks)).toEqual(lastBytes);
 		expect(reset).not.toHaveBeenCalled();
-		expect(await relay.settled).toMatchObject({ reason: "error" });
+		expect(await relay.settled).toMatchObject({ reason: "error", bytesUp: lastBytes.length });
 	});
 
 	it("propagates phone EOF to the worker and settles phone_disconnected with byte counts", async () => {
