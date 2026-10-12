@@ -30,6 +30,8 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 |--------|---------|-------------|
 | `tui.editor.cursorUp` | `up` | Move cursor up |
 | `tui.editor.cursorDown` | `down` | Move cursor down |
+| `tui.editor.historyPrevious` | *(none)* | Recall the previous prompt from history, from any cursor position |
+| `tui.editor.historyNext` | *(none)* | Recall the next prompt from history, from any cursor position |
 | `tui.editor.cursorLeft` | `left`, `ctrl+b` | Move cursor left |
 | `tui.editor.cursorRight` | `right`, `ctrl+f` | Move cursor right |
 | `tui.editor.cursorWordLeft` | `alt+left`, `ctrl+left`, `alt+b` | Move cursor word left |
@@ -79,6 +81,18 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 | `tui.select.pageDown` | `pageDown` | Page down in list |
 | `tui.select.confirm` | `enter` | Confirm selection |
 | `tui.select.cancel` | `escape`, `ctrl+c` | Cancel selection |
+| `tui.select.left` | `left` | Move selection left, or collapse a tree node |
+| `tui.select.right` | `right` | Move selection right, or expand a tree node |
+| `tui.select.toggle` | `space` | Toggle the selected item |
+
+### TUI Focus
+
+Used in forms, dialogs, cards, tabs, and extension panels. From an empty editor, `tui.focus.next` moves focus into extension panels that show actions, forms, or trees.
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `tui.focus.next` | `tab` | Move focus to the next control |
+| `tui.focus.previous` | `shift+tab` | Move focus to the previous control |
 
 ### TUI Fullscreen Viewport
 
@@ -222,6 +236,14 @@ Used inside the scoped models selector (opened via `/scoped-models`).
 | `app.models.toggleProvider` | `ctrl+p` | Toggle all models for the current provider |
 | `app.models.reorderUp` | `alt+up` | Move the selected model up in the cycle order |
 | `app.models.reorderDown` | `alt+down` | Move the selected model down in the cycle order |
+
+### Review Tools Selector
+
+Used inside the review tools selector (opened via `/review tools`).
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.reviewTools.toggle` | `space` | Toggle whether reviews may use the selected auxiliary tool |
 
 ## Custom Configuration
 
