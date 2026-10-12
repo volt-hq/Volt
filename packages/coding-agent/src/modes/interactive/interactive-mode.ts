@@ -133,6 +133,7 @@ import { formatMissingSessionCwdPrompt } from "../../core/session-cwd.ts";
 import { SettingsManager } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
+import { formatDuration } from "../../core/tools/render-utils.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { stripTerminalControls } from "../../core/ui/ansi-tokens.ts";
 import type { UserInputResponse } from "../../core/user-input.ts";
@@ -378,16 +379,6 @@ const PANEL_SIDEBAR_COLUMNS = 40;
 /** Narrowest terminal that shows the panel sidebar; narrower ones show sidebar panels above the editor. */
 const PANEL_SIDEBAR_MIN_TERMINAL_COLUMNS = 100;
 
-/** Format an elapsed duration for the working indicator, e.g. "42s", "3m 12s", "1h 4m". */
-function formatElapsedDuration(ms: number): string {
-	const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-	if (totalSeconds < 60) return `${totalSeconds}s`;
-	const minutes = Math.floor(totalSeconds / 60);
-	const seconds = totalSeconds % 60;
-	if (minutes < 60) return `${minutes}m ${seconds}s`;
-	return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
-}
-
 /** Local wall-clock time, e.g. "3:42 PM". */
 function formatClockTime(ms: number): string {
 	return new Date(ms).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
@@ -477,10 +468,16 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 	const terminal = options.terminal ?? new ProcessTerminal();
 	if (options.tuiMode === "fullscreen") {
 		const styleSearchMatch = (text: string) => theme.bg("searchMatchBg", theme.fg("searchMatchText", text));
-		return new TuiAltScreen(terminal, options.showHardwareCursor, options.logDirectory, {
+		const tui: TuiAltScreen = new TuiAltScreen(terminal, options.showHardwareCursor, options.logDirectory, {
 			searchMatchStyle: (text) => theme.underline(styleSearchMatch(text)),
 			searchCurrentMatchStyle: (text) => theme.bold(theme.inverse(styleSearchMatch(text))),
-			openUrl: openBrowser,
+			openUrl: (url) => {
+				// Link targets come from rendered transcript content, which model and tool output
+				// control, and platform openers also launch file:, smb:, and custom scheme handlers.
+				const target = URL.parse(url);
+				if (target?.protocol === "https:" || target?.protocol === "http:") openBrowser(target.href);
+				else tui.flash("Link not opened: only http and https links open", 3000);
+			},
 			onRightClickPaste: options.onRightClickPaste,
 			copySelection: async (text) => {
 				try {
@@ -491,6 +488,7 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 				}
 			},
 		});
+		return tui;
 	}
 	return new TuiMainScreen(terminal, options.showHardwareCursor, options.logDirectory);
 }
@@ -1949,7 +1947,7 @@ export class InteractiveMode {
 			const label = this.hostWait.open ?? this.hostWait.reconnect;
 			if (label === undefined) return undefined;
 			const waited = Date.now() - (this.hostWaitLoader?.startedAt ?? Date.now());
-			return `${label}...${waited >= 2_000 ? ` (${formatElapsedDuration(waited)})` : ""}`;
+			return `${label}...${waited >= 2_000 ? ` (${formatDuration(waited, { wholeSeconds: true })})` : ""}`;
 		};
 		if (text() === undefined) {
 			if (!shown) return;
@@ -2495,7 +2493,7 @@ export class InteractiveMode {
 	private getWorkingLoaderMessage(): string {
 		const base = this.defaultWorkingMessage;
 		if (this.turnStartedAt === undefined) return base;
-		const elapsed = formatElapsedDuration(Date.now() - this.turnStartedAt);
+		const elapsed = formatDuration(Date.now() - this.turnStartedAt, { wholeSeconds: true });
 		return `${base} (${elapsed} · ${keyText("app.interrupt")} to interrupt)`;
 	}
 
@@ -2593,7 +2591,7 @@ export class InteractiveMode {
 		this.workSummary = undefined;
 		if (!summary || summary.aborted || this.shutdownRequested) return;
 		const doneAt = Date.now();
-		const text = `Worked for ${formatElapsedDuration(doneAt - summary.startedAt)} · done ${formatClockTime(doneAt)}`;
+		const text = `Worked for ${formatDuration(doneAt - summary.startedAt, { wholeSeconds: true })} · done ${formatClockTime(doneAt)}`;
 		this.workSummaryTimer = setTimeout(() => {
 			this.workSummaryTimer = undefined;
 			if (this.isShuttingDown || this.runActive() || this.store.phase?.compaction !== undefined) return;

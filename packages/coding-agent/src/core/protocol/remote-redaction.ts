@@ -9,12 +9,15 @@
  * live items of each subscription and sends the redacted text the client does
  * not hold yet. A path split across deltas is held back until its token ends,
  * and when redaction rewrites text the client already holds, the streaming
- * message is sent again in full. Text up to a line break that redacts the same
- * alone as with the text after it is redacted for good, so a delta redacts
- * only the text after its block's last such line break; a long stretch
- * without one is redacted again only once it has grown by an eighth. `seq` is
- * renumbered per subscription, since a frame left empty by redaction is not
- * sent.
+ * message is sent again in full. A message sent in full, so also to a client
+ * that joins mid-stream, holds back the same of each block whose end the
+ * client was not sent, and carries no arguments of a tool call that still
+ * streams: the items after it rebuild them from settled argument text. Text
+ * up to a line break that redacts the same alone as with the text after it is
+ * redacted for good, so a delta redacts only the text after its block's last
+ * such line break; a long stretch without one is redacted again only once it
+ * has grown by an eighth. `seq` is renumbered per subscription, since a frame
+ * left empty by redaction is not sent.
  *
  * A patched panel or work item is redacted as a whole value, as a set one is:
  * the redactor folds the raw patch, redacts the patched value, and sends the
@@ -243,6 +246,21 @@ function settledPrefix(text: string): string {
 }
 
 /**
+ * The content indexes of the tool calls whose arguments the items after
+ * `items[position]` start again, before another message starts. Of a message
+ * the item at `position` starts, these are the calls whose arguments still
+ * stream, as a host sends a streaming message again (`liveStreamingItems`).
+ */
+function restartedCalls(items: readonly LiveItem[], position: number): Set<number> {
+	const calls = new Set<number>();
+	for (const item of items.slice(position + 1)) {
+		if (item.type === "assistant_start") break;
+		if (item.type === "assistant_delta" && item.event.type === "toolcall_start") calls.add(item.event.contentIndex);
+	}
+	return calls;
+}
+
+/**
  * Raw text after a streaming block's checkpoint, in UTF-16 code units, that
  * each delta redacts again. A longer tail, such as a tool call's arguments on
  * one line, is redacted again only once it has grown by an eighth, so its
@@ -291,6 +309,8 @@ interface StreamingView {
 	readonly args: Map<number, StreamedText>;
 	/** Blocks no longer streamed: over budget, or not redactable incrementally. The commit brings them. */
 	readonly frozen: Set<number>;
+	/** Text and thinking blocks whose end the client was sent: their text no longer grows. */
+	readonly ended: Set<number>;
 	/** Redacted content bytes the client holds of the message. */
 	bytes: number;
 	/** The last `seq` sent; 0 before the first frame. */
@@ -309,6 +329,7 @@ function newView(basedOn: number): StreamingView {
 		text: new Map(),
 		args: new Map(),
 		frozen: new Set(),
+		ended: new Set(),
 		bytes: 0,
 		seq: 0,
 		held: new Map(),
@@ -321,6 +342,7 @@ function clearStreaming(view: StreamingView): void {
 	view.text.clear();
 	view.args.clear();
 	view.frozen.clear();
+	view.ended.clear();
 	view.bytes = 0;
 }
 
@@ -351,10 +373,16 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 		return prefix.slice(0, prefix.length - sanitizer.rootPrefixSuffix(prefix));
 	};
 
-	/** A redacted assistant message within the snapshot budget; blocks cut short are frozen. */
+	/**
+	 * A redacted assistant message within the snapshot budget; blocks cut short
+	 * are frozen. A tool call in `streaming`, whose arguments the items after
+	 * the message rebuild, carries none: the arguments parsed from its partial
+	 * JSON may end in the start of a root.
+	 */
 	const redactMessage = (
 		message: DeepReadonly<AssistantMessage>,
 		view: StreamingView,
+		streaming: ReadonlySet<number>,
 	): DeepReadonly<AssistantMessage> => {
 		const redacted = sanitize(message);
 		view.text.clear();
@@ -367,11 +395,14 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 		const content = redacted.content.map((block, index) => {
 			if (block.type !== "text" && block.type !== "thinking") {
 				if (block.type === "toolCall") {
+					if (streaming.has(index)) return { ...block, arguments: {} };
 					return { ...block, arguments: boundStrings(block.arguments, RPC_ACTIVE_TOOL_ARGS_MAX_SERIALIZED_BYTES) };
 				}
 				return block;
 			}
-			const text = block.type === "text" ? block.text : block.thinking;
+			let text = block.type === "text" ? block.text : block.thinking;
+			// A block that may still grow holds back what its next delta may complete, as its deltas do.
+			if (!view.ended.has(index)) text = sanitizeText(settled(blockText(message.content[index]) ?? ""));
 			let kept = text;
 			const bytes = Buffer.byteLength(text, "utf8");
 			if (bytes > budget) {
@@ -394,7 +425,12 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 			clearStreaming(view);
 			return [];
 		}
-		const items: LiveItem[] = [{ type: "assistant_start", message: redactMessage(assistant.message, view) }];
+		const items: LiveItem[] = [
+			{
+				type: "assistant_start",
+				message: redactMessage(assistant.message, view, new Set(assistant.argsText.keys())),
+			},
+		];
 		for (const [contentIndex, argsText] of assistant.argsText) {
 			const block = assistant.message.content[contentIndex];
 			if (block?.type !== "toolCall") continue;
@@ -473,6 +509,7 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 			case "thinking_start":
 				view.text.set(index, streamedText("", ""));
 				view.frozen.delete(index);
+				view.ended.delete(index);
 				return [{ type: "assistant_delta", event }];
 			case "text_delta":
 			case "thinking_delta": {
@@ -502,6 +539,7 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 				view.bytes += Math.max(0, Buffer.byteLength(content, "utf8") - Buffer.byteLength(held, "utf8"));
 				view.text.set(index, streamedText(event.content, content));
 				view.frozen.delete(index);
+				view.ended.add(index);
 				return [{ type: "assistant_delta", event: { ...event, content } }];
 			}
 			case "toolcall_start":
@@ -756,11 +794,24 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 		return [{ item, held: hold(view, key, value) }];
 	};
 
-	const redactItem = (view: StreamingView, item: LiveItem): Sent[] => {
+	/** `item`, at `position` of the frame's items, as the client may receive it. */
+	const redactItem = (
+		view: StreamingView,
+		item: LiveItem,
+		frameItems: readonly LiveItem[],
+		position: number,
+	): Sent[] => {
 		const sent = (items: LiveItem[]): Sent[] => items.map((each) => ({ item: each }));
 		switch (item.type) {
 			case "assistant_start":
-				return sent([{ type: "assistant_start", message: redactMessage(item.message, view) }]);
+				// A new message, or one a client joins mid-stream: which of its blocks ended is not known.
+				view.ended.clear();
+				return sent([
+					{
+						type: "assistant_start",
+						message: redactMessage(item.message, view, restartedCalls(frameItems, position)),
+					},
+				]);
 			case "assistant_delta":
 				return sent(redactDelta(view, item.event));
 			case "assistant_end":
@@ -896,9 +947,9 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 		}
 		view.raw = foldLiveFrame(view.raw, { basedOn: frame.basedOn, reset: frame.reset, items: [] });
 		const sent: Sent[] = [];
-		for (const item of frame.items) {
+		for (const [position, item] of frame.items.entries()) {
 			view.raw = foldLiveItems(view.raw, [item]);
-			sent.push(...redactItem(view, item));
+			sent.push(...redactItem(view, item, frame.items, position));
 		}
 		if (sent.length === 0 && frame.reset !== true) return undefined;
 		const fitted = keptItems(view, sent, frame);
