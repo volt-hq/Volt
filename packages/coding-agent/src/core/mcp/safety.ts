@@ -61,9 +61,11 @@ const READ_NAME_PATTERN = new RegExp(
 	`${TOKEN_START}(read|get|list|search|find|query|fetch|lookup|inspect|describe|show|view|download)${TOKEN_END}`,
 	"i",
 );
-const SECRET_KEY_PATTERN = /token|secret|password|passwd|api[-_]?key|authorization|credential|private/i;
+const SECRET_KEY_PATTERN = /token|secret|password|passwd|api[-_\s]?key|authorization|credential|private/i;
+// A key may be quoted (`"access_token": "abc"`, `'token': 'abc'`). A quoted value is redacted up to its
+// closing quote, so values with spaces are fully hidden and the surrounding JSON stays intact.
 const SECRET_VALUE_PATTERN =
-	/(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:token|secret|password|passwd|api[-_]?key|authorization|credential|private)[\s:=]+)[^\s,;]+/gi;
+	/(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:token|secret|password|passwd|api[-_\s]?key|authorization|credential|private)["']?[\s:=]+)(?:(["'])(?:\\.|(?!\3)[^\\\n])*\3|[^\s,;]+)/gi;
 
 function tokenizeRiskText(value: string): string {
 	return value
@@ -100,12 +102,13 @@ export function isMcpToolTrustedReadCandidate(tool: Pick<SdkTool, "name" | "desc
 export function redactMcpText(value: string): string {
 	return value.replace(
 		SECRET_VALUE_PATTERN,
-		(_match, bearerPrefix: string | undefined, keyPrefix: string | undefined) => {
+		(_match, bearerPrefix: string | undefined, keyPrefix: string | undefined, valueQuote: string | undefined) => {
 			if (bearerPrefix) {
 				return `${bearerPrefix}[redacted]`;
 			}
 			if (keyPrefix) {
-				return `${keyPrefix}[redacted]`;
+				const quote = valueQuote ?? "";
+				return `${keyPrefix}${quote}[redacted]${quote}`;
 			}
 			return "[redacted]";
 		},
