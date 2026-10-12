@@ -8,7 +8,9 @@
  * Streaming assistant text is redacted as a whole: the redactor folds the raw
  * live items of each subscription and sends the redacted text the client does
  * not hold yet. A path split across deltas is held back until its token ends,
- * and when redaction rewrites text the client already holds, the streaming
+ * but text the client holds is never held back again: when a delta grows a
+ * sent token into a path, the rest of the token waits for its end. When
+ * redaction rewrites text the client already holds, the streaming
  * message is sent again in full. `seq` is renumbered per subscription, since
  * a frame left empty by redaction is not sent.
  *
@@ -238,14 +240,29 @@ function settledPrefix(text: string): string {
 	return text;
 }
 
+/** The text of a text or thinking block. */
+function blockText(block: DeepReadonly<AssistantMessage["content"][number]> | undefined): string | undefined {
+	if (block?.type === "text") return block.text;
+	if (block?.type === "thinking") return block.thinking;
+	return undefined;
+}
+
+/** What a client holds of a streaming block's text, or of a tool call's argument text. */
+interface HeldText {
+	/** The redacted text. */
+	readonly text: string;
+	/** Length of the raw text it is the redaction of. */
+	readonly raw: number;
+}
+
 /** What one subscription's client holds of the streaming assistant message, redacted. */
 interface StreamingView {
 	/** The raw live state the subscription was sent, folded as the client folds it. */
 	raw: LiveFoldState;
-	/** Redacted text of each text and thinking block the client holds. */
-	readonly text: Map<number, string>;
-	/** Redacted argument text of each streaming tool call the client holds. */
-	readonly args: Map<number, string>;
+	/** What the client holds of each text and thinking block. */
+	readonly text: Map<number, HeldText>;
+	/** What the client holds of each streaming tool call's argument text. */
+	readonly args: Map<number, HeldText>;
 	/** Blocks no longer streamed: over budget, or not redactable incrementally. The commit brings them. */
 	readonly frozen: Set<number>;
 	/** Redacted content bytes the client holds of the message. */
@@ -336,7 +353,7 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 				view.frozen.add(index);
 			}
 			budget = Math.max(0, budget - Buffer.byteLength(kept, "utf8"));
-			view.text.set(index, kept);
+			view.text.set(index, { text: kept, raw: blockText(message.content[index])?.length ?? 0 });
 			view.bytes += Buffer.byteLength(kept, "utf8");
 			return block.type === "text" ? { ...block, text: kept } : { ...block, thinking: kept };
 		});
@@ -359,8 +376,9 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 				type: "assistant_delta",
 				event: { type: "toolcall_start", contentIndex, id: block.id, name: block.name },
 			});
-			const redacted = sanitizeText(settled(argsText));
-			view.args.set(contentIndex, redacted);
+			const ready = settled(argsText);
+			const redacted = sanitizeText(ready);
+			view.args.set(contentIndex, { text: redacted, raw: ready.length });
 			if (redacted.length > 0) {
 				items.push({
 					type: "assistant_delta",
@@ -373,12 +391,8 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 	};
 
 	/** The streaming text of a block as the raw state holds it. */
-	const rawText = (view: StreamingView, index: number): string | undefined => {
-		const block = view.raw.assistant?.message.content[index];
-		if (block?.type === "text") return block.text;
-		if (block?.type === "thinking") return block.thinking;
-		return undefined;
-	};
+	const rawText = (view: StreamingView, index: number): string | undefined =>
+		blockText(view.raw.assistant?.message.content[index]);
 
 	/** Text the client may append to what it holds, or `undefined` when its text must be replaced. */
 	const appendable = (held: string, next: string): string | undefined =>
@@ -389,7 +403,7 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 		switch (event.type) {
 			case "text_start":
 			case "thinking_start":
-				view.text.set(index, "");
+				view.text.set(index, { text: "", raw: 0 });
 				view.frozen.delete(index);
 				return [{ type: "assistant_delta", event }];
 			case "text_delta":
@@ -398,8 +412,11 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 				const raw = rawText(view, index);
 				const held = view.text.get(index);
 				if (raw === undefined || held === undefined) return [];
-				const next = sanitizeText(settled(raw));
-				const delta = appendable(held, next);
+				const ready = settled(raw);
+				// A token the client holds the start of grew into what may be a path: the rest waits for its end.
+				if (ready.length < held.raw) return [];
+				const next = sanitizeText(ready);
+				const delta = appendable(held.text, next);
 				if (delta === undefined) return replacement(view);
 				if (delta.length === 0) return [];
 				const bytes = Buffer.byteLength(delta, "utf8");
@@ -408,20 +425,20 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 					return [];
 				}
 				view.bytes += bytes;
-				view.text.set(index, next);
+				view.text.set(index, { text: next, raw: ready.length });
 				return [{ type: "assistant_delta", event: { type: event.type, contentIndex: index, delta } }];
 			}
 			case "text_end":
 			case "thinking_end": {
 				const content = sanitizeText(event.content);
-				const held = view.text.get(index) ?? "";
+				const held = view.text.get(index)?.text ?? "";
 				view.bytes += Math.max(0, Buffer.byteLength(content, "utf8") - Buffer.byteLength(held, "utf8"));
-				view.text.set(index, content);
+				view.text.set(index, { text: content, raw: event.content.length });
 				view.frozen.delete(index);
 				return [{ type: "assistant_delta", event: { ...event, content } }];
 			}
 			case "toolcall_start":
-				view.args.set(index, "");
+				view.args.set(index, { text: "", raw: 0 });
 				view.frozen.delete(index);
 				return [{ type: "assistant_delta", event: sanitize(event) }];
 			case "toolcall_delta": {
@@ -429,15 +446,17 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 				const raw = view.raw.assistant?.argsText.get(index);
 				const held = view.args.get(index);
 				if (raw === undefined || held === undefined) return [];
-				const next = sanitizeText(settled(raw));
-				const delta = appendable(held, next);
+				const ready = settled(raw);
+				if (ready.length < held.raw) return [];
+				const next = sanitizeText(ready);
+				const delta = appendable(held.text, next);
 				if (delta === undefined || view.bytes + delta.length > RPC_ACTIVE_TOOL_ARGS_MAX_SERIALIZED_BYTES * 4) {
 					// Arguments that redaction rewrites mid-stream arrive whole with the call's end.
 					view.frozen.add(index);
 					return [];
 				}
 				if (delta.length === 0) return [];
-				view.args.set(index, next);
+				view.args.set(index, { text: next, raw: ready.length });
 				view.bytes += Buffer.byteLength(delta, "utf8");
 				return [
 					{
