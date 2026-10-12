@@ -85,7 +85,7 @@ function record(runId: string, endedAt: number, findings: ReviewFinding[] = [fin
 		runId,
 		workflowAction: "review.branch",
 		status: "completed",
-		startedAt: endedAt - 10,
+		startedAt: endedAt,
 		endedAt,
 		target: {
 			description: "current branch against main",
