@@ -46,6 +46,23 @@ describe("issue #881: MCP redaction of quoted keys and API key", () => {
 		expect(redactMcpText('token: "abc123')).toBe("token: [redacted]");
 	});
 
+	it("redacts the token after a Bearer or Basic scheme when the value is not a closed string", () => {
+		expect(redactMcpText('{"Authorization":"Bearer abc123')).toBe('{"Authorization":[redacted]');
+		expect(redactMcpText('"Authorization": f"Bearer abc123"')).toBe('"Authorization": [redacted]');
+		expect(redactMcpText('"Authorization": Bearer abc123')).toBe('"Authorization": [redacted]');
+		expect(redactMcpText("API key: Bearer abc123")).toBe("API key: [redacted]");
+		expect(redactMcpText("Authorization: Bearer abc123")).toBe("Authorization: [redacted]");
+		expect(redactMcpText("authorization: Basic dXNlcjpwYXNz")).toBe("authorization: [redacted]");
+	});
+
+	it("keeps nested secret keys under a secret key redactable", () => {
+		expect(redactMcpText('{"credential": {"password": "hunter2"}}')).toBe(
+			'{"credential": {"password": "[redacted]"}}',
+		);
+		expect(redactMcpText('{"credential":{"password":"hunter2"}}')).toBe('{"credential":{"password":"[redacted]"}}');
+		expect(redactMcpText('{"token": [{"password": "hunter2"}]}')).toBe('{"token": [{"password": "[redacted]"}]}');
+	});
+
 	it("keeps serialized JSON secrets and API key object keys out of the audit log", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "volt-881-"));
 		directories.push(directory);

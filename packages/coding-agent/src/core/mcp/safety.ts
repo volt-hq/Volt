@@ -65,9 +65,10 @@ const SECRET_KEY_PATTERN = /token|secret|password|passwd|api[-_\s]?key|authoriza
 // A key may be quoted (`"access_token": "abc"`, `'token': 'abc'`). A quoted key and the two-word "API key"
 // need an explicit `:` or `=`, so a quoted value or prose ending in a key name never takes the next key
 // name as its value. A quoted value is redacted up to its closing quote, so values with spaces are fully
-// hidden and the surrounding JSON stays intact.
+// hidden and the surrounding JSON stays intact. Any other value is redacted together with the token after a
+// `Bearer`/`Basic` scheme, and a value starting with `{` or `[` is left for nested keys to be redacted.
 const SECRET_VALUE_PATTERN =
-	/(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:token|secret|password|passwd|api[-_]?key|authorization|credential|private)(?:["']\s*[:=]\s*|[\s:=]+)|api\skey["']?\s*[:=]\s*)(?:(["'])(?:\\.|(?!\3)[^\\\n])*\3|[^\s,;]+)/gi;
+	/(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:token|secret|password|passwd|api[-_]?key|authorization|credential|private)(?:["']\s*[:=]\s*|[\s:=]+)|api\skey["']?\s*[:=]\s*)(?:(["'])(?:\\.|(?!\3)[^\\\n])*\3|[^\s,;{[]*?(?:bearer|basic)[ \t]+[^\s,;]+|[^\s,;{[][^\s,;]*)/gi;
 
 function tokenizeRiskText(value: string): string {
 	return value
