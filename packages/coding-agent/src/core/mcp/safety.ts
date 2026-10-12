@@ -62,8 +62,15 @@ const READ_NAME_PATTERN = new RegExp(
 	"i",
 );
 const SECRET_KEY_PATTERN = /token|secret|password|passwd|api[-_]?key|authorization|credential|private/i;
-const SECRET_VALUE_PATTERN =
-	/(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:token|secret|password|passwd|api[-_]?key|authorization|credential|private)[\s:=]+)[^\s,;]+/gi;
+// Secret key names are also ordinary prose ("token endpoint", "Refresh token expired"), so a value is
+// only redacted after a `:` or `=` separator (`token: abc`, `api_key=abc`) or after a command-line flag
+// whose name ends in a key name (`--token abc`, `--github-token abc`). Free text such as
+// "token abc123" is left readable.
+const SECRET_KEY = `(?:${SECRET_KEY_PATTERN.source})`;
+const SECRET_VALUE_PATTERN = new RegExp(
+	String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+|(${SECRET_KEY}\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?${SECRET_KEY}\s+)[^\s,;]+`,
+	"gi",
+);
 
 function tokenizeRiskText(value: string): string {
 	return value
