@@ -35,10 +35,12 @@ import { formatSchemaError } from "./protocol/schema-errors.ts";
 import {
 	controlsWithDefaults,
 	inRunScope,
+	type ReviewCheckoutSetup,
 	type ReviewEffort,
 	type ReviewRunControls,
 	type ReviewTarget,
 	reviewExclusions,
+	setUpReviewCheckout,
 } from "./review.ts";
 import { STATIC_REVIEW_LIMITATION } from "./review-presentation.ts";
 import {
@@ -419,8 +421,9 @@ export interface ReviewEngineContext {
 	 * When this review follows an earlier review of its target: the findings that run left open, which the code may
 	 * have fixed or moved since. A decision for one in the verification's `priorFindingDecisions` settles it: `fixed`
 	 * closes it in the run where it was found, and `open` with the `candidateId` of the accepted candidate that
-	 * reports it now keeps its id there. One without a decision is carried into this review as it was, with its id
-	 * and status. Empty otherwise.
+	 * reports it now keeps its id there. One the engine neither decides nor reports again (a candidate with its
+	 * fingerprint) the host decides after the engine returns, with a verification pass of its own, so that no finding
+	 * outlives a round undecided: deciding them is the engine's to do where it can, not a duty. Empty otherwise.
 	 */
 	readonly previousFindings: readonly ReviewFinding[];
 	/**
@@ -462,7 +465,17 @@ export interface ReviewEngineContext {
 	 * {@link ReviewEngineSubmissionError}, after which the engine may submit again.
 	 */
 	submit(result: ReviewEngineResult): Promise<ReviewEngineSubmission>;
-	/** A disposable checkout of the reviewed head, removed when the review ends. */
+	/**
+	 * Tools of the conversation the review may use beside the snapshot tools, such as `bash` to run the project's
+	 * checks and tests: an engine gives them to the sessions it starts, and runs them in a {@link checkout}, never in
+	 * the workspace. Empty unless whoever started the review granted them; a remote review never has any.
+	 */
+	readonly tools: readonly string[];
+	/**
+	 * A new disposable checkout of the reviewed head, removed when the review ends. When the review was started with
+	 * a setup (such as installing dependencies), it has run there, so commands find what a working copy has; a setup
+	 * that fails rejects with its output.
+	 */
 	checkout(): Promise<string>;
 }
 
@@ -517,6 +530,19 @@ export interface ReviewEngineRunOptions {
 	suppressedFingerprints?: readonly string[];
 	/** Whether the review collects follow-ups. */
 	followUps?: boolean;
+	/** The tools of the conversation the review may use beside the snapshot tools. */
+	tools?: readonly string[];
+	/** Prepares each checkout the engine asks for. */
+	setup?: ReviewCheckoutSetup;
+	/** The shell the setup runs with: the user's. */
+	shellPath?: string;
+}
+
+/** What the engine decided of the previous findings, kept until the host decided the rest. */
+interface PendingPriorDecisions {
+	readonly decisions: readonly ReviewPriorFindingDecision[];
+	/** The fingerprints of the accepted candidates, by candidate id. */
+	readonly candidateFingerprints: ReadonlyMap<string, string>;
 }
 
 /** The state of one engine run: its passes' coverage, and the result it submitted. */
@@ -528,10 +554,14 @@ export class ReviewEngineRun {
 	private readonly previousFindings: readonly ReviewFinding[];
 	private readonly suppressedFingerprints: ReadonlySet<string>;
 	private readonly followUps: boolean;
+	private readonly tools: readonly string[];
+	private readonly setup: ReviewCheckoutSetup | undefined;
+	private readonly shellPath: string | undefined;
 	private readonly coverage = new ReviewRunCoverage();
 	private readonly inScopeHunkIds: ReadonlySet<string>;
 	private inventory: ReviewCoverageTracker | undefined;
 	private submitted: ParsedReview | undefined;
+	private pendingPrior: PendingPriorDecisions | undefined;
 	private fixed: ReviewPriorFindingDecision[] = [];
 	private ended = false;
 
@@ -543,6 +573,9 @@ export class ReviewEngineRun {
 		this.previousFindings = structuredClone(options.previousFindings ?? []);
 		this.suppressedFingerprints = new Set(options.suppressedFingerprints);
 		this.followUps = options.followUps === true;
+		this.tools = Object.freeze([...(options.tools ?? [])]);
+		this.setup = options.setup;
+		this.shellPath = options.shellPath;
 		this.inScopeHunkIds = new Set(
 			this.snapshot.changedFiles
 				.filter((file) => file.reviewable && inRunScope(file.path, this.controls, undefined))
@@ -550,14 +583,46 @@ export class ReviewEngineRun {
 		);
 	}
 
-	/** The result the engine submitted, if it did. */
+	/**
+	 * The result the engine submitted, if it did: once {@link settle} ran, with every previous finding decided.
+	 */
 	result(): ParsedReview | undefined {
 		return this.submitted;
 	}
 
-	/** The decisions of the submitted result that found previous findings fixed. */
+	/** The decisions of the settled result that found previous findings fixed. */
 	fixedPriorFindings(): ReviewPriorFindingDecision[] {
 		return [...this.fixed];
+	}
+
+	/**
+	 * The previous findings the submitted result left for the host: the engine neither decided them nor reported
+	 * them again (an accepted finding with their fingerprint, which takes their id as it is settled).
+	 */
+	undecidedPreviousFindings(): ReviewFinding[] {
+		const pending = this.pendingPrior;
+		if (!this.submitted || !pending) return [];
+		const decided = new Set(pending.decisions.map((decision) => decision.findingId));
+		const reported = new Set(this.submitted.findings.map((finding) => finding.fingerprint));
+		return structuredClone(
+			this.previousFindings.filter((finding) => !decided.has(finding.id) && !reported.has(finding.fingerprint)),
+		);
+	}
+
+	/**
+	 * Settle the previous findings of the submitted result with the engine's decisions and `hostDecisions`, the
+	 * host's for {@link undecidedPreviousFindings}, then its verdict. Once only.
+	 */
+	settle(hostDecisions: readonly ReviewPriorFindingDecision[] = []): void {
+		const pending = this.pendingPrior;
+		if (!this.submitted || !pending) return;
+		this.pendingPrior = undefined;
+		this.fixed = settlePreviousFindings(
+			this.submitted,
+			this.previousFindings,
+			[...pending.decisions, ...hostDecisions],
+			pending.candidateFingerprints,
+		);
 	}
 
 	/** The run is over: its context refuses further calls. */
@@ -591,6 +656,7 @@ export class ReviewEngineRun {
 			cwd: this.cwd,
 			previousFindings: Object.freeze(structuredClone(this.previousFindings)),
 			followUps: this.followUps,
+			tools: this.tools,
 			target: Object.freeze({
 				kind: this.target.kind,
 				description: snapshot.description,
@@ -610,7 +676,9 @@ export class ReviewEngineRun {
 			submit: (result) => this.submit(result),
 			checkout: async () => {
 				this.assertLive();
-				return await snapshot.materializeHead();
+				const checkout = await snapshot.materializeHead();
+				if (this.setup) await setUpReviewCheckout(checkout, this.setup, this.shellPath, channels.signal);
+				return checkout;
 			},
 		};
 		return Object.freeze(context);
@@ -770,18 +838,27 @@ export class ReviewEngineRun {
 				declassified: declassifyReviewFollowUps(checkedFollowUps.followUps, decided),
 			});
 		}
+		let reported = parsed;
 		if (this.previousFindings.length > 0) {
-			this.fixed = settlePreviousFindings(
-				parsed,
+			// Settled once the host decided what the engine left: the engine is told what its own decisions give.
+			this.pendingPrior = {
+				decisions: verification.priorFindingDecisions,
+				candidateFingerprints: new Map(
+					validated.map((candidate) => [candidate.candidateId, candidate.fingerprint]),
+				),
+			};
+			reported = structuredClone(parsed);
+			settlePreviousFindings(
+				reported,
 				this.previousFindings,
-				verification.priorFindingDecisions,
-				new Map(validated.map((candidate) => [candidate.candidateId, candidate.fingerprint])),
+				this.pendingPrior.decisions,
+				this.pendingPrior.candidateFingerprints,
 			);
 		}
 		this.submitted = parsed;
 		return {
-			completionStatus: parsed.completionStatus,
-			findings: parsed.findings.length,
+			completionStatus: reported.completionStatus,
+			findings: reported.findings.length,
 			followUps: parsed.followUps?.length ?? 0,
 			rejected,
 			errors: [...checked.errors, ...followUpErrors],

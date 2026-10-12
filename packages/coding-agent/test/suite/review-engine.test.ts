@@ -18,6 +18,7 @@ import { startEngineReview } from "../../src/core/review-engine-run.ts";
 import type { ReviewCandidateReport, ReviewVerificationReport } from "../../src/core/review-report.ts";
 import * as reviewSnapshots from "../../src/core/review-snapshot.ts";
 import { listReviewRuns, recordReviewFindingOutcome } from "../../src/core/review-state.ts";
+import type { SettingsManager } from "../../src/core/settings-manager.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 const SWARM = "ext:swarm-review/swarm";
@@ -44,6 +45,12 @@ function initializeRepository(cwd: string): void {
 		join(cwd, "src", "value.ts"),
 		"export function divide(amount: number, divisor: number) {\n\tif (divisor === 0) return amount;\n\treturn amount / divisor;\n}\n",
 	);
+}
+
+/** `settings`, for a project the user did or did not trust. */
+function trustedAs(settings: SettingsManager, trusted: boolean): SettingsManager {
+	vi.spyOn(settings, "isProjectTrusted").mockReturnValue(trusted);
+	return settings;
 }
 
 function candidates(overrides: Partial<ReviewCandidateReport["candidates"][number]> = {}): ReviewCandidateReport {
@@ -169,7 +176,8 @@ describe("review engines", () => {
 				work: harness.session.work,
 				modelRegistry: harness.session.modelRegistry,
 				model: harness.session.model,
-				settingsManager: { isProjectTrusted: () => options.trusted ?? true },
+				agentDir: harness.tempDir,
+				settingsManager: trustedAs(harness.settingsManager, options.trusted ?? true),
 				sessionManager: harness.session.sessionManager!,
 				sessionWriter: harness.session.sessionWriter,
 			});
@@ -718,7 +726,8 @@ describe("review engines", () => {
 				work: harness.session.work,
 				modelRegistry: harness.session.modelRegistry,
 				model: harness.session.model,
-				settingsManager: { isProjectTrusted: () => true },
+				agentDir: harness.tempDir,
+				settingsManager: harness.settingsManager,
 				sessionManager: harness.session.sessionManager!,
 				sessionWriter: harness.session.sessionWriter,
 			});
@@ -841,7 +850,8 @@ describe("review engines", () => {
 				work: harness.session.work,
 				modelRegistry: harness.session.modelRegistry,
 				model: harness.session.model,
-				settingsManager: { isProjectTrusted: () => true },
+				agentDir: harness.tempDir,
+				settingsManager: harness.settingsManager,
 				sessionManager: harness.session.sessionManager!,
 				sessionWriter: harness.session.sessionWriter,
 			});
@@ -908,7 +918,8 @@ describe("review engines", () => {
 					work: harness.session.work,
 					modelRegistry: harness.session.modelRegistry,
 					model: harness.session.model,
-					settingsManager: { isProjectTrusted: () => true },
+					agentDir: harness.tempDir,
+					settingsManager: harness.settingsManager,
 					sessionManager: harness.session.sessionManager!,
 					sessionWriter: harness.session.sessionWriter,
 				});
@@ -952,7 +963,8 @@ describe("review engines", () => {
 			work: harness.session.work,
 			modelRegistry: harness.session.modelRegistry,
 			model: harness.session.model,
-			settingsManager: { isProjectTrusted: () => true },
+			agentDir: harness.tempDir,
+			settingsManager: harness.settingsManager,
 			sessionManager: harness.session.sessionManager!,
 			sessionWriter: harness.session.sessionWriter,
 		});

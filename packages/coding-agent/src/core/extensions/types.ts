@@ -367,8 +367,9 @@ export interface ExtensionReviewStartOptions {
 	 * a run, it also decides each finding that run left open. A finding still
 	 * there keeps its id in this review; one found fixed is closed in the run
 	 * where it was found (and in the runs that run followed), once this review
-	 * completes. The standard review decides every such finding; an engine
-	 * decides the ones it can.
+	 * completes. Every engine's review decides each such finding: one an
+	 * engine leaves undecided, the host decides with a verification pass of
+	 * its own.
 	 */
 	readonly previousRunId?: string;
 	/**
@@ -380,15 +381,15 @@ export interface ExtensionReviewStartOptions {
 	 */
 	readonly followUps?: boolean;
 	/**
-	 * Tools of the conversation the standard review's passes may use beside
-	 * their read-only snapshot tools, such as `bash` to run checks and tests:
-	 * the passes then run in a disposable checkout of the reviewed head. The
-	 * workspace file tools (read, grep, find, ls, edit, write) are refused.
+	 * Tools of the conversation the review may use beside its read-only
+	 * snapshot tools, such as `bash` to run checks and tests, on any engine:
+	 * they run in disposable checkouts of the reviewed head. The workspace file
+	 * tools (read, grep, find, ls, edit, write) are refused.
 	 */
 	readonly tools?: readonly string[];
 	/**
-	 * A shell command the host runs in the root of that disposable checkout
-	 * before the passes start, such as installing its dependencies
+	 * A shell command the host runs in the root of each such disposable
+	 * checkout before the review uses it, such as installing its dependencies
 	 * (`npm ci --ignore-scripts`): a fresh checkout has none. It runs with the
 	 * user's shell and permissions, for at most `timeoutMs` (ten minutes by
 	 * default); one that fails or times out fails the review with its output.

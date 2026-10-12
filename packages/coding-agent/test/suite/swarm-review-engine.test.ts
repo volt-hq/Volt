@@ -118,13 +118,12 @@ const SEQUENTIAL = {
 };
 
 describe("the swarm review as an engine", () => {
-	test("is registered as an engine of the extension, with its options and its local-only one", async () => {
+	test("is registered as an engine of the extension, with its options", async () => {
 		const { conversation } = await setup([]);
 		const engine = conversation.session.reviewEngines.get(ENGINE);
 		expect(engine).toMatchObject({
 			label: "Swarm",
 			remoteSafe: true,
-			localOnly: ["exec"],
 			targets: ["uncommitted", "branch", "branch_uncommitted", "commit", "pr"],
 		});
 		expect(Object.keys(engine?.parameters?.properties ?? {})).toEqual([
@@ -138,7 +137,6 @@ describe("the swarm review as an engine", () => {
 			"verifierConcurrency",
 			"stragglerGrace",
 			"fresh",
-			"exec",
 		]);
 		// Its models and counts have settings of the extension's, and /swarm-review is gone.
 		expect(Object.keys(swarmManifest.settings.properties)).toEqual(
@@ -234,7 +232,7 @@ describe("the swarm review as an engine", () => {
 		expect(harness.faux.state.callCount).toBe(0);
 	});
 
-	test("lets verifiers run commands only for a client at the host, and reports what they ran", async () => {
+	test("lets verifiers run commands when a client at the host grants bash, and reports what they ran", async () => {
 		const { client, conversation } = await setup([
 			fauxAssistantMessage(fauxToolCall("report_findings", { findings: [finding] }), { stopReason: "toolUse" }),
 			fauxAssistantMessage(
@@ -251,25 +249,22 @@ describe("the swarm review as an engine", () => {
 			verdict(2),
 		]);
 
-		// A paired remote device is refused the option; the engine is not told of it.
+		// A paired remote device is refused the grant, as for any review.
 		const remote = {
 			target: { session: conversation.session, conversation, host: {}, client: {} } as never,
 			services: { runReview: vi.fn() },
 			profile: { name: "remote" as const, grant: createIrohRemoteRpcGrant(REMOTE_CAPABILITIES) },
 		};
 		await expect(
-			intentRegistry.invoke(remote, "review", {
-				target: "uncommitted",
-				engine: ENGINE,
-				engineParams: { exec: true },
-			}),
-		).rejects.toMatchObject({ code: "not_allowed", message: "exec can only be set by a client at the host" });
+			intentRegistry.invoke(remote, "review", { target: "uncommitted", engine: ENGINE, tools: ["bash"] }),
+		).rejects.toMatchObject({ code: "not_allowed" });
 		expect(remote.services.runReview).not.toHaveBeenCalled();
 
 		const started = await client.intent("review", {
 			target: "uncommitted",
 			engine: ENGINE,
-			engineParams: { ...SEQUENTIAL, exec: true },
+			engineParams: SEQUENTIAL,
+			tools: ["bash"],
 		});
 		const workId = (started as { result: { workId: string } }).result.workId;
 		await vi.waitFor(

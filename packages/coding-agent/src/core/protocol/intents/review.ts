@@ -130,8 +130,8 @@ function reviewTools(ctx: IntentContext, tools: readonly string[] | undefined): 
 
 /**
  * The extension engine a review start names, or none for the built-in pipeline. The conversation must have the
- * engine, it must review the target, a remote device may start only an engine that allows it, and an engine
- * takes no auxiliary tools: its passes are its own.
+ * engine, it must review the target, and a remote device may start only an engine that allows it. Auxiliary tools
+ * reach an engine as they do the built-in pipeline.
  */
 function reviewEngineOf(
 	ctx: IntentContext,
@@ -154,9 +154,6 @@ function reviewEngineOf(
 	}
 	if (ctx.profile.name === "remote" && !engine.remoteSafe) {
 		throw new IntentRejectedError("not_allowed", `The ${engine.label} engine is not available to remote clients`);
-	}
-	if (input.tools !== undefined) {
-		throw new IntentRejectedError("invalid_input", "Auxiliary tools do not apply to an engine's review");
 	}
 	try {
 		// Checked here to refuse early and by name; the run checks them again against the engine it runs.

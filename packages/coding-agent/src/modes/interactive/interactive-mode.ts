@@ -8461,8 +8461,8 @@ export class InteractiveMode {
 
 	/** Start a review through the conversation's review intent, with the configured auxiliary tools; resolves its work id. */
 	private async startReview(start: ReviewEngineStart): Promise<string> {
-		// An engine's passes are its own: the conversation's auxiliary tools are for the built-in review.
-		const tools = start.input.engine === undefined ? await this.getReviewToolsForRun() : [];
+		// Every engine gets the configured auxiliary tools, as the built-in review does.
+		const tools = await this.getReviewToolsForRun();
 		const accepted = await this.store.client.intent("review", {
 			...start.input,
 			...(start.engineParams === undefined ? {} : { engineParams: start.engineParams }),

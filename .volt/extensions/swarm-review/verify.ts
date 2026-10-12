@@ -160,7 +160,7 @@ function combine(cluster: Cluster): ClusterOutcome {
 	return verdicts[0].verdict;
 }
 
-/** Notes the commands a verifier runs with bash (--exec) and which of them fail. */
+/** Notes the commands a verifier runs with bash and which of them fail. */
 function recordCommand(state: SwarmState, pending: Map<string, string>, event: DeepReadonly<AgentSessionEvent>): void {
 	if (event.type === "tool_execution_start" && event.toolName === "bash") {
 		const command = (event.args as { command?: unknown } | undefined)?.command;
@@ -204,7 +204,7 @@ export async function verifyClusters(setup: SwarmSetup, state: SwarmState): Prom
 		// One host pass per verifier: the diff it is given counts for it alone.
 		const hostPass = setup.engine.pass();
 		const pending = new Map<string, string>();
-		// With --exec, commands can change files, so each verifier gets a private checkout.
+		// With bash, commands can change files, so each verifier gets a private checkout.
 		let privateCheckout: string | undefined;
 		try {
 			if (options.exec) privateCheckout = await target.createCheckout();

@@ -15,6 +15,7 @@ export interface SwarmOptions {
 	verifierThinking: ModelThinkingLevel;
 	/** Concurrent verifier sessions (each cluster uses two). */
 	verifierConcurrency: number;
+	/** Verifiers may run commands: the review granted bash. */
 	exec: boolean;
 	fresh: boolean;
 	/** Seconds; undefined derives the grace from finished workers' durations. */
@@ -157,7 +158,7 @@ export interface SwarmState {
 	/** One clustering pass per wave. */
 	clusterPasses: PassState[];
 	nextCandidate: number;
-	/** Commands verifiers ran (--exec), one line each, and the ones that failed. */
+	/** Commands verifiers ran with bash, one line each, and the ones that failed. */
 	commands: string[];
 	failedCommands: string[];
 	cancelling: boolean;

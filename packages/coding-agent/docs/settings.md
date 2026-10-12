@@ -96,7 +96,7 @@ The `"simplified-technical"` personality keeps source code, identifiers, command
 | `defaultThinkingLevel` | string | - | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` |
 | `reviewModel` | string | - | Discovery model for `/review`; falls back to the session model |
 | `reviewVerifierModel` | string | - | Independent verifier model for `/review`; falls back to `reviewModel` |
-| `reviewTools` | string[] | `[]` | Optional auxiliary review tools; immutable snapshot tools are always enabled |
+| `reviewTools` | string[] | `[]` | Optional auxiliary review tools, for every review engine; immutable snapshot tools are always enabled |
 | `reviewEngine` | string | `"standard"` | The engine `/review` runs on without `--engine`: `standard`, or an extension's engine by name (`swarm`). `--engine standard` overrides it for one review |
 | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level |

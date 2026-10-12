@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { getAgentDir, loadProjectContextFiles } from "@hansjm10/volt-coding-agent";
 import { SwarmCancelled } from "./util.ts";
 
@@ -70,14 +70,6 @@ export function git(cwd: string, args: string[], signal: AbortSignal, env?: Node
 	return runCommand("git", ["-c", "core.quotepath=off", ...args], { cwd, signal, ...(env ? { env } : {}) });
 }
 
-export async function gitOk(cwd: string, args: string[], signal: AbortSignal, env?: NodeJS.ProcessEnv): Promise<string> {
-	const result = await git(cwd, args, signal, env);
-	if (result.code !== 0)
-		throw new Error(`git ${args[0]} failed: ${result.stderr.trim() || `exit code ${result.code}`}`);
-	return result.stdout;
-}
-
-
 /** The repository the review runs in: its top-level directory and the Git common directory that identifies it across worktrees. */
 export async function repositoryOf(
 	cwd: string,
@@ -87,31 +79,6 @@ export async function repositoryOf(
 	if (top.code !== 0) return undefined;
 	const [rootLine = "", commonLine = ""] = top.stdout.split("\n");
 	return { repoRoot: rootLine.trim(), commonDir: realpathSync(resolve(cwd, commonLine.trim())) };
-}
-
-/**
- * Links the original repository's ignored `node_modules` directories into `checkout`, so commands a verifier runs
- * (--exec) find the dependencies. A convenience: a checkout without them is still reviewable.
- */
-export async function linkDependencies(checkout: string, repoRoot: string, signal: AbortSignal): Promise<void> {
-	const ignored = await gitOk(
-		repoRoot,
-		["ls-files", "--others", "--ignored", "--exclude-standard", "--directory"],
-		signal,
-	);
-	for (const entry of ignored.split("\n")) {
-		if (!entry.endsWith("node_modules/")) continue;
-		const relativePath = entry.slice(0, -1);
-		const link = join(checkout, relativePath);
-		if (existsSync(link)) continue;
-		try {
-			mkdirSync(dirname(link), { recursive: true });
-			// Junctions need no privilege on Windows; the type is ignored elsewhere.
-			symlinkSync(join(repoRoot, relativePath), link, process.platform === "win32" ? "junction" : "dir");
-		} catch {
-			// See above.
-		}
-	}
 }
 
 function insideRoot(root: string, path: string): boolean {

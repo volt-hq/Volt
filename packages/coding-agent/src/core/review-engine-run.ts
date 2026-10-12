@@ -3,20 +3,26 @@
  * the conversation's `review` work (the work id is the run id, as for the built-in pipeline), and writes the
  * run record when the engine returns. Whatever the engine does, the record ends the work: completed or
  * incomplete with the result the engine submitted, failed when the engine threw or submitted nothing, and
- * cancelled when the work was. The host disposes the snapshot after the engine returns.
+ * cancelled when the work was. A review that follows an earlier run first has the host decide the earlier
+ * findings the engine left undecided, so every engine's rounds converge as the built-in pipeline's do. The host
+ * disposes the snapshot after the engine returns.
  */
 
+import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { Api, Model } from "@hansjm10/volt-ai";
 import type { ModelRegistry } from "./model-registry.ts";
 import { readPrReviewBinding } from "./pr-review-binding.ts";
 import {
 	controlsWithDefaults,
 	createReviewWorkflowId,
+	decidePreviousFindings,
 	formatReviewWorkflowSummary,
 	REMOTE_REVIEW_FAILURE_MESSAGE,
+	type ReviewCheckoutSetup,
 	type ReviewRunControls,
 	type ReviewTarget,
 	resolveBoundReviewSnapshot,
+	resolveReviewVerifierModel,
 	reviewActionIdForTarget,
 	reviewWorkTarget,
 	verifyBoundPullRequest,
@@ -57,7 +63,12 @@ export interface StartEngineReviewOptions {
 	modelRegistry: ModelRegistry;
 	/** The conversation's current model. */
 	model?: Model<Api>;
-	settingsManager: Pick<SettingsManager, "isProjectTrusted">;
+	/** The user's agent directory, which the host's own verification reads context files from. */
+	agentDir: string;
+	/** The conversation's thinking level and fast mode, which the host's own verification runs with. */
+	thinkingLevel?: ThinkingLevel;
+	fastModeEnabled?: boolean;
+	settingsManager: SettingsManager;
 	/** The conversation's log, which a pull request review's binding and the run's records belong to. */
 	sessionManager: SessionManager;
 	sessionWriter: SessionWriter;
@@ -70,6 +81,10 @@ export interface StartEngineReviewOptions {
 	previousRunId?: string;
 	/** Also collect follow-ups: verified defects outside the change, kept apart from the findings. */
 	followUps?: boolean;
+	/** Tools of the conversation the review may use beside the snapshot tools, run in checkouts of the head. */
+	tools?: readonly string[];
+	/** Prepares each checkout of the review. */
+	setup?: ReviewCheckoutSetup;
 }
 
 /**
@@ -140,6 +155,9 @@ export async function startEngineReview(options: StartEngineReviewOptions): Prom
 						suppressedFingerprints: followUp.suppressedDismissedFingerprints,
 					}),
 			...(options.followUps ? { followUps: true } : {}),
+			...(options.tools === undefined ? {} : { tools: options.tools }),
+			...(options.setup === undefined ? {} : { setup: options.setup }),
+			shellPath: options.settingsManager.getShellPath(),
 		});
 		let failure: Error | undefined;
 		try {
@@ -167,6 +185,38 @@ export async function startEngineReview(options: StartEngineReviewOptions): Prom
 			run.end();
 		}
 		try {
+			const undecided = failure || work.signal.aborted ? [] : run.undecidedPreviousFindings();
+			if (undecided.length > 0) {
+				const count = undecided.length === 1 ? "1 earlier finding" : `${undecided.length} earlier findings`;
+				work.progress({ text: `Deciding ${count} the ${engine.label} engine left open` });
+				try {
+					run.settle(
+						await decidePreviousFindings({
+							snapshot: resolution,
+							controls,
+							findings: undecided,
+							cwd: options.cwd,
+							agentDir: options.agentDir,
+							model: resolveReviewVerifierModel({
+								settingsManager: options.settingsManager,
+								modelRegistry: options.modelRegistry,
+								...(options.model === undefined ? {} : { currentModel: options.model }),
+							}),
+							...(options.thinkingLevel === undefined ? {} : { thinkingLevel: options.thinkingLevel }),
+							...(options.fastModeEnabled === undefined ? {} : { fastModeEnabled: options.fastModeEnabled }),
+							modelRegistry: options.modelRegistry,
+							settingsManager: options.settingsManager,
+							...(options.tools === undefined ? {} : { tools: options.tools }),
+							...(options.setup === undefined ? {} : { setup: options.setup }),
+							signal: work.signal,
+						}),
+					);
+				} catch {
+					// Only a cancelled review stops the host's verification: the record says cancelled.
+				}
+			} else {
+				run.settle();
+			}
 			const parsed = run.result();
 			let status: ReviewRunStatus;
 			let errorMessage: string | undefined;

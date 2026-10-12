@@ -69,9 +69,9 @@ export interface ConversationReviewOptions {
 	readonly previousRunId?: string;
 	/** Also collect follow-ups: verified defects outside the change, kept apart from the findings. */
 	readonly followUps?: boolean;
-	/** Auxiliary tools of the conversation the built-in pipeline's passes may use besides their snapshot tools. */
+	/** Auxiliary tools of the conversation the review may use besides its snapshot tools, on any engine. */
 	readonly tools?: readonly string[];
-	/** Prepares the disposable checkout the auxiliary tools run in, such as installing its dependencies. */
+	/** Prepares each disposable checkout the auxiliary tools run in, such as installing its dependencies. */
 	readonly setup?: ReviewCheckoutSetup;
 	/** Running work the review belongs to: clients show it under that work. */
 	readonly parentWorkId?: string;
@@ -97,9 +97,9 @@ export async function startConversationReview(
 		if (options.parentRunId !== undefined) {
 			throw new Error(`A review on the ${engine.label} engine does not build on an earlier run`);
 		}
-		if (options.tools !== undefined || options.setup !== undefined) {
-			throw new Error("Auxiliary tools and their setup do not apply to an engine's review");
-		}
+		// As for the built-in pipeline: a remote review gets no auxiliary tools, and so runs no setup.
+		const tools = options.remote ? undefined : options.tools;
+		const setup = options.remote ? undefined : options.setup;
 		return await startEngineReview({
 			engine,
 			target,
@@ -107,9 +107,14 @@ export async function startConversationReview(
 			...(options.engineParams === undefined ? {} : { params: options.engineParams }),
 			remote: options.remote,
 			cwd: environment.cwd,
+			agentDir: environment.agentDir,
 			work: session.work,
 			modelRegistry: session.modelRegistry,
 			...(session.model === undefined ? {} : { model: session.model }),
+			thinkingLevel: session.thinkingLevel,
+			fastModeEnabled: session.fastModeEnabled,
+			...(tools === undefined ? {} : { tools }),
+			...(setup === undefined ? {} : { setup }),
 			settingsManager: session.settingsManager,
 			sessionManager: session.sessionManager,
 			sessionWriter: session.sessionWriter,

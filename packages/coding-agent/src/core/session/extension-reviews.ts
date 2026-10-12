@@ -429,9 +429,6 @@ export class ExtensionReviewRuns implements ExtensionReviewsHandler {
 			throw invalid("followUps must be true or false");
 		}
 		const tools = textList(options.tools, "tools");
-		if (extensionEngine !== undefined && tools !== undefined) {
-			throw invalid("tools apply to the standard review only");
-		}
 		const setup = checkoutSetup(options.setup);
 		if (setup !== undefined && (tools === undefined || tools.length === 0)) {
 			throw invalid("setup applies to a review whose passes run tools in a checkout: name them in tools");

@@ -521,6 +521,29 @@ function buildVerificationPrompt(
 	].join("\n");
 }
 
+/** The verification request of {@link decidePreviousFindings}: the earlier findings alone, to decide. */
+function buildPreviousFindingsPrompt(
+	resolved: ResolvedReview,
+	controls: ReviewRunControls,
+	findings: readonly ReviewFinding[],
+	commandCapable: boolean,
+): string {
+	return [
+		"<review_verification_request>",
+		`<target description="${escapeXml(resolved.description)}" base_tree="${resolved.identity.baseTree}" head_tree="${resolved.identity.headTree}" />`,
+		`<controls effort="${controls.effort}" include_optional="${controls.includeOptional ? "true" : "false"}" />`,
+		`<prior_open_findings>${escapeXml(JSON.stringify(findings))}</prior_open_findings>`,
+		"<prior_finding_guidance>An earlier review of this target left these findings open, and the review of this snapshot did not decide them. Decide each against this snapshot: fixed when the defect is gone; open when it remains; uncertain only when the evidence cannot settle it. There are no candidates: return no decisions, and no candidateId.</prior_finding_guidance>",
+		"<available_tool_guidance>",
+		...reviewSnapshotToolGuidelines(commandCapable, resolved.codeHostContext !== undefined).map(
+			(guideline) => `<instruction>${escapeXml(guideline)}</instruction>`,
+		),
+		"</available_tool_guidance>",
+		"<task>Decide every prior finding, then terminate with report_review_verification: assessment=complete once each is decided fixed or open.</task>",
+		"</review_verification_request>",
+	].join("\n");
+}
+
 function buildPresentationPrompt(
 	findings: readonly DeclassifiedReviewFinding[],
 	challenge?: DeclassifiedReviewChallenge,
@@ -663,7 +686,7 @@ const REVIEW_SETUP_ERROR_OUTPUT_CHARS = 2_000;
  * need there (dependencies, build output) before they start. A setup that fails, times out, or is cancelled
  * throws, and the review with it; it never runs in the workspace.
  */
-async function setUpReviewCheckout(
+export async function setUpReviewCheckout(
 	cwd: string,
 	setup: ReviewCheckoutSetup,
 	shellPath: string | undefined,
@@ -946,6 +969,21 @@ function resolveVerifierModel(options: {
 		model: resolved.model ?? options.discoveryModel,
 		...(resolved.warning ? { warning: resolved.warning } : {}),
 	};
+}
+
+/** The model the review settings verify with: the verifier model, else the review model, else `currentModel`. */
+export function resolveReviewVerifierModel(options: {
+	settingsManager: SettingsManager;
+	modelRegistry: ModelRegistry;
+	currentModel?: Model<Api>;
+}): Model<Api> | undefined {
+	const discoveryModel = resolveReviewModel(options).model;
+	if (discoveryModel === undefined) return undefined;
+	return resolveVerifierModel({
+		settingsManager: options.settingsManager,
+		modelRegistry: options.modelRegistry,
+		discoveryModel,
+	}).model;
 }
 
 export function reviewActionIdForTarget(target: ReviewTarget): string {
@@ -1926,6 +1964,114 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 		} finally {
 			await snapshot.dispose();
 		}
+	}
+}
+
+export interface DecidePreviousFindingsOptions {
+	/** The reviewed snapshot. */
+	snapshot: ResolvedReview;
+	controls: ReviewRunControls;
+	/** The findings an earlier review of the target left open that this review did not decide. */
+	findings: readonly ReviewFinding[];
+	cwd: string;
+	agentDir: string;
+	/** The model to verify with; none decides every finding `uncertain`. */
+	model: Model<Api> | undefined;
+	thinkingLevel?: ThinkingLevel;
+	fastModeEnabled?: boolean;
+	modelRegistry: ModelRegistry;
+	settingsManager: SettingsManager;
+	/** Auxiliary tools of the conversation the pass may use, such as `bash`: it then runs in a checkout of its own. */
+	tools?: readonly string[];
+	/** Prepares that checkout. */
+	setup?: ReviewCheckoutSetup;
+	signal?: AbortSignal;
+}
+
+/**
+ * Decide `findings`, which an earlier review of the target left open and this review did not decide, against the
+ * reviewed head, with one verification pass of the built-in pipeline over them alone: each is `fixed`, `open` (still
+ * there), or `uncertain`. The host runs it after an engine's review, so that no finding outlives a round without a
+ * decision, whatever the engine settles. Resolves with a decision for each finding; when the pass cannot run or
+ * finish, every one is `uncertain`, which leaves the review incomplete rather than wrong. Rejects only when `signal`
+ * aborts.
+ */
+export async function decidePreviousFindings(
+	options: DecidePreviousFindingsOptions,
+): Promise<ReviewPriorFindingDecision[]> {
+	const { snapshot, findings } = options;
+	const uncertain = (finding: ReviewFinding, rationale: string): ReviewPriorFindingDecision => ({
+		findingId: finding.id,
+		outcome: "uncertain",
+		method: "host verification",
+		rationale,
+		confidence: 0,
+	});
+	if (findings.length === 0) return [];
+	if (!options.model) {
+		return findings.map((finding) => uncertain(finding, "No model was available to verify the earlier finding."));
+	}
+	const controls = controlsWithDefaults(options.controls);
+	const auxiliary = [...new Set(options.tools ?? [])].filter(
+		(name) =>
+			!REVIEW_SNAPSHOT_TOOL_NAMES.includes(name as (typeof REVIEW_SNAPSHOT_TOOL_NAMES)[number]) &&
+			!MUTABLE_WORKSPACE_REVIEW_TOOLS.has(name),
+	);
+	const tracker = new ReviewCoverageTracker();
+	const tools = createReviewSnapshotTools(snapshot, tracker);
+	const collector = createReviewVerificationReportCollector();
+	try {
+		let cwd = snapshot.root;
+		if (auxiliary.length > 0) {
+			cwd = await snapshot.materializeHead();
+			if (options.setup) {
+				await setUpReviewCheckout(cwd, options.setup, options.settingsManager.getShellPath(), options.signal);
+			}
+		}
+		const contextFiles = await loadReviewContextFiles(snapshot, options.cwd, options.agentDir);
+		const pass = await runReviewPass({
+			name: "verification",
+			accounting: new ReviewUsageCollector(),
+			identity: { passId: 1, phase: "verification", purpose: "findings", round: 1 },
+			cwd,
+			agentDir: options.agentDir,
+			model: options.model,
+			thinkingLevel: effortThinkingLevel(options.thinkingLevel, controls.effort),
+			fastModeEnabled: options.fastModeEnabled,
+			authStorage: options.modelRegistry.authStorage,
+			modelRegistry: options.modelRegistry,
+			settingsManager: options.settingsManager,
+			resourceLoader: createReviewResourceLoader(REVIEW_VERIFIER_SYSTEM_PROMPT, contextFiles),
+			customTools: [...tools, collector.tool],
+			inspectionTools: tools,
+			activeTools: [...tools.map((tool) => tool.name), ...auxiliary, collector.tool.name],
+			collector,
+			prompt: buildPreviousFindingsPrompt(snapshot, controls, findings, auxiliary.includes("bash")),
+			repair: (report) =>
+				report
+					? [
+							...validateReviewVerification([], report, findings),
+							...(report.decisions.length > 0 ? ["decisions must be empty: there are no candidates"] : []),
+						]
+					: ["report_review_verification was not called with a valid payload"],
+			priorUsage: EMPTY_SESSION_USAGE,
+			signal: options.signal,
+			onEvent: () => {},
+			readsCodeHostContext: snapshot.codeHostContext !== undefined,
+		});
+		const decided = new Map(pass.report.priorFindingDecisions.map((decision) => [decision.findingId, decision]));
+		return findings.map(
+			(finding) =>
+				decided.get(finding.id) ??
+				uncertain(finding, "The host's verification left the earlier finding undecided."),
+		);
+	} catch (error) {
+		if (options.signal?.aborted) throw error;
+		const reason =
+			error instanceof ReviewPassError || error instanceof ReviewCheckoutSetupError ? `: ${error.message}` : "";
+		return findings.map((finding) =>
+			uncertain(finding, `The host's verification of the earlier finding could not finish${reason}.`),
+		);
 	}
 }
 
