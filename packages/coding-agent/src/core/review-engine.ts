@@ -753,7 +753,9 @@ export class ReviewEngineRun {
 		if (commandsRun.length === 0) parsed.coverage.residualRisk.unshift(STATIC_REVIEW_LIMITATION);
 		const followUpErrors: string[] = [];
 		if (this.followUps) {
-			const checkedFollowUps = await validateReviewFollowUps(this.snapshot, result.candidates.followUps ?? []);
+			const checkedFollowUps = await validateReviewFollowUps(this.snapshot, result.candidates.followUps ?? [], {
+				inScopeHunkIds: this.inScopeHunkIds,
+			});
 			// Follow-ups never affect the verdict: a missing, duplicate, or unknown decision is reported, not refused.
 			followUpErrors.push(
 				...checkedFollowUps.errors,

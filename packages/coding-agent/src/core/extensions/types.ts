@@ -518,10 +518,12 @@ export interface ExtensionReviewStartOptions {
 	readonly previousRunId?: string;
 	/**
 	 * Also collect follow-ups: defects the review notices outside the change,
-	 * such as pre-existing bugs, each verified like a finding and kept apart
+	 * in code it does not touch, each verified like a finding and kept apart
 	 * from the findings (`followUps` of the result). They never affect the
-	 * verdict; an extension may file them as issues of their own. An engine
-	 * reports the ones it can.
+	 * verdict; an extension may file them as issues of their own. A defect on
+	 * a line the change touches is never one, even when it predates the
+	 * change: such a review reports it as a finding, for the change to fix.
+	 * An engine reports the ones it can.
 	 */
 	readonly followUps?: boolean;
 	/**

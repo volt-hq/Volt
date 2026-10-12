@@ -1821,6 +1821,98 @@ describe("review pipeline", () => {
 			return { run, prompts };
 		}
 
+		it("sends a follow-up on a line the change touches back to discovery, which reports it as the change's finding", async () => {
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const snapshot = await createSnapshotRepository(harness);
+			snapshots.push(snapshot);
+			const toolUse = { stopReason: "toolUse" } as const;
+			const pageDiff = fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), toolUse);
+			const zeroGuard = {
+				title: "Zero divisor returns the numerator",
+				body: "The guard on the changed line returns amount for a zero divisor.",
+				category: "correctness",
+				rootCauseKey: "zero-guard",
+				priority: 2,
+			};
+			const location = { path: "src/value.ts", side: "head", startLine: 2, endLine: 2 };
+			const repairs: string[] = [];
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("review_changed_files", {}), toolUse),
+				pageDiff,
+				// Discovery calls the defect on the changed line a follow-up, as if it were none of the change's.
+				fauxAssistantMessage(
+					fauxToolCall("report_review_candidates", {
+						summary: "One follow-up.",
+						candidates: [],
+						followUps: [{ ...zeroGuard, followUpId: "f1", location }],
+						limitations: [],
+					}),
+					toolUse,
+				),
+				(context) => {
+					repairs.push(JSON.stringify(context.messages.at(-1)));
+					return fauxAssistantMessage(
+						fauxToolCall("report_review_candidates", {
+							summary: "The defect is the change's.",
+							candidates: [
+								{
+									...zeroGuard,
+									candidateId: "c1",
+									trigger: "Call divide(5, 0).",
+									impact: "Callers get 5 instead of an error.",
+									confidence: 0.9,
+									changeLocation: location,
+									evidenceLocations: [],
+								},
+							],
+							limitations: [],
+						}),
+						toolUse,
+					);
+				},
+				fauxAssistantMessage(fauxToolCall("review_changed_files", {}), toolUse),
+				pageDiff,
+				fauxAssistantMessage(
+					fauxToolCall("report_review_verification", {
+						summary: "Confirmed.",
+						assessment: "complete",
+						decisions: [
+							{
+								candidateId: "c1",
+								outcome: "accept",
+								method: "Read it.",
+								rationale: "It returns 5.",
+								confidence: 0.9,
+							},
+						],
+						priorFindingDecisions: [],
+						followUpDecisions: [],
+						limitations: [],
+					}),
+					toolUse,
+				),
+			]);
+			const run = await runReview({
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				model: harness.getModel(),
+				verifierModel: harness.getModel(),
+				authStorage: harness.authStorage,
+				modelRegistry: harness.session.modelRegistry,
+				settingsManager: harness.settingsManager,
+				resolved: snapshot,
+				controls: { scopeMode: "full", scope: ["src/**"] },
+				followUps: true,
+			});
+			snapshots.splice(snapshots.indexOf(snapshot), 1);
+			expect(repairs[0]).toContain("is on a line the change touches");
+			expect(run.parsed?.findings).toMatchObject([
+				{ title: "Zero divisor returns the numerator", changeLocation: location },
+			]);
+			expect(run.parsed?.followUps).toEqual([]);
+		});
+
 		it("keeps verified follow-ups apart from the findings, without touching the verdict", async () => {
 			const { run, prompts } = await reviewWithFollowUp(true);
 			expect(run.errorMessage).toBeUndefined();
