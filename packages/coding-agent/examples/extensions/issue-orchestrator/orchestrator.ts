@@ -94,6 +94,11 @@ export interface NotedIssue {
 	readonly reason: string;
 }
 
+/** An issue handed to a human: `ready` when its pull request was approved for them to merge, not stuck. */
+export interface HandedOffIssue extends NotedIssue {
+	readonly ready: boolean;
+}
+
 export interface OrchestratorSnapshot {
 	readonly repo?: string;
 	readonly workflowPath?: string;
@@ -102,7 +107,7 @@ export interface OrchestratorSnapshot {
 	readonly running: readonly RunningIssue[];
 	readonly retrying: readonly RetryingIssue[];
 	readonly waiting: readonly NotedIssue[];
-	readonly handedOff: readonly NotedIssue[];
+	readonly handedOff: readonly HandedOffIssue[];
 	readonly finished: readonly NotedIssue[];
 	readonly totals: { readonly runs: number; readonly tokens: number; readonly cost: number };
 	readonly lastTickAt?: number;
@@ -123,6 +128,8 @@ interface HandedOff {
 	readonly reason: string;
 	/** The label applied: once a human removes it, the issue is worked again. */
 	readonly label: string | undefined;
+	/** Approved for a human to merge (`merge.ready_label`), rather than stuck. */
+	readonly ready: boolean;
 }
 
 const BASE_RETRY_DELAY_MS = 10_000;
@@ -204,6 +211,7 @@ export class Orchestrator {
 				issue,
 				title: handoff.title,
 				reason: handoff.reason,
+				ready: handoff.ready,
 			})),
 			finished: [...this.finished],
 			totals: { ...this.totals },
@@ -215,12 +223,18 @@ export class Orchestrator {
 	async tick(): Promise<void> {
 		this.lastTickAt = this.now();
 		this.woken = false;
+		const previous = this.error;
+		const fail = (message: string): void => {
+			this.error = message;
+			// Logged when it starts, not on every tick it lasts.
+			if (message !== previous) this.log(message);
+		};
 		try {
 			this.workflow = await this.options.loadWorkflow();
 			this.error = undefined;
 		} catch (error) {
 			// An invalid reload keeps the last good workflow.
-			this.error = `Workflow: ${errorText(error)}`;
+			fail(`Workflow: ${errorText(error)}`);
 		}
 		const workflow = this.workflow;
 		if (workflow === undefined) return this.emit();
@@ -230,7 +244,7 @@ export class Orchestrator {
 			tracker = await this.options.tracker(config);
 			this.repo = tracker.repo;
 		} catch (error) {
-			this.error = `GitHub: ${errorText(error)}`;
+			fail(`GitHub: ${errorText(error)}`);
 			return this.emit();
 		}
 		await this.reconcile(tracker, config);
@@ -239,7 +253,7 @@ export class Orchestrator {
 		try {
 			candidates = await tracker.candidates(config.tracker.labels);
 		} catch (error) {
-			this.error = `GitHub: ${errorText(error)}`;
+			fail(`GitHub: ${errorText(error)}`);
 			return this.emit();
 		}
 		// An issue that left the candidates (closed, or unlabeled) is done with.
@@ -308,7 +322,7 @@ export class Orchestrator {
 				note(phase.reason);
 				return;
 			case "handoff":
-				await this.handOff(tracker, issue, phase.label, phase.reason);
+				await this.handOff(tracker, config, issue, phase.label, phase.reason);
 				return;
 			case "merge":
 				try {
@@ -318,6 +332,7 @@ export class Orchestrator {
 				} catch (error) {
 					await this.handOff(
 						tracker,
+						config,
 						issue,
 						config.handoffLabel,
 						`Merging pull request #${phase.pr.number} failed: ${errorText(error)}`,
@@ -330,6 +345,7 @@ export class Orchestrator {
 				if (attempts >= config.agent.maxAttempts) {
 					await this.handOff(
 						tracker,
+						config,
 						issue,
 						config.handoffLabel,
 						`The ${phase.kind} agent ran ${attempts} times without moving the issue on.`,
@@ -530,14 +546,25 @@ export class Orchestrator {
 		await Promise.all(entries.map((entry) => entry.ended));
 	}
 
-	private async handOff(tracker: Tracker, issue: Issue, label: string, reason: string): Promise<void> {
+	private async handOff(
+		tracker: Tracker,
+		config: WorkflowConfig,
+		issue: Issue,
+		label: string,
+		reason: string,
+	): Promise<void> {
 		let labeled = false;
 		try {
 			labeled = await tracker.handOff(issue.number, label, `${reason}\n\n_Volt issue orchestrator_`);
 		} catch (error) {
 			this.log(`#${issue.number}: handing off failed: ${errorText(error)}`);
 		}
-		this.handedOff.set(issue.number, { title: issue.title, reason, label: labeled ? label : undefined });
+		this.handedOff.set(issue.number, {
+			title: issue.title,
+			reason,
+			label: labeled ? label : undefined,
+			ready: label === config.merge.readyLabel,
+		});
 		this.retries.delete(issue.number);
 		this.pendingReleases.set(issue.number, issue.title);
 		this.log(`#${issue.number}: handed to a human: ${reason}`);

@@ -6,7 +6,8 @@
  * `/orchestrate start [workflow]` runs the loop as work of this conversation:
  * every agent it starts is a subagent of that work, in the issue's managed
  * worktree, and this conversation's panel shows what each issue is doing.
- * `/orchestrate stop`, `status`, and `refresh` control it. The loop is
+ * The work item lists every issue and logs what the loop does, so `/work`
+ * shows it full screen. `/orchestrate stop`, `status`, and `refresh` control it. The loop is
  * deterministic code; the conversation's own model is free to talk about it.
  *
  * Needs a conversation the daemon hosts (interactive Volt), a trusted
@@ -18,12 +19,12 @@ import {
 	defineManifest,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
-	type ExtensionPanel,
+	type WorkRunContext,
 } from "@hansjm10/volt-coding-agent";
-import type { UiNode } from "@hansjm10/volt-protocol";
 import { type GhRunner, GitHubTracker, type Tracker } from "./github.ts";
 import { Orchestrator, type OrchestratorSnapshot, type ReleaseOutcome, type Workspaces } from "./orchestrator.ts";
 import { issueBranch, issueWorktree } from "./phase.ts";
+import { issueSteps, panel } from "./views.ts";
 import { loadWorkflow, type WorkflowConfig } from "./workflow.ts";
 
 export const manifest = defineManifest({
@@ -142,11 +143,15 @@ async function start(
 	}
 	note(
 		volt,
-		`Issue orchestrator started for ${repo} (${relative(ctx.cwd, path) || path}): working open issues labeled ${config.tracker.labels.join(" + ")}, including the ones its agents file, with up to ${config.agent.maxConcurrent} agents at once, and it ${merging}. Its agents run under its work item (/work); /orchestrate status, refresh, and stop control it.`,
+		`Issue orchestrator started for ${repo} (${relative(ctx.cwd, path) || path}): working open issues labeled ${config.tracker.labels.join(" + ")}, including the ones its agents file, with up to ${config.agent.maxConcurrent} agents at once, and it ${merging}. Its agents run under its work item, which /work shows full screen with every issue and its log; /orchestrate status, refresh, and stop control it.`,
 	);
 
 	const controller = new AbortController();
-	let workId: string | undefined;
+	/** The loop's work, once it runs. */
+	let reporter: WorkRunContext | undefined;
+	const report = (snapshot: OrchestratorSnapshot): void =>
+		reporter?.progress({ text: summary(snapshot), steps: issueSteps(snapshot) });
+	const log = (line: string): void => reporter?.output(`${new Date().toTimeString().slice(0, 8)}  ${line}\n`);
 	let tracker: { key: string; tracker: Promise<Tracker> } | undefined;
 	const hooked = new Set<string>();
 	const gh =
@@ -219,28 +224,35 @@ async function start(
 					task,
 					cwd,
 					limits,
-					...(workId === undefined ? {} : { parentWorkId: workId }),
+					...(reporter === undefined ? {} : { parentWorkId: reporter.workId }),
 				});
 				return { id: run.id, ended: run.ended };
 			},
 			cancel: (id) => ctx.subagents.cancel(id),
 		},
 		workspaces,
-		onChange: (snapshot) => ctx.ui.setPanel("orchestrator", panel(snapshot)),
+		onChange: (snapshot) => {
+			ctx.ui.setPanel("orchestrator", panel(snapshot, `extension.command.${manifest.id}.${COMMAND}`));
+			report(snapshot);
+		},
+		log,
 	});
 
 	await ctx.startWork(
 		"orchestrator",
 		{ title: `Orchestrate issues labeled ${config.tracker.labels.join(" + ")}`, input: { workflow: path } },
 		async (work) => {
-			workId = work.workId;
+			reporter = work;
 			// Cancelling the work, or the conversation's end, stops the loop.
 			const cancel = () => controller.abort();
 			work.signal.addEventListener("abort", cancel, { once: true });
 			ctx.signal.addEventListener("abort", cancel, { once: true });
-			const report = setInterval(() => work.progress({ text: summary(orchestrator.snapshot()) }), 5_000);
+			// Running times advance between changes.
+			const refresh = setInterval(() => report(orchestrator.snapshot()), 5_000);
+			log(`started for ${repo}`);
 			try {
 				await orchestrator.run(controller.signal);
+				log("stopped");
 				const final = orchestrator.snapshot();
 				note(volt, `Issue orchestrator stopped. ${summary(final)}.`);
 				return {
@@ -248,7 +260,7 @@ async function start(
 					result: { summary: summary(final) },
 				};
 			} finally {
-				clearInterval(report);
+				clearInterval(refresh);
 				work.signal.removeEventListener("abort", cancel);
 				ctx.signal.removeEventListener("abort", cancel);
 				stopped();
@@ -312,101 +324,4 @@ function summary(snapshot: OrchestratorSnapshot): string {
 		`${snapshot.totals.runs} runs, $${snapshot.totals.cost.toFixed(2)}`,
 	];
 	return `${snapshot.repo ?? "Issue orchestrator"}: ${parts.join(", ")}${snapshot.error ? ` (${snapshot.error})` : ""}`;
-}
-
-function minutes(since: number): string {
-	return `${Math.max(0, Math.round((Date.now() - since) / 60_000))}m`;
-}
-
-/** The status panel: what runs, waits, retries, and was handed to a human. */
-function panel(snapshot: OrchestratorSnapshot): ExtensionPanel {
-	const sections: Array<{ key: string; title: string; children: UiNode[] }> = [];
-	const table = (key: string, headers: string[], rows: Array<{ key: string; cells: string[] }>): UiNode => ({
-		type: "table",
-		key,
-		columns: headers.map((header) => ({ header })),
-		rows,
-	});
-	if (snapshot.error)
-		sections.push({
-			key: "error",
-			title: "Error",
-			children: [{ type: "text", text: snapshot.error, token: "error" }],
-		});
-	if (snapshot.running.length > 0) {
-		sections.push({
-			key: "running",
-			title: "Running",
-			children: [
-				table(
-					"running",
-					["Issue", "Role", "For"],
-					snapshot.running.map((run) => ({
-						key: String(run.issue),
-						cells: [`#${run.issue} ${run.title}`, run.role, minutes(run.startedAt)],
-					})),
-				),
-			],
-		});
-	}
-	const noted = (key: string, title: string, rows: readonly { issue: number; title: string; reason: string }[]) => {
-		if (rows.length === 0) return;
-		sections.push({
-			key,
-			title,
-			children: [
-				table(
-					key,
-					["Issue", "Why"],
-					rows.map((row) => ({ key: String(row.issue), cells: [`#${row.issue} ${row.title}`, row.reason] })),
-				),
-			],
-		});
-	};
-	noted("waiting", "Waiting", snapshot.waiting);
-	noted(
-		"retrying",
-		"Retrying",
-		snapshot.retrying.map((retry) => ({
-			issue: retry.issue,
-			title: retry.title,
-			reason: `${retry.failures} failed: ${retry.error}`,
-		})),
-	);
-	noted("handoff", "Handed to a human", snapshot.handedOff);
-	noted("finished", "Finished", snapshot.finished.slice(0, 5));
-	const open = snapshot.running.flatMap((run) =>
-		run.runId === undefined
-			? []
-			: [
-					{
-						id: `open-${run.issue}`,
-						label: `Open #${run.issue}`,
-						intent: { type: "open_work", input: { workId: run.runId } },
-					},
-				],
-	);
-	const command = (id: string, label: string, argument: string) => ({
-		id,
-		label,
-		intent: { type: `extension.command.${manifest.id}.${COMMAND}`, input: { arguments: argument } },
-	});
-	return {
-		title: "Issue orchestrator",
-		node: {
-			type: "card",
-			key: "orchestrator",
-			title: snapshot.repo ?? "Issue orchestrator",
-			badges: [
-				{ label: `${snapshot.running.length} running`, token: snapshot.running.length > 0 ? "accent" : "muted" },
-				{ label: `${snapshot.totals.runs} runs` },
-				{ label: `$${snapshot.totals.cost.toFixed(2)}` },
-			],
-			sections:
-				sections.length > 0
-					? sections
-					: [{ key: "idle", children: [{ type: "text", text: "No labeled issues need work.", token: "muted" }] }],
-			actions: [...open.slice(0, 4), command("refresh", "Refresh", "refresh"), command("stop", "Stop", "stop")],
-		},
-	};
 }

@@ -10,6 +10,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { WorkProgress } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import issueOrchestrator, { manifest, releaseWorktree } from "../../examples/extensions/issue-orchestrator/index.ts";
 import type {
@@ -100,6 +101,8 @@ function setup(options: { confirm?: boolean } = {}) {
 	const cancelled: string[] = [];
 	const ended = Promise.withResolvers<ExtensionSubagentResult>();
 	let work: Promise<WorkRunResult> | undefined;
+	const progress: WorkProgress[] = [];
+	let output = "";
 	const workAbort = new AbortController();
 	const ctx = {
 		cwd,
@@ -140,9 +143,11 @@ function setup(options: { confirm?: boolean } = {}) {
 			work = run({
 				workId: "work-1",
 				signal: workAbort.signal,
-				progress: () => {},
+				progress: (value: WorkProgress) => progress.push(value),
 				checkpoint: () => {},
-				output: () => {},
+				output: (text: string) => {
+					output += text;
+				},
 			});
 			return { workId: "work-1" };
 		},
@@ -162,6 +167,8 @@ function setup(options: { confirm?: boolean } = {}) {
 		started,
 		cancelled,
 		notes,
+		progress,
+		output: () => output,
 		sessionName: () => sessionName,
 		work: () => work,
 	};
@@ -177,6 +184,8 @@ describe("issue orchestrator extension", () => {
 			command,
 			calls,
 			panels,
+			progress,
+			output,
 			worktrees,
 			creates,
 			started,
@@ -230,8 +239,8 @@ describe("issue orchestrator extension", () => {
 		await vi.waitFor(() =>
 			expect(panels.at(-1)?.node).toMatchObject({
 				type: "card",
-				title: "o/r",
-				sections: [{ key: "running", title: "Running" }],
+				title: "Issue orchestrator · o/r",
+				sections: [{ key: "issues", children: [{ type: "table", rows: [{ key: "12" }] }] }],
 				actions: [
 					{ id: "open-12", intent: { type: "open_work", input: { workId: "sa_1" } } },
 					{ id: "refresh" },
@@ -243,6 +252,15 @@ describe("issue orchestrator extension", () => {
 			}),
 		);
 
+		// The work lists the issue and logs what the loop did, for /work to show.
+		expect(progress.at(-1)).toEqual({
+			text: "o/r: 1 running, 0 waiting, 0 retrying, 0 handed off, 0 runs, $0.00",
+			steps: [{ key: "12", label: "#12 Fix the thing · implementing · for <1m", status: "active" }],
+		});
+		expect(output()).toMatch(
+			/^\d\d:\d\d:\d\d {2}started for o\/r\n\d\d:\d\d:\d\d {2}#12: starting implement \(general\)\n/,
+		);
+
 		await command("start");
 		expect(notifications).toContain("The orchestrator is already running.");
 		await command("stop");
@@ -251,6 +269,7 @@ describe("issue orchestrator extension", () => {
 			result: { summary: expect.stringContaining("1 runs, $0.25") },
 		});
 		expect(cancelled).toEqual(["sa_1"]);
+		expect(output()).toMatch(/#12: implement cancelled\n\d\d:\d\d:\d\d {2}stopped\n$/);
 		expect(notes.at(-1)).toMatchObject({
 			content: expect.stringMatching(/^Issue orchestrator stopped\. o\/r: 0 running/),
 		});

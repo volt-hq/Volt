@@ -331,6 +331,7 @@ describe("issue orchestrator", () => {
 				comment: expect.stringContaining("ready for a human to merge"),
 			},
 		]);
+		expect(orchestrator.snapshot().handedOff).toMatchObject([{ issue: 12, ready: true }]);
 		// Labeled, it is no longer a candidate.
 		await orchestrator.tick();
 		expect(github.handoffs).toHaveLength(1);
@@ -367,6 +368,7 @@ describe("issue orchestrator", () => {
 				comment: expect.stringContaining("did not converge after 2 review rounds"),
 			},
 		]);
+		expect(orchestrator.snapshot().handedOff).toMatchObject([{ issue: 12, ready: false }]);
 	});
 
 	it("respects the concurrency limits, oldest issue first", async () => {
@@ -641,6 +643,7 @@ describe("issue orchestrator", () => {
 	it("keeps the last good workflow when a reload breaks, and says why", async () => {
 		const github = new FakeGitHub();
 		const agents = fakeAgents();
+		const log: string[] = [];
 		let broken: Error | undefined = new Error("workflow.tracker.labels must name at least one label");
 		const orchestrator = new Orchestrator({
 			loadWorkflow: async () => {
@@ -650,12 +653,16 @@ describe("issue orchestrator", () => {
 			tracker: async () => github,
 			agents,
 			workspaces,
+			log: (line) => log.push(line),
 		});
 		github.addIssue(12);
 		// No good workflow yet: nothing runs.
 		await orchestrator.tick();
 		expect(orchestrator.snapshot().error).toBe(`Workflow: ${broken.message}`);
 		expect(agents.started).toEqual([]);
+		// Logged once, not on every tick it lasts.
+		await orchestrator.tick();
+		expect(log).toEqual([`Workflow: ${broken.message}`]);
 
 		broken = undefined;
 		await orchestrator.tick();
