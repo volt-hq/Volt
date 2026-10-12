@@ -62,8 +62,11 @@ const READ_NAME_PATTERN = new RegExp(
 	"i",
 );
 const SECRET_KEY_PATTERN = /token|secret|password|passwd|api[-_]?key|authorization|credential|private/i;
+// `authorization` is also ordinary prose ("authorization server"), so it only matches header and
+// key-value forms. Its value may start with an auth scheme ("Authorization: Bearer abc"), which is
+// redacted together with the credential.
 const SECRET_VALUE_PATTERN =
-	/(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:token|secret|password|passwd|api[-_]?key|authorization|credential|private)[\s:=]+)[^\s,;]+/gi;
+	/(authorization\s*[:=]\s*)(?:[A-Za-z][\w.-]*[ \t]+)?[^\s,;]+|(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:token|secret|password|passwd|api[-_]?key|credential|private)[\s:=]+)[^\s,;]+/gi;
 
 function tokenizeRiskText(value: string): string {
 	return value
@@ -100,7 +103,15 @@ export function isMcpToolTrustedReadCandidate(tool: Pick<SdkTool, "name" | "desc
 export function redactMcpText(value: string): string {
 	return value.replace(
 		SECRET_VALUE_PATTERN,
-		(_match, bearerPrefix: string | undefined, keyPrefix: string | undefined) => {
+		(
+			_match,
+			authorizationPrefix: string | undefined,
+			bearerPrefix: string | undefined,
+			keyPrefix: string | undefined,
+		) => {
+			if (authorizationPrefix) {
+				return `${authorizationPrefix}[redacted]`;
+			}
 			if (bearerPrefix) {
 				return `${bearerPrefix}[redacted]`;
 			}
