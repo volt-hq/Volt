@@ -10,7 +10,8 @@
  * not hold yet. A path split across deltas is held back until its token ends,
  * and when redaction rewrites text the client already holds, the streaming
  * message is sent again in full. A message sent in full, so also to a client
- * that joins mid-stream, carries no arguments of a tool call that still
+ * that joins mid-stream, holds back the same of each block whose end the
+ * client was not sent, and carries no arguments of a tool call that still
  * streams: the items after it rebuild them from settled argument text. Text
  * up to a line break that redacts the same alone as with the text after it is
  * redacted for good, so a delta redacts only the text after its block's last
@@ -308,6 +309,8 @@ interface StreamingView {
 	readonly args: Map<number, StreamedText>;
 	/** Blocks no longer streamed: over budget, or not redactable incrementally. The commit brings them. */
 	readonly frozen: Set<number>;
+	/** Text and thinking blocks whose end the client was sent: their text no longer grows. */
+	readonly ended: Set<number>;
 	/** Redacted content bytes the client holds of the message. */
 	bytes: number;
 	/** The last `seq` sent; 0 before the first frame. */
@@ -326,6 +329,7 @@ function newView(basedOn: number): StreamingView {
 		text: new Map(),
 		args: new Map(),
 		frozen: new Set(),
+		ended: new Set(),
 		bytes: 0,
 		seq: 0,
 		held: new Map(),
@@ -338,6 +342,7 @@ function clearStreaming(view: StreamingView): void {
 	view.text.clear();
 	view.args.clear();
 	view.frozen.clear();
+	view.ended.clear();
 	view.bytes = 0;
 }
 
@@ -395,7 +400,9 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 				}
 				return block;
 			}
-			const text = block.type === "text" ? block.text : block.thinking;
+			let text = block.type === "text" ? block.text : block.thinking;
+			// A block that may still grow holds back what its next delta may complete, as its deltas do.
+			if (!view.ended.has(index)) text = sanitizeText(settled(blockText(message.content[index]) ?? ""));
 			let kept = text;
 			const bytes = Buffer.byteLength(text, "utf8");
 			if (bytes > budget) {
@@ -502,6 +509,7 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 			case "thinking_start":
 				view.text.set(index, streamedText("", ""));
 				view.frozen.delete(index);
+				view.ended.delete(index);
 				return [{ type: "assistant_delta", event }];
 			case "text_delta":
 			case "thinking_delta": {
@@ -531,6 +539,7 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 				view.bytes += Math.max(0, Buffer.byteLength(content, "utf8") - Buffer.byteLength(held, "utf8"));
 				view.text.set(index, streamedText(event.content, content));
 				view.frozen.delete(index);
+				view.ended.add(index);
 				return [{ type: "assistant_delta", event: { ...event, content } }];
 			}
 			case "toolcall_start":
@@ -795,6 +804,8 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 		const sent = (items: LiveItem[]): Sent[] => items.map((each) => ({ item: each }));
 		switch (item.type) {
 			case "assistant_start":
+				// A new message, or one a client joins mid-stream: which of its blocks ended is not known.
+				view.ended.clear();
 				return sent([
 					{
 						type: "assistant_start",
