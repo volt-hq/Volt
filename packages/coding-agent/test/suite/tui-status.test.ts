@@ -197,7 +197,17 @@ describe("the TUI's status from its store", () => {
 		const { tui, session } = await start({ extensions: [failing] });
 		await session.prompt("trigger it");
 
-		const shown = await waitForScreen(tui, 'Extension "failing-ext" error: agent_start: the handler broke');
+		// The stack's frames carry absolute paths: by the checkout's path they wrap
+		// and push the header above the visible rows, so read the scrollback too.
+		let shown = "";
+		await vi.waitFor(
+			async () => {
+				await screen(tui);
+				shown = tui.terminal.getScrollBuffer().join("\n");
+				expect(shown).toContain('Extension "failing-ext" error: agent_start: the handler broke');
+			},
+			{ timeout: 10_000 },
+		);
 		expect(shown).toMatch(/\n\s+at /);
 	});
 

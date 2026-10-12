@@ -419,6 +419,11 @@ describe("work status list", () => {
 		);
 		vi.setSystemTime(101_000);
 		expect(text(status)).toContain("npm run check · 13.0s · PASS 12 of 40");
+		// Past a minute, minutes and hours instead of seconds.
+		vi.setSystemTime(88_000 + 2_832_000);
+		expect(text(status)).toContain("npm run check · 47m 12s · PASS 12 of 40");
+		vi.setSystemTime(88_000 + 3_725_000);
+		expect(text(status)).toContain("npm run check · 1h 2m · PASS 12 of 40");
 		// Suspended work shows no elapsed time; checkpointed progress shows without a live value.
 		source.views = [
 			view(item("agent-1", { kind: "subagent", title: "scout", resume: true, progress: { text: "grep auth" } }), {

@@ -27,13 +27,17 @@ import { ANTHROPIC_SUBSCRIPTION_AUTH_WARNING, usesAnthropicSubscription } from "
 
 type SlimAssistantEvent = Extract<LiveItem, { type: "assistant_delta" }>["event"];
 
-/** Entry types whose commit changes what the live `intents` value reads. */
+/**
+ * Entry types whose commit changes what the live `intents` value reads. A
+ * branch move commits a host-only `leaf` entry, which entry listeners never
+ * see: the activity change that ends its navigation, and the plan state
+ * restored after it, refresh the value.
+ */
 const INTENT_STATE_ENTRY_TYPES: ReadonlySet<string> = new Set([
 	"model_change",
 	"thinking_level_change",
 	"fast_mode_change",
 	"planning_state_change",
-	"leaf",
 ]);
 
 export interface LiveFeed {
@@ -375,6 +379,7 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 			case "thinking_level_changed":
 			case "planning_state_changed":
 			case "fast_mode_changed":
+			case "ambiguous_client_input_changed":
 				updateIntents();
 				return;
 			default:

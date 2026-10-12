@@ -48,15 +48,17 @@ tmux capture-pane -t volt-view -p                  # startup screen
 
 ```bash
 tmux send-keys -t volt-view "Reply with exactly: ok" Enter   # submit a prompt
-tmux send-keys -t volt-view "/subagents" Enter               # slash commands
+tmux send-keys -t volt-view "/work" Enter                    # slash command: work inspector
 tmux send-keys -t volt-view Escape                           # interrupt a running turn
 tmux send-keys -t volt-view C-o                              # ctrl+o: expand tool outputs
-tmux send-keys -t volt-view M-a                              # option+a: subagent inspector
+tmux send-keys -t volt-view M-j                              # alt+j (option+j on macOS): work inspector
 tmux send-keys -t volt-view C-d                              # ctrl+d: exit (editor must be empty)
 ```
 
-Keybindings are configurable; the defaults live in
-`packages/coding-agent/src/core/keybindings.ts` (`DEFAULT_APP_KEYBINDINGS`).
+Keybindings are configurable; the defaults live in `KEYBINDINGS`
+(`app.*` actions) in `packages/coding-agent/src/core/keybindings.ts`, which
+spreads `TUI_KEYBINDINGS` (`tui.*` actions) from
+`packages/tui/src/keybindings.ts`.
 The footer hints under tool cards (e.g. `option+a inspect  ctrl+o outputs`)
 tell you what is available in context.
 
@@ -86,7 +88,8 @@ Bottom-up:
   renderers. Subagent tool calls render as a live tree
   (`├─`/`└─` branches, status glyphs `…`/`✓`/`✗`/`○`, per-node
   `status · tool calls · duration · tokens · current activity`), including
-  nested children. The full-screen subagent inspector is `option+a`.
+  nested children. Subagents, jobs, and reviews open in the full-screen work
+  inspector: `/work` or `alt+j` (`option+j` on macOS).
 
 ### Cleanup
 

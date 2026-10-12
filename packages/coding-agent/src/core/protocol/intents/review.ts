@@ -17,8 +17,13 @@ import {
 	type ReviewTarget,
 	reviewTargetForRerun,
 } from "../../review.ts";
-import { ReviewDiscussionConfigurationError, type ReviewDiscussionService } from "../../review-discussions.ts";
+import {
+	ReviewDiscussionConfigurationError,
+	ReviewDiscussionRequestConflictError,
+	type ReviewDiscussionService,
+} from "../../review-discussions.ts";
 import { ReviewEngineParametersError, resolveReviewEngineParameters } from "../../review-engine.ts";
+import { ReviewSourceUnavailableError } from "../../review-links.ts";
 import { publishReviewRun } from "../../review-publish.ts";
 import {
 	acknowledgeReviewRun,
@@ -582,21 +587,32 @@ export function reviewDiscussionsOf(ctx: IntentContext): ReviewDiscussionService
 	return service;
 }
 
-/** Run a review discussion operation; source changes surface as one stable error. */
+/**
+ * Run a review discussion operation. A source that changed or is unavailable
+ * surfaces as one stable error, and a reset request id reused for another
+ * predecessor as a conflict; any other failure, a stale branch included,
+ * surfaces as it is.
+ */
 export async function runReviewDiscussion<T>(
 	ctx: IntentContext,
 	operation: (service: ReviewDiscussionService) => Promise<T>,
 ): Promise<T> {
 	const service = reviewDiscussionsOf(ctx);
+	ctx.assertCurrent?.();
 	try {
-		ctx.assertCurrent?.();
 		return await operation(service);
 	} catch (error) {
 		if (error instanceof ReviewDiscussionConfigurationError) throw new Error(error.message);
-		throw new CodedIntentError(
-			"review_source_unavailable",
-			"Review source identity, placement, or runtime admission changed",
-		);
+		if (error instanceof ReviewDiscussionRequestConflictError) {
+			throw new IntentRejectedError("conflict", error.message);
+		}
+		if (error instanceof ReviewSourceUnavailableError) {
+			throw new CodedIntentError(
+				"review_source_unavailable",
+				"Review source identity, placement, or runtime admission changed",
+			);
+		}
+		throw error;
 	}
 }
 

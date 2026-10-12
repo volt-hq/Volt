@@ -23,7 +23,7 @@ import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { HostedConversation } from "./host/hosted-conversation.ts";
 import { findInitialModel } from "./model-resolver.ts";
-import { type ReviewSourceWriter, resolveCanonicalReviewSource } from "./review-links.ts";
+import { ReviewSourceUnavailableError, type ReviewSourceWriter, resolveCanonicalReviewSource } from "./review-links.ts";
 import {
 	findReviewDiscussion,
 	type ReviewDiscussionLink,
@@ -41,6 +41,9 @@ import { admitReviewRecord, type ReviewRecord, type SessionWriter } from "./sess
 type DiscussionConfiguration = IntentInput<"review_start_discussions">["discussionConfiguration"];
 
 export class ReviewDiscussionConfigurationError extends Error {}
+
+/** A reset's request id already names the reset of another predecessor. */
+export class ReviewDiscussionRequestConflictError extends Error {}
 
 export interface ReviewDiscussionService {
 	start(
@@ -196,6 +199,10 @@ interface SourceView {
 	readonly discussion: ReviewDiscussionRecord;
 }
 
+/**
+ * What the service needs of its host. A check that fails because a runtime
+ * is no longer hosted here throws `ReviewSourceUnavailableError`.
+ */
 export interface ReviewDiscussionHost {
 	findRuntime(ref: SessionReference, requester: HostedConversation): HostedConversation | undefined;
 	assertCurrent(runtime: HostedConversation): void;
@@ -289,7 +296,7 @@ export class HostReviewDiscussionService {
 				runtime.whileOpen(() =>
 					this.withStore(runtime, async (store, ref, assertCurrent) => {
 						const indexed = await store.findReviewDiscussion(id);
-						if (!indexed) throw new Error("Review discussion unavailable");
+						if (!indexed) throw new ReviewSourceUnavailableError("Review discussion unavailable");
 						return this.serial(`${ref.storeId}:${indexed.runId}:${indexed.findingId}`, () =>
 							this.reset(runtime, store, ref, assertCurrent, id, expected, requestId),
 						);
@@ -306,7 +313,7 @@ export class HostReviewDiscussionService {
 						indexed.runId !== link.runId ||
 						!sameReviewSession(indexed.source, link.source)
 					)
-						throw new Error("Review discussion unavailable");
+						throw new ReviewSourceUnavailableError("Review discussion unavailable");
 					const view = await this.sourceView(runtime, { ...ref, ...link.source }, link.discussionId);
 					const result = await this.project(runtime, store, ref, view);
 					assertCurrent();
@@ -333,7 +340,7 @@ export class HostReviewDiscussionService {
 		const session = runtime.session;
 		const revision = session.conversationGenerationRevision;
 		const ref = session.sessionRef;
-		if (!ref) throw new Error("Review discussions unavailable for ephemeral sessions");
+		if (!ref) throw new ReviewSourceUnavailableError("Review discussions unavailable for ephemeral sessions");
 		const assertCurrent = () => {
 			this.host.assertCurrent(runtime);
 			const currentRef = session.sessionRef;
@@ -344,13 +351,14 @@ export class HostReviewDiscussionService {
 				runtime.session !== session ||
 				session.conversationGenerationRevision !== revision
 			)
-				throw new Error("Review source generation changed");
+				throw new ReviewSourceUnavailableError("Review source generation changed");
 		};
 		assertCurrent();
 		const lease = await acquireSharedSQLiteSessionStore(ref.sessionDirectory);
 		try {
 			assertCurrent();
-			if (lease.client.info.storeId !== ref.storeId) throw new Error("Review source store changed");
+			if (lease.client.info.storeId !== ref.storeId)
+				throw new ReviewSourceUnavailableError("Review source store changed");
 			return await operation(lease.client, ref, assertCurrent);
 		} finally {
 			await lease.release();
@@ -360,11 +368,12 @@ export class HostReviewDiscussionService {
 	/** The source of run `runId` when `runtime` is it or a handoff alias of it; discussions do not own review lifecycle. */
 	private async requireSource(runtime: HostedConversation, runId: string): Promise<SessionReference> {
 		if (runtime.session.isReviewDiscussion)
-			throw new Error(
+			throw new ReviewSourceUnavailableError(
 				"This action requires the source review; finding discussions do not own review lifecycle or canonical outcomes",
 			);
 		const source = await resolveCanonicalReviewSource(runtime.session.sessionManager, runId);
-		if (!source) throw new Error("Review source unavailable or not owned by this conversation");
+		if (!source)
+			throw new ReviewSourceUnavailableError("Review source unavailable or not owned by this conversation");
 		return source;
 	}
 
@@ -393,7 +402,7 @@ export class HostReviewDiscussionService {
 			cwd: manager.getCwd(),
 			discussion: manager.getReviewState().discussions.get(discussionId),
 		}));
-		if (!view.discussion) throw new Error("Review discussion unavailable");
+		if (!view.discussion) throw new ReviewSourceUnavailableError("Review discussion unavailable");
 		return { ref: source, cwd: view.cwd, discussion: view.discussion };
 	}
 
@@ -410,7 +419,8 @@ export class HostReviewDiscussionService {
 		return this.serial(`source:${ref.storeId}:${ref.sessionId}`, async () => {
 			const live = this.host.findRuntime(ref, requester);
 			if (live) return live.whileOpen((session) => write(session.sessionWriter));
-			if (!this.host.withSourceWrite) throw new Error("Canonical source writer is unavailable");
+			if (!this.host.withSourceWrite)
+				throw new ReviewSourceUnavailableError("Canonical source writer is unavailable");
 			return this.host.withSourceWrite(requester, ref, async () => {
 				const manager = await SessionManager.open(ref);
 				try {
@@ -645,7 +655,7 @@ export class HostReviewDiscussionService {
 				const state = writer.sessionManager.getReviewState();
 				const discussion =
 					state.discussions.get(link.discussionId) ?? findReviewDiscussion(state, link.runId, link.findingId);
-				if (!discussion) throw new Error("Review discussion unavailable");
+				if (!discussion) throw new ReviewSourceUnavailableError("Review discussion unavailable");
 				return { recorded, discussion };
 			});
 			if (!added.recorded) await discardDiscussionChild(source, child);
@@ -725,9 +735,10 @@ export class HostReviewDiscussionService {
 		requestId: string,
 	): Promise<RpcResetReviewDiscussion> {
 		const indexed = await store.findReviewDiscussion(discussionId);
-		if (!indexed) throw new Error("Review discussion unavailable");
+		if (!indexed) throw new ReviewSourceUnavailableError("Review discussion unavailable");
 		const sourceRef = await this.requireSource(runtime, indexed.runId);
-		if (!sameReviewSession(identityOf(sourceRef), indexed.source)) throw new Error("Review discussion unavailable");
+		if (!sameReviewSession(identityOf(sourceRef), indexed.source))
+			throw new ReviewSourceUnavailableError("Review discussion unavailable");
 		assertCurrent();
 		const view = await this.sourceView(runtime, sourceRef, discussionId);
 		assertCurrent();
@@ -736,7 +747,7 @@ export class HostReviewDiscussionService {
 		for (const entry of view.discussion.children) {
 			if (entry.requestId === requestId) {
 				if (entry.ordinal === 1 || previousSessionId !== expectedSessionId)
-					throw new Error("Review reset request identity conflict");
+					throw new ReviewDiscussionRequestConflictError("Review reset request identity conflict");
 				return {
 					requestId,
 					status: "reset",
@@ -760,7 +771,7 @@ export class HostReviewDiscussionService {
 			};
 			const added = await this.addChild(runtime, sourceRef, view.cwd, link, assertCurrent, (state, child) => {
 				const latest = state.discussions.get(discussionId);
-				if (!latest) throw new Error("Review discussion unavailable");
+				if (!latest) throw new ReviewSourceUnavailableError("Review discussion unavailable");
 				// A deleted current child can be reset, but never silently rebound to a reused id.
 				if (!sameReviewSession(latest.children.at(-1)!.child, current.child)) return undefined;
 				return {

@@ -119,6 +119,19 @@ type RunnerEmitEvent = Exclude<
 	| SettingsChangedEvent
 >;
 
+/** Agent loop events carry session data: each handler gets its own copy, so its changes reach no other handler and not the session. */
+const LOOP_EVENT_TYPES: ReadonlySet<RunnerEmitEvent["type"]> = new Set<RunnerEmitEvent["type"]>([
+	"agent_start",
+	"agent_end",
+	"turn_start",
+	"turn_end",
+	"message_start",
+	"message_update",
+	"tool_execution_start",
+	"tool_execution_update",
+	"tool_execution_end",
+]);
+
 type SessionBeforeEvent = Extract<
 	RunnerEmitEvent,
 	{ type: "session_before_switch" | "session_before_fork" | "session_before_compact" | "session_before_tree" }
@@ -414,6 +427,28 @@ function recordingProviders(registry: ModelRegistry, extension: Extension): Mode
 		}
 		return key === "client" && typeof value === "object" && value !== null ? recordingClient(value) : value;
 	});
+}
+
+/**
+ * A copy of `value` in which every array and plain object is new and holds the enumerable own
+ * properties, the ones serializing it sends. Other objects, such as an abort signal or bytes, are
+ * kept as they are.
+ */
+function copyPlainData(value: unknown): unknown {
+	if (typeof value !== "object" || value === null) return value;
+	if (Array.isArray(value)) return value.map(copyPlainData);
+	if (Object.getPrototypeOf(value) !== Object.prototype) return value;
+	const copy: Record<string, unknown> = {};
+	for (const [key, entry] of Object.entries(value)) {
+		const entryCopy = copyPlainData(entry);
+		// Assigning `__proto__` would set the copy's prototype instead of adding the property.
+		if (key === "__proto__") {
+			Object.defineProperty(copy, key, { value: entryCopy, enumerable: true, writable: true, configurable: true });
+		} else {
+			copy[key] = entryCopy;
+		}
+	}
+	return copy;
 }
 
 /** An event one extension hears alone: its activation and deactivation, and its own start or stop at runtime. */
@@ -1262,7 +1297,8 @@ export class ExtensionRunner {
 		});
 		context.getSystemPromptOptions = () => {
 			assertActive();
-			return this.getSystemPromptOptionsFn();
+			// A copy: the options share the session's loaded skills and context files.
+			return structuredClone(this.getSystemPromptOptionsFn());
 		};
 		context.waitForIdle = () => {
 			assertActive();
@@ -1309,15 +1345,20 @@ export class ExtensionRunner {
 			return undefined as RunnerEmitResult<TEvent>;
 		}
 		let result: SessionBeforeEventResult | undefined;
+		const copyPerHandler = LOOP_EVENT_TYPES.has(event.type);
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(event.type);
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
+				// Copied outside the handler's error containment: invalid session data is not the extension's failure.
+				const handlerEvent = copyPerHandler
+					? cloneCanonicalData(event, `Extension ${event.type} input for ${ext.id}`)
+					: event;
 				try {
 					const ctx = this.createContext(ext.id, event.type === "tool_execution_end");
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await handler(handlerEvent, ctx);
 
 					if (this.isSessionBeforeEvent(event) && handlerResult) {
 						result = cloneCanonicalData(
@@ -1608,11 +1649,15 @@ export class ExtensionRunner {
 		return currentMessages;
 	}
 
+	/**
+	 * Run the `before_provider_request` handlers on a copy of `payload`, which providers build with live
+	 * state such as each tool's registered parameter schema: an in-place edit changes only this request.
+	 */
 	async emitBeforeProviderRequest(payload: unknown): Promise<unknown> {
 		if (this.isInert) {
 			return payload;
 		}
-		let currentPayload = payload;
+		let currentPayload = copyPlainData(payload);
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("before_provider_request");
@@ -1675,9 +1720,14 @@ export class ExtensionRunner {
 					const event: BeforeAgentStartEvent = {
 						type: "before_agent_start",
 						prompt,
-						images,
+						// A copy: only a returned result changes the prompt.
+						images:
+							images === undefined
+								? undefined
+								: cloneCanonicalData(images, `Extension before_agent_start input for ${ext.id}`),
 						systemPrompt: currentSystemPrompt,
-						systemPromptOptions,
+						// A copy: the options share the session's loaded skills and context files.
+						systemPromptOptions: structuredClone(systemPromptOptions),
 					};
 					const handlerResult = await handler(event, ctx);
 
@@ -1793,7 +1843,11 @@ export class ExtensionRunner {
 					const event: InputEvent = {
 						type: "input",
 						text: currentText,
-						images: currentImages,
+						// A copy: only a transform result changes the prompt.
+						images:
+							currentImages === undefined
+								? undefined
+								: cloneCanonicalData(currentImages, `Extension input images for ${ext.id}`),
 						source,
 						streamingBehavior,
 					};
