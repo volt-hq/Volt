@@ -66,7 +66,7 @@ import { ExtensionReviewEngines } from "./review-engine-extensions.ts";
 import { ReviewPasses } from "./review-passes.ts";
 import { reviewWorkKind } from "./review-work.ts";
 import { SessionBash } from "./session/bash.ts";
-import { SessionClientInputs, type WithdrawnInput } from "./session/client-inputs.ts";
+import { type AmbiguousClientInput, SessionClientInputs, type WithdrawnInput } from "./session/client-inputs.ts";
 import { SessionCompaction } from "./session/compaction.ts";
 import { SessionEvents } from "./session/events.ts";
 import {
@@ -1747,6 +1747,30 @@ export class AgentSession {
 	 */
 	resumeRecoveredClientInputs(): Promise<void> {
 		return this._clientInputs.resumeRecovered();
+	}
+
+	/**
+	 * The first client input whose outcome is ambiguous: its dispatch started
+	 * (an extension command, input hook, or `before_agent_start` ran) and its
+	 * owner was lost before recording an outcome, so it may or may not have
+	 * reached the model. It is never replayed automatically, and it holds
+	 * recovered and fresh input back until {@link discardAmbiguousClientInput}
+	 * resolves it.
+	 */
+	get ambiguousClientInput(): AmbiguousClientInput | undefined {
+		return this._clientInputs.ambiguous();
+	}
+
+	/**
+	 * Discard an ambiguous client input ({@link ambiguousClientInput}): it is
+	 * recorded `failed` and not replayed, which releases the input it held
+	 * back; queued input behind it replays in order once recovery resumes
+	 * ({@link resumeRecoveredClientInputs}). An input a live operation still
+	 * dispatches is refused; discarding an input that already failed does
+	 * nothing. Resolves the next ambiguous input, if one remains.
+	 */
+	discardAmbiguousClientInput(clientMessageId: string): Promise<AmbiguousClientInput | undefined> {
+		return this._clientInputs.discardAmbiguous(clientMessageId);
 	}
 
 	// =========================================================================

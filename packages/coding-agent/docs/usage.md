@@ -54,6 +54,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
 | `/compact [prompt]` | Manually compact context, optionally with custom instructions |
+| `/discard-stuck` | Discard a message Volt stopped while sending (it may or may not have reached the model), so later messages can run |
 | `/review [target] [options]` | Snapshot and independently verify uncommitted, branch (with or without uncommitted changes), PR, or commit changes |
 | `/copy` | Copy last assistant message to clipboard |
 | `/export [file]` | Export session to HTML |

@@ -34,6 +34,8 @@ const INTENT_STATE_ENTRY_TYPES: ReadonlySet<string> = new Set([
 	"fast_mode_change",
 	"planning_state_change",
 	"leaf",
+	// An input's outcome: whether an ambiguous input holds later input back.
+	"client_input_state",
 ]);
 
 export interface LiveFeed {
