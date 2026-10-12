@@ -46,6 +46,16 @@ export const RpcSafeNonNegativeIntegerSchema = Type.Integer({
 	"x-volt-expected": "be a safe non-negative integer",
 });
 
+/**
+ * Host-authoritative Unix epoch milliseconds. Bounded like any safe
+ * non-negative integer so elapsed-time arithmetic and client integer
+ * conversions cannot overflow; ordering between timestamps (such as
+ * `endedAt >= startedAt`) is a record-level rule.
+ */
+export const RpcEpochMillisecondsSchema = Type.Options(RpcSafeNonNegativeIntegerSchema, {
+	description: "Unix epoch milliseconds",
+});
+
 /** volt-ai's ImageContent annotated with the conversation-input byte limits. */
 export const RpcImageContentSchema = Type.Object(
 	{

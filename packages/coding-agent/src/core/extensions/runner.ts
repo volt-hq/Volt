@@ -119,6 +119,19 @@ type RunnerEmitEvent = Exclude<
 	| SettingsChangedEvent
 >;
 
+/** Agent loop events carry session data: each handler gets its own copy, so its changes reach no other handler and not the session. */
+const LOOP_EVENT_TYPES: ReadonlySet<RunnerEmitEvent["type"]> = new Set<RunnerEmitEvent["type"]>([
+	"agent_start",
+	"agent_end",
+	"turn_start",
+	"turn_end",
+	"message_start",
+	"message_update",
+	"tool_execution_start",
+	"tool_execution_update",
+	"tool_execution_end",
+]);
+
 type SessionBeforeEvent = Extract<
 	RunnerEmitEvent,
 	{ type: "session_before_switch" | "session_before_fork" | "session_before_compact" | "session_before_tree" }
@@ -1342,7 +1355,7 @@ export class ExtensionRunner {
 			return undefined as RunnerEmitResult<TEvent>;
 		}
 		let result: SessionBeforeEventResult | undefined;
-		const copyPerHandler = COMMITTED_ENTRY_EVENT_TYPES.has(event.type);
+		const copyPerHandler = LOOP_EVENT_TYPES.has(event.type) || COMMITTED_ENTRY_EVENT_TYPES.has(event.type);
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(event.type);

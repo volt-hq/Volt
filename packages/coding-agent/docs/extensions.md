@@ -671,6 +671,8 @@ volt.on("session_shutdown", async (event, ctx) => {
 
 ### Agent Events
 
+Every `agent_start`, `agent_end`, `turn_start`, `turn_end`, `message_start`, `message_update`, and `tool_execution_*` handler receives its own copy of the event. A change a handler makes to it reaches neither later handlers nor the session and its clients.
+
 #### before_agent_start
 
 Fired after user submits prompt, before agent loop. Can inject a message and/or modify the system prompt.

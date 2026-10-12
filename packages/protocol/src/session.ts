@@ -10,7 +10,7 @@ import { ModelSchema } from "@hansjm10/volt-ai/schemas";
 import { type Static, Type } from "typebox";
 import { RpcGitContextSchema } from "./git-context.ts";
 import { opaque, stringEnum } from "./helpers.ts";
-import { RpcThinkingLevelSchema } from "./primitives.ts";
+import { RpcEpochMillisecondsSchema, RpcThinkingLevelSchema } from "./primitives.ts";
 import { RpcReviewDiscussionLinkSchema } from "./review-discussions.ts";
 import {
 	RPC_CHANGE_BRANCH_MAX_CHARS,
@@ -106,7 +106,7 @@ export type RpcSessionListItem = Static<typeof RpcSessionListItemSchema>;
 export const RpcActiveAgentRunSchema = Type.Object(
 	{
 		/** Logical operation start in Unix epoch milliseconds; retained through automatic recovery until settlement. */
-		startedAt: Type.Number(),
+		startedAt: RpcEpochMillisecondsSchema,
 	},
 	{ additionalProperties: false },
 );
@@ -115,7 +115,7 @@ export const RpcActiveCompactionSchema = Type.Object(
 	{
 		reason: stringEnum(["manual", "threshold", "overflow"]),
 		/** Unix epoch milliseconds when the active compaction started. */
-		startedAt: Type.Number(),
+		startedAt: RpcEpochMillisecondsSchema,
 	},
 	{ additionalProperties: false },
 );
