@@ -380,9 +380,15 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 		return undefined;
 	};
 
-	/** Text the client may append to what it holds, or `undefined` when its text must be replaced. */
-	const appendable = (held: string, next: string): string | undefined =>
-		next.startsWith(held) ? next.slice(held.length) : undefined;
+	/**
+	 * Text the client may append to what it holds, or `undefined` when its text
+	 * must be replaced. Nothing while `next` falls short of it: a token the
+	 * client holds part of is held back again until it ends.
+	 */
+	const appendable = (held: string, next: string): string | undefined => {
+		if (next.startsWith(held)) return next.slice(held.length);
+		return held.startsWith(next) ? "" : undefined;
+	};
 
 	const redactDelta = (view: StreamingView, event: SlimAssistantEvent): LiveItem[] => {
 		const index = event.contentIndex;
