@@ -32,6 +32,7 @@ import {
 import { getIrohRemotePairingVerificationDetails } from "../../../core/remote/iroh/ticket.ts";
 import { getIrohRemoteWorkspaceNameAlias } from "../../../core/remote/iroh/workspace.ts";
 import { theme } from "../../../core/theme/runtime.ts";
+import { formatDuration } from "../../../core/tools/render-utils.ts";
 import { createDaemonClient, type DaemonClient } from "../../../daemon/control-client.ts";
 import {
 	CONTROL_PAIR_CANCEL_CAPABILITY,
@@ -406,16 +407,6 @@ type DisplayRow = {
 	wrap?: boolean;
 	tone?: "text" | "muted" | "dim" | "accent" | "success" | "warning" | "error";
 };
-
-function formatDuration(ms: number): string {
-	const seconds = Math.max(0, Math.floor(ms / 1000));
-	if (seconds < 60) return `${seconds}s`;
-	const minutes = Math.floor(seconds / 60);
-	if (minutes < 60) return `${minutes}m`;
-	const hours = Math.floor(minutes / 60);
-	if (hours < 48) return `${hours}h ${minutes % 60}m`;
-	return `${Math.floor(hours / 24)}d ${hours % 24}h`;
-}
 
 function abbreviatedId(value: string, width = 12): string {
 	return value.length <= width ? value : `${value.slice(0, Math.max(4, width - 1))}…`;
@@ -1405,7 +1396,7 @@ export class RemoteControlCenterComponent implements Component {
 				: []),
 			{ text: "CONNECTION", tone: "accent" },
 			{
-				text: `voltd ${status.version} · pid ${status.pid} · up ${formatDuration(Date.now() - status.startedAtMs)}`,
+				text: `voltd ${status.version} · pid ${status.pid} · up ${formatDuration(Date.now() - status.startedAtMs, { wholeSeconds: true })}`,
 				tone: "text",
 			},
 			{
@@ -1427,7 +1418,7 @@ export class RemoteControlCenterComponent implements Component {
 							text:
 								relayCredential?.nextRefreshAt === undefined
 									? "Checking relay access now"
-									: `Next automatic check in ${formatDuration(relayCredential.nextRefreshAt - Date.now())}`,
+									: `Next automatic check in ${formatDuration(relayCredential.nextRefreshAt - Date.now(), { wholeSeconds: true })}`,
 							tone: "muted" as const,
 							wrap: true,
 						},
@@ -1482,7 +1473,7 @@ export class RemoteControlCenterComponent implements Component {
 							tone: "dim" as const,
 						},
 						{
-							text: `Detached runtime retention: ${formatDuration(remotePolicy.detachedRuntimeTtlMs)}`,
+							text: `Detached runtime retention: ${formatDuration(remotePolicy.detachedRuntimeTtlMs, { wholeSeconds: true })}`,
 							tone: "text" as const,
 						},
 					]
@@ -1496,7 +1487,7 @@ export class RemoteControlCenterComponent implements Component {
 		for (const client of status.clients) {
 			rows.push({
 				key: `client:${client.clientNodeId}`,
-				text: `${client.label || "Unnamed phone"} · ${abbreviatedId(client.clientNodeId, width < 60 ? 10 : 20)} · last seen ${formatDuration(Date.now() - (client.lastSeenAtMs ?? client.pairedAtMs))} ago`,
+				text: `${client.label || "Unnamed phone"} · ${abbreviatedId(client.clientNodeId, width < 60 ? 10 : 20)} · last seen ${formatDuration(Date.now() - (client.lastSeenAtMs ?? client.pairedAtMs), { wholeSeconds: true })} ago`,
 				tone: "text",
 			});
 			rows.push({
@@ -1515,7 +1506,7 @@ export class RemoteControlCenterComponent implements Component {
 				const approved = client.rePairApprovedAtMs !== undefined;
 				rows.push({
 					...(approved ? {} : { key: `revoked:${client.clientNodeId}` }),
-					text: `${client.label || "Unnamed phone"} · ${abbreviatedId(client.clientNodeId, width < 60 ? 10 : 20)} · revoked ${formatDuration(Date.now() - client.revokedAtMs)} ago`,
+					text: `${client.label || "Unnamed phone"} · ${abbreviatedId(client.clientNodeId, width < 60 ? 10 : 20)} · revoked ${formatDuration(Date.now() - client.revokedAtMs, { wholeSeconds: true })} ago`,
 					tone: approved ? "success" : "warning",
 				});
 				rows.push({
