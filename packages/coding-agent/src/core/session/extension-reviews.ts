@@ -228,13 +228,13 @@ export class ExtensionReviewRuns implements ExtensionReviewsHandler {
 		try {
 			({ workId } = await this.host.startReview(target, review));
 			if (start.retired) {
-				// Its extension was disabled meanwhile: retiring it waits for the review to stop.
+				// Its extension was disabled or reloaded meanwhile: retiring it waits for the review to stop.
 				await this.host
 					.work()
 					.cancel(workId)
 					.catch(() => undefined);
 				throw new Error(
-					`ctx.reviews.start: extension ${owner} was disabled while the review started; it was cancelled`,
+					`ctx.reviews.start: extension ${owner} was disabled or reloaded while the review started; it was cancelled`,
 				);
 			}
 		} finally {
@@ -381,6 +381,12 @@ export class ExtensionReviewRuns implements ExtensionReviewsHandler {
 		} finally {
 			clearTimeout(timer);
 		}
+	}
+
+	/** Retire the reviews of every extension, as {@link retire} does: their runner generation was replaced (reload). */
+	async clear(graceMs = EXTENSION_DISABLE_GRACE_MS): Promise<void> {
+		const owners = new Set([...this.owned.keys(), ...this.starting.keys()]);
+		await Promise.all([...owners].map((owner) => this.retire(owner, graceMs)));
 	}
 
 	private requireOwned(owner: string, runId: unknown, verb: string): void {

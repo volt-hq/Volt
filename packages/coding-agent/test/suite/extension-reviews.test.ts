@@ -1,13 +1,14 @@
 /**
  * Extension reviews (`ctx.reviews`): an extension with the `exec` permission starts a review as the
  * conversation's `review` work, on the standard engine or a registered one, and learns how it ended from the
- * run's record. It cancels only its own reviews, and disabling it cancels those still running.
+ * run's record. It cancels only its own reviews, disabling it cancels those still running, and reloading the
+ * extensions cancels those still starting.
  */
 
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { createLoopbackClient, type LoopbackClient } from "../../src/client/protocol-client.ts";
 import type { ExtensionContext, ExtensionFactory } from "../../src/core/extensions/index.ts";
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
@@ -454,6 +455,31 @@ describe("ctx.reviews", () => {
 		).rejects.toThrow(/reviewed another target/);
 	});
 
+	test("does not report again a finding dismissed rounds ago", async () => {
+		const { reviewer, decide } = await setup();
+		const first = await reviewer.reviews.start({ target: { kind: "uncommitted" }, engine: PROBE });
+		const found = (await first.ended).run?.findings?.[0];
+		if (!found) throw new Error("Expected a finding");
+		await reviewer.reviews.recordOutcome(first.id, found.id, { status: "dismissed", reason: "intentional" });
+
+		// Every later round reports the defect again; each leaves it out, the rounds after the next one too.
+		decide.next = "open";
+		let previousRunId = first.id;
+		for (let round = 2; round <= 3; round++) {
+			const review = await reviewer.reviews.start({
+				target: { kind: "uncommitted" },
+				engine: DECIDER,
+				previousRunId,
+			});
+			expect((await review.ended).run).toMatchObject({
+				parentRunId: previousRunId,
+				completionStatus: "complete",
+				findings: [],
+			});
+			previousRunId = review.id;
+		}
+	});
+
 	test("records what became of the findings of its own reviews", async () => {
 		const { reviewer, bystander } = await setup();
 		const review = await reviewer.reviews.start({ target: { kind: "uncommitted" }, engine: PROBE });
@@ -503,5 +529,36 @@ describe("ctx.reviews", () => {
 		await conversation.session.extensionRegistry.settled();
 		expect((await third.ended).status).toBe("cancelled");
 		expect(conversation.session.work.get(second.id)).toMatchObject({ outcome: "completed" });
+	});
+
+	test("reloading the extensions cancels a review still starting, which no active work held back", async () => {
+		const { conversation, reviewer } = await setup();
+		const work = conversation.session.work;
+		const start = work.start.bind(work);
+		const reloaded = Promise.withResolvers<void>();
+		// The review's start is still under way, as one resolving a pull request is, until the reload removed its
+		// engine, or until the reload ended, had it not waited for the start.
+		vi.spyOn(work, "start").mockImplementation(async (kind, input, execute, options) => {
+			if (kind === "review") {
+				await Promise.race([
+					vi.waitFor(() => expect(conversation.session.reviewEngines.get(SLOW)).toBeUndefined(), {
+						timeout: 5_000,
+						interval: 1,
+					}),
+					reloaded.promise,
+				]);
+			}
+			return await start(kind, input, execute, options);
+		});
+		const starting = reviewer.reviews.start({ target: { kind: "uncommitted" }, engine: SLOW });
+		const refused = expect(starting).rejects.toThrow(/was disabled or reloaded while the review started/);
+
+		await conversation.session.reload();
+		reloaded.resolve();
+		await refused;
+		expect(work.list().filter((item) => item.kind === "review")).toEqual([
+			expect.objectContaining({ outcome: "cancelled" }),
+		]);
+		expect(work.running()).toEqual([]);
 	});
 });

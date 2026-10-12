@@ -18,6 +18,7 @@ import {
 	closeFixedFindings,
 	createReviewRunRecord,
 	decidesPreviousFindings,
+	dismissedFingerprintsOfFollowedRuns,
 	exportReviewFeedback,
 	followUpReviewPlan,
 	getReviewRun,
@@ -690,7 +691,7 @@ describe("durable review state", () => {
 				finding({ id: "fixed-1", status: "fixed", fingerprint: "b".repeat(64) }),
 				finding({ id: "dismissed-1", status: "dismissed", fingerprint: "c".repeat(64) }),
 			]);
-			const plan = followUpReviewPlan(previous, snapshot("blob-2"));
+			const plan = followUpReviewPlan(previous, snapshot("blob-2"), []);
 			expect(plan).toMatchObject({
 				mode: "full",
 				previousRun: { runId: "run-1" },
@@ -710,6 +711,39 @@ describe("durable review state", () => {
 					}),
 				),
 			).toBe(false);
+		});
+
+		it("does not report again a finding dismissed in a run the previous run followed", async () => {
+			const manager = SessionManager.inMemory("/tmp/review-state");
+			await appendReviewRun(
+				manager.logWriter,
+				record("run-1", 1, [finding({ id: "x" }), finding({ id: "y", fingerprint: "b".repeat(64) })]),
+			);
+			await appendReviewFindingTransition(manager.logWriter, {
+				runId: "run-1",
+				findingId: "x",
+				status: "dismissed",
+				reason: "intentional",
+			});
+			// The round that followed it left the dismissed finding out.
+			await appendReviewRun(manager.logWriter, {
+				...record("run-2", 2, [finding({ id: "y", fingerprint: "b".repeat(64) })]),
+				parentRunId: "run-1",
+			});
+			const previous = getReviewRun(manager, "run-2");
+			if (!previous) throw new Error("Expected run-2");
+
+			const dismissedEarlier = await dismissedFingerprintsOfFollowedRuns(manager, previous);
+			expect(dismissedEarlier).toEqual(["a".repeat(64)]);
+			const plan = followUpReviewPlan(previous, snapshot("blob-2"), dismissedEarlier);
+			expect(plan.suppressedDismissedFingerprints).toEqual(["a".repeat(64)]);
+			expect(plan.priorOpenFindings.map((open) => open.id)).toEqual(["y"]);
+			expect(reconcileFindingIdentities([finding({ id: "new-1" })], plan)).toEqual([]);
+
+			// A run the conversation does not hold ends the walk.
+			await expect(
+				dismissedFingerprintsOfFollowedRuns(manager, { ...previous, parentRunId: "run-missing" }),
+			).resolves.toEqual([]);
 		});
 
 		it("follows only a review of its own target", () => {
@@ -753,6 +787,7 @@ describe("durable review state", () => {
 			const plan = followUpReviewPlan(
 				record("run-1", 1, [finding({ id: "uncertain-1", status: "uncertain" })]),
 				snapshot("blob-2"),
+				[],
 			);
 			// Reported again with the same anchor, the finding takes the earlier id and status.
 			const reported = reconcileFindingIdentities([finding({ id: "new-1" })], plan);
@@ -772,7 +807,7 @@ describe("durable review state", () => {
 		});
 
 		it("settles as uncertain an open finding reported again with its anchor", () => {
-			const plan = followUpReviewPlan(record("run-1", 1, [finding({ id: "open-1" })]), snapshot("blob-2"));
+			const plan = followUpReviewPlan(record("run-1", 1, [finding({ id: "open-1" })]), snapshot("blob-2"), []);
 			const decided = applyPreviousFindingDecisions(
 				reconcileFindingIdentities([finding({ id: "new-1" })], plan),
 				plan.priorOpenFindings,
@@ -788,7 +823,7 @@ describe("durable review state", () => {
 		});
 
 		it("leaves one finding with a decided finding's id when the decision names another candidate", () => {
-			const plan = followUpReviewPlan(record("run-1", 1, [finding({ id: "open-1" })]), snapshot("blob-2"));
+			const plan = followUpReviewPlan(record("run-1", 1, [finding({ id: "open-1" })]), snapshot("blob-2"), []);
 			const decided = applyPreviousFindingDecisions(
 				reconcileFindingIdentities(
 					[finding({ id: "new-1" }), finding({ id: "new-2", fingerprint: "d".repeat(64) })],

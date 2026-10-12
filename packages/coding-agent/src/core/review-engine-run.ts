@@ -28,6 +28,7 @@ import {
 	assertReviewControlsPersistLosslessly,
 	closeFixedFindings,
 	createReviewRunRecord,
+	dismissedFingerprintsOfFollowedRuns,
 	followUpReviewPlan,
 	getCanonicalReviewRun,
 	type ReviewIncrementalPlan,
@@ -98,6 +99,9 @@ export async function startEngineReview(options: StartEngineReviewOptions): Prom
 	if (options.previousRunId !== undefined && !previousRun) {
 		throw new Error(`Unknown review run: ${options.previousRunId}`);
 	}
+	const dismissedEarlier = previousRun
+		? await dismissedFingerprintsOfFollowedRuns(options.sessionManager, previousRun)
+		: [];
 	// An engine reviews a pull request's code, not its discussion: the snapshot has its identity only.
 	const { target, resolution } = await resolveBoundReviewSnapshot({
 		target: options.target,
@@ -110,7 +114,7 @@ export async function startEngineReview(options: StartEngineReviewOptions): Prom
 	try {
 		if (previousRun) {
 			assertFollowsReviewOf(previousRun, resolution);
-			followUp = followUpReviewPlan(previousRun, resolution);
+			followUp = followUpReviewPlan(previousRun, resolution, dismissedEarlier);
 		}
 	} catch (error) {
 		await resolution.dispose();

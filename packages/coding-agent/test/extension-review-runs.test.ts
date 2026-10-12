@@ -1,7 +1,8 @@
 /**
  * The reviews extensions start (`ctx.reviews`), on a host whose review starts wait until the test lets them:
  * disabling an extension cancels its reviews still starting as well as those running and waits for them to stop,
- * cancelling a review that ends meanwhile leaves it alone, and a finding discussion starts none.
+ * reloading the extensions does so for every extension, cancelling a review that ends meanwhile leaves it alone,
+ * and a finding discussion starts none.
  */
 
 import { Conversation, InMemoryConversationLog, type StreamFn } from "@hansjm10/volt-agent-core";
@@ -91,7 +92,9 @@ describe("extension review runs", () => {
 		fixture.preflight = preflight.promise;
 		fixture.stopping = "slowly";
 		const starting = runs.start(OWNER, UNCOMMITTED);
-		const refused = expect(starting).rejects.toThrow(`extension ${OWNER} was disabled while the review started`);
+		const refused = expect(starting).rejects.toThrow(
+			`extension ${OWNER} was disabled or reloaded while the review started`,
+		);
 
 		let retired = false;
 		const retiring = runs.retire(OWNER).then(() => {
@@ -123,7 +126,9 @@ describe("extension review runs", () => {
 		const preflight = Promise.withResolvers<void>();
 		fixture.preflight = preflight.promise;
 		const starting = runs.start(OWNER, UNCOMMITTED);
-		const refused = expect(starting).rejects.toThrow(`extension ${OWNER} was disabled while the review started`);
+		const refused = expect(starting).rejects.toThrow(
+			`extension ${OWNER} was disabled or reloaded while the review started`,
+		);
 
 		const began = Date.now();
 		await runs.retire(OWNER, 50);
@@ -155,6 +160,43 @@ describe("extension review runs", () => {
 		fixture.finish.resolve();
 		await theirs.ended;
 		expect(work.get(theirs.id)?.outcome).toBe("completed");
+	});
+
+	it("cancels every extension's reviews still starting or running when the extensions reload, and waits for them", async () => {
+		const { fixture, work, runs } = await setup();
+		fixture.stopping = "slowly";
+		const running = await runs.start(OWNER, UNCOMMITTED);
+		const preflight = Promise.withResolvers<void>();
+		fixture.preflight = preflight.promise;
+		const mine = runs.start(OWNER, UNCOMMITTED);
+		const theirs = runs.start("other", UNCOMMITTED);
+		const refused = Promise.all([
+			expect(mine).rejects.toThrow(`extension ${OWNER} was disabled or reloaded while the review started`),
+			expect(theirs).rejects.toThrow("extension other was disabled or reloaded while the review started"),
+		]);
+
+		let cleared = false;
+		const clearing = runs.clear().then(() => {
+			cleared = true;
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		// It waits for the starts under way.
+		expect(cleared).toBe(false);
+
+		preflight.resolve();
+		await clearing;
+		await refused;
+		expect((await running.ended).status).toBe("cancelled");
+		expect(work.list().map((review) => review.outcome)).toEqual(["cancelled", "cancelled", "cancelled"]);
+		expect(work.running()).toEqual([]);
+
+		// The reloaded extensions start reviews as before.
+		fixture.preflight = Promise.resolve();
+		const again = await runs.start(OWNER, UNCOMMITTED);
+		expect(work.get(again.id)?.state).toBe("running");
+		fixture.finish.resolve();
+		await again.ended;
+		expect(work.get(again.id)?.outcome).toBe("completed");
 	});
 
 	it("stops waiting for a review that ignores its cancellation once the grace has passed", async () => {

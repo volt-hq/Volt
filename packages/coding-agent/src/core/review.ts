@@ -81,6 +81,7 @@ import {
 	closeFixedFindings,
 	createReviewRunRecord,
 	decidesPreviousFindings,
+	dismissedFingerprintsOfFollowedRuns,
 	followUpReviewPlan,
 	getCanonicalReviewRun,
 	planCanonicalIncrementalReview,
@@ -1110,6 +1111,10 @@ export async function prepareReviewWorkflow(options: PrepareReviewWorkflowOption
 	if (options.previousRunId !== undefined && !previousRun) {
 		throw new Error(`Unknown review run: ${options.previousRunId}`);
 	}
+	const dismissedEarlier =
+		previousRun && options.sessionManager
+			? await dismissedFingerprintsOfFollowedRuns(options.sessionManager, previousRun)
+			: [];
 	const { target, resolution } = await resolveBoundReviewSnapshot({
 		target: options.target,
 		cwd: options.cwd,
@@ -1138,7 +1143,7 @@ export async function prepareReviewWorkflow(options: PrepareReviewWorkflowOption
 			verifierModel: verifier.model,
 			startedAt: options.startedAt ?? Date.now(),
 			incrementalPlan: previousRun
-				? followUpReviewPlan(previousRun, resolution)
+				? followUpReviewPlan(previousRun, resolution, dismissedEarlier)
 				: await planCanonicalIncrementalReview(
 						options.sessionManager,
 						resolution,

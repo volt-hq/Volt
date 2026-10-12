@@ -1033,19 +1033,23 @@ function planReviewFromPreviousRun(
 
 /**
  * The plan of a full review that follows `previousRun`, an earlier review of the same target: it reviews every
- * changed path, and its verifier decides each finding `previousRun` left open. Findings `previousRun` dismissed
- * are not reported again.
+ * changed path, and its verifier decides each finding `previousRun` left open. Findings dismissed in `previousRun`,
+ * or in the runs it followed (`dismissedEarlier`, see {@link dismissedFingerprintsOfFollowedRuns}), are not reported
+ * again.
  */
-export function followUpReviewPlan(previousRun: ReviewRunRecord, snapshot: ReviewSnapshot): ReviewIncrementalPlan {
+export function followUpReviewPlan(
+	previousRun: ReviewRunRecord,
+	snapshot: ReviewSnapshot,
+	dismissedEarlier: readonly string[],
+): ReviewIncrementalPlan {
 	const findings = previousRun.result?.findings ?? [];
+	const dismissed = findings.filter((finding) => finding.status === "dismissed").map((finding) => finding.fingerprint);
 	return {
 		mode: "full",
 		previousRun,
 		changedPaths: snapshot.changedFiles.map((file) => file.path),
 		priorOpenFindings: findings.filter((finding) => finding.status !== "fixed" && finding.status !== "dismissed"),
-		suppressedDismissedFingerprints: findings
-			.filter((finding) => finding.status === "dismissed")
-			.map((finding) => finding.fingerprint),
+		suppressedDismissedFingerprints: [...new Set([...dismissed, ...dismissedEarlier])],
 	};
 }
 
@@ -1124,8 +1128,34 @@ export function applyPreviousFindingDecisions(
 	return { findings: result, fixed };
 }
 
-/** The most runs {@link closeFixedFindings} walks back through. */
+/** The most runs {@link closeFixedFindings} and {@link dismissedFingerprintsOfFollowedRuns} walk back through. */
 const MAX_FOLLOWED_RUNS = 16;
+
+/**
+ * The fingerprints of the findings dismissed in the runs `previousRun` followed in turn. A review that follows a run
+ * leaves out the findings dismissed there, so the round after it learns of an earlier dismissal only from these runs.
+ * A run this conversation does not hold ends the walk.
+ */
+export async function dismissedFingerprintsOfFollowedRuns(
+	manager: SessionManager,
+	previousRun: ReviewRunRecord,
+): Promise<string[]> {
+	const fingerprints = new Set<string>();
+	const seen = new Set([previousRun.runId]);
+	let runId = previousRun.parentRunId;
+	while (runId !== undefined && !seen.has(runId) && seen.size < MAX_FOLLOWED_RUNS) {
+		seen.add(runId);
+		const run: HydratedReviewRunRecord | undefined = await getCanonicalReviewRun(manager, runId).catch(
+			() => undefined,
+		);
+		if (!run) break;
+		for (const finding of run.result?.findings ?? []) {
+			if (finding.status === "dismissed") fingerprints.add(finding.fingerprint);
+		}
+		runId = run.parentRunId;
+	}
+	return [...fingerprints];
+}
 
 /**
  * Close the findings a complete review that followed `previousRunId` decided fixed: in that run and in each run it

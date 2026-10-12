@@ -1101,9 +1101,13 @@ export class SessionExtensionBinding {
 			await this.extensionRunner.emit({ type: "deactivate", reason: "reload" });
 			this.host.assertActive();
 		}
-		// The shut-down extensions' work kinds go with them, interrupting the work they still run.
-		await this.host.extensionKinds().clear();
-		await this.host.extensionReviewEngines().clear();
+		// The shut-down extensions' work kinds go with them, interrupting the work they still run, and so do the
+		// reviews they started, those still starting included: a start under way passes the active-work check above.
+		await Promise.all([
+			this.host.extensionKinds().clear(),
+			this.host.extensionReviewEngines().clear(),
+			this.reviews.clear(),
+		]);
 		this.host.assertActive();
 		await this.host.settingsManager.reload();
 		this.host.assertActive();

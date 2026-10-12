@@ -1651,7 +1651,7 @@ describe("review pipeline", () => {
 			settingsManager: harness.settingsManager,
 			resolved: snapshot,
 			controls: { scopeMode: "full" },
-			incrementalPlan: followUpReviewPlan(previousRun, snapshot),
+			incrementalPlan: followUpReviewPlan(previousRun, snapshot, []),
 		});
 		snapshots.splice(snapshots.indexOf(snapshot), 1);
 		expect(run.errorMessage).toBeUndefined();
