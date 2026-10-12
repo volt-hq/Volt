@@ -59,6 +59,7 @@ import type {
 	ThinkingLevelChangeEntry,
 } from "./session-manager.ts";
 import { readonlySessionView } from "./session-manager.ts";
+import { HOST_CUSTOM_MESSAGE_TYPES } from "./ui/message-presenters.ts";
 
 type RecordOf<E extends SessionEntry> = Omit<E, "id" | "parentId" | "timestamp">;
 
@@ -248,7 +249,8 @@ export function admitReviewRecord(record: ReviewRecord): SessionEntry {
 
 /**
  * The writes code outside the host may make: every write but the host's review records, which only the host
- * writes (`recordReviewState`, and the `custom` entries whose type starts with {@link HOST_REVIEW_ENTRY_TYPE_PREFIX}).
+ * writes (`recordReviewState`, and the `custom` entries whose type starts with {@link HOST_REVIEW_ENTRY_TYPE_PREFIX}),
+ * and the host's custom messages ({@link reservedCustomType}).
  */
 export interface ExtensionSessionWriter extends Omit<SessionWriter, "sessionManager" | "recordReviewState"> {
 	/** The read-only view of the session this writer writes. */
@@ -266,18 +268,46 @@ export function assertExtensionEntryType(customType: string): void {
 }
 
 /**
+ * The error of a custom message of a type `reserved` keeps for the host; none
+ * for others. Extensions may not send or write any of the host's message
+ * types, which the host presents as its own.
+ */
+export function reservedCustomType(
+	message: { readonly customType?: unknown },
+	reserved: ReadonlySet<string> = HOST_CUSTOM_MESSAGE_TYPES,
+): Error | undefined {
+	return typeof message.customType === "string" && reserved.has(message.customType)
+		? new Error(`Custom messages of type ${message.customType} are the host's`)
+		: undefined;
+}
+
+/**
  * `writer` as code outside the host gets it: its writes, without `recordReviewState` or any other method, and a
  * read-only view of its session whose methods return copies of the entries and header they read.
  */
 export function extensionSessionWriter(writer: ExtensionSessionWriter): ExtensionSessionWriter {
 	return Object.freeze({
 		sessionManager: readonlySessionView(writer.sessionManager),
-		appendMessage: writer.appendMessage.bind(writer),
+		appendMessage: async (message: Message | CustomMessage | BashExecutionMessage): Promise<string> => {
+			const reserved = message.role === "custom" ? reservedCustomType(message) : undefined;
+			if (reserved) throw reserved;
+			return await writer.appendMessage(message);
+		},
 		appendCustomEntry: async <T = JsonValue>(customType: string, data?: JsonCompatibleInput<T>): Promise<string> => {
 			assertExtensionEntryType(customType);
 			return await writer.appendCustomEntry(customType, data);
 		},
-		appendCustomMessageEntry: writer.appendCustomMessageEntry.bind(writer),
+		appendCustomMessageEntry: async <T = JsonValue>(
+			customType: string,
+			content: string | (TextContent | ImageContent)[],
+			display: boolean,
+			details?: JsonCompatibleInput<T>,
+			timestamp?: number,
+		): Promise<string> => {
+			const reserved = reservedCustomType({ customType });
+			if (reserved) throw reserved;
+			return await writer.appendCustomMessageEntry(customType, content, display, details, timestamp);
+		},
 		appendModelChange: writer.appendModelChange.bind(writer),
 		appendThinkingLevelChange: writer.appendThinkingLevelChange.bind(writer),
 		appendFastModeChange: writer.appendFastModeChange.bind(writer),
