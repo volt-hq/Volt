@@ -9,12 +9,15 @@
  * - The work item's progress lists them as steps, which `/work` shows full
  *   screen above the orchestrator's log. They stay within what a live work
  *   value holds.
+ * - Notes in the conversation link to an issue or pull request a human may
+ *   want to follow: when the orchestrator picks an issue up, when the issue
+ *   gets its pull request, and when it is handed to a human.
  */
 
 import { Buffer } from "node:buffer";
 import type { ExtensionPanel } from "@hansjm10/volt-coding-agent";
 import type { UiNode, UiNodeAction, UiNodeStyledText, UiNodeToken, WorkProgressStep } from "@hansjm10/volt-protocol";
-import type { OrchestratorSnapshot } from "./orchestrator.ts";
+import type { OrchestratorEvent, OrchestratorSnapshot } from "./orchestrator.ts";
 import type { Role } from "./workflow.ts";
 
 /** Issue rows the panel shows: with the card's border, the table's header, and the actions, 12 rows. */
@@ -29,6 +32,13 @@ const MAX_STEPS = 30;
 const STEPS_MAX_BYTES = 5_000;
 const STEP_TITLE_MAX_CHARS = 72;
 const STEP_LABEL_MAX_CHARS = 180;
+
+/** What a role does to a pull request, for a note. */
+const DOING_TO_PR: Readonly<Record<Exclude<Role, "implement">, string>> = {
+	review: "reviewing",
+	fix: "fixing",
+	update: "updating",
+};
 
 const DOING: Readonly<Record<Role, string>> = {
 	implement: "implementing",
@@ -251,4 +261,52 @@ export function issueSteps(snapshot: OrchestratorSnapshot, now = Date.now()): Wo
 		steps.push(step);
 	}
 	return steps;
+}
+
+/** `text` on one line as literal Markdown: every ASCII punctuation character escaped, so it adds no links or formatting. */
+function literal(text: string): string {
+	return text
+		.replace(/\s+/g, " ")
+		.trim()
+		.replace(/[!-/:-@[-`{-~]/g, "\\$&");
+}
+
+/** `url` when it is a plain http(s) address, which Markdown shows as a link. */
+function linkable(url: string): string | undefined {
+	return /^https?:\/\/[^\s<>()[\]]+$/.test(url) ? url : undefined;
+}
+
+/**
+ * The Markdown note of `event`: what happened, then the link on its own line,
+ * which renders as a clickable link, or as the address a terminal opens where
+ * it shows no links.
+ */
+export function noteText(event: OrchestratorEvent): string {
+	const issue = `**\\#${event.issue.number}** ${literal(event.issue.title)}`;
+	let text: string;
+	let url: string;
+	switch (event.kind) {
+		case "picked_up":
+			if (event.role === "implement" || event.pr === undefined) {
+				text = `Picked up ${issue}: ${DOING[event.role]} it.`;
+				url = event.issue.url;
+			} else {
+				text = `Picked up ${issue}: ${DOING_TO_PR[event.role]} pull request \\#${event.pr.number}.`;
+				url = event.pr.url;
+			}
+			break;
+		case "pr_opened":
+			text = `${issue}: pull request \\#${event.pr.number} is open.`;
+			url = event.pr.url;
+			break;
+		case "handed_off":
+			text =
+				event.ready && event.pr !== undefined
+					? `${issue}: pull request \\#${event.pr.number} is ready for you to merge.`
+					: `${issue} needs you: ${literal(event.reason)}`;
+			url = event.pr?.url ?? event.issue.url;
+			break;
+	}
+	const link = linkable(url);
+	return link === undefined ? text : `${text}\n\n${link}`;
 }

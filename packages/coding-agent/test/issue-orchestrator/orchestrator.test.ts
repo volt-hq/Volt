@@ -17,6 +17,7 @@ import {
 	type AgentResult,
 	type Agents,
 	Orchestrator,
+	type OrchestratorEvent,
 	type ReleaseOutcome,
 	type Workspaces,
 } from "../../examples/extensions/issue-orchestrator/orchestrator.ts";
@@ -242,11 +243,13 @@ function setup(config: WorkflowConfig = workflow(), options: { now?: () => numbe
 	const github = new FakeGitHub();
 	const agents = fakeAgents();
 	const workspaces = fakeWorkspaces();
+	const announced: OrchestratorEvent[] = [];
 	const orchestrator = new Orchestrator({
 		loadWorkflow: async () => ({ path: "/repo/.volt/WORKFLOW.md", config }),
 		tracker: async () => github,
 		agents,
 		workspaces,
+		announce: (event) => announced.push(event),
 		...(options.now === undefined ? {} : { now: options.now }),
 	});
 	/** Wait until `count` runs started. */
@@ -263,6 +266,7 @@ function setup(config: WorkflowConfig = workflow(), options: { now?: () => numbe
 		github,
 		agents,
 		workspaces,
+		announced,
 		orchestrator,
 		runs,
 		finish,
@@ -271,8 +275,9 @@ function setup(config: WorkflowConfig = workflow(), options: { now?: () => numbe
 
 describe("issue orchestrator", () => {
 	it("works an issue from implementation through review until clean to merge", async () => {
-		const { github, orchestrator, runs, finish } = setup(workflow("merge:\n  mode: auto"));
+		const { github, orchestrator, runs, finish, announced } = setup(workflow("merge:\n  mode: auto"));
 		github.addIssue(12);
+		const issue12 = { number: 12, title: "Issue 12", url: "https://github.com/o/r/issues/12" };
 
 		await orchestrator.tick();
 		const implement = await runs(1);
@@ -291,6 +296,11 @@ describe("issue orchestrator", () => {
 		await orchestrator.tick();
 		const review = await runs(2);
 		expect(review.task).toBe(`Review #112 at ${first.headSha}, round 1: ${reviewMarker(first.headSha, "clean")}`);
+		// Picked up once, then its pull request, linked; the later agents on it are not announced.
+		expect(announced).toEqual([
+			{ kind: "picked_up", issue: issue12, role: "implement" },
+			{ kind: "pr_opened", issue: issue12, pr: { number: 112, url: "https://github.com/o/r/pull/112" } },
+		]);
 
 		github.review(12, "changes");
 		await finish(review);
@@ -308,6 +318,7 @@ describe("issue orchestrator", () => {
 		await finish(second);
 		await orchestrator.tick();
 		expect(github.merged).toEqual([112]);
+		expect(announced).toHaveLength(2);
 		expect(orchestrator.snapshot()).toMatchObject({
 			repo: "o/r",
 			running: [],
@@ -317,7 +328,7 @@ describe("issue orchestrator", () => {
 	});
 
 	it("hands an approved, green pull request to a human by default", async () => {
-		const { github, orchestrator } = setup();
+		const { github, orchestrator, announced } = setup();
 		github.addIssue(12);
 		github.push(12);
 		github.review(12, "clean");
@@ -332,13 +343,23 @@ describe("issue orchestrator", () => {
 			},
 		]);
 		expect(orchestrator.snapshot().handedOff).toMatchObject([{ issue: 12, ready: true }]);
+		// Found approved: no agent ran, so only the handoff is announced, with its pull request.
+		expect(announced).toEqual([
+			{
+				kind: "handed_off",
+				issue: { number: 12, title: "Issue 12", url: "https://github.com/o/r/issues/12" },
+				ready: true,
+				reason: expect.stringContaining("ready for a human to merge"),
+				pr: { number: 112, url: "https://github.com/o/r/pull/112" },
+			},
+		]);
 		// Labeled, it is no longer a candidate.
 		await orchestrator.tick();
 		expect(github.handoffs).toHaveLength(1);
 	});
 
 	it("fixes failing checks, waits for running ones, and stops after the review rounds", async () => {
-		const { github, orchestrator, runs, finish, agents } = setup(workflow("review:\n  max_rounds: 2"));
+		const { github, orchestrator, runs, finish, agents, announced } = setup(workflow("review:\n  max_rounds: 2"));
 		github.addIssue(12);
 		const pr = github.push(12);
 		github.review(12, "clean");
@@ -369,6 +390,7 @@ describe("issue orchestrator", () => {
 			},
 		]);
 		expect(orchestrator.snapshot().handedOff).toMatchObject([{ issue: 12, ready: false }]);
+		expect(announced.at(-1)).toMatchObject({ kind: "handed_off", ready: false, pr: { number: 112 } });
 	});
 
 	it("respects the concurrency limits, oldest issue first", async () => {

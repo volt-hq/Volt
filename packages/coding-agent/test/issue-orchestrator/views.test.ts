@@ -3,16 +3,17 @@
  * that need someone first, the rest counted; actions to open running agents,
  * refresh, and stop; rendered in the TUI, within a panel's rows with its
  * actions in view. Its work's progress lists the issues as steps, within
- * what a live work value holds.
+ * what a live work value holds. Its notes link to the issue or pull request,
+ * and nothing in an issue's title becomes a link.
  */
 
 import type { UiCardNode, UiNode, UiTableNode } from "@hansjm10/volt-protocol";
-import { setCapabilities, setKeybindings } from "@hansjm10/volt-tui";
+import { Markdown, setCapabilities, setKeybindings } from "@hansjm10/volt-tui";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { OrchestratorSnapshot } from "../../examples/extensions/issue-orchestrator/orchestrator.ts";
-import { issueSteps, panel } from "../../examples/extensions/issue-orchestrator/views.ts";
+import { issueSteps, noteText, panel } from "../../examples/extensions/issue-orchestrator/views.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
-import { initTheme } from "../../src/core/theme/runtime.ts";
+import { getMarkdownTheme, initTheme } from "../../src/core/theme/runtime.ts";
 import { DEFAULT_PANEL_MAX_ROWS, UiPanels } from "../../src/modes/interactive/ui-node/panels.ts";
 import { stripAnsi } from "../../src/utils/ansi.ts";
 
@@ -62,6 +63,53 @@ function table(node: UiCardNode): UiTableNode {
 function plain(cell: UiTableNode["rows"][number]["cells"][number]): string {
 	return typeof cell === "string" ? cell : cell.map((span) => span.text).join("");
 }
+
+describe("issue orchestrator notes", () => {
+	beforeEach(() => initTheme("dark"));
+	const issue = { number: 12, title: "Fix the thing", url: "https://github.com/o/r/issues/12" };
+	const pr = { number: 112, url: "https://github.com/o/r/pull/112" };
+
+	it("link to the issue it picked up, its pull request, and the pull request handed to a human", () => {
+		expect(noteText({ kind: "picked_up", issue, role: "implement" })).toBe(
+			"Picked up **\\#12** Fix the thing: implementing it.\n\nhttps://github.com/o/r/issues/12",
+		);
+		expect(noteText({ kind: "picked_up", issue, role: "review", pr })).toBe(
+			"Picked up **\\#12** Fix the thing: reviewing pull request \\#112.\n\nhttps://github.com/o/r/pull/112",
+		);
+		expect(noteText({ kind: "pr_opened", issue, pr })).toBe(
+			"**\\#12** Fix the thing: pull request \\#112 is open.\n\nhttps://github.com/o/r/pull/112",
+		);
+		expect(noteText({ kind: "handed_off", issue, ready: true, reason: "clean", pr })).toBe(
+			"**\\#12** Fix the thing: pull request \\#112 is ready for you to merge.\n\nhttps://github.com/o/r/pull/112",
+		);
+		// Stuck without a pull request: the issue's link.
+		expect(noteText({ kind: "handed_off", issue, ready: false, reason: "ran 2 times" })).toBe(
+			"**\\#12** Fix the thing needs you: ran 2 times\n\nhttps://github.com/o/r/issues/12",
+		);
+	});
+
+	it("make nothing in a title or reason a link, and leave out an address that is not http(s)", () => {
+		setCapabilities({ images: null, trueColor: true, hyperlinks: true });
+		const links = (markdown: string) =>
+			new Markdown(markdown, 0, 0, getMarkdownTheme())
+				.render(100)
+				.lines.join("\n")
+				.match(/\x1b\]8;;[^\x07\x1b]+/g)
+				?.map((link) => link.slice("\x1b]8;;".length)) ?? [];
+		const hostile = {
+			...issue,
+			title: "See [docs](https://evil.example) or https://evil.example/x or <https://evil.example>",
+		};
+		const note = noteText({ kind: "handed_off", issue: hostile, ready: false, reason: "**www.evil.example**", pr });
+		expect(links(note)).toEqual(["https://github.com/o/r/pull/112"]);
+		expect(stripAnsi(new Markdown(note, 0, 0, getMarkdownTheme()).render(200).lines[0] ?? "")).toContain(
+			"See [docs](https://evil.example) or https://evil.example/x or <https://evil.example> needs you: **www.evil.example**",
+		);
+		expect(noteText({ kind: "picked_up", issue: { ...issue, url: "javascript:alert(1)" }, role: "implement" })).toBe(
+			"Picked up **\\#12** Fix the thing: implementing it.",
+		);
+	});
+});
 
 describe("issue orchestrator work progress", () => {
 	it("lists every issue as a step, in the panel's order, its status in the step's", () => {

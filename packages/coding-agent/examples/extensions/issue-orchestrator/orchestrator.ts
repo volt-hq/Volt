@@ -14,7 +14,7 @@
  * commit, exponential backoff after a failed run, and `review.max_rounds`.
  */
 
-import type { Issue, Tracker } from "./github.ts";
+import type { Issue, PullRequest, Tracker } from "./github.ts";
 import { reviewMarker } from "./github.ts";
 import { inspectIssue, isRoutable, issueBranch, type Phase } from "./phase.ts";
 import {
@@ -69,6 +69,8 @@ export interface OrchestratorOptions {
 	now?: () => number;
 	/** Called whenever what the snapshot shows may have changed. */
 	onChange?: (snapshot: OrchestratorSnapshot) => void;
+	/** Called when something happens a human may want to follow on GitHub. */
+	announce?: (event: OrchestratorEvent) => void;
 	log?: (line: string) => void;
 }
 
@@ -98,6 +100,26 @@ export interface NotedIssue {
 export interface HandedOffIssue extends NotedIssue {
 	readonly ready: boolean;
 }
+
+/** An issue or pull request an event links to. */
+export type IssueLink = Pick<Issue, "number" | "title" | "url">;
+export type PullRequestLink = Pick<PullRequest, "number" | "url">;
+
+/**
+ * Something a human may want to follow on GitHub: the orchestrator started
+ * on an issue, an issue it implemented got a pull request, or it handed an
+ * issue to a human, ready to merge or stuck.
+ */
+export type OrchestratorEvent =
+	| { readonly kind: "picked_up"; readonly issue: IssueLink; readonly role: Role; readonly pr?: PullRequestLink }
+	| { readonly kind: "pr_opened"; readonly issue: IssueLink; readonly pr: PullRequestLink }
+	| {
+			readonly kind: "handed_off";
+			readonly issue: IssueLink;
+			readonly ready: boolean;
+			readonly reason: string;
+			readonly pr?: PullRequestLink;
+	  };
 
 export interface OrchestratorSnapshot {
 	readonly repo?: string;
@@ -137,6 +159,14 @@ const BASE_RETRY_DELAY_MS = 10_000;
 const MIN_TICK_DELAY_MS = 1_000;
 const MAX_FINISHED = 20;
 
+function issueLink(issue: Issue): IssueLink {
+	return { number: issue.number, title: issue.title, url: issue.url };
+}
+
+function pullRequestLink(pr: PullRequest): PullRequestLink {
+	return { number: pr.number, url: pr.url };
+}
+
 function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
@@ -158,6 +188,8 @@ export class Orchestrator {
 	private readonly pendingReleases = new Map<number, string>();
 	/** Issues it started agents for and is not done with, with their titles. */
 	private readonly known = new Map<number, string>();
+	/** Issues it started an implementer on that have no pull request yet. */
+	private readonly awaitingPullRequest = new Set<number>();
 	private readonly finished: NotedIssue[] = [];
 	private totals = { runs: 0, tokens: 0, cost: 0 };
 	private signal: AbortSignal | undefined;
@@ -314,6 +346,10 @@ export class Orchestrator {
 		const note = (reason: string): void => {
 			waiting.set(issue.number, { issue: issue.number, title: issue.title, reason });
 		};
+		const pr = "pr" in phase ? phase.pr : undefined;
+		if (pr !== undefined && this.awaitingPullRequest.delete(issue.number)) {
+			this.announce({ kind: "pr_opened", issue: issueLink(issue), pr: pullRequestLink(pr) });
+		}
 		switch (phase.kind) {
 			case "done":
 				this.finish(issue, phase.reason);
@@ -322,7 +358,7 @@ export class Orchestrator {
 				note(phase.reason);
 				return;
 			case "handoff":
-				await this.handOff(tracker, config, issue, phase.label, phase.reason);
+				await this.handOff(tracker, config, issue, phase.label, phase.reason, phase.pr);
 				return;
 			case "merge":
 				try {
@@ -336,6 +372,7 @@ export class Orchestrator {
 						issue,
 						config.handoffLabel,
 						`Merging pull request #${phase.pr.number} failed: ${errorText(error)}`,
+						phase.pr,
 					);
 				}
 				return;
@@ -349,6 +386,7 @@ export class Orchestrator {
 						issue,
 						config.handoffLabel,
 						`The ${phase.kind} agent ran ${attempts} times without moving the issue on.`,
+						pr,
 					);
 					return;
 				}
@@ -391,6 +429,15 @@ export class Orchestrator {
 			ended: ended.promise,
 		};
 		this.running.set(issue.number, entry);
+		if (!this.known.has(issue.number)) {
+			this.announce({
+				kind: "picked_up",
+				issue: issueLink(issue),
+				role: phase.kind,
+				...("pr" in phase ? { pr: pullRequestLink(phase.pr) } : {}),
+			});
+		}
+		if (phase.kind === "implement") this.awaitingPullRequest.add(issue.number);
 		this.known.set(issue.number, issue.title);
 		this.log(`#${issue.number}: starting ${phase.kind} (${role.agent})`);
 		void (async () => {
@@ -552,6 +599,7 @@ export class Orchestrator {
 		issue: Issue,
 		label: string,
 		reason: string,
+		pr: PullRequest | undefined,
 	): Promise<void> {
 		let labeled = false;
 		try {
@@ -568,6 +616,13 @@ export class Orchestrator {
 		this.retries.delete(issue.number);
 		this.pendingReleases.set(issue.number, issue.title);
 		this.log(`#${issue.number}: handed to a human: ${reason}`);
+		this.announce({
+			kind: "handed_off",
+			issue: issueLink(issue),
+			ready: label === config.merge.readyLabel,
+			reason,
+			...(pr === undefined ? {} : { pr: pullRequestLink(pr) }),
+		});
 	}
 
 	private finish(issue: Issue, reason: string): void {
@@ -583,6 +638,7 @@ export class Orchestrator {
 		this.retries.delete(number);
 		this.handedOff.delete(number);
 		this.known.delete(number);
+		this.awaitingPullRequest.delete(number);
 		for (const key of [...this.attempts.keys()]) if (key.startsWith(`${number}:`)) this.attempts.delete(key);
 	}
 
@@ -650,6 +706,15 @@ export class Orchestrator {
 				done();
 			};
 		});
+	}
+
+	private announce(event: OrchestratorEvent): void {
+		try {
+			this.options.announce?.(event);
+		} catch (error) {
+			// An observer that fails does not stop the loop.
+			this.log(`announcing ${event.kind} failed: ${errorText(error)}`);
+		}
 	}
 
 	private emit(): void {

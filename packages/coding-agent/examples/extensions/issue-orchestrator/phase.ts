@@ -33,7 +33,7 @@ export type Phase =
 	  }
 	| { readonly kind: "merge"; readonly pr: PullRequest }
 	| { readonly kind: "wait"; readonly reason: string }
-	| { readonly kind: "handoff"; readonly label: string; readonly reason: string }
+	| { readonly kind: "handoff"; readonly label: string; readonly reason: string; readonly pr?: PullRequest }
 	| { readonly kind: "done"; readonly reason: string };
 
 /** The branch an issue's agents work on. */
@@ -97,6 +97,7 @@ export function decidePhase(
 					kind: "handoff",
 					label: config.handoffLabel,
 					reason: `The pull request did not converge after ${reviewed} review rounds (last: ${reason}).`,
+					pr,
 				}
 			: { kind: "fix", pr, round: reviewed, reason, failing };
 	if (current === undefined) return { kind: "review", pr, round: reviewed + 1 };
@@ -108,6 +109,7 @@ export function decidePhase(
 			kind: "handoff",
 			label: config.handoffLabel,
 			reason: `Pull request #${pr.number} was approved, but no CI checks ran on it.`,
+			pr,
 		};
 	}
 	if (pr.mergeable === "unknown") {
@@ -118,10 +120,11 @@ export function decidePhase(
 			kind: "handoff",
 			label: config.merge.readyLabel,
 			reason: `Pull request #${pr.number} was reviewed clean and its checks pass: ready for a human to merge.`,
+			pr,
 		};
 	}
 	if (pr.draft) {
-		return { kind: "handoff", label: config.handoffLabel, reason: `Pull request #${pr.number} is a draft.` };
+		return { kind: "handoff", label: config.handoffLabel, reason: `Pull request #${pr.number} is a draft.`, pr };
 	}
 	return { kind: "merge", pr };
 }
