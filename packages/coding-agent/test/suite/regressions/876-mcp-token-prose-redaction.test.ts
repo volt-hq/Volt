@@ -83,7 +83,8 @@ describe("issue #876: MCP redaction keeps secret key names in prose readable", (
 			"password reset required",
 			"credential helper failed",
 			"private key is missing",
-			"token abc123",
+			"Existing OAuth client information is required when exchanging an authorization code",
+			"Retried token 3 times",
 		]) {
 			expect(redactMcpText(message)).toBe(message);
 		}
@@ -99,6 +100,22 @@ describe("issue #876: MCP redaction keeps secret key names in prose readable", (
 		);
 		expect(redactMcpText("client_secret=xyz, status 400")).toBe("client_secret=[redacted], status 400");
 		expect(redactMcpText("API_KEY: sk-abc; retry")).toBe("API_KEY: [redacted]; retry");
+	});
+
+	it("redacts credential-like values separated from their key name by whitespace", () => {
+		expect(redactMcpText("401 Unauthorized: invalid token ghp_abc123")).toBe(
+			"401 Unauthorized: invalid token [redacted]",
+		);
+		expect(redactMcpText("x-api-key sk-live-123")).toBe("x-api-key [redacted]");
+		expect(redactMcpText("password hunter2 rejected")).toBe("password [redacted] rejected");
+		expect(redactMcpText("token abc123")).toBe("token [redacted]");
+		expect(redactMcpText("Refresh token eyJhbGciOiJIUzI1NiJ9.e30.sig expired")).toBe(
+			"Refresh token [redacted] expired",
+		);
+		expect(sanitizeMcpArguments({ error: "invalid token ghp_abc123", note: "token endpoint" })).toEqual({
+			error: "invalid token [redacted]",
+			note: "token endpoint",
+		});
 	});
 
 	it("redacts values after command-line flags named for a secret", () => {
