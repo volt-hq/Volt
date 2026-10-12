@@ -416,6 +416,28 @@ function recordingProviders(registry: ModelRegistry, extension: Extension): Mode
 	});
 }
 
+/**
+ * A copy of `value` in which every array and plain object is new and holds the enumerable own
+ * properties, the ones serializing it sends. Other objects, such as an abort signal or bytes, are
+ * kept as they are.
+ */
+function copyPlainData(value: unknown): unknown {
+	if (typeof value !== "object" || value === null) return value;
+	if (Array.isArray(value)) return value.map(copyPlainData);
+	if (Object.getPrototypeOf(value) !== Object.prototype) return value;
+	const copy: Record<string, unknown> = {};
+	for (const [key, entry] of Object.entries(value)) {
+		const entryCopy = copyPlainData(entry);
+		// Assigning `__proto__` would set the copy's prototype instead of adding the property.
+		if (key === "__proto__") {
+			Object.defineProperty(copy, key, { value: entryCopy, enumerable: true, writable: true, configurable: true });
+		} else {
+			copy[key] = entryCopy;
+		}
+	}
+	return copy;
+}
+
 /** An event one extension hears alone: its activation and deactivation, and its own start or stop at runtime. */
 export type ExtensionLifecycleEvent = ActivateEvent | DeactivateEvent | SessionStartEvent | SessionShutdownEvent;
 
@@ -1608,11 +1630,15 @@ export class ExtensionRunner {
 		return currentMessages;
 	}
 
+	/**
+	 * Run the `before_provider_request` handlers on a copy of `payload`, which providers build with live
+	 * state such as each tool's registered parameter schema: an in-place edit changes only this request.
+	 */
 	async emitBeforeProviderRequest(payload: unknown): Promise<unknown> {
 		if (this.isInert) {
 			return payload;
 		}
-		let currentPayload = payload;
+		let currentPayload = copyPlainData(payload);
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("before_provider_request");

@@ -740,7 +740,10 @@ export interface ContextEvent {
 	messages: AgentMessage[];
 }
 
-/** Fired before a provider request is sent. Can replace the payload. */
+/**
+ * Fired before a provider request is sent. Can replace the payload. `payload` is a copy of the
+ * payload's arrays and plain objects, so editing it in place changes only this request.
+ */
 export interface BeforeProviderRequestEvent {
 	type: "before_provider_request";
 	payload: unknown;

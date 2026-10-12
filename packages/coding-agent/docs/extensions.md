@@ -806,7 +806,7 @@ volt.on("context", async (event, ctx) => {
 
 #### before_provider_request
 
-Fired after the provider-specific payload is built, right before the request is sent. Handlers run in extension load order. Returning `undefined` keeps the payload unchanged. Returning any other value replaces the payload for later handlers and for the actual request.
+Fired after the provider-specific payload is built, right before the request is sent. Handlers run in extension load order. `event.payload` is a copy of the payload's arrays and plain objects (other objects, such as an abort signal, are shared), so editing it in place changes only this request, not the session's tools or messages. Returning `undefined` keeps the payload as the handler left it. Returning any other value replaces the payload for later handlers and for the actual request.
 
 This hook can rewrite provider-level system instructions or remove them entirely. Those payload-level changes are not reflected by `ctx.getSystemPrompt()`, which reports Volt's system prompt string rather than the final serialized provider payload.
 
