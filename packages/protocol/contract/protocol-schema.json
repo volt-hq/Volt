@@ -712,10 +712,10 @@
 					"type": "string"
 				},
 				"pairedAtMs": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"lastSeenAtMs": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"allowedTools": {
 					"type": "array",
@@ -3491,7 +3491,7 @@
 					"type": "number"
 				},
 				"startedAtMs": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"environment": {
 					"$ref": "#/$defs/Control.EnvironmentStatus"
@@ -3800,16 +3800,16 @@
 					"type": "string"
 				},
 				"pairedAtMs": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"lastSeenAtMs": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"revokedAtMs": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"rePairApprovedAtMs": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"rpcGrant": {
 					"$ref": "#/$defs/RemoteGrant"
@@ -4427,7 +4427,7 @@
 					"type": "string"
 				},
 				"createdAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"sessionIds": {
 					"type": "array",
@@ -11671,7 +11671,7 @@
 							"type": "string"
 						},
 						"createdAt": {
-							"type": "number"
+							"$ref": "#/$defs/RpcEpochMilliseconds"
 						},
 						"sessionIds": {
 							"type": "array",
@@ -12086,7 +12086,7 @@
 					"type": "string"
 				},
 				"createdAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				}
 			},
 			"additionalProperties": false
@@ -17744,7 +17744,7 @@
 								"type": "string"
 							},
 							"createdAt": {
-								"type": "number"
+								"$ref": "#/$defs/RpcEpochMilliseconds"
 							},
 							"sessionIds": {
 								"type": "array",
@@ -18800,7 +18800,7 @@
 					"type": "number"
 				},
 				"retryAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"error": {
 					"type": "string"
@@ -20657,13 +20657,13 @@
 							"const": "retained"
 						},
 						"lastRequestAt": {
-							"type": "number"
+							"$ref": "#/$defs/RpcEpochMilliseconds"
 						},
 						"expiresAt": {
-							"type": "number"
+							"$ref": "#/$defs/RpcEpochMilliseconds"
 						},
 						"keepAliveUntil": {
-							"type": "number"
+							"$ref": "#/$defs/RpcEpochMilliseconds"
 						}
 					},
 					"additionalProperties": false

@@ -117,7 +117,7 @@ function toolResult(value: unknown): ToolResultView | undefined {
 
 /** The retry an `auto_retry_start` scheduled: when its attempt starts, and what failed the one before. */
 interface ScheduledRetry {
-	readonly retryAt: number;
+	readonly retryAt?: number;
 	readonly error: string;
 }
 
@@ -300,11 +300,17 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 				updatePhase();
 				updateIntents();
 				return;
-			case "auto_retry_start":
-				scheduledRetry = { retryAt: Date.now() + event.delayMs, error: event.errorMessage };
+			case "auto_retry_start": {
+				// The backoff scales the configured base delay, which may be fractional or too large for a timestamp.
+				const retryAt = Math.round(Date.now() + event.delayMs);
+				scheduledRetry = {
+					...(Number.isSafeInteger(retryAt) && retryAt >= 0 ? { retryAt } : {}),
+					error: event.errorMessage,
+				};
 				updatePhase();
 				updateIntents();
 				return;
+			}
 			case "auto_retry_end":
 				scheduledRetry = undefined;
 				updatePhase();

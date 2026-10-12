@@ -2,8 +2,14 @@ import { ApiSchema } from "@hansjm10/volt-ai/schemas";
 import type { TSchema } from "typebox";
 import { Compile } from "typebox/compile";
 import { describe, expect, test } from "vitest";
+import {
+	CONTROL_RESPONSE_SCHEMAS,
+	ControlClientStatusSchema,
+	ControlRevokedClientStatusSchema,
+	ControlWorktreeStatusSchema,
+} from "../src/daemon-control.ts";
 import { type RpcGitContext, RpcGitContextSchema } from "../src/git-context.ts";
-import { IntentPresentationSchema } from "../src/intents.ts";
+import { INTENT_SCHEMAS, IntentPresentationSchema } from "../src/intents.ts";
 import { RpcPlanningStateSchema } from "../src/planning.ts";
 import { RpcEpochMillisecondsSchema } from "../src/primitives.ts";
 import {
@@ -11,9 +17,15 @@ import {
 	RpcReviewRunDescriptorSchema,
 	RpcReviewWorkflowResultResponseSchema,
 } from "../src/projections.ts";
-import { RpcActiveAgentRunSchema, RpcActiveCompactionSchema } from "../src/session.ts";
+import {
+	RpcActiveAgentRunSchema,
+	RpcActiveCompactionSchema,
+	RpcActiveRetrySchema,
+	RpcPromptCacheStatusSchema,
+} from "../src/session.ts";
 import { RpcSubscriptionUsageReportSchema } from "../src/subscription-usage.ts";
 import { RPC_WIRE_MAX_SAFE_INTEGER } from "../src/wire-limits.ts";
+import { IrohRemoteWorktreeSummarySchema } from "../src/workspace.ts";
 
 function check(schema: TSchema, value: unknown): boolean {
 	return Compile(schema).Check(value);
@@ -190,6 +202,74 @@ describe("shared schemas", () => {
 			[RpcReviewAcknowledgmentResponseSchema, { runId: "run-1", acknowledgedAt: startedAt }, ["acknowledgedAt"]],
 			[RpcActiveAgentRunSchema, { startedAt }, ["startedAt"]],
 			[RpcActiveCompactionSchema, { reason: "manual", startedAt }, ["startedAt"]],
+			[RpcActiveRetrySchema, { attempt: 1, maxAttempts: 3, retryAt: startedAt + 2_000 }, ["retryAt"]],
+			[
+				RpcPromptCacheStatusSchema,
+				{
+					kind: "retained",
+					lastRequestAt: startedAt,
+					expiresAt: startedAt + 300_000,
+					keepAliveUntil: startedAt + 600_000,
+				},
+				["lastRequestAt", "expiresAt", "keepAliveUntil"],
+			],
+			[
+				IrohRemoteWorktreeSummarySchema,
+				{ id: "wt-1", branch: "volt/wt-1", createdAt: startedAt, sessionIds: [] },
+				["createdAt"],
+			],
+			[
+				INTENT_SCHEMAS.review_record_finding_outcome.output,
+				{ runId: "run-1", findingId: "finding-1", status: "accepted", createdAt: startedAt },
+				["createdAt"],
+			],
+			[
+				ControlWorktreeStatusSchema,
+				{
+					id: "wt-1",
+					workspaceName: "volt",
+					path: "/tmp/wt-1",
+					branch: "volt/wt-1",
+					createdAt: startedAt,
+					sessionIds: [],
+				},
+				["createdAt"],
+			],
+			[
+				ControlClientStatusSchema,
+				{ clientNodeId: "node-1", pairedAtMs: startedAt, lastSeenAtMs: startedAt + 60_000 },
+				["pairedAtMs", "lastSeenAtMs"],
+			],
+			[
+				ControlRevokedClientStatusSchema,
+				{
+					clientNodeId: "node-2",
+					pairedAtMs: startedAt,
+					lastSeenAtMs: startedAt + 60_000,
+					revokedAtMs: startedAt + 120_000,
+					rePairApprovedAtMs: startedAt + 180_000,
+				},
+				["pairedAtMs", "lastSeenAtMs", "revokedAtMs", "rePairApprovedAtMs"],
+			],
+			[
+				CONTROL_RESPONSE_SCHEMAS.status_result,
+				{
+					type: "status_result",
+					id: "1",
+					version: "1.0.0",
+					protocolVersion: 8,
+					pid: 42,
+					startedAtMs: startedAt,
+					environment: { source: "inherited" },
+					phoneConnections: 0,
+					workspaces: [],
+					clients: [],
+					remoteTransport: { state: "ready" },
+					keepAwake: { enabled: false, state: "disabled" },
+					workers: [],
+				},
+				["startedAtMs"],
+			],
 		];
 		for (const value of [0, startedAt, RPC_WIRE_MAX_SAFE_INTEGER]) {
 			expect(check(RpcEpochMillisecondsSchema, value), `${value}`).toBe(true);
