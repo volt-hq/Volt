@@ -141,10 +141,13 @@ describe("native Iroh test prerequisite", () => {
 					reconnect: false,
 				});
 				await expect
-					.poll(async () => {
-						const status = await control?.request({ type: "status" });
-						return status?.type === "status_result" ? status.remoteTransport : undefined;
-					})
+					.poll(
+						async () => {
+							const status = await control?.request({ type: "status" });
+							return status?.type === "status_result" ? status.remoteTransport : undefined;
+						},
+						{ timeout: 5_000 },
+					)
 					.toMatchObject({ state: "unavailable", reasonCode: "endpoint_start_failed" });
 				await control.request({ type: "shutdown" });
 				await expect(daemon).resolves.toBe(0);
