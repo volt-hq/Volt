@@ -17,7 +17,7 @@ import { CanonicalDataError, cloneCanonicalData } from "../canonical-data.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { DeclaredReviewEngine } from "../review-engine-extensions.ts";
-import type { SessionManager, SessionReference } from "../session-manager.ts";
+import type { ReadonlySessionManager, SessionManager, SessionReference } from "../session-manager.ts";
 import type { ExtensionSessionWriter } from "../session-writer.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import type { MessagePresenter } from "../ui/presentation.ts";
@@ -466,6 +466,40 @@ function copyPlainData(value: unknown): unknown {
 	return copy;
 }
 
+/**
+ * `manager` as extensions read it through `ctx.sessionManager`: the {@link ReadonlySessionManager}
+ * methods, each returning copies of the entries and header it reads, so an extension cannot change
+ * the session's committed entries.
+ */
+function readonlySessionView(manager: SessionManager): ReadonlySessionManager {
+	return {
+		getCwd: () => manager.getCwd(),
+		getSessionDir: () => manager.getSessionDir(),
+		getSessionId: () => manager.getSessionId(),
+		getSessionRef: () => manager.getSessionRef(),
+		getLeafId: () => manager.getLeafId(),
+		getLeafEntry: () => structuredClone(manager.getLeafEntry()),
+		getEntry: (id) => structuredClone(manager.getEntry(id)),
+		getLabel: (id) => manager.getLabel(id),
+		getBranch: (fromId) => structuredClone(manager.getBranch(fromId)),
+		getBranchWindow: (options) => structuredClone(manager.getBranchWindow(options)),
+		getHeader: () => structuredClone(manager.getHeader()),
+		getEntries: () => structuredClone(manager.getEntries()),
+		getTree: () => {
+			// The nodes are new on every call; only their entries are the manager's. Copying entry by entry
+			// keeps a deep tree from deepening the copy's recursion.
+			const roots = manager.getTree();
+			const stack = [...roots];
+			for (let node = stack.pop(); node !== undefined; node = stack.pop()) {
+				node.entry = structuredClone(node.entry);
+				stack.push(...node.children);
+			}
+			return roots;
+		},
+		getSessionName: () => manager.getSessionName(),
+	};
+}
+
 /** An event one extension hears alone: its activation and deactivation, and its own start or stop at runtime. */
 export type ExtensionLifecycleEvent = ActivateEvent | DeactivateEvent | SessionStartEvent | SessionShutdownEvent;
 
@@ -497,7 +531,8 @@ export class ExtensionRunner {
 	private mode: ExtensionMode = "print";
 	private hasUIFn: () => boolean = () => this.uiFactory !== noOpUIFactory;
 	private cwd: string;
-	private sessionManager: SessionManager;
+	/** The session's manager as extensions read it: copies of its entries. */
+	private sessionManager: ReadonlySessionManager;
 	private modelRegistry: ModelRegistry;
 	private errorListeners: Set<ExtensionErrorListener> = new Set();
 	private getModel: () => Model<any> | undefined = () => undefined;
@@ -546,7 +581,7 @@ export class ExtensionRunner {
 		this.runtime = runtime;
 		this.uiFactory = noOpUIFactory;
 		this.cwd = cwd;
-		this.sessionManager = sessionManager;
+		this.sessionManager = readonlySessionView(sessionManager);
 		this.modelRegistry = modelRegistry;
 	}
 
