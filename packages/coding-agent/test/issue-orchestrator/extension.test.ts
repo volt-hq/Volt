@@ -380,8 +380,12 @@ describe("releasing an issue's worktree", () => {
 		}
 	});
 
-	it("tries a held checkout again, and treats a gone or archived one as released", async () => {
+	it("tries a held checkout again, rejects a removal that fails, and treats a gone or archived one as released", async () => {
 		expect(await releaseWorktree(checkout({ removeError: "worktree_busy" }).worktrees, runGit, 12)).toBe("retry");
+		// For the orchestrator to try again: such as while the daemon has no room to set the checkout aside.
+		await expect(
+			releaseWorktree(checkout({ removeError: "git_failed: recovery quota is full" }).worktrees, runGit, 12),
+		).rejects.toThrow("git_failed: recovery quota is full");
 		expect(await releaseWorktree(checkout({ removeError: "worktree_dirty: changes" }).worktrees, runGit, 12)).toBe(
 			"kept",
 		);

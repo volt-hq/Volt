@@ -9,7 +9,8 @@
  * merged), the approval is taken back and the pull request updated.
  *
  * Its state is in memory only. GitHub is the source of truth: after a
- * restart the next tick finds each issue's phase again. Bounded by:
+ * restart the next tick finds each issue's phase again, and the checkouts of
+ * the issues it is done with. Bounded by:
  * concurrency limits, `agent.max_attempts` runs of one phase of one head
  * commit, exponential backoff after a failed run, and `review.max_rounds`.
  */
@@ -55,9 +56,12 @@ export type ReleaseOutcome = "released" | "retry" | "kept";
 
 /** Prepares the checkout an issue's agents work in, and releases it once the orchestrator is done with the issue. */
 export interface Workspaces {
+	/** Rejects with an error whose message starts with `worktree_limit_reached` while the workspace has no room for it. */
 	prepare(issue: Issue, config: WorkflowConfig): Promise<Workspace>;
-	/** Release issue `number`'s checkout, keeping its branch; a checkout with changes is `kept`. */
+	/** Release issue `number`'s checkout, keeping its branch; a checkout with changes is `kept`, one that fails tried again. */
 	release(number: number): Promise<ReleaseOutcome>;
+	/** The issues whose checkouts take room in the workspace now. */
+	checkouts(): Promise<number[]>;
 }
 
 export interface OrchestratorOptions {
@@ -154,6 +158,13 @@ interface HandedOff {
 	readonly ready: boolean;
 }
 
+interface PendingRelease {
+	/** Undefined for an issue GitHub no longer has. */
+	readonly title: string | undefined;
+	/** Why the last try failed, so a failure that lasts is logged once. */
+	error?: string;
+}
+
 const BASE_RETRY_DELAY_MS = 10_000;
 /** The shortest pause between ticks, whatever is due. */
 const MIN_TICK_DELAY_MS = 1_000;
@@ -184,8 +195,14 @@ export class Orchestrator {
 	private readonly attempts = new Map<string, number>();
 	private waiting = new Map<number, NotedIssue>();
 	private readonly handedOff = new Map<number, HandedOff>();
-	/** Issues whose checkouts the orchestrator is done with and has yet to release, with their titles. */
-	private readonly pendingReleases = new Map<number, string>();
+	/** Issues whose checkouts the orchestrator is done with and has yet to release. */
+	private readonly pendingReleases = new Map<number, PendingRelease>();
+	/**
+	 * Whether to look for the checkouts of issues it is done with but does not
+	 * know of: when it starts (an earlier run worked them), and once the
+	 * workspace was full.
+	 */
+	private sweepDue = true;
 	/** Issues it started agents for and is not done with, with their titles. */
 	private readonly known = new Map<number, string>();
 	/** Issues it started an implementer on that have no pull request yet. */
@@ -293,9 +310,10 @@ export class Orchestrator {
 		for (const [number, title] of this.known) {
 			if (listed.has(number) || this.running.has(number)) continue;
 			this.forget(number);
-			this.pendingReleases.set(number, title);
+			this.pendingReleases.set(number, { title });
 		}
 		candidates = await this.recheckApproved(tracker, config, candidates);
+		if (this.sweepDue) await this.sweepCheckouts(tracker, config, candidates);
 		const waiting = new Map<number, NotedIssue>();
 		this.waiting = waiting;
 		const ordered = candidates
@@ -447,6 +465,8 @@ export class Orchestrator {
 				try {
 					workspace = await this.options.workspaces.prepare(issue, config);
 				} catch (error) {
+					// The workspace may be full of checkouts of issues done with that this orchestrator does not know of.
+					if (errorText(error).startsWith("worktree_limit_reached")) this.sweepDue = true;
 					throw new Error(`setting up the checkout failed: ${errorText(error)}`);
 				}
 				const task = renderTemplate(
@@ -561,10 +581,11 @@ export class Orchestrator {
 	/**
 	 * Release the checkouts of issues the orchestrator is done with: handed to a
 	 * human (a checkout with changes stays for them), approved, or finished.
-	 * One a conversation still holds is tried again next tick.
+	 * One a conversation still holds, or whose release fails, is tried again
+	 * next tick.
 	 */
 	private async releaseCheckouts(): Promise<void> {
-		for (const [number, title] of [...this.pendingReleases]) {
+		for (const [number, pending] of [...this.pendingReleases]) {
 			if (this.running.has(number)) {
 				this.pendingReleases.delete(number);
 				continue;
@@ -573,13 +594,51 @@ export class Orchestrator {
 			try {
 				outcome = await this.options.workspaces.release(number);
 			} catch (error) {
-				this.log(`#${number}: releasing the checkout failed: ${errorText(error)}`);
-				outcome = "kept";
+				// Such as while the daemon cannot set the checkout aside: a later tick may.
+				const message = errorText(error);
+				if (pending.error !== message)
+					this.log(`#${number}: releasing the checkout failed, trying again: ${message}`);
+				pending.error = message;
+				continue;
 			}
 			if (outcome === "retry") continue;
 			this.pendingReleases.delete(number);
-			this.log(`#${number} (${title}): ${outcome === "released" ? "released its checkout" : "kept its checkout"}`);
+			const issue = pending.title === undefined ? `#${number}` : `#${number} (${pending.title})`;
+			this.log(`${issue}: ${outcome === "released" ? "released its checkout" : "kept its checkout"}`);
 		}
+	}
+
+	/**
+	 * Release the checkout of every issue GitHub shows the orchestrator is done
+	 * with (closed, approved, handed off, or out of the workflow), including the
+	 * ones an earlier run worked, which this one does not know of.
+	 */
+	private async sweepCheckouts(tracker: Tracker, config: WorkflowConfig, candidates: readonly Issue[]): Promise<void> {
+		this.sweepDue = false;
+		let numbers: number[];
+		try {
+			numbers = await this.options.workspaces.checkouts();
+		} catch (error) {
+			// Looked for again once the workspace is full.
+			this.log(`listing the checkouts failed: ${errorText(error)}`);
+			return;
+		}
+		const listed = new Map(candidates.map((issue) => [issue.number, issue]));
+		for (const number of numbers) {
+			if (this.running.has(number) || this.pendingReleases.has(number)) continue;
+			let issue = listed.get(number);
+			if (issue === undefined) {
+				try {
+					issue = await tracker.issue(number);
+				} catch (error) {
+					this.log(`#${number}: checking whether its checkout is still needed failed: ${errorText(error)}`);
+					continue;
+				}
+			}
+			if (issue?.open && isRoutable(issue, config)) continue;
+			this.pendingReleases.set(number, { title: issue?.title });
+		}
+		await this.releaseCheckouts();
 	}
 
 	private async cancel(entry: RunningEntry): Promise<void> {
@@ -614,7 +673,7 @@ export class Orchestrator {
 			ready: label === config.merge.readyLabel,
 		});
 		this.retries.delete(issue.number);
-		this.pendingReleases.set(issue.number, issue.title);
+		this.pendingReleases.set(issue.number, { title: issue.title });
 		this.log(`#${issue.number}: handed to a human: ${reason}`);
 		this.announce({
 			kind: "handed_off",
@@ -627,7 +686,7 @@ export class Orchestrator {
 
 	private finish(issue: Issue, reason: string): void {
 		this.forget(issue.number);
-		this.pendingReleases.set(issue.number, issue.title);
+		this.pendingReleases.set(issue.number, { title: issue.title });
 		if (this.finished.some((entry) => entry.issue === issue.number && entry.reason === reason)) return;
 		this.finished.unshift({ issue: issue.number, title: issue.title, reason });
 		this.finished.length = Math.min(this.finished.length, MAX_FINISHED);

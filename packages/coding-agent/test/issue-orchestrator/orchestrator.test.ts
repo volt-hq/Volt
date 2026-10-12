@@ -210,29 +210,45 @@ function fakeAgents(): Agents & { started: StartedRun[]; cancelled: string[] } {
 }
 
 /**
- * Checkouts in memory: `prepare` fails while `failPrepare` says why, and
- * `release` answers the next queued outcome (`released` by default).
+ * Checkouts in memory, `held` by the issues that have one: `prepare` fails
+ * while `failPrepare` says why, or with `worktree_limit_reached` once
+ * `capacity` checkouts are held; `release` throws `failRelease`, else answers
+ * the next queued outcome (`released` by default).
  */
 function fakeWorkspaces(): Workspaces & {
 	prepared: number[];
 	releases: number[];
+	held: Set<number>;
+	capacity: number;
 	failPrepare: string | undefined;
+	failRelease: string | undefined;
 	outcomes: ReleaseOutcome[];
 } {
 	const workspaces = {
 		prepared: [] as number[],
 		releases: [] as number[],
+		held: new Set<number>(),
+		capacity: Number.POSITIVE_INFINITY,
 		failPrepare: undefined as string | undefined,
+		failRelease: undefined as string | undefined,
 		outcomes: [] as ReleaseOutcome[],
 		prepare: async (issue: Issue) => {
 			if (workspaces.failPrepare !== undefined) throw new Error(workspaces.failPrepare);
+			if (!workspaces.held.has(issue.number) && workspaces.held.size >= workspaces.capacity) {
+				throw new Error("worktree_limit_reached");
+			}
 			workspaces.prepared.push(issue.number);
+			workspaces.held.add(issue.number);
 			return { path: `/worktrees/issue-${issue.number}`, branch: issueBranch(issue.number) };
 		},
 		release: async (number: number): Promise<ReleaseOutcome> => {
 			workspaces.releases.push(number);
-			return workspaces.outcomes.shift() ?? "released";
+			if (workspaces.failRelease !== undefined) throw new Error(workspaces.failRelease);
+			const outcome = workspaces.outcomes.shift() ?? "released";
+			if (outcome === "released") workspaces.held.delete(number);
+			return outcome;
 		},
+		checkouts: async () => [...workspaces.held],
 	};
 	return workspaces;
 }
@@ -244,12 +260,14 @@ function setup(config: WorkflowConfig = workflow(), options: { now?: () => numbe
 	const agents = fakeAgents();
 	const workspaces = fakeWorkspaces();
 	const announced: OrchestratorEvent[] = [];
+	const log: string[] = [];
 	const orchestrator = new Orchestrator({
 		loadWorkflow: async () => ({ path: "/repo/.volt/WORKFLOW.md", config }),
 		tracker: async () => github,
 		agents,
 		workspaces,
 		announce: (event) => announced.push(event),
+		log: (line) => log.push(line),
 		...(options.now === undefined ? {} : { now: options.now }),
 	});
 	/** Wait until `count` runs started. */
@@ -267,6 +285,7 @@ function setup(config: WorkflowConfig = workflow(), options: { now?: () => numbe
 		agents,
 		workspaces,
 		announced,
+		log,
 		orchestrator,
 		runs,
 		finish,
@@ -660,6 +679,87 @@ describe("issue orchestrator", () => {
 		// Once.
 		await orchestrator.tick();
 		expect(workspaces.releases).toEqual([12]);
+	});
+
+	it("tries a release that fails again on later ticks, saying why once", async () => {
+		const { github, workspaces, orchestrator, log } = setup();
+		github.addIssue(12);
+		github.push(12);
+		github.review(12, "clean");
+		workspaces.held.add(12);
+		workspaces.failRelease = "git_failed: worktree recovery quota of 32 checkouts is full";
+
+		// Approved: handed to a human, then its checkout released, which fails until the daemon has room.
+		await orchestrator.tick();
+		await orchestrator.tick();
+		await orchestrator.tick();
+		expect(workspaces.releases).toEqual([12, 12]);
+		expect(log.filter((line) => line.includes("releasing the checkout failed"))).toEqual([
+			"#12: releasing the checkout failed, trying again: git_failed: worktree recovery quota of 32 checkouts is full",
+		]);
+
+		workspaces.failRelease = undefined;
+		await orchestrator.tick();
+		expect(workspaces.held).toEqual(new Set());
+		expect(log.at(-1)).toBe("#12 (Issue 12): released its checkout");
+		await orchestrator.tick();
+		expect(workspaces.releases).toEqual([12, 12, 12]);
+	});
+
+	it("releases, when it starts, the checkouts of issues an earlier run was done with", async () => {
+		const { github, workspaces, orchestrator, log } = setup();
+		// An earlier run left checkouts of an approved issue, one handed off, a closed one, one taken out of
+		// the workflow, one GitHub no longer has, and one still worked.
+		github.addIssue(11, [LABEL, "agent-approved"]);
+		github.addIssue(12, [LABEL, "agent-needs-human"]);
+		github.addIssue(13);
+		github.issues.set(13, { ...(github.issues.get(13) as Issue), open: false });
+		github.addIssue(14, []);
+		github.addIssue(15);
+		for (const number of [11, 12, 13, 14, 16, 15]) workspaces.held.add(number);
+
+		await orchestrator.tick();
+		expect(workspaces.releases).toEqual([11, 12, 13, 14, 16]);
+		expect(workspaces.held).toEqual(new Set([15]));
+		expect(log).toContain("#11 (Issue 11): released its checkout");
+		expect(log).toContain("#16: released its checkout");
+		// Once.
+		await orchestrator.tick();
+		expect(workspaces.releases).toEqual([11, 12, 13, 14, 16]);
+	});
+
+	it("looks for checkouts to release once the workspace is full", async () => {
+		let now = 1_000_000;
+		const { github, workspaces, orchestrator, runs } = setup(workflow(), { now: () => now });
+		// An earlier run's checkout of an issue whose checks still run when this one starts: it stays.
+		github.addIssue(11);
+		const pr = github.push(11);
+		github.review(11, "clean");
+		github.checkStates.set(pr.number, { state: "pending" });
+		workspaces.held.add(11);
+		workspaces.capacity = 1;
+		await orchestrator.tick();
+		expect(workspaces.releases).toEqual([]);
+
+		// A human closes it, which an orchestrator that started no agent on it does not notice, and the
+		// next issue finds the workspace full.
+		github.issues.set(11, { ...(github.issues.get(11) as Issue), open: false });
+		github.addIssue(12);
+		await orchestrator.tick();
+		await vi.waitFor(() =>
+			expect(orchestrator.snapshot().retrying).toMatchObject([
+				{ issue: 12, error: "setting up the checkout failed: worktree_limit_reached" },
+			]),
+		);
+		expect(workspaces.releases).toEqual([]);
+
+		// The next tick looks, and frees the room the retry needs.
+		await orchestrator.tick();
+		expect(workspaces.releases).toEqual([11]);
+		now += 10_000;
+		await orchestrator.tick();
+		await runs(1);
+		expect(workspaces.prepared).toEqual([12]);
 	});
 
 	it("keeps the last good workflow when a reload breaks, and says why", async () => {

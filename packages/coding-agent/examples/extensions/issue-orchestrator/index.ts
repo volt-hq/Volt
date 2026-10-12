@@ -193,10 +193,17 @@ async function start(
 			return { path: worktree.path, branch: worktree.branch };
 		},
 		release: async (number) => {
-			const outcome = await releaseWorktree(ctx.worktrees, (args, cwd) => volt.exec("git", args, { cwd }), number);
-			if (outcome === "released") hooked.delete(issueWorktree(number));
-			return outcome;
+			// Releasing drops the checkout's ignored files, the hook's dependencies among them: should the
+			// issue come back while the checkout is still there, the hook runs again.
+			hooked.delete(issueWorktree(number));
+			return await releaseWorktree(ctx.worktrees, (args, cwd) => volt.exec("git", args, { cwd }), number);
 		},
+		checkouts: async () =>
+			(await ctx.worktrees.list()).flatMap((worktree) => {
+				const number = /^issue-(\d+)$/.exec(worktree.id)?.[1];
+				// An archived worktree has no checkout taking room.
+				return number !== undefined && worktree.available ? [Number(number)] : [];
+			}),
 	};
 	const orchestrator = new Orchestrator({
 		loadWorkflow: () => loadWorkflow(path),
@@ -285,7 +292,8 @@ async function start(
  * leave dependencies and build output there, so a checkout whose only
  * changes are ignored files loses those first. One with changes to tracked
  * or untracked files is kept for a human; one a conversation still holds is
- * tried again.
+ * tried again. Rejects when the daemon refuses the removal for another reason,
+ * for the orchestrator to try again later.
  */
 export async function releaseWorktree(
 	worktrees: Pick<ExtensionCommandContext["worktrees"], "list" | "remove">,
@@ -305,7 +313,8 @@ export async function releaseWorktree(
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		if (message.startsWith("worktree_busy")) return "retry";
-		if (!message.startsWith("worktree_not_found")) return "kept";
+		if (message.startsWith("worktree_dirty")) return "kept";
+		if (!message.startsWith("worktree_not_found")) throw error;
 	}
 	return "released";
 }
