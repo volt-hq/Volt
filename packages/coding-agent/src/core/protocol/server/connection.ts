@@ -372,7 +372,14 @@ function errorMessage(error: unknown): string {
 const CODED_REJECTIONS: Readonly<Record<string, RejectionReason["code"]>> = {
 	client_input_conflict: "conflict",
 	conversation_locked: "locked",
+	review_discussions_unavailable: "unavailable",
+	review_source_unavailable: "unavailable",
 };
+
+/** The rejection code of a coded error, or none for any other error. */
+function codedRejection(error: unknown): RejectionReason["code"] | undefined {
+	return isRecord(error) && typeof error.code === "string" ? CODED_REJECTIONS[error.code] : undefined;
+}
 
 /** The rejection a failed admission or run answers with. */
 export function rejectionReason(error: unknown): RejectionReason {
@@ -384,8 +391,7 @@ export function rejectionReason(error: unknown): RejectionReason {
 			...(error.requiredCapability === undefined ? {} : { requiredCapability: error.requiredCapability }),
 		};
 	}
-	const code = isRecord(error) && typeof error.code === "string" ? CODED_REJECTIONS[error.code] : undefined;
-	return { code: code ?? "failed", message: errorMessage(error) };
+	return { code: codedRejection(error) ?? "failed", message: errorMessage(error) };
 }
 
 /** The query error a failed admission or run answers with. */
@@ -399,9 +405,8 @@ export function queryErrorReason(
 			...(error.requiredCapability === undefined ? {} : { requiredCapability: error.requiredCapability }),
 		};
 	}
-	if (error instanceof IntentRejectedError && (error.code === "invalid_input" || error.code === "unavailable")) {
-		return { code: error.code, message: error.message };
-	}
+	const code = error instanceof IntentRejectedError ? error.code : codedRejection(error);
+	if (code === "invalid_input" || code === "unavailable") return { code, message: errorMessage(error) };
 	return { code: "failed", message: errorMessage(error) };
 }
 

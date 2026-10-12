@@ -207,12 +207,14 @@ describe("protocol transcript view", () => {
 		expect(JSON.stringify(remote.map((item) => item.presentation))).not.toContain("/Users/jordan");
 	});
 
-	test("preserves assistant Markdown text parts verbatim across multiple text content parts", async () => {
+	test("preserves assistant Markdown text parts verbatim and separates them by a blank line in text", async () => {
 		const session = SessionManager.inMemory("/workspace");
 		await session.logWriter.appendMessage(
 			assistant(
 				[
 					{ type: "text", text: "Here is a plan:\n- Step one" },
+					{ type: "thinking", thinking: "Then the code." },
+					{ type: "text", text: "" },
 					{ type: "text", text: "- Step two\n```swift\n\tlet value = 1\n```" },
 				],
 				20,
@@ -224,16 +226,49 @@ describe("protocol transcript view", () => {
 		expect(items).toEqual([
 			{
 				role: "assistant",
-				text: "Here is a plan:\n- Step one- Step two\n```swift\n\tlet value = 1\n```",
+				// Each block is its own Markdown; thinking and empty blocks are not in `text`.
+				text: "Here is a plan:\n- Step one\n\n- Step two\n```swift\n\tlet value = 1\n```",
 				truncated: false,
 				parts: [
 					{ type: "text", text: "Here is a plan:\n- Step one", truncated: false },
+					{ type: "thinking", text: "Then the code." },
+					{ type: "text", text: "", truncated: false },
 					{ type: "text", text: "- Step two\n```swift\n\tlet value = 1\n```", truncated: false },
 				],
 				stopReason: "stop",
 			},
 		]);
-		expect(JSON.stringify(items)).not.toContain("Here is a plan: - Step one - Step two");
+	});
+
+	test("bounds an assistant item's text, its block separators included, by the profile", async () => {
+		const session = SessionManager.inMemory("/workspace");
+		await session.logWriter.appendMessage(
+			assistant(
+				[
+					{ type: "text", text: "abcde" },
+					{ type: "text", text: "fghij" },
+				],
+				20,
+			),
+		);
+		const profile = remoteProfile({
+			grant: OBSERVE_GRANT,
+			redaction: { workspacePath: "/workspace" },
+			limits: { textScalars: 10 },
+		});
+
+		expect(transcript(session, profile)).toEqual([
+			{
+				role: "assistant",
+				text: "abcde\n\nfgh",
+				truncated: true,
+				parts: [
+					{ type: "text", text: "abcde", truncated: false },
+					{ type: "text", text: "fghij", truncated: false },
+				],
+				stopReason: "stop",
+			},
+		]);
 	});
 
 	test("projects bounded subagent args and details for rich remote transcript rendering", async () => {
