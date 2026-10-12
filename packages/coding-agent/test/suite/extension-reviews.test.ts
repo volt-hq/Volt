@@ -90,7 +90,10 @@ function decider(decide: () => Decide, seen: ReviewEngineContext["previousFindin
 	};
 }
 
-/** An engine that reviews every hunk and reports one finding on the changed line. */
+/**
+ * An engine that reviews every hunk and reports one finding on the changed line, and, when the review collects
+ * them, a follow-up in a file the change does not touch and one in no file at all.
+ */
 async function probe(ctx: ReviewEngineContext): Promise<void> {
 	const hunks = ctx.changedFiles().flatMap((file) => file.hunks.map((hunk) => hunk.id));
 	ctx.pass().diff(hunks, 64 * 1024);
@@ -113,6 +116,26 @@ async function probe(ctx: ReviewEngineContext): Promise<void> {
 					evidenceLocations: [],
 				},
 			],
+			followUps: [
+				{
+					followUpId: "f1",
+					title: "Sessions ignored by hand",
+					body: ".gitignore lists sessions/ by hand.",
+					category: "maintainability",
+					rootCauseKey: "manual-ignore",
+					priority: 3,
+					location: { path: ".gitignore", side: "head", startLine: 1, endLine: 1 },
+				},
+				{
+					followUpId: "f2",
+					title: "Nowhere",
+					body: "A file that does not exist.",
+					category: "correctness",
+					rootCauseKey: "nowhere",
+					priority: 2,
+					location: { path: "src/missing.ts", side: "head", startLine: 1, endLine: 1 },
+				},
+			],
 		},
 		verification: {
 			summary: "Confirmed.",
@@ -121,6 +144,10 @@ async function probe(ctx: ReviewEngineContext): Promise<void> {
 				{ candidateId: "c1", outcome: "accept", method: "Read it.", rationale: "It is 3.", confidence: 0.9 },
 			],
 			priorFindingDecisions: [],
+			followUpDecisions: [
+				{ followUpId: "f1", outcome: "accept", method: "Read it.", rationale: "It is there.", confidence: 0.7 },
+				{ followUpId: "f2", outcome: "accept", method: "Guessed.", rationale: "Maybe.", confidence: 0.5 },
+			],
 			limitations: [],
 		},
 		commandsRun: ["npm test"],
@@ -253,6 +280,31 @@ describe("ctx.reviews", () => {
 		});
 		expect(await reviewer.reviews.result(review.id)).toEqual(end.run);
 		expect(await reviewer.reviews.result("no-such-run")).toBeUndefined();
+		// A review that does not collect follow-ups has none, whatever the engine reported.
+		expect(end.run).not.toHaveProperty("followUps");
+	});
+
+	test("collects follow-ups when asked: the valid ones the engine accepted, apart from the findings", async () => {
+		const { reviewer } = await setup();
+		const review = await reviewer.reviews.start({ target: { kind: "uncommitted" }, engine: PROBE, followUps: true });
+		const run = (await review.ended).run;
+		expect(run?.findings).toHaveLength(1);
+		expect(run?.followUps).toEqual([
+			{
+				id: expect.any(String),
+				fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
+				title: "Sessions ignored by hand",
+				body: ".gitignore lists sessions/ by hand.",
+				category: "maintainability",
+				priority: 3,
+				location: { path: ".gitignore", side: "head", startLine: 1, endLine: 1 },
+				verification: { method: "Read it.", rationale: "It is there.", confidence: 0.7 },
+			},
+		]);
+		expect(await reviewer.reviews.result(review.id)).toEqual(run);
+		await expect(
+			reviewer.reviews.start({ target: { kind: "uncommitted" }, followUps: "yes" as never }),
+		).rejects.toThrow(/followUps must be true or false/);
 	});
 
 	test("starts the standard review, always full, and records how it ended", async () => {

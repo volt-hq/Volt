@@ -364,7 +364,7 @@ describe("review engines", () => {
 				output: { text: "Swarm report\n" },
 			},
 		});
-		expect(submission).toEqual({ completionStatus: "complete", findings: 1, rejected: [], errors: [] });
+		expect(submission).toEqual({ completionStatus: "complete", findings: 1, followUps: 0, rejected: [], errors: [] });
 		expect(runs.runs).toHaveLength(1);
 		const [record] = runs.runs;
 		expect(record).toMatchObject({

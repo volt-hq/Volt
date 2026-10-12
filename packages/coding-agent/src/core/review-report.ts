@@ -37,10 +37,38 @@ export interface ReviewCandidate {
 	evidenceLocations: ReviewLocation[];
 }
 
+/** The most follow-ups one review reports. */
+export const REVIEW_FOLLOW_UPS_MAX = 10;
+
+/**
+ * A defect a review noticed outside the change: pre-existing, or in code the change does not touch. It never
+ * affects the review's verdict; a tool may file it as an issue of its own.
+ */
+export interface ReviewFollowUpCandidate {
+	followUpId: string;
+	title: string;
+	body: string;
+	category: string;
+	rootCauseKey: string;
+	priority: ReviewPriority;
+	/** Where it is in the reviewed head: any file of the head tree, at most 10 lines. */
+	location: ReviewLocation;
+}
+
 export interface ReviewCandidateReport {
 	summary: string;
 	candidates: ReviewCandidate[];
+	/** Defects outside the change, when the review collects them. */
+	followUps?: ReviewFollowUpCandidate[];
 	limitations: string[];
+}
+
+export interface ReviewFollowUpDecision {
+	followUpId: string;
+	outcome: "accept" | "reject";
+	method: string;
+	rationale: string;
+	confidence: number;
 }
 
 export interface ReviewVerificationDecision {
@@ -72,6 +100,8 @@ export interface ReviewVerificationReport {
 	challengeLocations?: ReviewLocation[];
 	decisions: ReviewVerificationDecision[];
 	priorFindingDecisions: ReviewPriorFindingDecision[];
+	/** One decision for every follow-up the candidate report gave, when the review collects them. */
+	followUpDecisions?: ReviewFollowUpDecision[];
 	limitations: string[];
 }
 
@@ -86,8 +116,18 @@ export interface ReviewFindingPresentation {
 	rationale: string;
 }
 
+/** A follow-up's prose, rendered without code-host context. */
+export interface ReviewFollowUpPresentation {
+	presentationId: string;
+	title: string;
+	body: string;
+	category: string;
+	rationale: string;
+}
+
 export interface ReviewPresentationReport {
 	findings: ReviewFindingPresentation[];
+	followUps?: ReviewFollowUpPresentation[];
 	challenge?: { explanation: string; nextStep: string };
 }
 
@@ -155,6 +195,35 @@ export interface ReviewCoverage {
 	modelReportedLimitations: string[];
 }
 
+/** A verified follow-up a review kept: a defect outside the change. */
+export interface ReviewFollowUp {
+	id: string;
+	/**
+	 * Its path, category, and root cause, hashed: the same defect has the same fingerprint in every review that
+	 * reports it, whatever the head, so a tool filing follow-ups can tell one it filed before.
+	 */
+	fingerprint: string;
+	title: string;
+	body: string;
+	category: string;
+	priority: ReviewPriority;
+	location: ReviewLocation;
+	verification: { method: string; rationale: string; confidence: number };
+}
+
+/** A follow-up the verifier accepted, stripped to what a context-blind pass may see. */
+export interface DeclassifiedReviewFollowUp {
+	presentationId: string;
+	fingerprint: string;
+	priority: ReviewPriority;
+	confidence: number;
+	location: ReviewLocation;
+}
+
+export interface ValidatedReviewFollowUp extends ReviewFollowUpCandidate {
+	fingerprint: string;
+}
+
 export interface ParsedReview {
 	completionStatus: ReviewCompletionStatus;
 	summary: string;
@@ -163,6 +232,8 @@ export interface ParsedReview {
 	overallCorrectness?: ReviewOverallCorrectness;
 	overallExplanation: string;
 	verificationChallenge?: string;
+	/** The verified defects outside the change, when the review collected them. They never affect the verdict. */
+	followUps?: ReviewFollowUp[];
 }
 
 export interface ReviewReportCollector<TReport> {
@@ -231,11 +302,36 @@ const CandidateSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const FollowUpSchema = Type.Object(
+	{
+		followUpId: Type.String({ minLength: 1, maxLength: 120, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$" }),
+		title: Type.String({ minLength: 1, maxLength: 200 }),
+		body: Type.String({ minLength: 1, maxLength: 4_000 }),
+		category: Type.String({ minLength: 1, maxLength: 80, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }),
+		rootCauseKey: Type.String({ minLength: 1, maxLength: 160, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }),
+		priority: Type.Union([Type.Literal(0), Type.Literal(1), Type.Literal(2), Type.Literal(3)]),
+		location: LocationSchema,
+	},
+	{ additionalProperties: false },
+);
+
 export const ReviewCandidateReportSchema = Type.Object(
 	{
 		summary: Type.String({ minLength: 1, maxLength: 2_000 }),
 		candidates: Type.Array(CandidateSchema, { maxItems: 50 }),
+		followUps: Type.Optional(Type.Array(FollowUpSchema, { maxItems: REVIEW_FOLLOW_UPS_MAX })),
 		limitations: Type.Array(Type.String({ minLength: 1, maxLength: 500 }), { maxItems: 30 }),
+	},
+	{ additionalProperties: false },
+);
+
+const FollowUpDecisionSchema = Type.Object(
+	{
+		followUpId: Type.String({ minLength: 1, maxLength: 120 }),
+		outcome: Type.Union([Type.Literal("accept"), Type.Literal("reject")]),
+		method: Type.String({ minLength: 1, maxLength: 1_000 }),
+		rationale: Type.String({ minLength: 1, maxLength: 2_000 }),
+		confidence: Type.Number({ minimum: 0, maximum: 1 }),
 	},
 	{ additionalProperties: false },
 );
@@ -271,6 +367,7 @@ export const ReviewVerificationReportSchema = Type.Object(
 		challengeLocations: Type.Optional(Type.Array(LocationSchema, { minItems: 1, maxItems: 4 })),
 		decisions: Type.Array(VerificationDecisionSchema, { maxItems: 50 }),
 		priorFindingDecisions: Type.Array(PriorFindingDecisionSchema, { maxItems: 50 }),
+		followUpDecisions: Type.Optional(Type.Array(FollowUpDecisionSchema, { maxItems: REVIEW_FOLLOW_UPS_MAX })),
 		limitations: Type.Array(Type.String({ minLength: 1, maxLength: 500 }), { maxItems: 30 }),
 	},
 	{ additionalProperties: false },
@@ -290,9 +387,21 @@ const FindingPresentationSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const FollowUpPresentationSchema = Type.Object(
+	{
+		presentationId: Type.String({ minLength: 1, maxLength: 120 }),
+		title: Type.String({ minLength: 1, maxLength: 200 }),
+		body: Type.String({ minLength: 1, maxLength: 4_000 }),
+		category: Type.String({ minLength: 1, maxLength: 80, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }),
+		rationale: Type.String({ minLength: 1, maxLength: 2_000 }),
+	},
+	{ additionalProperties: false },
+);
+
 export const ReviewPresentationReportSchema = Type.Object(
 	{
 		findings: Type.Array(FindingPresentationSchema, { maxItems: 50 }),
+		followUps: Type.Optional(Type.Array(FollowUpPresentationSchema, { maxItems: REVIEW_FOLLOW_UPS_MAX })),
 		challenge: Type.Optional(
 			Type.Object(
 				{
@@ -541,6 +650,195 @@ export async function validateReviewCandidates(
 		candidates.push({ ...candidate, fingerprint, hunkIds });
 	}
 	return { candidates, errors };
+}
+
+/** A follow-up's fingerprint: its path, category, and root cause, not the blobs, so it holds from head to head. */
+function followUpFingerprint(followUp: ReviewFollowUpCandidate): string {
+	return createHash("sha256")
+		.update("follow-up")
+		.update("\0")
+		.update(followUp.location.path)
+		.update("\0")
+		.update(followUp.category)
+		.update("\0")
+		.update(followUp.rootCauseKey)
+		.digest("hex");
+}
+
+/**
+ * Check the follow-ups of a candidate report: each in a file of the reviewed head, at most 10 lines, one per
+ * defect. Returns the valid ones with their fingerprints, and what is wrong with the others.
+ */
+export async function validateReviewFollowUps(
+	snapshot: ReviewSnapshot,
+	followUps: readonly ReviewFollowUpCandidate[],
+): Promise<{ followUps: ValidatedReviewFollowUp[]; errors: string[] }> {
+	const errors: string[] = [];
+	const valid: ValidatedReviewFollowUp[] = [];
+	const ids = new Set<string>();
+	const fingerprints = new Set<string>();
+	for (const [index, followUp] of followUps.entries()) {
+		const label = `followUps[${index}]`;
+		if (ids.has(followUp.followUpId)) {
+			errors.push(`${label}.followUpId is duplicated: ${followUp.followUpId}`);
+			continue;
+		}
+		ids.add(followUp.followUpId);
+		const problems: string[] = [];
+		if (![0, 1, 2, 3].includes(followUp.priority) || !Number.isInteger(followUp.priority)) {
+			problems.push(`${label}.priority must be an integer from 0 through 3`);
+		}
+		if (followUp.location.side !== "head") problems.push(`${label}.location must be on the head side`);
+		else problems.push(...(await validateLocationExists(snapshot, followUp.location, `${label}.location`)));
+		if (followUp.location.endLine - followUp.location.startLine + 1 > 10) {
+			problems.push(`${label}.location exceeds 10 lines`);
+		}
+		const fingerprint = followUpFingerprint(followUp);
+		if (fingerprints.has(fingerprint)) {
+			problems.push(`${label} repeats another follow-up's root cause at ${followUp.location.path}`);
+		}
+		if (problems.length > 0) {
+			errors.push(...problems);
+			continue;
+		}
+		fingerprints.add(fingerprint);
+		valid.push({ ...structuredClone(followUp), fingerprint });
+	}
+	return { followUps: valid, errors };
+}
+
+/** What is wrong with a verification report's follow-up decisions: every follow-up needs exactly one. */
+export function validateFollowUpDecisions(
+	followUps: readonly ValidatedReviewFollowUp[],
+	report: ReviewVerificationReport,
+): string[] {
+	const errors: string[] = [];
+	const expected = new Set(followUps.map((followUp) => followUp.followUpId));
+	const seen = new Set<string>();
+	for (const [index, decision] of (report.followUpDecisions ?? []).entries()) {
+		const label = `followUpDecisions[${index}]`;
+		if (!expected.has(decision.followUpId))
+			errors.push(`${label} references unknown follow-up ${decision.followUpId}`);
+		if (seen.has(decision.followUpId)) errors.push(`${label} duplicates follow-up ${decision.followUpId}`);
+		seen.add(decision.followUpId);
+		if (!Number.isFinite(decision.confidence) || decision.confidence < 0 || decision.confidence > 1) {
+			errors.push(`${label}.confidence must be finite and between 0 and 1`);
+		}
+	}
+	for (const followUpId of expected) {
+		if (!seen.has(followUpId)) errors.push(`Missing follow-up decision for ${followUpId}`);
+	}
+	return errors;
+}
+
+/** The follow-ups the verifier accepted, stripped of prose for a context-blind presentation pass. */
+export function declassifyReviewFollowUps(
+	followUps: readonly ValidatedReviewFollowUp[],
+	report: ReviewVerificationReport,
+): DeclassifiedReviewFollowUp[] {
+	const decisions = new Map((report.followUpDecisions ?? []).map((decision) => [decision.followUpId, decision]));
+	return followUps.flatMap((followUp) => {
+		const decision = decisions.get(followUp.followUpId);
+		if (decision?.outcome !== "accept") return [];
+		return [
+			{
+				presentationId: randomUUID(),
+				fingerprint: followUp.fingerprint,
+				priority: followUp.priority,
+				confidence: Math.round(decision.confidence * 100) / 100,
+				location: structuredClone(followUp.location),
+			},
+		];
+	});
+}
+
+/** What is wrong with a presentation report's follow-ups: one for every declassified follow-up, read in full. */
+export function validateFollowUpPresentations(
+	followUps: readonly DeclassifiedReviewFollowUp[],
+	report: ReviewPresentationReport,
+	coverage?: ReviewObservedCoverage,
+): string[] {
+	const errors: string[] = [];
+	const expected = new Set(followUps.map((followUp) => followUp.presentationId));
+	const seen = new Set<string>();
+	for (const [index, presentation] of (report.followUps ?? []).entries()) {
+		if (!expected.has(presentation.presentationId)) {
+			errors.push(`followUps[${index}] references unknown presentation ${presentation.presentationId}`);
+		}
+		if (seen.has(presentation.presentationId)) {
+			errors.push(`followUps[${index}] duplicates presentation ${presentation.presentationId}`);
+		}
+		seen.add(presentation.presentationId);
+	}
+	for (const presentationId of expected) {
+		if (!seen.has(presentationId)) errors.push(`Missing follow-up presentation for ${presentationId}`);
+	}
+	if (coverage) {
+		const read = new Set(coverage.filesRead);
+		for (const followUp of followUps) {
+			if (!read.has(followUp.location.path)) {
+				errors.push(`Presentation ${followUp.presentationId} did not read ${followUp.location.path}`);
+			}
+		}
+	}
+	return errors;
+}
+
+const REVIEW_FOLLOW_UP_PRESENTATION_METHOD =
+	"Independent verification accepted this follow-up; a separate context-blind pass rendered its code-based description.";
+
+/**
+ * The follow-ups a review keeps: the declassified ones, with prose from a context-blind presentation when the
+ * review read code-host context (`presentations`), else from discovery and the verifier's decision.
+ */
+export function buildReviewFollowUps(options: {
+	followUps: readonly ValidatedReviewFollowUp[];
+	verification: ReviewVerificationReport;
+	declassified: readonly DeclassifiedReviewFollowUp[];
+	presentations?: readonly ReviewFollowUpPresentation[];
+}): ReviewFollowUp[] {
+	const byFingerprint = new Map(options.followUps.map((followUp) => [followUp.fingerprint, followUp]));
+	const decisions = new Map(
+		(options.verification.followUpDecisions ?? []).map((decision) => [decision.followUpId, decision]),
+	);
+	const presentations = new Map(
+		(options.presentations ?? []).map((presentation) => [presentation.presentationId, presentation]),
+	);
+	return options.declassified.map((declassified) => {
+		const base = {
+			id: randomUUID(),
+			fingerprint: declassified.fingerprint,
+			priority: declassified.priority,
+			location: structuredClone(declassified.location),
+		};
+		if (options.presentations) {
+			const presentation = presentations.get(declassified.presentationId);
+			if (!presentation) throw new Error(`Missing follow-up presentation for ${declassified.presentationId}`);
+			return {
+				...base,
+				title: presentation.title,
+				body: presentation.body,
+				category: presentation.category,
+				verification: {
+					method: REVIEW_FOLLOW_UP_PRESENTATION_METHOD,
+					rationale: presentation.rationale,
+					confidence: declassified.confidence,
+				},
+			};
+		}
+		const followUp = byFingerprint.get(declassified.fingerprint);
+		const decision = followUp ? decisions.get(followUp.followUpId) : undefined;
+		if (!followUp || decision?.outcome !== "accept") {
+			throw new Error(`Missing accepted verifier decision for follow-up ${declassified.presentationId}`);
+		}
+		return {
+			...base,
+			title: followUp.title,
+			body: followUp.body,
+			category: followUp.category,
+			verification: { method: decision.method, rationale: decision.rationale, confidence: decision.confidence },
+		};
+	});
 }
 
 /** How a verification report decides the prior findings it was given. */

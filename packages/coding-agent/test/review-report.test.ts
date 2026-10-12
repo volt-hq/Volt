@@ -5,16 +5,22 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	buildParsedReview,
+	buildReviewFollowUps,
 	createReviewCandidateReportCollector,
 	createReviewPresentationReportCollector,
 	createReviewVerificationReportCollector,
 	declassifyReviewFindings,
+	declassifyReviewFollowUps,
 	type ReviewCandidateReport,
 	type ReviewFinding,
+	type ReviewFollowUpCandidate,
 	type ReviewPresentationReport,
 	type ReviewVerificationReport,
+	validateFollowUpDecisions,
+	validateFollowUpPresentations,
 	validateReviewCandidates,
 	validateReviewChallenge,
+	validateReviewFollowUps,
 	validateReviewPresentations,
 	validateReviewVerification,
 } from "../src/core/review-report.ts";
@@ -451,6 +457,146 @@ describe("structured review reports", () => {
 		expect(validateReviewVerification(valid.candidates, verification([]), [prior("p1")]).join(" ")).toContain(
 			"Missing prior finding decision for p1",
 		);
+	});
+
+	it("keeps follow-ups anywhere in the head, one per defect, each verified, with a fingerprint that holds across heads", async () => {
+		const snapshot = await setup();
+		const followUp = (overrides: Partial<ReviewFollowUpCandidate> = {}): ReviewFollowUpCandidate => ({
+			followUpId: "f1",
+			title: "Context file is padded",
+			body: "docs/context.txt is 512 bytes of x.",
+			category: "docs",
+			rootCauseKey: "padded-context",
+			priority: 3,
+			// An unchanged file: a follow-up is outside the change.
+			location: { path: "docs/context.txt", side: "head", startLine: 1, endLine: 1 },
+			...overrides,
+		});
+		const checked = await validateReviewFollowUps(snapshot, [
+			followUp(),
+			followUp({
+				followUpId: "f2",
+				rootCauseKey: "base-side",
+				location: { path: "docs/context.txt", side: "base", startLine: 1, endLine: 1 },
+			}),
+			followUp({ followUpId: "f3", location: { path: "docs/missing.txt", side: "head", startLine: 1, endLine: 1 } }),
+			followUp({
+				followUpId: "f4",
+				rootCauseKey: "long",
+				location: { path: "src/divide.ts", side: "head", startLine: 1, endLine: 11 },
+			}),
+			followUp({ followUpId: "f5", title: "Same defect again" }),
+			followUp({ followUpId: "f1", rootCauseKey: "other" }),
+		]);
+		expect(checked.followUps.map((kept) => kept.followUpId)).toEqual(["f1"]);
+		expect(checked.errors).toEqual([
+			"followUps[1].location must be on the head side",
+			"followUps[2].location does not exist in the head snapshot: docs/missing.txt",
+			"followUps[3].location exceeds src/divide.ts's head line count",
+			"followUps[3].location exceeds 10 lines",
+			"followUps[4] repeats another follow-up's root cause at docs/context.txt",
+			"followUps[5].followUpId is duplicated: f1",
+		]);
+		// Another head with the same defect gives the same fingerprint.
+		const again = await validateReviewFollowUps(snapshot, [followUp({ followUpId: "other-id", title: "Reworded" })]);
+		expect(again.followUps[0]?.fingerprint).toBe(checked.followUps[0]?.fingerprint);
+
+		const verification = (decisions: ReviewVerificationReport["followUpDecisions"]): ReviewVerificationReport => ({
+			summary: "Decided.",
+			assessment: "complete",
+			decisions: [],
+			priorFindingDecisions: [],
+			...(decisions === undefined ? {} : { followUpDecisions: decisions }),
+			limitations: [],
+		});
+		const accept = {
+			followUpId: "f1",
+			outcome: "accept" as const,
+			method: "Read it.",
+			rationale: "It is padded.",
+			confidence: 0.8,
+		};
+		expect(validateFollowUpDecisions(checked.followUps, verification([accept]))).toEqual([]);
+		expect(validateFollowUpDecisions(checked.followUps, verification(undefined))).toEqual([
+			"Missing follow-up decision for f1",
+		]);
+		expect(
+			validateFollowUpDecisions(checked.followUps, verification([accept, { ...accept, followUpId: "f9" }])),
+		).toEqual(["followUpDecisions[1] references unknown follow-up f9"]);
+
+		// Kept with discovery's prose and the verifier's reasoning.
+		const accepted = verification([accept]);
+		const declassified = declassifyReviewFollowUps(checked.followUps, accepted);
+		expect(declassified).toEqual([
+			{
+				presentationId: expect.any(String),
+				fingerprint: checked.followUps[0]?.fingerprint,
+				priority: 3,
+				confidence: 0.8,
+				location: { path: "docs/context.txt", side: "head", startLine: 1, endLine: 1 },
+			},
+		]);
+		expect(declassifyReviewFollowUps(checked.followUps, verification([{ ...accept, outcome: "reject" }]))).toEqual(
+			[],
+		);
+		expect(buildReviewFollowUps({ followUps: checked.followUps, verification: accepted, declassified })).toEqual([
+			{
+				id: expect.any(String),
+				fingerprint: checked.followUps[0]?.fingerprint,
+				title: "Context file is padded",
+				body: "docs/context.txt is 512 bytes of x.",
+				category: "docs",
+				priority: 3,
+				location: { path: "docs/context.txt", side: "head", startLine: 1, endLine: 1 },
+				verification: { method: "Read it.", rationale: "It is padded.", confidence: 0.8 },
+			},
+		]);
+
+		// A review that read code-host context keeps the context-blind pass's prose instead, once it read the file.
+		const presentationId = declassified[0]?.presentationId ?? "";
+		const presentation: ReviewPresentationReport = {
+			findings: [],
+			followUps: [
+				{
+					presentationId,
+					title: "Padded file",
+					body: "The file is padding.",
+					category: "docs",
+					rationale: "Read it.",
+				},
+			],
+		};
+		const coverage = (filesRead: string[]): ReviewObservedCoverage => ({
+			changedFileInventoryComplete: true,
+			contextInspectionComplete: true,
+			contextPagesRead: 0,
+			filesRead,
+			hunksInspected: [],
+			searchesRun: 0,
+			treePagesRead: 0,
+			diffFilesFullyRead: [],
+		});
+		expect(validateFollowUpPresentations(declassified, presentation, coverage(["docs/context.txt"]))).toEqual([]);
+		expect(validateFollowUpPresentations(declassified, presentation, coverage([]))).toEqual([
+			`Presentation ${presentationId} did not read docs/context.txt`,
+		]);
+		expect(validateFollowUpPresentations(declassified, { findings: [] })).toEqual([
+			`Missing follow-up presentation for ${presentationId}`,
+		]);
+		expect(
+			buildReviewFollowUps({
+				followUps: checked.followUps,
+				verification: accepted,
+				declassified,
+				presentations: presentation.followUps ?? [],
+			}),
+		).toEqual([
+			expect.objectContaining({
+				title: "Padded file",
+				body: "The file is padding.",
+				verification: expect.objectContaining({ rationale: "Read it.", confidence: 0.8 }),
+			}),
+		]);
 	});
 
 	it("derives completeness, correctness, and coverage from host observations", async () => {

@@ -43,7 +43,9 @@ import {
 import { STATIC_REVIEW_LIMITATION } from "./review-presentation.ts";
 import {
 	buildParsedReview,
+	buildReviewFollowUps,
 	declassifyReviewFindings,
+	declassifyReviewFollowUps,
 	type ParsedReview,
 	type ReviewCandidateReport,
 	ReviewCandidateReportSchema,
@@ -54,6 +56,7 @@ import {
 	settleReviewVerdict,
 	type ValidatedReviewCandidate,
 	validateReviewCandidates,
+	validateReviewFollowUps,
 	validateReviewVerification,
 } from "./review-report.ts";
 import type { ReviewChangedFileStatus, ReviewSnapshot, ReviewSnapshotIdentity } from "./review-snapshot.ts";
@@ -383,9 +386,11 @@ export interface ReviewEngineSubmission {
 	completionStatus: ParsedReview["completionStatus"];
 	/** The findings the run keeps. */
 	findings: number;
+	/** The follow-ups the run keeps: valid, and accepted by a decision. */
+	followUps: number;
 	/** The ids of candidates the host did not accept; their decisions were dropped. */
 	rejected: string[];
-	/** Why it rejected them. */
+	/** Why it rejected them, and the follow-ups it left out. */
 	errors: string[];
 }
 
@@ -416,6 +421,13 @@ export interface ReviewEngineContext {
 	 * reports it now keeps its id there. One without a decision stays open where it was found. Empty otherwise.
 	 */
 	readonly previousFindings: readonly ReviewFinding[];
+	/**
+	 * Whether the review collects follow-ups: defects outside the change, such as pre-existing ones, which a tool may
+	 * file as issues. When it does, report them in the candidates' `followUps` (each in a file of the reviewed head, at
+	 * most 10 lines) and decide each in the verification's `followUpDecisions`; the host keeps the valid ones accepted.
+	 * They never affect the verdict. When it does not, they are ignored.
+	 */
+	readonly followUps: boolean;
 	/** The conversation's working directory. */
 	readonly cwd: string;
 	/**
@@ -499,6 +511,8 @@ export interface ReviewEngineRunOptions {
 	cwd: string;
 	/** The findings the earlier run this review follows left open. */
 	previousFindings?: readonly ReviewFinding[];
+	/** Whether the review collects follow-ups. */
+	followUps?: boolean;
 }
 
 /** The state of one engine run: its passes' coverage, and the result it submitted. */
@@ -508,6 +522,7 @@ export class ReviewEngineRun {
 	private readonly controls: ReviewRunControls;
 	private readonly cwd: string;
 	private readonly previousFindings: readonly ReviewFinding[];
+	private readonly followUps: boolean;
 	private readonly coverage = new ReviewRunCoverage();
 	private readonly inScopeHunkIds: ReadonlySet<string>;
 	private inventory: ReviewCoverageTracker | undefined;
@@ -521,6 +536,7 @@ export class ReviewEngineRun {
 		this.controls = controlsWithDefaults(options.controls);
 		this.cwd = options.cwd;
 		this.previousFindings = structuredClone(options.previousFindings ?? []);
+		this.followUps = options.followUps === true;
 		this.inScopeHunkIds = new Set(
 			this.snapshot.changedFiles
 				.filter((file) => file.reviewable && inRunScope(file.path, this.controls, undefined))
@@ -568,6 +584,7 @@ export class ReviewEngineRun {
 			...channels,
 			cwd: this.cwd,
 			previousFindings: Object.freeze(structuredClone(this.previousFindings)),
+			followUps: this.followUps,
 			target: Object.freeze({
 				kind: this.target.kind,
 				description: snapshot.description,
@@ -726,6 +743,24 @@ export class ReviewEngineRun {
 			excludedPaths: reviewExclusions(this.snapshot, this.controls, undefined),
 		});
 		if (commandsRun.length === 0) parsed.coverage.residualRisk.unshift(STATIC_REVIEW_LIMITATION);
+		const followUpErrors: string[] = [];
+		if (this.followUps) {
+			const checkedFollowUps = await validateReviewFollowUps(this.snapshot, result.candidates.followUps ?? []);
+			followUpErrors.push(...checkedFollowUps.errors);
+			// A follow-up is kept once one decision accepts it; one without a decision is not verified.
+			const kept = new Set(checkedFollowUps.followUps.map((followUp) => followUp.followUpId));
+			const decisions = (result.verification.followUpDecisions ?? []).filter(
+				(decision, index, all) =>
+					kept.has(decision.followUpId) &&
+					all.findIndex((other) => other.followUpId === decision.followUpId) === index,
+			);
+			const decided = { ...verification, followUpDecisions: decisions };
+			parsed.followUps = buildReviewFollowUps({
+				followUps: checkedFollowUps.followUps,
+				verification: decided,
+				declassified: declassifyReviewFollowUps(checkedFollowUps.followUps, decided),
+			});
+		}
 		if (this.previousFindings.length > 0) {
 			const decided = applyPreviousFindingDecisions(
 				parsed.findings,
@@ -741,8 +776,9 @@ export class ReviewEngineRun {
 		return {
 			completionStatus: parsed.completionStatus,
 			findings: parsed.findings.length,
+			followUps: parsed.followUps?.length ?? 0,
 			rejected,
-			errors: checked.errors,
+			errors: [...checked.errors, ...followUpErrors],
 		};
 	}
 }

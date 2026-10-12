@@ -4,12 +4,13 @@ import { minimatch } from "minimatch";
 import type { ReviewRunControls } from "./review.ts";
 import { ReviewSourceUnavailableError, resolveCanonicalReviewSource } from "./review-links.ts";
 import { createReviewAccountingMessage } from "./review-presentation.ts";
-import type {
-	ParsedReview,
-	ReviewFinding,
-	ReviewFindingOutcomeReason,
-	ReviewFindingStatus,
-	ReviewPriorFindingDecision,
+import {
+	type ParsedReview,
+	REVIEW_FOLLOW_UPS_MAX,
+	type ReviewFinding,
+	type ReviewFindingOutcomeReason,
+	type ReviewFindingStatus,
+	type ReviewPriorFindingDecision,
 } from "./review-report.ts";
 import type {
 	ReviewBranchBase,
@@ -316,6 +317,21 @@ function boundPublicReviewResult(result: ParsedReview, includeEvidence: boolean)
 		overallExplanation: truncateUtf8(result.overallExplanation, 4_000),
 		...(result.verificationChallenge
 			? { verificationChallenge: truncateUtf8(result.verificationChallenge, 4_000) }
+			: {}),
+		...(result.followUps
+			? {
+					followUps: result.followUps.slice(0, REVIEW_FOLLOW_UPS_MAX).map((followUp) => ({
+						...structuredClone(followUp),
+						title: truncateUtf8(followUp.title, includeEvidence ? 300 : 200),
+						body: truncateUtf8(followUp.body, includeEvidence ? 2_000 : 1_000),
+						category: truncateUtf8(followUp.category, 80),
+						verification: {
+							...followUp.verification,
+							method: truncateUtf8(followUp.verification.method, includeEvidence ? 500 : 300),
+							rationale: truncateUtf8(followUp.verification.rationale, includeEvidence ? 1_000 : 500),
+						},
+					})),
+				}
 			: {}),
 	};
 }

@@ -36,14 +36,18 @@ import { reviewUsageDetail, STATIC_REVIEW_LIMITATION } from "./review-presentati
 import { createReviewPrivateDiagnostics } from "./review-private-diagnostics.ts";
 import {
 	buildParsedReview,
+	buildReviewFollowUps,
 	createReviewCandidateReportCollector,
 	createReviewPresentationReportCollector,
 	createReviewVerificationReportCollector,
 	type DeclassifiedReviewChallenge,
 	type DeclassifiedReviewFinding,
+	type DeclassifiedReviewFollowUp,
 	declassifyReviewFindings,
+	declassifyReviewFollowUps,
 	hostReviewSummary,
 	type ParsedReview,
+	REVIEW_FOLLOW_UPS_MAX,
 	type ReviewCandidateReport,
 	type ReviewCoverage,
 	type ReviewFinding,
@@ -53,8 +57,12 @@ import {
 	type ReviewVerificationReport,
 	settleReviewVerdict,
 	type ValidatedReviewCandidate,
+	type ValidatedReviewFollowUp,
+	validateFollowUpDecisions,
+	validateFollowUpPresentations,
 	validateReviewCandidates,
 	validateReviewChallenge,
+	validateReviewFollowUps,
 	validateReviewPresentations,
 	validateReviewVerification,
 } from "./review-report.ts";
@@ -367,6 +375,7 @@ export const REVIEW_PRESENTATION_SYSTEM_PROMPT = `<review_presentation_prompt>
 - Inspect the complete diff for every supplied finding path before reporting.
 - Derive title, body, trigger, impact, category, root-cause key, and rationale only from immutable code evidence and trusted review policy.
 - Return exactly one entry for every supplied presentation id and no others.
+- When declassified_follow_ups are supplied, read each one's file around its location and return exactly one followUps entry for each of their presentation ids: a title, body, category, and rationale describing the defect from code alone. They are defects outside the reviewed change, not findings.
 - When unresolved_challenge anchors are supplied, inspect their complete diffs and return challenge.explanation and challenge.nextStep. Explain the code behavior that still needs verification, distinguish uncertainty from proven defects, and give a concrete check. These anchors are NOT accepted findings. Do not add them to findings or claim the review verified their impact.
 - Do not infer or request code-host context, prior discussion, candidate prose, verifier prose, or model configuration.
 - Call report_review_presentations exactly once. Do not serialize JSON/XML in prose.
@@ -418,6 +427,7 @@ export function buildReviewPrompt(
 	controlsInput: Partial<ReviewRunControls> = {},
 	commandCapable = false,
 	incrementalPlan?: ReviewIncrementalPlan,
+	followUps = false,
 ): string {
 	const controls = controlsWithDefaults(controlsInput);
 	const changed = resolved.changedFiles.map((file) => ({
@@ -452,6 +462,9 @@ export function buildReviewPrompt(
 				: incrementalPlan?.fallbackReason
 					? `<incremental_fallback>${escapeXml(incrementalPlan.fallbackReason)}</incremental_fallback>`
 					: "",
+		followUps
+			? `<follow_up_guidance>Also report, in followUps (at most ${REVIEW_FOLLOW_UPS_MAX}), substantiated defects you notice outside the change: pre-existing defects, or defects in code the change does not touch that it does not cause. Anchor each at its location in the head snapshot (at most 10 lines), with a concrete description. Never report a defect the change introduces as a follow-up: that is a candidate. Follow-ups never block the change; an empty or absent followUps is fine.</follow_up_guidance>`
+			: "",
 		"<available_tool_guidance>",
 		...reviewSnapshotToolGuidelines(commandCapable, resolved.codeHostContext !== undefined).map(
 			(guideline) => `<instruction>${escapeXml(guideline)}</instruction>`,
@@ -472,6 +485,7 @@ function buildVerificationPrompt(
 	observedCoverage: ReturnType<ReviewCoverageTracker["snapshot"]>,
 	commandCapable: boolean,
 	incrementalPlan?: ReviewIncrementalPlan,
+	followUps: readonly ValidatedReviewFollowUp[] = [],
 ): string {
 	return [
 		"<review_verification_request>",
@@ -487,6 +501,12 @@ function buildVerificationPrompt(
 		decidesPreviousFindings(incrementalPlan)
 			? "<prior_finding_guidance>These findings were left open by an earlier review of this target, whose code may have changed since. Decide each against this snapshot: fixed when the defect is gone; open when it remains, naming in candidateId the accepted candidate that reports it now; uncertain only when the evidence cannot settle it. A prior finding that remains but that no candidate reports is an omitted issue: set assessment=incomplete with a challenge at its current location.</prior_finding_guidance>"
 			: "",
+		followUps.length > 0
+			? [
+					`<follow_up_candidates>${escapeXml(JSON.stringify(followUps))}</follow_up_candidates>`,
+					"<follow_up_guidance>Discovery also reported these defects outside the change. Return one followUpDecisions entry for each: accept only a substantiated, actionable defect at its location that the change does not introduce; reject the rest. They never block the change and do not affect your assessment.</follow_up_guidance>",
+				].join("\n")
+			: "",
 		"<available_tool_guidance>",
 		...reviewSnapshotToolGuidelines(commandCapable, resolved.codeHostContext !== undefined).map(
 			(guideline) => `<instruction>${escapeXml(guideline)}</instruction>`,
@@ -500,6 +520,7 @@ function buildVerificationPrompt(
 function buildPresentationPrompt(
 	findings: readonly DeclassifiedReviewFinding[],
 	challenge?: DeclassifiedReviewChallenge,
+	followUps: readonly DeclassifiedReviewFollowUp[] = [],
 ): string {
 	const declassified = findings.map((finding) => ({
 		presentationId: finding.presentationId,
@@ -512,6 +533,11 @@ function buildPresentationPrompt(
 		"<review_presentation_request>",
 		`<declassified_findings>${escapeXml(JSON.stringify(declassified))}</declassified_findings>`,
 		...(challenge ? [`<unresolved_challenge>${escapeXml(JSON.stringify(challenge))}</unresolved_challenge>`] : []),
+		...(followUps.length > 0
+			? [
+					`<declassified_follow_ups>${escapeXml(JSON.stringify(followUps.map(({ presentationId, priority, location }) => ({ presentationId, priority, location }))))}</declassified_follow_ups>`,
+				]
+			: []),
 		"<available_tool_guidance>",
 		"<instruction>Use review_diff to page the complete immutable diff for every supplied finding path.</instruction>",
 		"<instruction>Use review_file, review_search, and review_tree only for code context needed to render the supplied findings.</instruction>",
@@ -632,6 +658,8 @@ export interface RunReviewOptions {
 	resolved: ResolvedReview;
 	controls?: Partial<ReviewRunControls>;
 	incrementalPlan?: ReviewIncrementalPlan;
+	/** Also collect follow-ups: verified defects outside the change, kept apart from the findings. */
+	followUps?: boolean;
 	parentResourceLoader?: ResourceLoader;
 	tools?: readonly string[];
 	signal?: AbortSignal;
@@ -739,6 +767,8 @@ export interface PrepareReviewWorkflowOptions {
 	 * left open, and closes the ones it finds fixed.
 	 */
 	previousRunId?: string;
+	/** Also collect follow-ups: verified defects outside the change, kept apart from the findings. */
+	followUps?: boolean;
 	workflowId?: string;
 	startedAt?: number;
 	cwd: string;
@@ -764,6 +794,8 @@ export interface PreparedReviewWorkflow {
 	verifierModelWarning?: string;
 	startedAt: number;
 	incrementalPlan: ReviewIncrementalPlan;
+	/** Whether the review collects follow-ups. */
+	followUps?: boolean;
 }
 
 export interface ExecuteReviewWorkflowOptions {
@@ -1069,6 +1101,7 @@ export async function prepareReviewWorkflow(options: PrepareReviewWorkflowOption
 					),
 			...(reviewModel.warning ? { modelWarning: reviewModel.warning } : {}),
 			...(verifier.warning ? { verifierModelWarning: verifier.warning } : {}),
+			...(options.followUps ? { followUps: true } : {}),
 		};
 	} catch (error) {
 		await resolution.dispose();
@@ -1426,6 +1459,7 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 		let candidateReport: ReviewCandidateReport | undefined;
 		let verificationReport: ReviewVerificationReport | undefined;
 		let validatedCandidates: ValidatedReviewCandidate[] = [];
+		let validatedFollowUps: ValidatedReviewFollowUp[] = [];
 		let unresolvedChallenge: DeclassifiedReviewChallenge | undefined;
 		let followUpFailure: string | undefined;
 		let usage = EMPTY_SESSION_USAGE;
@@ -1448,6 +1482,7 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 			const candidateCollector = createReviewCandidateReportCollector();
 			const verificationCollector = createReviewVerificationReportCollector();
 			let roundCandidates: ValidatedReviewCandidate[] = [];
+			let roundFollowUps: ValidatedReviewFollowUp[] = [];
 			let roundChallenge: DeclassifiedReviewChallenge | undefined;
 			try {
 				phase = "discovery";
@@ -1472,7 +1507,14 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 						candidateCollector.tool.name,
 					],
 					collector: candidateCollector,
-					prompt: buildReviewPrompt(snapshot, controls, commandCapable, options.incrementalPlan) + followUp,
+					prompt:
+						buildReviewPrompt(
+							snapshot,
+							controls,
+							commandCapable,
+							options.incrementalPlan,
+							options.followUps === true,
+						) + followUp,
 					repair: async (report) => {
 						if (!report) return ["report_review_candidates was not called with a valid payload"];
 						const validation = await validateReviewCandidates(snapshot, report, {
@@ -1501,6 +1543,25 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 							validation.errors.push(
 								"The combined report exceeds 50 candidates; consolidate duplicate root causes.",
 							);
+						// Follow-ups a review does not collect are left out.
+						roundFollowUps = [...validatedFollowUps];
+						if (options.followUps) {
+							const followUps = await validateReviewFollowUps(snapshot, report.followUps ?? []);
+							validation.errors.push(...followUps.errors);
+							for (const followUp of followUps.followUps) {
+								if (roundFollowUps.some((prior) => prior.fingerprint === followUp.fingerprint)) continue;
+								roundFollowUps.push({
+									...followUp,
+									followUpId: roundFollowUps.some((prior) => prior.followUpId === followUp.followUpId)
+										? randomUUID()
+										: followUp.followUpId,
+								});
+							}
+							if (roundFollowUps.length > REVIEW_FOLLOW_UPS_MAX)
+								validation.errors.push(
+									`The combined report exceeds ${REVIEW_FOLLOW_UPS_MAX} follow-ups; keep the most important.`,
+								);
+						}
 						return validation.errors;
 					},
 					priorUsage: usage,
@@ -1546,6 +1607,7 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 							roundDiscoveryTracker.snapshot(),
 							commandCapable,
 							options.incrementalPlan,
+							roundFollowUps,
 						) + followUp,
 					repair: async (report) => {
 						if (!report) return ["report_review_verification was not called with a valid payload"];
@@ -1553,12 +1615,15 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 						roundChallenge = validation.challenge;
 						// Optional invalid anchors cannot discard otherwise valid verifier decisions.
 						// They stay private; follow-up discovery receives the challenge and may locate it.
-						return validateReviewVerification(
-							roundCandidates,
-							report,
-							options.incrementalPlan?.priorOpenFindings,
-							{ reportedAgain: decidesPreviousFindings(options.incrementalPlan) },
-						);
+						return [
+							...validateReviewVerification(
+								roundCandidates,
+								report,
+								options.incrementalPlan?.priorOpenFindings,
+								{ reportedAgain: decidesPreviousFindings(options.incrementalPlan) },
+							),
+							...validateFollowUpDecisions(roundFollowUps, report),
+						];
 					},
 					priorUsage: usage,
 					signal: options.signal,
@@ -1574,6 +1639,7 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 				candidateReport = { ...candidatePass.report, candidates: roundCandidates };
 				verificationReport = verificationPass.report;
 				validatedCandidates = roundCandidates;
+				validatedFollowUps = roundFollowUps;
 				unresolvedChallenge = roundChallenge;
 				discoveryTracker = roundDiscoveryTracker;
 				verificationTracker = roundVerificationTracker;
@@ -1596,9 +1662,11 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 		const declassifiedFindings = declassifyReviewFindings(validatedCandidates, verificationReport).filter(
 			(finding) => !suppressedFingerprints.has(finding.fingerprint),
 		);
+		const declassifiedFollowUps = declassifyReviewFollowUps(validatedFollowUps, verificationReport);
 		let presentationReport: ReviewPresentationReport | undefined;
 		let challengePresentation: ReviewPresentationReport["challenge"];
-		if (snapshot.codeHostContext && declassifiedFindings.length > 0) {
+		// Prose a tool may post publicly, follow-ups included, is rendered without the pull request's discussion.
+		if (snapshot.codeHostContext && (declassifiedFindings.length > 0 || declassifiedFollowUps.length > 0)) {
 			phase = "presentation";
 			const presentationTracker = new ReviewCoverageTracker();
 			const presentationSnapshotTools = createReviewSnapshotTools(snapshot, presentationTracker, {
@@ -1622,10 +1690,13 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 				inspectionTools: presentationSnapshotTools,
 				activeTools: [...presentationSnapshotTools.map((tool) => tool.name), presentationCollector.tool.name],
 				collector: presentationCollector,
-				prompt: buildPresentationPrompt(declassifiedFindings),
+				prompt: buildPresentationPrompt(declassifiedFindings, undefined, declassifiedFollowUps),
 				repair: (report) =>
 					report
-						? validateReviewPresentations(declassifiedFindings, report, presentationTracker.snapshot())
+						? [
+								...validateReviewPresentations(declassifiedFindings, report, presentationTracker.snapshot()),
+								...validateFollowUpPresentations(declassifiedFollowUps, report, presentationTracker.snapshot()),
+							]
 						: ["report_review_presentations was not called with a valid payload"],
 				priorUsage: usage,
 				signal: options.signal,
@@ -1735,6 +1806,14 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 			}
 		}
 		settleReviewVerdict(parsed);
+		if (options.followUps) {
+			parsed.followUps = buildReviewFollowUps({
+				followUps: validatedFollowUps,
+				verification: verificationReport,
+				declassified: declassifiedFollowUps,
+				...(snapshot.codeHostContext ? { presentations: presentationReport?.followUps ?? [] } : {}),
+			});
+		}
 		if (snapshot.codeHostContext) parsed.summary = hostReviewSummary(parsed.completionStatus, parsed.findings.length);
 		return {
 			aborted: false,
@@ -1869,6 +1948,7 @@ export async function executeReviewWorkflow(
 		workflowId: prepared.workflowId,
 		workflowAction: prepared.action,
 		incrementalPlan: prepared.incrementalPlan,
+		...(prepared.followUps ? { followUps: true } : {}),
 	});
 	const usage = await accounting.finish();
 	assertSource();

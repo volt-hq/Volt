@@ -67,6 +67,8 @@ export interface StartEngineReviewOptions {
 	 * the ones it finds fixed are closed there.
 	 */
 	previousRunId?: string;
+	/** Also collect follow-ups: verified defects outside the change, kept apart from the findings. */
+	followUps?: boolean;
 }
 
 /**
@@ -126,6 +128,7 @@ export async function startEngineReview(options: StartEngineReviewOptions): Prom
 			controls,
 			cwd: options.cwd,
 			...(followUp === undefined ? {} : { previousFindings: followUp.priorOpenFindings }),
+			...(options.followUps ? { followUps: true } : {}),
 		});
 		let failure: Error | undefined;
 		try {

@@ -1672,6 +1672,193 @@ describe("review pipeline", () => {
 		expect(run.parsed).toMatchObject({ completionStatus: "complete", overallCorrectness: "incorrect" });
 	});
 
+	describe("follow-ups", () => {
+		const followUp = (body = "AGENTS.md carries a one-line policy with no review rules.") => ({
+			followUpId: "f1",
+			title: "Policy file is terse",
+			body,
+			category: "docs",
+			rootCauseKey: "terse-policy",
+			priority: 3,
+			// A file the change does not touch.
+			location: { path: "AGENTS.md", side: "head", startLine: 1, endLine: 1 },
+		});
+		const acceptFollowUp = {
+			followUpId: "f1",
+			outcome: "accept",
+			method: "Read AGENTS.md at head.",
+			rationale: "It holds one line.",
+			confidence: 0.8,
+		};
+
+		/** A review of src/value.ts whose discovery reports one follow-up and whose verifier accepts it. */
+		async function reviewWithFollowUp(collect: boolean) {
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const snapshot = await createSnapshotRepository(harness);
+			snapshots.push(snapshot);
+			const prompts: string[] = [];
+			const recordPrompt: FauxResponseFactory = (context) => {
+				prompts.push(JSON.stringify(context.messages));
+				return fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" });
+			};
+			const pageDiff = fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), {
+				stopReason: "toolUse",
+			});
+			harness.setResponses([
+				recordPrompt,
+				pageDiff,
+				fauxAssistantMessage(
+					fauxToolCall("report_review_candidates", {
+						summary: "No defect in the change.",
+						candidates: [],
+						followUps: [followUp()],
+						limitations: [],
+					}),
+					{ stopReason: "toolUse" },
+				),
+				recordPrompt,
+				pageDiff,
+				fauxAssistantMessage(
+					fauxToolCall("report_review_verification", {
+						summary: "Nothing omitted.",
+						assessment: "complete",
+						decisions: [],
+						priorFindingDecisions: [],
+						...(collect ? { followUpDecisions: [acceptFollowUp] } : {}),
+						limitations: [],
+					}),
+					{ stopReason: "toolUse" },
+				),
+			]);
+			const run = await runReview({
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				model: harness.getModel(),
+				verifierModel: harness.getModel(),
+				authStorage: harness.authStorage,
+				modelRegistry: harness.session.modelRegistry,
+				settingsManager: harness.settingsManager,
+				resolved: snapshot,
+				controls: { scopeMode: "full", scope: ["src/**"] },
+				...(collect ? { followUps: true } : {}),
+			});
+			snapshots.splice(snapshots.indexOf(snapshot), 1);
+			return { run, prompts };
+		}
+
+		it("keeps verified follow-ups apart from the findings, without touching the verdict", async () => {
+			const { run, prompts } = await reviewWithFollowUp(true);
+			expect(run.errorMessage).toBeUndefined();
+			expect(prompts[0]).toContain("follow_up_guidance");
+			expect(prompts[1]).toContain("follow_up_candidates");
+			expect(run.parsed).toMatchObject({
+				completionStatus: "complete",
+				overallCorrectness: "correct",
+				findings: [],
+				followUps: [
+					{
+						id: expect.any(String),
+						fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
+						title: "Policy file is terse",
+						category: "docs",
+						priority: 3,
+						location: { path: "AGENTS.md", side: "head", startLine: 1, endLine: 1 },
+						verification: { method: "Read AGENTS.md at head.", rationale: "It holds one line.", confidence: 0.8 },
+					},
+				],
+			});
+		});
+
+		it("leaves follow-ups out of a review that does not collect them", async () => {
+			const { run, prompts } = await reviewWithFollowUp(false);
+			expect(run.errorMessage).toBeUndefined();
+			expect(prompts[0]).not.toContain("follow_up_guidance");
+			expect(prompts[1]).not.toContain("follow_up_candidates");
+			expect(run.parsed).not.toHaveProperty("followUps");
+		});
+
+		it("renders a pull request review's follow-ups without its discussion", async () => {
+			const privateMarker = "private-follow-up-marker";
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const snapshot = await createSnapshotRepository(harness);
+			attachGitHubContext(snapshot, privateMarker);
+			snapshots.push(snapshot);
+			const presentationPrompts: string[] = [];
+			const pass = (report: object, name: string) => [
+				fauxAssistantMessage(fauxToolCall("review_context", {}), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall(name, report as never), { stopReason: "toolUse" }),
+			];
+			harness.setResponses([
+				...pass(
+					{ summary: privateMarker, candidates: [], followUps: [followUp(privateMarker)], limitations: [] },
+					"report_review_candidates",
+				),
+				...pass(
+					{
+						summary: privateMarker,
+						assessment: "complete",
+						decisions: [],
+						priorFindingDecisions: [],
+						followUpDecisions: [{ ...acceptFollowUp, rationale: privateMarker }],
+						limitations: [],
+					},
+					"report_review_verification",
+				),
+				(context) => {
+					presentationPrompts.push(JSON.stringify(context.messages));
+					return fauxAssistantMessage(fauxToolCall("review_file", { path: "AGENTS.md" }), {
+						stopReason: "toolUse",
+					});
+				},
+				(context) =>
+					fauxAssistantMessage(
+						fauxToolCall("report_review_presentations", {
+							findings: [],
+							followUps: [
+								{
+									presentationId: presentationIdFromMessages(context.messages),
+									title: "Policy file is terse",
+									body: "AGENTS.md is a single line.",
+									category: "docs",
+									rationale: "The head file has one line.",
+								},
+							],
+						}),
+						{ stopReason: "toolUse" },
+					),
+			]);
+
+			const run = await runReview({
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				model: harness.getModel(),
+				verifierModel: harness.getModel(),
+				authStorage: harness.authStorage,
+				modelRegistry: harness.session.modelRegistry,
+				settingsManager: harness.settingsManager,
+				resolved: snapshot,
+				controls: { scopeMode: "full", scope: ["src/**"] },
+				followUps: true,
+			});
+			snapshots.splice(snapshots.indexOf(snapshot), 1);
+			expect(run.errorMessage).toBeUndefined();
+			// The pass that wrote it saw the follow-up's place, not what discovery or the verifier wrote about it.
+			expect(presentationPrompts[0]).toContain("declassified_follow_ups");
+			expect(presentationPrompts[0]).not.toContain(privateMarker);
+			expect(run.parsed?.followUps).toEqual([
+				expect.objectContaining({
+					body: "AGENTS.md is a single line.",
+					verification: expect.objectContaining({ rationale: "The head file has one line." }),
+				}),
+			]);
+			expect(JSON.stringify(run.parsed)).not.toContain(privateMarker);
+		});
+	});
+
 	it("projects active-pass context and cumulative usage across both isolated sessions", async () => {
 		const harness = await createHarness({
 			models: [

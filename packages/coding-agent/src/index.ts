@@ -674,7 +674,12 @@ export { ReviewEngineSubmissionError } from "./core/review-engine.ts";
 export type {
 	ReviewCandidate,
 	ReviewCandidateReport,
+	ReviewFinding,
+	ReviewFollowUp,
+	ReviewFollowUpCandidate,
+	ReviewFollowUpDecision,
 	ReviewLocation,
+	ReviewPriorFindingDecision,
 	ReviewVerificationDecision,
 	ReviewVerificationReport,
 } from "./core/review-report.ts";

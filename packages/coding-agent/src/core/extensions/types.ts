@@ -57,6 +57,7 @@ import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { CustomMessage, CustomMessageInput } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ReviewEngineDeclaration } from "../review-engine.ts";
+import type { ReviewFollowUp } from "../review-report.ts";
 import type {
 	BranchSummaryEntry,
 	CompactionEntry,
@@ -371,6 +372,14 @@ export interface ExtensionReviewStartOptions {
 	 */
 	readonly previousRunId?: string;
 	/**
+	 * Also collect follow-ups: defects the review notices outside the change,
+	 * such as pre-existing bugs, each verified like a finding and kept apart
+	 * from the findings (`followUps` of the result). They never affect the
+	 * verdict; an extension may file them as issues of their own. An engine
+	 * reports the ones it can.
+	 */
+	readonly followUps?: boolean;
+	/**
 	 * Tools of the conversation the standard review's passes may use beside
 	 * their read-only snapshot tools, such as `bash` to run checks and tests:
 	 * the passes then run in a disposable checkout of the reviewed head. The
@@ -382,7 +391,15 @@ export interface ExtensionReviewStartOptions {
 }
 
 /** A review run as clients see it (`review.result`): its target, status, and, once it has one, its result. */
-export type ExtensionReviewResult = QueryResult<"review.result">;
+export type ExtensionReviewResult = QueryResult<"review.result"> & {
+	/**
+	 * The follow-ups of a review that collected them: verified defects outside
+	 * the change. A follow-up's `fingerprint` names the defect by its path,
+	 * category, and root cause, so it is the same in every review that reports
+	 * it: an extension filing follow-ups can tell one it filed before.
+	 */
+	readonly followUps?: readonly ReviewFollowUp[];
+};
 
 /** How a review the extension started ended. */
 export interface ExtensionReviewEnd {

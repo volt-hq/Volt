@@ -6,6 +6,7 @@
  * those still running.
  */
 
+import type { QueryResult } from "@hansjm10/volt-protocol";
 import type {
 	ExtensionReviewEnd,
 	ExtensionReviewEngine,
@@ -312,6 +313,9 @@ export class ExtensionReviewRuns implements ExtensionReviewsHandler {
 			throw invalid("params need an engine other than standard");
 		}
 		const previousRunId = optionalText(options.previousRunId, "previousRunId");
+		if (options.followUps !== undefined && typeof options.followUps !== "boolean") {
+			throw invalid("followUps must be true or false");
+		}
 		const tools = textList(options.tools, "tools");
 		if (extensionEngine !== undefined && tools !== undefined) {
 			throw invalid("tools apply to the standard review only");
@@ -353,6 +357,7 @@ export class ExtensionReviewRuns implements ExtensionReviewsHandler {
 				...(params === undefined ? {} : { engineParams: params }),
 				controls,
 				...(previousRunId === undefined ? {} : { previousRunId }),
+				...(options.followUps === true ? { followUps: true } : {}),
 				...(tools === undefined ? {} : { tools }),
 				...(parentWorkId === undefined ? {} : { parentWorkId }),
 			},
@@ -377,6 +382,11 @@ export class ExtensionReviewRuns implements ExtensionReviewsHandler {
 	}
 }
 
+/** A run as clients see it, with the follow-ups an extension reads besides. */
 function project(record: HydratedReviewRunRecord): ExtensionReviewResult {
-	return projectReviewRun(record, true) as ExtensionReviewResult;
+	const followUps = record.result?.followUps;
+	return {
+		...(projectReviewRun(record, true) as QueryResult<"review.result">),
+		...(followUps === undefined ? {} : { followUps: structuredClone(followUps) }),
+	};
 }
