@@ -386,6 +386,15 @@ export interface ExtensionReviewStartOptions {
 	 * workspace file tools (read, grep, find, ls, edit, write) are refused.
 	 */
 	readonly tools?: readonly string[];
+	/**
+	 * A shell command the host runs in the root of that disposable checkout
+	 * before the passes start, such as installing its dependencies
+	 * (`npm ci --ignore-scripts`): a fresh checkout has none. It runs with the
+	 * user's shell and permissions, for at most `timeoutMs` (ten minutes by
+	 * default); one that fails or times out fails the review with its output.
+	 * It applies with `tools`.
+	 */
+	readonly setup?: { readonly command: string; readonly timeoutMs?: number };
 	/** Running work of the extension's own kind the review belongs to: clients show it under that work. */
 	readonly parentWorkId?: string;
 }

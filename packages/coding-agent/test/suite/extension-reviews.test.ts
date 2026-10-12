@@ -354,6 +354,21 @@ describe("ctx.reviews", () => {
 			/Unknown review run/,
 		],
 		["a workspace file tool", { target: { kind: "uncommitted" }, tools: ["read"] }, /not available to reviews: read/],
+		[
+			"a setup with no tools to run in its checkout",
+			{ target: { kind: "uncommitted" }, setup: { command: "npm ci" } },
+			/setup applies to a review whose passes run tools/,
+		],
+		[
+			"a setup without a command",
+			{ target: { kind: "uncommitted" }, tools: ["bash"], setup: { command: " " } },
+			/setup.command must be a shell command/,
+		],
+		[
+			"a setup that may run for days",
+			{ target: { kind: "uncommitted" }, tools: ["bash"], setup: { command: "npm ci", timeoutMs: 86_400_000 } },
+			/setup.timeoutMs must be a positive number/,
+		],
 		["a tool the conversation does not have", { target: { kind: "uncommitted" }, tools: ["teleport"] }, /teleport/],
 		["an effort it does not know", { target: { kind: "uncommitted" }, effort: "max" }, /effort must be one of/],
 		["parent work it does not own", { target: { kind: "uncommitted" }, parentWorkId: "work-1" }, /parentWorkId/],
@@ -361,6 +376,24 @@ describe("ctx.reviews", () => {
 		const { reviewer, conversation } = await setup();
 		await expect(reviewer.reviews.start(options as never)).rejects.toThrow(message);
 		expect(conversation.session.work.list().filter((item) => item.kind === "review")).toEqual([]);
+	});
+
+	test("sets up the checkout its standard review runs commands in, and a failed setup fails the review with why", async () => {
+		const { reviewer } = await setup();
+		const review = await reviewer.reviews.start({
+			target: { kind: "uncommitted" },
+			tools: ["bash"],
+			setup: { command: "echo cannot-install >&2; exit 7" },
+		});
+		expect(await review.ended).toMatchObject({
+			status: "failed",
+			error: "The review checkout's setup failed (exit 7): cannot-install",
+			run: {
+				engine: "standard",
+				status: "failed",
+				errorMessage: "The review checkout's setup failed (exit 7): cannot-install",
+			},
+		});
 	});
 
 	test("shows a review it starts from its own work under that work", async () => {

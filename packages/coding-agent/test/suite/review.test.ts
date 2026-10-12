@@ -1672,6 +1672,70 @@ describe("review pipeline", () => {
 		expect(run.parsed).toMatchObject({ completionStatus: "complete", overallCorrectness: "incorrect" });
 	});
 
+	describe("the checkout of a review that runs commands", () => {
+		async function reviewWithSetup(setup: { command: string; timeoutMs?: number }, responses: FauxResponseFactory[]) {
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const snapshot = await createSnapshotRepository(harness);
+			snapshots.push(snapshot);
+			harness.setResponses(responses);
+			const run = await runReview({
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				model: harness.getModel(),
+				verifierModel: harness.getModel(),
+				authStorage: harness.authStorage,
+				modelRegistry: harness.session.modelRegistry,
+				settingsManager: harness.settingsManager,
+				resolved: snapshot,
+				controls: { scopeMode: "full", scope: ["src/**"] },
+				tools: ["bash"],
+				setup,
+			});
+			snapshots.splice(snapshots.indexOf(snapshot), 1);
+			return { run, workspace: harness.tempDir };
+		}
+
+		it("is set up before the first pass, so the passes' commands find what the setup made", async () => {
+			const seen: string[] = [];
+			const { run, workspace } = await reviewWithSetup({ command: "printf ready > setup-marker" }, [
+				() =>
+					fauxAssistantMessage(fauxToolCall("bash", { command: "cat setup-marker" }), { stopReason: "toolUse" }),
+				(context) => {
+					seen.push(JSON.stringify(context.messages.at(-1)));
+					return fauxAssistantMessage(
+						fauxToolCall("report_review_candidates", { summary: "Nothing.", candidates: [], limitations: [] }),
+						{ stopReason: "toolUse" },
+					);
+				},
+				() =>
+					fauxAssistantMessage(
+						fauxToolCall("report_review_verification", {
+							summary: "Nothing omitted.",
+							assessment: "complete",
+							decisions: [],
+							priorFindingDecisions: [],
+							limitations: [],
+						}),
+						{ stopReason: "toolUse" },
+					),
+			]);
+			expect(run.errorMessage).toBeUndefined();
+			expect(seen[0]).toContain("ready");
+			expect(run.parsed?.coverage.commandsRun).toEqual(["cat setup-marker"]);
+			// The setup ran in the disposable checkout, never in the workspace.
+			expect(existsSync(join(workspace, "setup-marker"))).toBe(false);
+		});
+
+		it("fails the review, saying why, when its setup fails or runs too long", async () => {
+			const failed = await reviewWithSetup({ command: "echo no-registry >&2; exit 3" }, []);
+			expect(failed.run.errorMessage).toBe("The review checkout's setup failed (exit 3): no-registry");
+			expect(failed.run.publicErrorMessage).toBe(failed.run.errorMessage);
+			const slow = await reviewWithSetup({ command: "sleep 5", timeoutMs: 100 }, []);
+			expect(slow.run.errorMessage).toBe("The review checkout's setup timed out");
+		});
+	});
+
 	describe("follow-ups", () => {
 		const followUp = (body = "AGENTS.md carries a one-line policy with no review rules.") => ({
 			followUpId: "f1",

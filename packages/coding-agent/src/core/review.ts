@@ -9,6 +9,7 @@ import { minimatch } from "minimatch";
 import type { AgentSession, AgentSessionEvent } from "./agent-session.ts";
 import type { AgentSessionServices } from "./agent-session-services.ts";
 import type { AuthStorage } from "./auth-storage.ts";
+import { executeBashWithOperations } from "./bash-executor.ts";
 import {
 	type CodeHostProvider,
 	type CodeHostPullRequestSummary,
@@ -100,6 +101,7 @@ import { SessionManager } from "./session-manager.ts";
 import type { SessionUsageProjection, SessionUsageTotals } from "./session-usage.ts";
 import type { SessionWriter } from "./session-writer.ts";
 import type { SettingsManager } from "./settings-manager.ts";
+import { createLocalBashOperations } from "./tools/bash.ts";
 import type { WorkContext, WorkExecution, WorkRegistry } from "./work/registry.ts";
 
 export { createReviewSeedMessage } from "./review-presentation.ts";
@@ -639,6 +641,44 @@ function collectParentExtensionTools(parentResourceLoader: ResourceLoader | unde
 	return Array.from(toolsByName.values());
 }
 
+/** A command that prepares a review's disposable checkout, such as installing its dependencies. */
+export interface ReviewCheckoutSetup {
+	/** A shell command run in the checkout's root. */
+	readonly command: string;
+	/** How long it may run; ten minutes by default. */
+	readonly timeoutMs?: number;
+}
+
+const DEFAULT_REVIEW_SETUP_TIMEOUT_MS = 600_000;
+
+/** The checkout's setup failed: its message, the setup's own output, is what the run's record says. */
+class ReviewCheckoutSetupError extends Error {}
+/** The most of a failed setup's output its error carries, in characters. */
+const REVIEW_SETUP_ERROR_OUTPUT_CHARS = 2_000;
+
+/**
+ * Run `setup` in the disposable checkout `cwd` with the user's shell: what the review's command-capable passes
+ * need there (dependencies, build output) before they start. A setup that fails, times out, or is cancelled
+ * throws, and the review with it; it never runs in the workspace.
+ */
+async function setUpReviewCheckout(
+	cwd: string,
+	setup: ReviewCheckoutSetup,
+	shellPath: string | undefined,
+	signal: AbortSignal | undefined,
+): Promise<void> {
+	const timeout = AbortSignal.timeout(setup.timeoutMs ?? DEFAULT_REVIEW_SETUP_TIMEOUT_MS);
+	const result = await executeBashWithOperations(setup.command, cwd, createLocalBashOperations({ shellPath }), {
+		signal: signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
+	});
+	if (signal?.aborted) throw new Error("Review aborted");
+	if (result.cancelled || result.exitCode !== 0) {
+		const output = result.output.trim().slice(-REVIEW_SETUP_ERROR_OUTPUT_CHARS);
+		const how = result.cancelled ? "timed out" : `failed (exit ${result.exitCode ?? "unknown"})`;
+		throw new ReviewCheckoutSetupError(`The review checkout's setup ${how}${output ? `: ${output}` : ""}`);
+	}
+}
+
 export type ReviewPass = "discovery" | "verification" | "presentation";
 
 export interface ReviewUsageSnapshot extends SessionUsageProjection {
@@ -662,8 +702,12 @@ export interface RunReviewOptions {
 	followUps?: boolean;
 	parentResourceLoader?: ResourceLoader;
 	tools?: readonly string[];
+	/** Prepares the disposable checkout auxiliary tools run in, before the first pass. */
+	setup?: ReviewCheckoutSetup;
 	signal?: AbortSignal;
 	onProgress?: (message: string) => void;
+	/** The checkout's setup starts. */
+	onSetup?: () => void;
 	/** A pass of round `round` starts. */
 	onPass?: (pass: ReviewPass, round: number) => void;
 	onSessionEvent?: (event: DeepReadonly<AgentSessionEvent>) => void;
@@ -811,6 +855,8 @@ export interface ExecuteReviewWorkflowOptions {
 	fastModeEnabled?: boolean;
 	parentResourceLoader?: ResourceLoader;
 	tools?: readonly string[];
+	/** Prepares the disposable checkout auxiliary tools run in, before the first pass. */
+	setup?: ReviewCheckoutSetup;
 	sanitizeRemoteErrors?: boolean;
 	/** Retained for source compatibility during the in-place migration; snapshots make this a no-op. */
 	skipWorkingTreeGuard?: boolean;
@@ -1426,7 +1472,13 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 	let reviewCwd = snapshot.root;
 	let phase: ReviewPass | "preparation" = "preparation";
 	try {
-		if (requestedAuxiliaryTools.length > 0) reviewCwd = await snapshot.materializeHead();
+		if (requestedAuxiliaryTools.length > 0) {
+			reviewCwd = await snapshot.materializeHead();
+			if (options.setup) {
+				options.onSetup?.();
+				await setUpReviewCheckout(reviewCwd, options.setup, options.settingsManager.getShellPath(), options.signal);
+			}
+		}
 		const contextFiles = await loadReviewContextFiles(snapshot, options.cwd, options.agentDir);
 		const onSessionEvent = (phase: ReviewPass, event: DeepReadonly<AgentSessionEvent>): void => {
 			options.onSessionEvent?.(event);
@@ -1829,7 +1881,7 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 			raw: "",
 			errorMessage: error instanceof Error ? error.message : String(error),
 			publicErrorMessage:
-				error instanceof ReviewPassError
+				error instanceof ReviewPassError || error instanceof ReviewCheckoutSetupError
 					? error.message
 					: `Review ${phase} could not finish loading or processing the snapshot evidence. Retry with a narrower --scope; if it repeats, report the failed stage and target revision.`,
 		};
@@ -1929,8 +1981,13 @@ export async function executeReviewWorkflow(
 		controls: prepared.controls,
 		parentResourceLoader: options.parentResourceLoader,
 		tools: options.tools,
+		...(options.setup === undefined ? {} : { setup: options.setup }),
 		signal: options.signal,
 		onProgress: options.onProgress,
+		onSetup: () => {
+			stage = "Setting up the review checkout";
+			report(stage, true);
+		},
 		onPass: (pass, round) => {
 			stage = reviewPassStage(pass, round);
 			report(stage, true);

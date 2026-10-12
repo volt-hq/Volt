@@ -21,6 +21,7 @@ import type {
 import {
 	MAX_PULL_REQUEST_NUMBER,
 	MUTABLE_WORKSPACE_REVIEW_TOOLS,
+	type ReviewCheckoutSetup,
 	type ReviewEffort,
 	type ReviewRunControls,
 	type ReviewTarget,
@@ -133,6 +134,31 @@ function reviewTarget(value: unknown): ReviewTarget {
 			return { kind: "commit", sha: ref };
 		}
 	}
+}
+
+/** The longest setup command a review takes, in characters. */
+const SETUP_COMMAND_MAX_CHARS = 10_000;
+/** The longest a review's setup may run. */
+const SETUP_TIMEOUT_MAX_MS = 3_600_000;
+
+/** A review checkout's setup as the extension supplied it: a command, and how long it may run. */
+function checkoutSetup(value: unknown): ReviewCheckoutSetup | undefined {
+	if (value === undefined) return undefined;
+	if (!isRecord(value)) throw invalid("setup must be { command, timeoutMs? }");
+	const { command, timeoutMs } = value;
+	if (typeof command !== "string" || command.trim().length === 0 || command.length > SETUP_COMMAND_MAX_CHARS) {
+		throw invalid(`setup.command must be a shell command of at most ${SETUP_COMMAND_MAX_CHARS} characters`);
+	}
+	if (
+		timeoutMs !== undefined &&
+		(typeof timeoutMs !== "number" ||
+			!Number.isSafeInteger(timeoutMs) ||
+			timeoutMs < 1 ||
+			timeoutMs > SETUP_TIMEOUT_MAX_MS)
+	) {
+		throw invalid(`setup.timeoutMs must be a positive number of milliseconds of at most ${SETUP_TIMEOUT_MAX_MS}`);
+	}
+	return { command, ...(timeoutMs === undefined ? {} : { timeoutMs }) };
 }
 
 /** The engine's parameters as the extension supplied them: a flat object of strings, numbers, and booleans. */
@@ -320,6 +346,10 @@ export class ExtensionReviewRuns implements ExtensionReviewsHandler {
 		if (extensionEngine !== undefined && tools !== undefined) {
 			throw invalid("tools apply to the standard review only");
 		}
+		const setup = checkoutSetup(options.setup);
+		if (setup !== undefined && (tools === undefined || tools.length === 0)) {
+			throw invalid("setup applies to a review whose passes run tools in a checkout: name them in tools");
+		}
 		if (tools !== undefined) {
 			const available = new Set(this.host.toolNames());
 			const refused = tools.filter((name) => !available.has(name) || MUTABLE_WORKSPACE_REVIEW_TOOLS.has(name));
@@ -359,6 +389,7 @@ export class ExtensionReviewRuns implements ExtensionReviewsHandler {
 				...(previousRunId === undefined ? {} : { previousRunId }),
 				...(options.followUps === true ? { followUps: true } : {}),
 				...(tools === undefined ? {} : { tools }),
+				...(setup === undefined ? {} : { setup }),
 				...(parentWorkId === undefined ? {} : { parentWorkId }),
 			},
 		};

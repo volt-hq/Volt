@@ -11,6 +11,7 @@ import {
 	type prepareReviewWorkflow,
 	REMOTE_REVIEW_FAILURE_MESSAGE,
 	REMOTE_REVIEW_TOOL_NAMES,
+	type ReviewCheckoutSetup,
 	type ReviewRunControls,
 	type ReviewTarget,
 	reviewWorkExecution,
@@ -70,6 +71,8 @@ export interface ConversationReviewOptions {
 	readonly followUps?: boolean;
 	/** Auxiliary tools of the conversation the built-in pipeline's passes may use besides their snapshot tools. */
 	readonly tools?: readonly string[];
+	/** Prepares the disposable checkout the auxiliary tools run in, such as installing its dependencies. */
+	readonly setup?: ReviewCheckoutSetup;
 	/** Running work the review belongs to: clients show it under that work. */
 	readonly parentWorkId?: string;
 }
@@ -94,7 +97,9 @@ export async function startConversationReview(
 		if (options.parentRunId !== undefined) {
 			throw new Error(`A review on the ${engine.label} engine does not build on an earlier run`);
 		}
-		if (options.tools !== undefined) throw new Error("Auxiliary tools do not apply to an engine's review");
+		if (options.tools !== undefined || options.setup !== undefined) {
+			throw new Error("Auxiliary tools and their setup do not apply to an engine's review");
+		}
 		return await startEngineReview({
 			engine,
 			target,
@@ -135,6 +140,8 @@ export async function startConversationReview(
 	// Immutable snapshot tools only, unless a local caller named auxiliary tools of the conversation (never its
 	// workspace file tools). A remote review gets no auxiliary or extension tools at all.
 	const tools = options.remote ? REMOTE_REVIEW_TOOL_NAMES : (options.tools ?? REMOTE_REVIEW_TOOL_NAMES);
+	// A remote review runs no commands, so nothing of its checkout is set up.
+	const setup = options.remote ? undefined : options.setup;
 	const parentResourceLoader = options.remote ? undefined : session.resourceLoader;
 	const reviewed = reviewWorkTarget(prepared.resolution);
 	try {
@@ -156,6 +163,7 @@ export async function startConversationReview(
 						fastModeEnabled,
 						parentResourceLoader,
 						tools,
+						...(setup === undefined ? {} : { setup }),
 						signal: ctx.signal,
 						passes: session.reviewPasses,
 						work: ctx,
