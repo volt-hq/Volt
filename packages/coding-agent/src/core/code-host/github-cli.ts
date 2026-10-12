@@ -39,6 +39,11 @@ export interface GitHubCliResult {
 
 export interface GitHubCliRunOptions {
 	cwd: string;
+	/**
+	 * The command that runs GitHub CLI: `gh` by default, or a wrapper such as `["volt-agent", "gh"]` whose first
+	 * word is the program and the rest its leading arguments. The account it is signed in as acts on GitHub.
+	 */
+	command?: readonly string[];
 	input?: string;
 	signal?: AbortSignal;
 	stdoutMaxBytes?: number;
@@ -54,7 +59,8 @@ export async function runGitHubCli(args: readonly string[], options: GitHubCliRu
 	const stderrMaxBytes = Math.max(1, options.stderrMaxBytes ?? DEFAULT_STDERR_MAX_BYTES);
 	const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 	const result = await new Promise<GitHubCliResult>((resolveResult) => {
-		const child = spawnProcess("gh", [...args], {
+		const [program = "gh", ...prefix] = options.command ?? [];
+		const child = spawnProcess(program, [...prefix, ...args], {
 			cwd: options.cwd,
 			stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
 			env: createGitHubCliEnvironment(),

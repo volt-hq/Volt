@@ -55,6 +55,8 @@ export interface StartEngineReviewOptions {
 	/** The conversation's log, which a pull request review's binding and the run's records belong to. */
 	sessionManager: SessionManager;
 	sessionWriter: SessionWriter;
+	/** Running work the review belongs to: clients show it under that work. */
+	parentWorkId?: string;
 }
 
 /**
@@ -163,7 +165,10 @@ export async function startEngineReview(options: StartEngineReviewOptions): Prom
 	};
 
 	try {
-		await options.work.start("review", reviewWorkInput(action, shown), execute, { workId });
+		await options.work.start("review", reviewWorkInput(action, shown), execute, {
+			workId,
+			...(options.parentWorkId === undefined ? {} : { parentWorkId: options.parentWorkId }),
+		});
 	} catch (error) {
 		await resolution.dispose();
 		throw error;

@@ -6,7 +6,8 @@
 import { BUILTIN_QUERIES } from "./definitions.ts";
 import { QueryRegistry } from "./registry.ts";
 
-export { BUILTIN_QUERIES, projectReviewRun, projectSubscriptionUsageReport } from "./definitions.ts";
+export { projectReviewRun } from "../../review-projection.ts";
+export { BUILTIN_QUERIES, projectSubscriptionUsageReport } from "./definitions.ts";
 export type { BuiltinQueryDefinitions } from "./registry.ts";
 export { QueryRegistry } from "./registry.ts";
 export * from "./types.ts";

@@ -7,16 +7,8 @@
 
 import type { RpcSubagentDefinition } from "@hansjm10/volt-protocol";
 import type { HostedConversation } from "../../host/hosted-conversation.ts";
-import {
-	executeReviewWorkflow,
-	prepareReviewWorkflow,
-	REMOTE_REVIEW_FAILURE_MESSAGE,
-	REMOTE_REVIEW_TOOL_NAMES,
-	reviewWorkExecution,
-	reviewWorkTarget,
-} from "../../review.ts";
-import { startEngineReview } from "../../review-engine-run.ts";
-import { reviewWorkInput } from "../../review-work.ts";
+import { executeReviewWorkflow, prepareReviewWorkflow } from "../../review.ts";
+import { startConversationReview } from "../../review-start.ts";
 import type { SubagentDefinition } from "../../subagents/index.ts";
 import type { SubscriptionUsageService } from "../../subscription-usage.ts";
 import type { IntentServices, IntentSubagentServices } from "../intents/types.ts";
@@ -70,93 +62,17 @@ export function createLocalIntentServices(
 		abortRun: (target) => target.abort("remote_request", { deliverQueuedMessages: true }),
 		detachedReviews: true,
 		runReview: async (target, reviewOptions) => {
-			if (reviewOptions.engine !== undefined) {
-				const engine = session.reviewEngines.get(reviewOptions.engine);
-				if (!engine) throw new Error(`Unknown review engine: ${reviewOptions.engine}`);
-				const { workId } = await startEngineReview({
-					engine,
-					target,
-					controls: reviewOptions.controls,
-					...(reviewOptions.engineParams === undefined ? {} : { params: reviewOptions.engineParams }),
-					remote: reviewOptions.remote,
-					cwd: conversation.cwd,
-					work: conversation.work,
-					modelRegistry: session.modelRegistry,
-					...(session.model === undefined ? {} : { model: session.model }),
-					settingsManager: session.settingsManager,
-					sessionManager: session.sessionManager,
-					sessionWriter: session.sessionWriter,
-				});
-				return { status: "accepted", workId };
-			}
-			// The fast preflight runs inline so target errors fail the intent; the
-			// review then runs as the conversation's work.
-			const prepared = await prepareReviewWorkflow({
+			const started = await startConversationReview(
+				session,
+				{ cwd: conversation.cwd, agentDir: conversation.services.agentDir },
+				{ prepare: prepareReviewWorkflow, execute: executeReviewWorkflow },
 				target,
-				controls: reviewOptions.controls,
-				...(reviewOptions.parentRunId ? { parentRunId: reviewOptions.parentRunId } : {}),
-				cwd: conversation.cwd,
-				settingsManager: session.settingsManager,
-				modelRegistry: session.modelRegistry,
-				currentModel: session.model,
-				sessionManager: session.sessionManager,
-				requireProjectTrust: reviewOptions.remote,
-				sanitizeRemoteErrors: reviewOptions.remote,
-			});
-			const thinkingLevel = session.thinkingLevel;
-			const fastModeEnabled = session.fastModeEnabled;
-			const authStorage = session.modelRegistry.authStorage;
-			const modelRegistry = session.modelRegistry;
-			const settingsManager = session.settingsManager;
-			// Immutable snapshot tools only, unless a local client named auxiliary tools of the conversation
-			// (never its workspace file tools). A remote review gets no auxiliary or extension tools at all.
-			const tools = reviewOptions.remote
-				? REMOTE_REVIEW_TOOL_NAMES
-				: (reviewOptions.tools ?? REMOTE_REVIEW_TOOL_NAMES);
-			const parentResourceLoader = reviewOptions.remote ? undefined : session.resourceLoader;
-			const reviewed = reviewWorkTarget(prepared.resolution);
-			try {
-				await conversation.work.start(
-					"review",
-					reviewWorkInput(prepared.action, reviewed),
-					async (ctx) => {
-						try {
-							const result = await executeReviewWorkflow({
-								prepared,
-								cwd: conversation.cwd,
-								agentDir: conversation.services.agentDir,
-								authStorage,
-								modelRegistry,
-								settingsManager,
-								sessionWriter: session.sessionWriter,
-								sanitizeRemoteErrors: reviewOptions.remote,
-								thinkingLevel,
-								fastModeEnabled,
-								parentResourceLoader,
-								tools,
-								signal: ctx.signal,
-								passes: session.reviewPasses,
-								work: ctx,
-							});
-							if (reviewOptions.remote && result.status === "failed") {
-								return { outcome: "failed", error: REMOTE_REVIEW_FAILURE_MESSAGE };
-							}
-							return reviewWorkExecution(result, reviewed);
-						} catch (error) {
-							if (reviewOptions.remote) return { outcome: "failed", error: REMOTE_REVIEW_FAILURE_MESSAGE };
-							throw error;
-						}
-					},
-					{ workId: prepared.workflowId },
-				);
-			} catch (error) {
-				await prepared.resolution.dispose();
-				throw error;
-			}
+				reviewOptions,
+			);
 			return {
 				status: "accepted",
-				workId: prepared.workflowId,
-				...(prepared.modelWarning === undefined || reviewOptions.remote ? {} : { message: prepared.modelWarning }),
+				workId: started.workId,
+				...(started.message === undefined ? {} : { message: started.message }),
 			};
 		},
 		subagents: localSubagentServices(conversation),

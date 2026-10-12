@@ -1232,6 +1232,36 @@ volt.on("before_agent_start", (event, ctx) => {
 
 Starts background work of a kind the extension registered with [`volt.registerWorkKind()`](#voltregisterworkkindname-kind). Resolves with `{ workId }` once the work is recorded; `run` then executes in the background. An extension starts only its own kinds: `kind` is the name it registered, and another extension's kind (or a built-in kind such as `job`) is never found. The context of a `ctx.newSession()`/`ctx.fork()`/`ctx.switchSession()` `withSession` callback cannot start work.
 
+### ctx.reviews
+
+Runs reviews as `/review` does: each is the conversation's `review` work, on the standard review or an engine the conversation's extensions [registered](#voltregisterreviewenginename-engine), and ends with the same run record, which `/work` and the findings conversation open. Starting, posting, and recording outcomes need the `exec` permission. An extension acts only on the reviews it started: it cancels them, posts them, and records what became of their findings; disabling or reloading it cancels the ones still running.
+
+```typescript
+const review = await ctx.reviews.start({
+  target: { kind: "pr", number: 123 }, // or uncommitted, branch, branch_uncommitted, commit
+  engine: "standard",                  // or an id from ctx.reviews.engines()
+  tools: ["bash"],                     // the standard review may run checks and tests in a disposable checkout
+  parentRunId: previous?.runId,         // review only what changed since an earlier standard review
+});
+const end = await review.ended;        // { status, error?, run? }; never rejects
+if (end.run?.completionStatus === "complete") {
+  const open = (end.run.findings ?? []).filter((finding) => finding.status === "open");
+  await ctx.reviews.publish(review.id, {
+    trailer: `<!-- my-tool verdict=${open.length === 0 ? "clean" : "changes"} -->`,
+    command: ["volt-agent", "gh"],    // post as the account this command is signed in as
+  });
+}
+```
+
+| Method | |
+|---|---|
+| `engines()` | The engines the conversation can run now: `standard` first, then each registered engine's id, label, description, cost note, and targets. |
+| `start(options)` | Starts a review. `target` is what it reviews; `engine` defaults to `standard`; `params` are an engine's declared parameters; `focus`, `scope`, `effort`, and `includeOptional` are the review's own options. A review is full unless `parentRunId` names an earlier standard review of the same target to build on: then it reviews only what changed since, decides whether each finding that run left open in an unchanged file was fixed, and falls back to a full review (saying why in its record) when the earlier run cannot be built on. `tools` names tools of the conversation the standard review's passes may use beside their read-only snapshot tools, such as `bash`; the passes then run in a disposable checkout of the reviewed head. `parentWorkId` shows the review under running work of the extension's own kind. What is reviewed is resolved before it resolves, so a target that cannot be reviewed rejects, and so does a start beyond the conversation's limit of reviews at once (with an error whose `code` is `limit`, so a caller can wait and try again). |
+| `result(runId)` | A run of the conversation as clients see it (`review.result`): target, status, options, findings, coverage, and verdict; undefined when the conversation does not hold it. |
+| `cancel(runId)` | Cancels a review the extension started; one that ended is left alone. |
+| `publish(runId, options?)` | Posts a complete pull request review the extension started, as one review with each finding on its line where the code host accepts it, after checking the pull request's head has not moved; records the publication. `trailer` is added after the review's body; `command` runs GitHub CLI in place of `gh`, and the account it is signed in as posts. |
+| `recordOutcome(runId, findingId, outcome)` | Records that a finding of a review the extension started was `accepted`, `fixed`, or `dismissed` (with a `reason`), with an optional note. |
+
 ## ExtensionCommandContext
 
 Command handlers receive `ExtensionCommandContext`, which extends `ExtensionContext` with session control methods. These are only available in commands because they can deadlock if called from event handlers.

@@ -55,7 +55,10 @@ import { type HostRequestOptions, hostRequestTimeout, type LiveState } from "../
 import type { CustomMessageInput } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "../resource-loader.ts";
+import type { ReviewTarget } from "../review.ts";
+import type { ReviewEngineRegistry } from "../review-engine.ts";
 import type { ExtensionReviewEngines, ReviewEngineRefusal } from "../review-engine-extensions.ts";
+import type { ConversationReviewOptions, StartedConversationReview } from "../review-start.ts";
 import type { SessionManager } from "../session-manager.ts";
 import {
 	assertExtensionEntryType,
@@ -81,6 +84,8 @@ import {
 } from "../ui/extension-ui.ts";
 import { HOST_CUSTOM_MESSAGE_TYPES } from "../ui/message-presenters.ts";
 import type { ExtensionKinds, WorkKindRefusal } from "../work/extension-kinds.ts";
+import type { WorkRegistry } from "../work/registry.ts";
+import { ExtensionReviewRuns } from "./extension-reviews.ts";
 import type { SessionExtensionServices } from "./extension-services.ts";
 import type { SessionJobs } from "./jobs.ts";
 import type { ModelSettings } from "./model-settings.ts";
@@ -172,6 +177,12 @@ export interface SessionExtensionBindingHost {
 	extensionKinds(): ExtensionKinds;
 	/** The review engines the extensions registered, kept in the conversation's engine registry. */
 	extensionReviewEngines(): ExtensionReviewEngines;
+	/** The conversation's work, its reviews included. */
+	work(): WorkRegistry;
+	/** The review engines the conversation can run besides the built-in pipeline. */
+	reviewEngines(): ReviewEngineRegistry;
+	/** Start a review as the conversation's `review` work. */
+	startReview(target: ReviewTarget, options: ConversationReviewOptions): Promise<StartedConversationReview>;
 	jobs(): SessionJobs;
 	sessionWriter(): SessionWriter;
 	/** Rejects once the session is disposed or has lost its log. */
@@ -274,12 +285,15 @@ export class SessionExtensionBinding {
 	private readonly uiRouters = new Map<string | undefined, ExtensionUIContext>();
 	/** Each extension instance's `ctx.ui`: it stops when its instance stops, whatever runs under its id later. */
 	private readonly instanceUIs = new WeakMap<Extension, ExtensionUIContext>();
+	/** The reviews the extensions started (`ctx.reviews`). */
+	private readonly reviews: ExtensionReviewRuns;
 	private readonly uiHost: ExtensionUiHost = {
 		// Read when a call runs: the routers are built before the binding's host is set.
 		live: () => this.host.liveState,
 		ownsWork: (extensionId, workId) =>
 			this.host.extensionKinds().owns(extensionId, workId) ||
-			this.host.extensionReviewEngines().owns(extensionId, workId),
+			this.host.extensionReviewEngines().owns(extensionId, workId) ||
+			this.reviews.owns(extensionId, workId),
 		droppedIntent: (extensionId, intent) =>
 			this.extensionRunner.emitError({
 				extensionId,
@@ -300,6 +314,15 @@ export class SessionExtensionBinding {
 		this.host = host;
 		this.extensionRunnerRef = options.extensionRunnerRef;
 		this.sessionStartEvent = options.sessionStartEvent;
+		this.reviews = new ExtensionReviewRuns({
+			sessionManager: host.sessionManager,
+			sessionWriter: () => host.sessionWriter(),
+			work: () => host.work(),
+			reviewEngines: () => host.reviewEngines(),
+			toolNames: () => host.session.getAllTools().map((tool) => tool.name),
+			ownsKindWork: (owner, workId) => host.extensionKinds().owns(owner, workId),
+			startReview: (target, review) => host.startReview(target, review),
+		});
 		this.registry = new ExtensionRegistry(this.createRegistryHost());
 	}
 
@@ -328,7 +351,11 @@ export class SessionExtensionBinding {
 			statesChanged: () => this.host.extensionsChanged(),
 			retireDeclarations: (extension) => this.retireDeclarations(extension),
 			retireWork: async (id) => {
-				await Promise.all([this.host.extensionKinds().retire(id), this.host.extensionReviewEngines().retire(id)]);
+				await Promise.all([
+					this.host.extensionKinds().retire(id),
+					this.host.extensionReviewEngines().retire(id),
+					this.reviews.retire(id),
+				]);
 			},
 			turnBoundary: () => this.host.turnBoundary(),
 			reportError: (error) => this.extensionRunner.emitError(error),
@@ -918,6 +945,7 @@ export class SessionExtensionBinding {
 		runner.bindServices(this.host.extensionServices().servicesManager);
 		const kinds = this.host.extensionKinds();
 		runner.bindWork(kinds.start, () => this.refuseDeclarations(runner));
+		runner.bindReviews(this.reviews);
 		// Each `sourceInfo` is a copy: the session's own attribute extension resources and describe the loaded skills.
 		const getCommands = (): SlashCommandInfo[] => {
 			const extensionCommands: SlashCommandInfo[] = runner.getRegisteredCommands().map((command) => ({
