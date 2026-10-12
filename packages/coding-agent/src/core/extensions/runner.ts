@@ -10,6 +10,7 @@
  * sees belongs to that instance and throws once it is retired.
  */
 
+import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { ImageContent, JsonValue, Model } from "@hansjm10/volt-ai";
 import { EXTENSION_ID_PATTERN } from "@hansjm10/volt-protocol";
@@ -1578,7 +1579,15 @@ export class ExtensionRunner {
 						}
 						throw error;
 					}
-					// A host message keeps its type, but no extension gives a message one of the host's.
+					// A host message commits as the host sent it: a handler can only pass it through unchanged.
+					if (
+						currentMessage.role === "custom" &&
+						HOST_CUSTOM_MESSAGE_TYPES.has(currentMessage.customType) &&
+						!isDeepStrictEqual(handlerResult.message, currentMessage)
+					) {
+						throw new Error(`Custom messages of type ${currentMessage.customType} are the host's`);
+					}
+					// No extension gives a message one of the host's types.
 					if (
 						handlerResult.message.role === "custom" &&
 						currentMessage.role === "custom" &&
