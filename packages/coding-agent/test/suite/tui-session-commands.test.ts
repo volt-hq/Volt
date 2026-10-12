@@ -194,8 +194,10 @@ describe("the TUI's session commands as intents", () => {
 		submit(tui, "/resume");
 		await waitForScreen(tui, "Resume Session (Current Folder)", "kept session", "doomed session");
 
-		// Search, then delete the one match.
-		tui.terminal.sendInput("doomed");
+		// Search, then delete the one match. The search is an exact phrase: a fuzzy one also reads each session's
+		// id and folder, a random temp directory, and can match the other session too.
+		const search = '"doomed"';
+		tui.terminal.sendInput(search);
 		await vi.waitFor(async () => expect(await screen(tui)).not.toContain("kept session"));
 		tui.terminal.sendInput(CTRL_D);
 		await waitForScreen(tui, "Delete session?");
@@ -205,7 +207,7 @@ describe("the TUI's session commands as intents", () => {
 		expect(listed.sessions.map((session) => session.sessionId)).not.toContain(doomed.sessionId);
 
 		// Rename the other one, then resume it.
-		for (let index = 0; index < "doomed".length; index++) tui.terminal.sendInput("\x7f");
+		for (let index = 0; index < search.length; index++) tui.terminal.sendInput("\x7f");
 		tui.terminal.sendInput("kept");
 		await vi.waitFor(async () => expect(await screen(tui)).not.toContain("(no messages)"));
 		tui.terminal.sendInput("\x1b[114;5u");
