@@ -619,7 +619,7 @@ volt.on("session_compact", async (event, ctx) => {
 });
 ```
 
-Custom compaction and tree-summary results are validated and owned before Volt moves the branch leaf or appends an entry. Invalid JSON data fails the operation without creating a summary entry.
+Custom compaction and tree-summary results are validated and owned before Volt moves the branch leaf or appends an entry. Invalid JSON data fails the operation without creating a summary entry. Each `session_before_compact` and `session_before_tree` handler receives its own copy of the event's `preparation` (and of `branchEntries` for compaction): changing it affects neither the summary Volt generates nor later handlers.
 
 #### session_before_tree / session_tree
 
@@ -669,6 +669,8 @@ volt.on("session_shutdown", async (event, ctx) => {
 
 ### Agent Events
 
+Every `agent_start`, `agent_end`, `turn_start`, `turn_end`, `message_start`, `message_update`, and `tool_execution_*` handler receives its own copy of the event. A change a handler makes to it reaches neither later handlers nor the session and its clients.
+
 #### before_agent_start
 
 Fired after user submits prompt, before agent loop. Can inject a message and/or modify the system prompt.
@@ -704,7 +706,7 @@ volt.on("before_agent_start", async (event, ctx) => {
 
 The `systemPromptOptions` field gives extensions access to the same structured data Volt uses to build the system prompt. This lets you inspect what Volt has loaded — custom prompts, guidelines, tool snippets, context files, skills — without re-discovering resources or re-parsing flags. Use it when your extension needs to make deep, informed changes to the system prompt while respecting user-provided configuration. Each handler receives its own copy: changing it does not change the skills or context files Volt loaded, or what later handlers see. Change the prompt by returning `systemPrompt`.
 
-Inside `before_agent_start`, `event.systemPrompt` and `ctx.getSystemPrompt()` both reflect the chained system prompt as of the current handler. Later `before_agent_start` handlers can still modify it again. An injected message must satisfy the [JSON data boundary](#json-data-boundary); Volt diagnoses and skips only the invalid optional message while continuing the turn.
+Inside `before_agent_start`, `event.systemPrompt` and `ctx.getSystemPrompt()` both reflect the chained system prompt as of the current handler. Later `before_agent_start` handlers can still modify it again. An injected message must satisfy the [JSON data boundary](#json-data-boundary); Volt diagnoses and skips only the invalid optional message while continuing the turn. An injected message of one of the host's message types (`work_notice`, `review`, `subagent_recovery`, `volt-plan-checkpoint`, or `volt-plan-execution`) is refused the same way, with the error `volt.sendMessage()` gives.
 
 #### agent_start / agent_end
 
@@ -736,9 +738,9 @@ volt.on("turn_end", async (event, ctx) => {
 
 Fired for message lifecycle updates.
 
-- `message_start` and `message_end` fire for user, assistant, and toolResult messages.
+- `message_start` and `message_end` fire for user, assistant, and toolResult messages, and for custom messages delivered to a turn: [`volt.sendMessage()`](#voltsendmessagemessage-options) messages queued while the agent streams or sent with `triggerTurn`, `"nextTurn"` and [`before_agent_start`](#before_agent_start) messages with the prompt that carries them, and the host's own custom messages delivered the same way, such as `volt-plan-execution`. A custom message appended while the agent is idle, such as a `volt.sendMessage()` message without `triggerTurn`, gets neither.
 - `message_update` fires for assistant streaming updates.
-- `message_end` handlers can return `{ message }` to replace the finalized message. The replacement must keep the same `role` and satisfy the [JSON data boundary](#json-data-boundary). An invalid replacement fails message preparation before it commits.
+- `message_end` handlers can return `{ message }` to replace the finalized message. The replacement must keep the same `role` and satisfy the [JSON data boundary](#json-data-boundary). An invalid replacement fails message preparation before it commits. A custom message's replacement cannot change its `customType` to one of the host's message types (`work_notice`, `review`, `subagent_recovery`, `volt-plan-checkpoint`, or `volt-plan-execution`): Volt reports the handler's error and keeps the message as it was.
 
 ```typescript
 volt.on("message_start", async (event, ctx) => {
@@ -1108,7 +1110,7 @@ Use this before reading project-local extension configuration that should only b
 
 ### ctx.sessionManager
 
-A read-only view of the session's log. It holds committed entries only: an entry appears after its write commits. It has no write methods; write through `volt.appendEntry()`, `volt.setLabel()`, and `volt.setSessionName()`, which resolve after their entries commit. See [Session Format](session-format.md) for entry types.
+A read-only view of the session's log. It holds committed entries only: an entry appears after its write commits. Its methods return copies of the entries and header they read, so changing one does not change the session. It has no write methods; write through `volt.appendEntry()`, `volt.setLabel()`, and `volt.setSessionName()`, which resolve after their entries commit. See [Session Format](session-format.md) for entry types.
 
 For `tool_call`, the view includes the assistant message that requested the tool. In parallel tool execution mode it is still not guaranteed to include sibling tool results from the same assistant message.
 
@@ -1277,6 +1279,38 @@ await ctx.subagents.start({ agent: "general", task: "Fix issue #12.", cwd: workt
 
 The daemon's retention and removal rules apply to these worktrees as to any other; merging a branch back stays the extension's or the user's action.
 
+### ctx.reviews
+
+Runs reviews as `/review` does: each is the conversation's `review` work, on the standard review or an engine the conversation's extensions [registered](#voltregisterreviewenginename-engine), and ends with the same run record, which `/work` and the findings conversation open. Starting, posting, and recording outcomes need the `exec` permission. An extension acts only on the reviews it started: it cancels them, posts them, and records what became of their findings; disabling or reloading it cancels the ones still starting or running. A finding discussion starts no reviews: what a review records there belongs to the source review, so `start` rejects.
+
+```typescript
+const review = await ctx.reviews.start({
+  target: { kind: "pr", number: 123 }, // or uncommitted, branch, branch_uncommitted, commit
+  engine: "standard",                  // or an id from ctx.reviews.engines()
+  tools: ["bash"],                     // the standard review may run checks and tests in a disposable checkout
+  setup: { command: "npm ci --ignore-scripts" }, // which has no dependencies until its setup installs them
+  previousRunId: previous?.runId,       // decide the findings the previous round left open
+  followUps: true,                      // also collect verified defects outside the change
+});
+const end = await review.ended;        // { status, error?, run? }; never rejects
+if (end.run?.completionStatus === "complete") {
+  const open = (end.run.findings ?? []).filter((finding) => finding.status === "open");
+  await ctx.reviews.publish(review.id, {
+    trailer: `<!-- my-tool verdict=${open.length === 0 ? "clean" : "changes"} -->`,
+    command: ["volt-agent", "gh"],    // post as the account this command is signed in as
+  });
+}
+```
+
+| Method | |
+|---|---|
+| `engines()` | The engines the conversation can run now: `standard` first, then each registered engine's id, label, description, cost note, and targets. |
+| `start(options)` | Starts a review. `target` is what it reviews; `engine` defaults to `standard`; `params` are an engine's declared parameters; `focus`, `scope`, `effort`, and `includeOptional` are the review's own options. A review is always full. `previousRunId` names an earlier review of the same target it follows, such as the previous round of a review loop: it then also decides each finding that run left open. A finding still there keeps its id in the new review; one found fixed is closed, once the new review completes, in the run where it was found and in the runs that run followed. The standard review decides every such finding; an engine decides the ones it can, through [`ctx.previousFindings`](#voltregisterreviewenginename-engine). `followUps: true` also collects follow-ups: defects the review notices outside the change, such as pre-existing bugs, each verified like a finding and listed in the result's `followUps`, apart from the findings. They never affect the verdict. A follow-up has a title, body, category, priority, a `location` in the reviewed head, and a `fingerprint` of its path, category, and root cause that is the same in every review that reports the defect, so an extension filing follow-ups as issues can tell one it filed before; on a pull request, the standard review writes their text without the pull request's discussion, as it does a finding's. `tools` names tools of the conversation the standard review's passes may use beside their read-only snapshot tools, such as `bash`; the passes then run in a disposable checkout of the reviewed head. That checkout has no dependencies or build output: `setup: { command, timeoutMs? }` names a shell command the host runs in its root first, with your shell and permissions, for at most `timeoutMs` (ten minutes by default). A setup that fails or times out fails the review, and the run's record carries its output. `parentWorkId` shows the review under running work of the extension's own kind. What is reviewed is resolved before it resolves, so a target that cannot be reviewed rejects, and so does a start beyond the conversation's limit of reviews at once (with an error whose `code` is `limit`, so a caller can wait and try again). |
+| `result(runId)` | A run of the conversation as clients see it (`review.result`): target, status, options, findings, coverage, and verdict, with `followUps` when it collected them; undefined when the conversation does not hold it. |
+| `cancel(runId)` | Cancels a review the extension started; one that ended is left alone. |
+| `publish(runId, options?)` | Posts a complete pull request review the extension started, as one review with each finding on its line where the code host accepts it, after checking the pull request's head has not moved; records the publication. `trailer` is added after the review's body; `command` runs GitHub CLI in place of `gh`, and the account it is signed in as posts. |
+| `recordOutcome(runId, findingId, outcome)` | Records that a finding of a review the extension started was `accepted`, `fixed`, or `dismissed` (with a `reason`), with an optional note. |
+
 ## ExtensionCommandContext
 
 Command handlers receive `ExtensionCommandContext`, which extends `ExtensionContext` with session control methods. These are only available in commands because they can deadlock if called from event handlers.
@@ -1370,7 +1404,7 @@ if (result.cancelled) {
 
 Options:
 - `parentSessionRef`: persisted parent identity to record for the new session
-- `setup`: write the new session before it opens, through its async `SessionWriter` (`writer.sessionManager` reads it), before `withSession` runs
+- `setup`: write the new session before it opens, through its async `SessionWriter`, before `withSession` runs. `writer.sessionManager` is a read-only view of the new session with the same methods as [`ctx.sessionManager`](#ctxsessionmanager); they return copies of the entries and header they read, so changing one does not change the session
 - `withSession`: run post-switch work against a fresh context of the new session. Do not use captured old `volt` / command `ctx`; see [Session changes: lifecycle and footguns](#session-changes-lifecycle-and-footguns).
 
 Result (`SessionIntentResult`), the same for `fork()` and `switchSession()`:
@@ -1498,7 +1532,7 @@ Lifecycle and footguns:
 - `withSession` runs only after the new extension instance has received `session_start` and, in an RPC or SDK host, the old session has emitted `session_shutdown` and closed.
 - The callback still executes in the original closure, not inside the new extension instance. That means your old extension instance may already have run its shutdown cleanup before `withSession` starts.
 - Captured old `volt` / old command `ctx` session-bound objects are stale once the session changed and will throw if used. Use only the `ctx` passed to `withSession` for session-bound work.
-- Previously extracted raw objects are still your responsibility. For example, if you capture `const sm = ctx.sessionManager` before the change, `sm` is still the old `SessionManager` object. Do not reuse it afterwards.
+- Previously extracted raw objects are still your responsibility. For example, if you capture `const sm = ctx.sessionManager` before the change, `sm` still reads the old session. Do not reuse it afterwards.
 - Code in `withSession` should assume any state invalidated by your `session_shutdown` handler is already gone. Only capture plain data that survives shutdown cleanly, such as strings, ids, and serialized config.
 - `withSession` is not guaranteed to run even when the operation is not cancelled: if recovered durable client input fails to replay into the new session, the callback is skipped and the result reports `seeded: false`. Check `seeded` whenever your callback delivers state the rest of your flow depends on.
 
@@ -1939,10 +1973,12 @@ The declaration:
 - `modelRegistry`, `model`, and `isProjectTrusted()`: the conversation's models and credentials, its current model when the review started, and whether the project is trusted. An engine that runs model sessions of its own resolves its models here; it should not fall back to the conversation's model unasked, which could run every pass on an expensive one.
 - `target`: what is reviewed (`kind`, `description`, the git `identity` including a pull request's, the repository `root`, host text about the target, and the review's `controls`: `focus`, `scope`, `effort`, `includeOptional`).
 - `progress(progress, detail?)`, `checkpoint(progress, detail?)`, and `output(text)` report as [background work](#voltregisterworkkindname-kind) does. `detail` is [UI data](#ui-as-data) every client shows with the running review; it is normalized under your extension's action policy (an action may send your own intents and commands, and `open_work` or `cancel_work` for your own reviews, whose id is `ctx.workId`) and bounded.
+- `previousFindings`: when the review follows an earlier review of its target (an extension's [`ctx.reviews.start({ previousRunId })`](#ctxreviews)), the findings that run left open, which the code may have fixed or moved since; empty otherwise. Settle each you can with a `priorFindingDecisions` entry in your verification: `fixed` closes it in the run where it was found once this review completes, `open` with the `candidateId` of your accepted candidate that reports it now keeps its id there, and `uncertain` leaves the review incomplete. One without a decision is carried into this review as it was, keeping its id and status, so an open one still counts against the verdict and the next round sees it.
+- `followUps`: whether the review collects follow-ups (an extension's `ctx.reviews.start({ followUps: true })`). When it does, report defects you notice outside the change in the candidates' `followUps` (each with a `followUpId`, title, body, kebab-case `category` and `rootCauseKey`, priority, and a `location` of at most 10 lines in a file of the reviewed head) and decide each in the verification's `followUpDecisions`; the host keeps the valid ones a decision accepts, and `submit` says how many (`followUps`) and why it left the others out (`errors`). When it does not, they are ignored.
 - `changedFiles()`: the changed files with their statuses, whether each is reviewable and in scope, and their hunks' ids and sizes. It carries no patch text. Receiving it counts as your engine getting the changed-file inventory, which a complete run needs.
 - `pass()`: starts an independent pass. `pass.diff(hunkIds, maxBytes)` returns the diff text of those hunks within the budget, each whole or left in `omitted`; `pass.tools()` returns the host's snapshot tools (changed files, diff, file, tree, search) for a pass to call; `pass.coverage()` says what the pass has seen.
 - `validate(candidates)`: checks a candidate report as `submit` would, without keeping anything, so your own reporting tools can send a reviewer back to fix an anchor.
-- `submit({ candidates, verification, commandsRun?, failedVerificationAttempts? })`: submits the result once. The reports have the host's shapes: a candidate has a title, body, trigger, impact, kebab-case `category` and `rootCauseKey`, a priority from 0 to 2 (3 only when the review includes optional findings), a confidence, and a `changeLocation` on a changed line of at most 10 lines; the verification has a decision for every candidate, an `assessment` of `complete` or `incomplete` (with a `challenge`), and `priorFindingDecisions: []`. A candidate the host's checks complain about is dropped with its decision, and `submit` returns which (`rejected`) and why (`errors`). A result that cannot stand at all (not the host's shape, a candidate without a decision, an incomplete assessment without a challenge) throws a `ReviewEngineSubmissionError`, and you may submit again; a successful submit is final.
+- `submit({ candidates, verification, commandsRun?, failedVerificationAttempts? })`: submits the result once. The reports have the host's shapes: a candidate has a title, body, trigger, impact, kebab-case `category` and `rootCauseKey`, a priority from 0 to 2 (3 only when the review includes optional findings), a confidence, and a `changeLocation` on a changed line of at most 10 lines; the verification has a decision for every candidate, an `assessment` of `complete` or `incomplete` (with a `challenge`), and `priorFindingDecisions` for the `previousFindings` you settle (`[]` for none). A candidate the host's checks complain about is dropped with its decision, and `submit` returns which (`rejected`) and why (`errors`). A result that cannot stand at all (not the host's shape, a candidate without a decision, an incomplete assessment without a challenge) throws a `ReviewEngineSubmissionError`, and you may submit again; a successful submit is final.
 - `checkout()`: a disposable checkout of the reviewed head, removed when the review ends.
 
 The host derives finding ids and fingerprints, the scope and exclusions, the completion status, and the target's files from git; you supply what only you know: the verification method and rationale, the assessment, limitations, and the commands you ran. A run is `complete` when your verification assessment is complete and nothing is left unchecked: every reviewable hunk was delivered to at least one pass through `pass.diff` or the pass's tools, and you received the changed-file inventory. That says what the host observed delivering and what you reported; it does not say a model read the diff or that your passes were independent. A run without a command in `commandsRun` is marked as a static review. The pull request review the user posts names your engine and says its coverage is reported by the engine.

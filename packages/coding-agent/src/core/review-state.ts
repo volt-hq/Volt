@@ -4,7 +4,15 @@ import { minimatch } from "minimatch";
 import type { ReviewRunControls } from "./review.ts";
 import { ReviewSourceUnavailableError, resolveCanonicalReviewSource } from "./review-links.ts";
 import { createReviewAccountingMessage } from "./review-presentation.ts";
-import type { ParsedReview, ReviewFinding, ReviewFindingOutcomeReason, ReviewFindingStatus } from "./review-report.ts";
+import {
+	type ParsedReview,
+	REVIEW_FOLLOW_UPS_MAX,
+	type ReviewFinding,
+	type ReviewFindingOutcomeReason,
+	type ReviewFindingStatus,
+	type ReviewPriorFindingDecision,
+	settleReviewVerdict,
+} from "./review-report.ts";
 import type {
 	ReviewBranchBase,
 	ReviewChangedFile,
@@ -311,11 +319,31 @@ function boundPublicReviewResult(result: ParsedReview, includeEvidence: boolean)
 		...(result.verificationChallenge
 			? { verificationChallenge: truncateUtf8(result.verificationChallenge, 4_000) }
 			: {}),
+		...(result.followUps
+			? {
+					followUps: result.followUps.slice(0, REVIEW_FOLLOW_UPS_MAX).map((followUp) => ({
+						...structuredClone(followUp),
+						title: truncateUtf8(followUp.title, includeEvidence ? 300 : 200),
+						body: truncateUtf8(followUp.body, includeEvidence ? 2_000 : 1_000),
+						category: truncateUtf8(followUp.category, 80),
+						verification: {
+							...followUp.verification,
+							method: truncateUtf8(followUp.verification.method, includeEvidence ? 500 : 300),
+							rationale: truncateUtf8(followUp.verification.rationale, includeEvidence ? 1_000 : 500),
+						},
+					})),
+				}
+			: {}),
 	};
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Whether `value` is a timestamp clients accept: safe non-negative integer epoch milliseconds. */
+function isEpochMilliseconds(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function parseRun(value: unknown): ReviewRunRecord | undefined {
@@ -330,8 +358,8 @@ function parseRun(value: unknown): ReviewRunRecord | undefined {
 	)
 		return undefined;
 	if (
-		!Number.isFinite(value.startedAt) ||
-		!Number.isFinite(value.endedAt) ||
+		!isEpochMilliseconds(value.startedAt) ||
+		!isEpochMilliseconds(value.endedAt) ||
 		!isObject(value.target) ||
 		!isObject(value.options)
 	)
@@ -352,7 +380,7 @@ function parseRun(value: unknown): ReviewRunRecord | undefined {
 
 function parseAcknowledgment(value: unknown): ReviewAcknowledgmentRecord | undefined {
 	if (!isObject(value) || value.schemaVersion !== REVIEW_STATE_SCHEMA_VERSION) return undefined;
-	if (typeof value.runId !== "string" || !Number.isFinite(value.acknowledgedAt)) return undefined;
+	if (typeof value.runId !== "string" || !isEpochMilliseconds(value.acknowledgedAt)) return undefined;
 	return structuredClone(value) as unknown as ReviewAcknowledgmentRecord;
 }
 
@@ -664,7 +692,8 @@ export async function acknowledgeReviewRun(
 ): Promise<ReviewAcknowledgmentRecord> {
 	const run = getReviewRun(writer.sessionManager, runId);
 	if (!run) throw new Error(`Unknown durable review run: ${runId}`);
-	if (!Number.isFinite(acknowledgedAt)) throw new Error("Review acknowledgment timestamp must be finite.");
+	if (!isEpochMilliseconds(acknowledgedAt))
+		throw new Error("Review acknowledgment timestamp must be a safe non-negative integer.");
 	if (run.acknowledgedAt !== undefined) {
 		return { schemaVersion: REVIEW_STATE_SCHEMA_VERSION, runId, acknowledgedAt: run.acknowledgedAt };
 	}
@@ -1007,6 +1036,193 @@ function planReviewFromPreviousRun(
 		.filter((finding) => finding.status === "dismissed")
 		.map((finding) => finding.fingerprint);
 	return { mode: "incremental", previousRun, changedPaths, priorOpenFindings, suppressedDismissedFingerprints };
+}
+
+/**
+ * The plan of a full review that follows `previousRun`, an earlier review of the same target: it reviews every
+ * changed path, and its verifier decides each finding `previousRun` left open. Findings dismissed in `previousRun`,
+ * or in the runs it followed (`dismissedEarlier`, see {@link dismissedFingerprintsOfFollowedRuns}), are not reported
+ * again.
+ */
+export function followUpReviewPlan(
+	previousRun: ReviewRunRecord,
+	snapshot: ReviewSnapshot,
+	dismissedEarlier: readonly string[],
+): ReviewIncrementalPlan {
+	const findings = previousRun.result?.findings ?? [];
+	const dismissed = findings.filter((finding) => finding.status === "dismissed").map((finding) => finding.fingerprint);
+	return {
+		mode: "full",
+		previousRun,
+		changedPaths: snapshot.changedFiles.map((file) => file.path),
+		priorOpenFindings: findings.filter((finding) => finding.status !== "fixed" && finding.status !== "dismissed"),
+		suppressedDismissedFingerprints: [...new Set([...dismissed, ...dismissedEarlier])],
+	};
+}
+
+/** Whether `plan` is a full review that decides the findings of the run it follows ({@link followUpReviewPlan}). */
+export function decidesPreviousFindings(
+	plan: ReviewIncrementalPlan | undefined,
+): plan is ReviewIncrementalPlan & { previousRun: ReviewRunRecord } {
+	return plan?.mode === "full" && plan.previousRun !== undefined;
+}
+
+/** Throws unless `previousRun` reviewed the target `snapshot` reviews: the same kind, and the same pull request. */
+export function assertFollowsReviewOf(previousRun: ReviewRunRecord, snapshot: ReviewSnapshot): void {
+	const previous = previousRun.target.identity;
+	const current = snapshot.identity;
+	if (
+		previous.kind !== current.kind ||
+		(current.kind === "pr" &&
+			(previous.pullRequest?.providerId !== current.pullRequest?.providerId ||
+				previous.pullRequest?.url !== current.pullRequest?.url))
+	) {
+		throw new Error(`Review ${previousRun.runId} reviewed another target; a review follows one of its own target.`);
+	}
+}
+
+/**
+ * The findings of a full review that follows an earlier run, once its verifier decided that run's open findings. A
+ * finding decided open or uncertain takes that status in the finding that holds its id; held by none, one decided open
+ * gives its id to the finding that reports it now (`candidateFingerprints` maps candidate ids to the fingerprints of
+ * their findings), or, reported by none, is carried with that status. One without a decision stays as it was: in the
+ * finding that holds its id, else its id and status go to a finding with its fingerprint that holds no other earlier
+ * finding's id, else it is carried unchanged. Findings decided fixed are not carried: they are returned, to be closed
+ * where they were found.
+ */
+export function applyPreviousFindingDecisions(
+	findings: readonly ReviewFinding[],
+	priorOpenFindings: readonly ReviewFinding[],
+	decisions: readonly ReviewPriorFindingDecision[],
+	candidateFingerprints: ReadonlyMap<string, string>,
+): { findings: ReviewFinding[]; fixed: ReviewPriorFindingDecision[] } {
+	const result = findings.map((finding) => structuredClone(finding));
+	const fixed: ReviewPriorFindingDecision[] = [];
+	const undecided: ReviewFinding[] = [];
+	for (const prior of priorOpenFindings) {
+		const decision = decisions.find((candidate) => candidate.findingId === prior.id);
+		if (!decision) {
+			undecided.push(prior);
+			continue;
+		}
+		if (decision.outcome === "fixed") {
+			fixed.push(decision);
+			continue;
+		}
+		const fingerprint =
+			decision.candidateId === undefined ? undefined : candidateFingerprints.get(decision.candidateId);
+		// Reported again with the same anchor, it already has its id.
+		const current =
+			result.find((finding) => finding.id === prior.id) ??
+			(decision.outcome === "open" && fingerprint !== undefined
+				? result.find((finding) => finding.fingerprint === fingerprint)
+				: undefined);
+		if (current) {
+			current.id = prior.id;
+			current.status = decision.outcome;
+		} else result.push({ ...structuredClone(prior), status: decision.outcome });
+	}
+	// After the decided ones, so one does not take a finding a decision gave its id.
+	const priorIds = new Set(priorOpenFindings.map((prior) => prior.id));
+	for (const prior of undecided) {
+		if (result.some((finding) => finding.id === prior.id)) continue;
+		const current = result.find((finding) => finding.fingerprint === prior.fingerprint && !priorIds.has(finding.id));
+		if (current) {
+			current.id = prior.id;
+			current.status = prior.status;
+		} else result.push(structuredClone(prior));
+	}
+	return { findings: result, fixed };
+}
+
+/**
+ * Settle `parsed`, a full review that follows an earlier run, with its verifier's decisions on that run's open
+ * findings ({@link applyPreviousFindingDecisions}), and its verdict with them. Returns the findings decided fixed, to
+ * be closed where they were found. Only a complete review closes them: an incomplete one carries them as they were,
+ * so the round that follows it decides them again.
+ */
+export function settlePreviousFindings(
+	parsed: ParsedReview,
+	priorOpenFindings: readonly ReviewFinding[],
+	decisions: readonly ReviewPriorFindingDecision[],
+	candidateFingerprints: ReadonlyMap<string, string>,
+): ReviewPriorFindingDecision[] {
+	const findings = parsed.findings;
+	const decided = applyPreviousFindingDecisions(findings, priorOpenFindings, decisions, candidateFingerprints);
+	parsed.findings = decided.findings;
+	settleReviewVerdict(parsed);
+	if (parsed.completionStatus === "complete" || decided.fixed.length === 0) return decided.fixed;
+	parsed.findings = applyPreviousFindingDecisions(
+		findings,
+		priorOpenFindings,
+		decisions.filter((decision) => decision.outcome !== "fixed"),
+		candidateFingerprints,
+	).findings;
+	settleReviewVerdict(parsed);
+	return [];
+}
+
+/** The most runs {@link closeFixedFindings} and {@link dismissedFingerprintsOfFollowedRuns} walk back through. */
+const MAX_FOLLOWED_RUNS = 16;
+
+/**
+ * The fingerprints of the findings dismissed in the runs `previousRun` followed in turn. A review that follows a run
+ * leaves out the findings dismissed there, so the round after it learns of an earlier dismissal only from these runs.
+ * A run this conversation does not hold ends the walk.
+ */
+export async function dismissedFingerprintsOfFollowedRuns(
+	manager: SessionManager,
+	previousRun: ReviewRunRecord,
+): Promise<string[]> {
+	const fingerprints = new Set<string>();
+	const seen = new Set([previousRun.runId]);
+	let runId = previousRun.parentRunId;
+	while (runId !== undefined && !seen.has(runId) && seen.size < MAX_FOLLOWED_RUNS) {
+		seen.add(runId);
+		const run: HydratedReviewRunRecord | undefined = await getCanonicalReviewRun(manager, runId).catch(
+			() => undefined,
+		);
+		if (!run) break;
+		for (const finding of run.result?.findings ?? []) {
+			if (finding.status === "dismissed") fingerprints.add(finding.fingerprint);
+		}
+		runId = run.parentRunId;
+	}
+	return [...fingerprints];
+}
+
+/**
+ * Close the findings a complete review that followed `previousRunId` decided fixed: in that run and in each run it
+ * followed in turn, wherever the finding (which keeps its id from run to run) is still open. A run this conversation
+ * does not hold, or whose outcome it cannot record, is left as it is.
+ */
+export async function closeFixedFindings(
+	writer: SessionWriter,
+	previousRunId: string,
+	reviewRunId: string,
+	fixed: readonly ReviewPriorFindingDecision[],
+): Promise<void> {
+	if (fixed.length === 0) return;
+	const seen = new Set<string>();
+	let runId: string | undefined = previousRunId;
+	while (runId !== undefined && !seen.has(runId) && seen.size < MAX_FOLLOWED_RUNS) {
+		seen.add(runId);
+		const run: HydratedReviewRunRecord | undefined = await getCanonicalReviewRun(writer.sessionManager, runId).catch(
+			() => undefined,
+		);
+		if (!run) return;
+		for (const decision of fixed) {
+			const finding = run.result?.findings.find((candidate) => candidate.id === decision.findingId);
+			if (!finding || finding.status === "fixed" || finding.status === "dismissed") continue;
+			await recordReviewFindingOutcome(writer, {
+				runId: run.runId,
+				findingId: finding.id,
+				status: "fixed",
+				note: `Review ${reviewRunId} found it fixed: ${decision.rationale}`,
+			}).catch(() => undefined);
+		}
+		runId = run.parentRunId;
+	}
 }
 
 export function reconcileFindingIdentities(

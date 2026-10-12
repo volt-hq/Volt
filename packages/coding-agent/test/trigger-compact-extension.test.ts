@@ -23,6 +23,14 @@ function createContext(tokens: number | null, compact = vi.fn()): ExtensionConte
 		startWork: vi.fn(),
 		subagents: { definitions: () => [], start: vi.fn(), cancel: vi.fn() },
 		worktrees: { list: vi.fn(), create: vi.fn(), remove: vi.fn() },
+		reviews: {
+			engines: () => [],
+			start: vi.fn(),
+			result: vi.fn(),
+			cancel: vi.fn(),
+			publish: vi.fn(),
+			recordOutcome: vi.fn(),
+		},
 	};
 }
 

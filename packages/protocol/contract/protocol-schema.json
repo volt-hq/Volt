@@ -713,10 +713,10 @@
 					"type": "string"
 				},
 				"pairedAtMs": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"lastSeenAtMs": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"allowedTools": {
 					"type": "array",
@@ -3573,7 +3573,7 @@
 					"type": "number"
 				},
 				"startedAtMs": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"environment": {
 					"$ref": "#/$defs/Control.EnvironmentStatus"
@@ -3882,16 +3882,16 @@
 					"type": "string"
 				},
 				"pairedAtMs": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"lastSeenAtMs": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"revokedAtMs": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"rePairApprovedAtMs": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"rpcGrant": {
 					"$ref": "#/$defs/RemoteGrant"
@@ -4509,7 +4509,7 @@
 					"type": "string"
 				},
 				"createdAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"sessionIds": {
 					"type": "array",
@@ -11797,7 +11797,7 @@
 							"type": "string"
 						},
 						"createdAt": {
-							"type": "number"
+							"$ref": "#/$defs/RpcEpochMilliseconds"
 						},
 						"sessionIds": {
 							"type": "array",
@@ -12235,7 +12235,7 @@
 					"type": "string"
 				},
 				"createdAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				}
 			},
 			"additionalProperties": false
@@ -17893,7 +17893,7 @@
 								"type": "string"
 							},
 							"createdAt": {
-								"type": "number"
+								"$ref": "#/$defs/RpcEpochMilliseconds"
 							},
 							"sessionIds": {
 								"type": "array",
@@ -18909,7 +18909,7 @@
 			],
 			"properties": {
 				"startedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				}
 			},
 			"additionalProperties": false
@@ -18930,7 +18930,7 @@
 					]
 				},
 				"startedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				}
 			},
 			"additionalProperties": false
@@ -18949,7 +18949,7 @@
 					"type": "number"
 				},
 				"retryAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"error": {
 					"type": "string"
@@ -19463,6 +19463,13 @@
 				}
 			},
 			"additionalProperties": false
+		},
+		"RpcEpochMilliseconds": {
+			"type": "integer",
+			"minimum": 0,
+			"maximum": 9007199254740991,
+			"x-volt-expected": "be a safe non-negative integer",
+			"description": "Unix epoch milliseconds"
 		},
 		"RpcGitChangeCounts": {
 			"type": "object",
@@ -20799,13 +20806,13 @@
 							"const": "retained"
 						},
 						"lastRequestAt": {
-							"type": "number"
+							"$ref": "#/$defs/RpcEpochMilliseconds"
 						},
 						"expiresAt": {
-							"type": "number"
+							"$ref": "#/$defs/RpcEpochMilliseconds"
 						},
 						"keepAliveUntil": {
-							"type": "number"
+							"$ref": "#/$defs/RpcEpochMilliseconds"
 						}
 					},
 					"additionalProperties": false
@@ -20974,7 +20981,7 @@
 					"type": "string"
 				},
 				"acknowledgedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				}
 			},
 			"additionalProperties": false
@@ -21475,10 +21482,10 @@
 					"$ref": "#/$defs/RpcReviewRunStatus"
 				},
 				"startedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"endedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"usage": {
 					"anyOf": [
@@ -21623,10 +21630,10 @@
 					]
 				},
 				"usageUpdatedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"acknowledgedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"target": {
 					"type": "object",
@@ -21769,7 +21776,7 @@
 									"additionalProperties": false
 								},
 								"observedAt": {
-									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+									"$ref": "#/$defs/RpcEpochMilliseconds"
 								}
 							},
 							"additionalProperties": false
@@ -22051,10 +22058,10 @@
 					"$ref": "#/$defs/RpcReviewRunStatus"
 				},
 				"startedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"endedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"usage": {
 					"anyOf": [
@@ -22199,10 +22206,10 @@
 					]
 				},
 				"usageUpdatedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"acknowledgedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"target": {
 					"type": "object",
@@ -22345,7 +22352,7 @@
 									"additionalProperties": false
 								},
 								"observedAt": {
-									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+									"$ref": "#/$defs/RpcEpochMilliseconds"
 								}
 							},
 							"additionalProperties": false

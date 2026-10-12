@@ -62,9 +62,11 @@ import type { AgentMode, PlanExecution, PlanningState, PlanState, PlanStepStatus
 import type { PromptCacheStatus } from "./prompt-cache-status.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
+import { executeReviewWorkflow, prepareReviewWorkflow } from "./review.ts";
 import { ReviewEngineRegistry } from "./review-engine.ts";
 import { ExtensionReviewEngines } from "./review-engine-extensions.ts";
 import { ReviewPasses } from "./review-passes.ts";
+import { startConversationReview } from "./review-start.ts";
 import { reviewWorkKind } from "./review-work.ts";
 import { SessionBash } from "./session/bash.ts";
 import { type AmbiguousClientInput, SessionClientInputs, type WithdrawnInput } from "./session/client-inputs.ts";
@@ -687,6 +689,16 @@ export class AgentSession {
 				extensionServices: () => this._extensionServices,
 				extensionKinds: () => this._extensionKinds,
 				extensionReviewEngines: () => this._extensionReviewEngines,
+				work: () => this._work,
+				reviewEngines: () => this.reviewEngines,
+				startReview: (target, options) =>
+					startConversationReview(
+						this,
+						{ cwd: this._cwd, agentDir: this._agentDir },
+						{ prepare: prepareReviewWorkflow, execute: executeReviewWorkflow },
+						target,
+						options,
+					),
 				jobs: () => this._jobs,
 				sessionWriter: () => this._sessionWriter,
 				assertActive: () => this._assertActive(),

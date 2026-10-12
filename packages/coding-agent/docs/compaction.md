@@ -331,7 +331,7 @@ Tool results are truncated to 2000 characters during serialization. Content beyo
 
 ## Custom Summarization via Extensions
 
-Extensions can intercept and customize both compaction and branch summarization. See [`extensions/types.ts`](../src/core/extensions/types.ts) for event type definitions. Volt validates and owns custom summaries before appending an entry or moving the branch leaf. Invalid details fail the operation without committing a compaction or tree-navigation mutation.
+Extensions can intercept and customize both compaction and branch summarization. See [`extensions/types.ts`](../src/core/extensions/types.ts) for event type definitions. Volt validates and owns custom summaries before appending an entry or moving the branch leaf. Invalid details fail the operation without committing a compaction or tree-navigation mutation. Each `session_before_compact` and `session_before_tree` handler receives its own copy of the event's `preparation` (and of `branchEntries` for compaction): changing it affects neither the summary Volt generates nor later handlers. To change the summary, return one.
 
 ### session_before_compact
 
