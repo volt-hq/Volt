@@ -265,15 +265,14 @@ async function start(
 					previousRunId !== undefined && (await ctx.reviews.result(previousRunId)) !== undefined
 						? previousRunId
 						: undefined;
-				// The standard review runs the project's checks in a checkout of its own, which the setup prepares.
-				const commands =
-					engine === "standard" ? { tools: ["bash"], ...(setup === undefined ? {} : { setup }) } : {};
 				const run = await ctx.reviews.start({
 					target: { kind: "pr", number: pr },
 					engine,
 					followUps: true,
 					...(previous === undefined ? {} : { previousRunId: previous }),
-					...commands,
+					// Any engine may run the project's checks, in checkouts of its own that the setup prepares.
+					tools: ["bash"],
+					...(setup === undefined ? {} : { setup }),
 					...(reporter === undefined ? {} : { parentWorkId: reporter.workId }),
 				});
 				return { id: run.id, ended: run.ended.then(reviewResult) };

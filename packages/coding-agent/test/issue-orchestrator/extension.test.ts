@@ -181,10 +181,14 @@ function setup(options: { confirm?: boolean; workflow?: string; reviews?: string
 			engines: () => [
 				{ id: "standard", label: "Standard", description: "The built-in review", targets: ["uncommitted", "pr"] },
 				{ id: "ext:local/diff", label: "Diff", description: "Reviews local changes", targets: ["uncommitted"] },
+				{ id: "ext:local/swarm", label: "Swarm", description: "Many reviewers", targets: ["pr"] },
 			],
 			start: async (start: ExtensionReviewStartOptions) => {
 				reviewStarts.push(start);
 				return { id: `review:${reviewStarts.length}`, ended: reviewEnded.promise };
+			},
+			cancel: async () => {
+				reviewEnded.resolve({ status: "cancelled" });
 			},
 			result: async (id: string) => reviewRuns.get(id),
 			publish: async (id: string, publish: ExtensionReviewPublishOptions) => {
@@ -442,8 +446,27 @@ describe("issue orchestrator extension", () => {
 		await command("start");
 		expect(work()).toBeUndefined();
 		expect(notifications.at(-1)).toBe(
-			"Review engine ext:local/diff cannot review pull requests here: set review.engine to agent or one of standard.",
+			"Review engine ext:local/diff cannot review pull requests here: set review.engine to agent or one of standard, ext:local/swarm.",
 		);
+	});
+
+	it("gives an extension's engine the tools and checkout setup the standard review gets", async () => {
+		const { command, reviewStarts, work } = setup({
+			workflow: WORKFLOW.replace("tracker:", "review:\n  engine: ext:local/swarm\ntracker:"),
+			reviews: [],
+		});
+		await command("start");
+		await vi.waitFor(() => expect(reviewStarts).toHaveLength(1));
+		expect(reviewStarts[0]).toEqual({
+			target: { kind: "pr", number: 112 },
+			engine: "ext:local/swarm",
+			followUps: true,
+			tools: ["bash"],
+			setup: { command: "npm ci --ignore-scripts", timeoutMs: 600_000 },
+			parentWorkId: "work-1",
+		});
+		await command("stop");
+		expect(await work()).toMatchObject({ outcome: "completed" });
 	});
 
 	it("starts nothing the user declines", async () => {
