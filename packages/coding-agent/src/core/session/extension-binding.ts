@@ -61,6 +61,7 @@ import {
 	assertExtensionEntryType,
 	type ExtensionSessionWriter,
 	extensionSessionWriter,
+	reservedCustomType,
 	type SessionWriter,
 } from "../session-writer.ts";
 import type { SettingsManager } from "../settings-manager.ts";
@@ -88,20 +89,6 @@ import type { SessionToolRuntime } from "./tool-runtime.ts";
 
 /** The custom types the host's own contexts may not send either: a work notice is the work registry's. */
 const WORK_NOTICE_TYPES: ReadonlySet<string> = new Set([WORK_NOTICE_CUSTOM_TYPE]);
-
-/**
- * The error of a message of a type `reserved` keeps for the host; none for
- * others. Extensions may not send any of the host's message types, which the
- * host presents as its own.
- */
-function reservedCustomType(
-	message: { readonly customType?: unknown },
-	reserved: ReadonlySet<string> = HOST_CUSTOM_MESSAGE_TYPES,
-): Error | undefined {
-	return typeof message.customType === "string" && reserved.has(message.customType)
-		? new Error(`Custom messages of type ${message.customType} are the host's`)
-		: undefined;
-}
 
 /** The session's public API, as extension actions drive it. */
 export type ExtensionBindingSession = Pick<
@@ -642,7 +629,7 @@ export class SessionExtensionBinding {
 		return {
 			waitForIdle: () => actions()?.waitForIdle() ?? Promise.resolve(),
 			newSession: (options) => {
-				// An extension seeds the new session without the host's review records, which only the host writes.
+				// An extension seeds the new session without the host's review records or messages, which only the host writes.
 				const setup = options?.setup;
 				const seeded =
 					setup === undefined
