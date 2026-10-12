@@ -17,7 +17,7 @@ import {
 import { startEngineReview } from "../../src/core/review-engine-run.ts";
 import type { ReviewCandidateReport, ReviewVerificationReport } from "../../src/core/review-report.ts";
 import * as reviewSnapshots from "../../src/core/review-snapshot.ts";
-import { listReviewRuns } from "../../src/core/review-state.ts";
+import { listReviewRuns, recordReviewFindingOutcome } from "../../src/core/review-state.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 const SWARM = "ext:swarm-review/swarm";
@@ -155,12 +155,16 @@ describe("review engines", () => {
 				remote?: boolean;
 				trusted?: boolean;
 				target?: Parameters<typeof startEngineReview>[0]["target"];
+				previousRunId?: string;
+				followUps?: boolean;
 			} = {},
 		) => {
 			const { workId } = await startEngineReview({
 				engine: declaration,
 				target: options.target ?? { kind: "uncommitted" },
 				remote: options.remote ?? false,
+				...(options.previousRunId === undefined ? {} : { previousRunId: options.previousRunId }),
+				...(options.followUps === undefined ? {} : { followUps: options.followUps }),
 				cwd: harness.tempDir,
 				work: harness.session.work,
 				modelRegistry: harness.session.modelRegistry,
@@ -364,7 +368,7 @@ describe("review engines", () => {
 				output: { text: "Swarm report\n" },
 			},
 		});
-		expect(submission).toEqual({ completionStatus: "complete", findings: 1, rejected: [], errors: [] });
+		expect(submission).toEqual({ completionStatus: "complete", findings: 1, followUps: 0, rejected: [], errors: [] });
 		expect(runs.runs).toHaveLength(1);
 		const [record] = runs.runs;
 		expect(record).toMatchObject({
@@ -582,6 +586,118 @@ describe("review engines", () => {
 				result: { findings: [], overallCorrectness: "correct" },
 			});
 		});
+
+		it("keeps the follow-ups a decision accepts, and says which it left out for want of one", async () => {
+			const { start } = await fixture();
+			let submission: Awaited<ReturnType<ReviewEngineContext["submit"]>> | undefined;
+			const followUp = (followUpId: string, rootCauseKey: string, line: number) => ({
+				followUpId,
+				title: `Follow-up ${followUpId}`,
+				body: "A defect outside the change.",
+				category: "correctness",
+				rootCauseKey,
+				priority: 2 as const,
+				location: { path: "src/value.ts", side: "head" as const, startLine: line, endLine: line },
+			});
+			const accept = (followUpId: string) => ({
+				followUpId,
+				outcome: "accept" as const,
+				method: "Read the head file.",
+				rationale: "It is there.",
+				confidence: 0.8,
+			});
+			const { runs } = await start(
+				engine(async (ctx) => {
+					expect(ctx.followUps).toBe(true);
+					submission = await reviewCarefully(ctx, {
+						candidates: {
+							...candidates(),
+							followUps: [followUp("f1", "unchecked-amount", 1), followUp("f2", "missing-brace", 4)],
+						},
+						// f1 is decided twice, f2 never.
+						verification: { ...verification(), followUpDecisions: [accept("f1"), accept("f1")] },
+					});
+				}),
+				{ followUps: true },
+			);
+			// Follow-ups never affect the verdict: the submission stands, and says what it left out.
+			expect(submission).toEqual({
+				completionStatus: "complete",
+				findings: 1,
+				followUps: 1,
+				rejected: [],
+				errors: ["followUpDecisions[1] duplicates follow-up f1", "Missing follow-up decision for f2"],
+			});
+			expect(runs.runs[0]).toMatchObject({ status: "completed" });
+			expect(runs.runs[0]!.result!.followUps).toEqual([expect.objectContaining({ title: "Follow-up f1" })]);
+		});
+	});
+
+	it("does not report again a finding the user dismissed in the review it follows", async () => {
+		const { harness, start } = await fixture();
+		const both = {
+			...candidates(),
+			candidates: [
+				...candidates().candidates,
+				{
+					...candidates().candidates[0]!,
+					candidateId: "candidate-2",
+					title: "Zero is not reported",
+					rootCauseKey: "zero-divisor-unreported",
+				},
+			],
+		};
+		const decisions = [...verification().decisions, { ...verification().decisions[0]!, candidateId: "candidate-2" }];
+		const first = await start(
+			engine(
+				async (ctx) =>
+					void (await reviewCarefully(ctx, { candidates: both, verification: { ...verification(), decisions } })),
+			),
+		);
+		const findings = first.runs.runs[0]!.result!.findings;
+		const dismissed = findings.find((finding) => finding.title === "Zero returns the numerator")!;
+		const open = findings.find((finding) => finding.title === "Zero is not reported")!;
+		await recordReviewFindingOutcome(harness.session.sessionWriter, {
+			runId: first.workId,
+			findingId: dismissed.id,
+			status: "dismissed",
+			reason: "intentional",
+		});
+
+		// The engine reports both defects again and keeps the one still open.
+		let previous: readonly string[] = [];
+		let submission: Awaited<ReturnType<ReviewEngineContext["submit"]>> | undefined;
+		const second = await start(
+			engine(async (ctx) => {
+				previous = ctx.previousFindings.map((finding) => finding.id);
+				submission = await reviewCarefully(ctx, {
+					candidates: both,
+					verification: {
+						...verification(),
+						decisions,
+						priorFindingDecisions: [
+							{
+								findingId: open.id,
+								outcome: "open",
+								candidateId: "candidate-2",
+								method: "Read the head file.",
+								rationale: "Still unreported.",
+								confidence: 0.9,
+							},
+						],
+					},
+				});
+			}),
+			{ previousRunId: first.workId },
+		);
+		expect(previous).toEqual([open.id]);
+		expect(submission).toMatchObject({ completionStatus: "complete", findings: 1, rejected: [], errors: [] });
+		const record = second.runs.runs.find((run) => run.runId === second.workId)!;
+		expect(record).toMatchObject({ status: "completed", parentRunId: first.workId });
+		expect(record.result!.findings).toEqual([
+			expect.objectContaining({ id: open.id, status: "open", title: "Zero is not reported" }),
+		]);
+		expect(record.result!.findings.map((finding) => finding.fingerprint)).not.toContain(dismissed.fingerprint);
 	});
 
 	it("checks the parameters against the engine that runs, for the client that asked", async () => {

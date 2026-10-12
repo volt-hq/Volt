@@ -6,6 +6,7 @@
 
 import { type Static, Type } from "typebox";
 import { stringEnum } from "./helpers.ts";
+import { RpcEpochMillisecondsSchema } from "./primitives.ts";
 
 /** Workspace names count Unicode code points; 255 of them always fit the 1024-byte budget. */
 export const IROH_REMOTE_WORKSPACE_NAME_MAX_CODE_POINTS = 255;
@@ -46,7 +47,7 @@ export const IrohRemoteWorktreeSummarySchema = Type.Object(
 		id: Type.String(),
 		branch: Type.String(),
 		baseRef: Type.Optional(Type.String()),
-		createdAt: Type.Number(),
+		createdAt: RpcEpochMillisecondsSchema,
 		sessionIds: Type.Array(Type.String()),
 		available: Type.Optional(Type.Boolean()),
 		/** Uncommitted work in the checkout. */

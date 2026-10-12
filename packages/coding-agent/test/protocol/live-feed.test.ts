@@ -224,4 +224,31 @@ describe("live feed", () => {
 			},
 		]);
 	});
+
+	it("carries a fractional retry backoff's start time as whole epoch milliseconds", async () => {
+		const { harness, items } = await feedHarness({
+			settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 1.5 } },
+		});
+		const overloaded = () =>
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				error: { kind: "overloaded", retryable: true, message: "overloaded_error" },
+			});
+		harness.setResponses([overloaded(), overloaded()]);
+		const before = Date.now();
+		await harness.session.prompt("retry me");
+		await harness.session.waitForIdle();
+
+		const retries = items().flatMap((item) =>
+			item.type === "set" && item.value.kind === "phase" && item.value.retry ? [item.value.retry] : [],
+		);
+		expect(retries[0]).toEqual({
+			attempt: 1,
+			maxAttempts: 1,
+			retryAt: expect.any(Number),
+			error: "overloaded_error",
+		});
+		expect(Number.isSafeInteger(retries[0]?.retryAt)).toBe(true);
+		expect(retries[0]?.retryAt).toBeGreaterThanOrEqual(before + 2);
+	});
 });
