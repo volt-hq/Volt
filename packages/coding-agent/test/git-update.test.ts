@@ -302,11 +302,12 @@ describe("DefaultPackageManager git update", () => {
 			const initialCommit = createCommit(remoteDir, "extension.ts", "// v1", "Initial commit");
 
 			// Install with pinned ref from the start - full clone to ensure commit is available
+			const pinnedDir = join(agentDir, "git", "github.com", "test", `extension@${initialCommit}`);
 			mkdirSync(join(agentDir, "git", "github.com", "test"), { recursive: true });
-			git(["clone", remoteDir, installedDir], tempDir);
-			git(["checkout", initialCommit], installedDir);
-			git(["config", "--local", "user.email", "test@test.com"], installedDir);
-			git(["config", "--local", "user.name", "Test"], installedDir);
+			git(["clone", remoteDir, pinnedDir], tempDir);
+			git(["checkout", initialCommit], pinnedDir);
+			git(["config", "--local", "user.email", "test@test.com"], pinnedDir);
+			git(["config", "--local", "user.name", "Test"], pinnedDir);
 
 			// Add to global packages with pinned ref
 			settingsManager.setPackages([`${gitSource}@${initialCommit}`]);
@@ -317,11 +318,11 @@ describe("DefaultPackageManager git update", () => {
 			await packageManager.update();
 
 			// Should still be on initial commit
-			expect(getCurrentCommit(installedDir)).toBe(initialCommit);
-			expect(getFileContent(installedDir, "extension.ts")).toBe("// v1");
+			expect(getCurrentCommit(pinnedDir)).toBe(initialCommit);
+			expect(getFileContent(pinnedDir, "extension.ts")).toBe("// v1");
 		});
 
-		it("should checkout the configured pinned git ref during full and targeted updates", async () => {
+		it("should reconcile a pinned ref's checkout with its ref during full and targeted updates", async () => {
 			mkdirSync(remoteDir, { recursive: true });
 			initGitRepo(remoteDir);
 			const v1Commit = createCommit(remoteDir, "extension.ts", "// v1", "Initial commit");
@@ -329,25 +330,27 @@ describe("DefaultPackageManager git update", () => {
 			const v2Commit = createCommit(remoteDir, "extension.ts", "// v2", "Second commit");
 			git(["tag", "v2"], remoteDir);
 
+			// The checkout for v2 has drifted to v1.
+			const pinnedDir = join(agentDir, "git", "github.com", "test", "extension@v2");
 			mkdirSync(join(agentDir, "git", "github.com", "test"), { recursive: true });
-			git(["clone", remoteDir, installedDir], tempDir);
-			git(["checkout", "v1"], installedDir);
-			expect(getCurrentCommit(installedDir)).toBe(v1Commit);
+			git(["clone", remoteDir, pinnedDir], tempDir);
+			git(["checkout", "v1"], pinnedDir);
+			expect(getCurrentCommit(pinnedDir)).toBe(v1Commit);
 
 			const pinnedSource = `${gitSource}@v2`;
 			settingsManager.setPackages([pinnedSource]);
 
 			await packageManager.update();
 
-			expect(getCurrentCommit(installedDir)).toBe(v2Commit);
-			expect(getFileContent(installedDir, "extension.ts")).toBe("// v2");
+			expect(getCurrentCommit(pinnedDir)).toBe(v2Commit);
+			expect(getFileContent(pinnedDir, "extension.ts")).toBe("// v2");
 
-			git(["checkout", "v1"], installedDir);
+			git(["checkout", "v1"], pinnedDir);
 
 			await packageManager.update(pinnedSource);
 
-			expect(getCurrentCommit(installedDir)).toBe(v2Commit);
-			expect(getFileContent(installedDir, "extension.ts")).toBe("// v2");
+			expect(getCurrentCommit(pinnedDir)).toBe(v2Commit);
+			expect(getFileContent(pinnedDir, "extension.ts")).toBe("// v2");
 		});
 
 		it("should not reset an annotated tag checkout that already matches the configured ref", async () => {
@@ -356,10 +359,11 @@ describe("DefaultPackageManager git update", () => {
 			const taggedCommit = createCommit(remoteDir, "extension.ts", "// v1", "Initial commit");
 			git(["tag", "-a", "v1", "-m", "v1"], remoteDir);
 
+			const pinnedDir = join(agentDir, "git", "github.com", "test", "extension@v1");
 			mkdirSync(join(agentDir, "git", "github.com", "test"), { recursive: true });
-			git(["clone", remoteDir, installedDir], tempDir);
-			git(["checkout", "v1"], installedDir);
-			expect(getCurrentCommit(installedDir)).toBe(taggedCommit);
+			git(["clone", remoteDir, pinnedDir], tempDir);
+			git(["checkout", "v1"], pinnedDir);
+			expect(getCurrentCommit(pinnedDir)).toBe(taggedCommit);
 
 			settingsManager.setPackages([`${gitSource}@v1`]);
 
@@ -383,7 +387,7 @@ describe("DefaultPackageManager git update", () => {
 			expect(executedCommands).toContain("git fetch origin v1");
 			expect(executedCommands.some((command) => command.startsWith("git reset --hard"))).toBe(false);
 			expect(executedCommands).not.toContain("git clean -fdx");
-			expect(getCurrentCommit(installedDir)).toBe(taggedCommit);
+			expect(getCurrentCommit(pinnedDir)).toBe(taggedCommit);
 		});
 	});
 
@@ -445,7 +449,10 @@ describe("DefaultPackageManager git update", () => {
 
 		it("should not refresh pinned temporary git sources", async () => {
 			const managerWithPaths = packageManager as unknown as PackageManagerPathInternals;
-			const cachedDir = managerWithPaths.getGitInstallPath(managerWithPaths.parseSource(gitSource), "temporary");
+			const cachedDir = managerWithPaths.getGitInstallPath(
+				managerWithPaths.parseSource(`${gitSource}@main`),
+				"temporary",
+			);
 			const extensionFile = join(cachedDir, "volt-extensions", "session-breakdown.ts");
 
 			rmSync(cachedDir, { recursive: true, force: true });

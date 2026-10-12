@@ -315,6 +315,23 @@ export class TuiInput {
 		return (await this.store.client.intent("withdraw_queued")).result?.messages ?? [];
 	}
 
+	/**
+	 * The message the host lost while sending it, which holds later input back
+	 * until it is discarded: as the live `intents` value names it.
+	 */
+	stuckInput(): { readonly clientMessageId: string; readonly preview: string } | undefined {
+		const value = this.store.value("intents");
+		if (value?.kind !== "intents") return undefined;
+		const state = value.availability.find((intent) => intent.name === "discard_client_input")?.state;
+		if (typeof state?.value !== "string") return undefined;
+		return { clientMessageId: state.value, preview: state.label ?? "" };
+	}
+
+	/** Discard the stuck message `clientMessageId` without sending it again; resolves the next stuck one, if any. */
+	async discardStuck(clientMessageId: string): Promise<{ readonly clientMessageId: string } | undefined> {
+		return (await this.store.client.intent("discard_client_input", { clientMessageId })).result?.blocker;
+	}
+
 	/** The input queued for the next turn. */
 	queue(): QueueView {
 		return queuedInput(this.store.state);

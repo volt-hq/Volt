@@ -1047,7 +1047,7 @@ describe("Iroh remote transcript views", () => {
 		);
 	});
 
-	test("streams assistant transcript entries with canonical text across multiple text parts", async () => {
+	test("streams assistant transcript entries with text parts separated by a blank line", async () => {
 		const { conversation, phone } = await subscribedPhone();
 		const id = await conversation.session.sessionWriter.appendMessage(
 			fauxAssistantMessage([
@@ -1059,7 +1059,7 @@ describe("Iroh remote transcript views", () => {
 		const entry = await entryOf(phone, id);
 		expect("view" in entry ? entry.view : undefined).toMatchObject({
 			role: "assistant",
-			text: ["Here is a plan:", "- Step one", "- Step two", "```swift", "\tlet value = 1", "```"].join("\n"),
+			text: "Here is a plan:\n- Step one\n\n\n- Step two\n```swift\n\tlet value = 1\n```",
 			truncated: false,
 			parts: [
 				{ type: "text", text: "Here is a plan:\n- Step one", truncated: false },

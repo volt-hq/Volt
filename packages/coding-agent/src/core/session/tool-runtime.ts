@@ -87,6 +87,23 @@ function normalizePromptGuidelines(guidelines: string[] | undefined): string[] {
 	return Array.from(unique);
 }
 
+/**
+ * A deep copy of a tool parameter schema. Plain objects and arrays are copied
+ * with each property's descriptor, so TypeBox's non-enumerable markers stay out
+ * of serialization; other objects are kept as they are.
+ */
+function copySchema<T>(value: T): T {
+	if (typeof value !== "object" || value === null) return value;
+	const prototype: object | null = Object.getPrototypeOf(value);
+	if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) return value;
+	const descriptors: PropertyDescriptorMap = Object.getOwnPropertyDescriptors(value);
+	for (const key of Reflect.ownKeys(descriptors)) {
+		const descriptor = descriptors[key];
+		if ("value" in descriptor) descriptor.value = copySchema(descriptor.value);
+	}
+	return Object.defineProperties(Array.isArray(value) ? [] : Object.create(prototype), descriptors);
+}
+
 export interface SessionToolRuntimeHost {
 	readonly sessionManager: SessionManager;
 	readonly settingsManager: SettingsManager;
@@ -357,6 +374,9 @@ export class SessionToolRuntime {
 
 	/**
 	 * Get all configured tools with name, description, parameter schema, prompt guidelines, and source metadata.
+	 * Each `parameters`, `promptGuidelines`, and `sourceInfo` is a copy, so callers cannot change the schema the model
+	 * is offered and arguments are validated against, the system prompt, or which tools the registry treats as trusted
+	 * built-ins.
 	 */
 	getAllTools(): ToolInfo[] {
 		return Array.from(this.toolDefinitions.values())
@@ -364,9 +384,9 @@ export class SessionToolRuntime {
 			.map(({ definition, sourceInfo }) => ({
 				name: definition.name,
 				description: definition.description,
-				parameters: definition.parameters,
-				promptGuidelines: definition.promptGuidelines,
-				sourceInfo,
+				parameters: copySchema(definition.parameters),
+				promptGuidelines: definition.promptGuidelines && [...definition.promptGuidelines],
+				sourceInfo: { ...sourceInfo },
 			}));
 	}
 

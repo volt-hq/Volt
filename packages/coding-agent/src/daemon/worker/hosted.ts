@@ -23,6 +23,7 @@ import type { HostedConversation } from "../../core/host/hosted-conversation.ts"
 import { sameFilesystemLocation } from "../../core/host/session-summaries.ts";
 import type { HostedRedirect, RedirectTarget } from "../../core/host/targets.ts";
 import { HostReviewDiscussionService, type ReviewDiscussionService } from "../../core/review-discussions.ts";
+import { ReviewSourceUnavailableError } from "../../core/review-links.ts";
 import { SessionManager, type SessionReference } from "../../core/session-manager.ts";
 import type { SubagentRuntimeRegistration } from "../../core/subagents/index.ts";
 import type { WorkerHostKind, WorkerSpawnSpec } from "../control-protocol.ts";
@@ -105,17 +106,21 @@ export class WorkerConversations {
 		this.onCatalogChanged = options.onCatalogChanged;
 		this.reviews = new HostReviewDiscussionService({
 			findRuntime: (ref, requester) => {
-				if (!this.isHosted(requester)) throw new Error("Review requester runtime is unavailable");
+				if (!this.isHosted(requester))
+					throw new ReviewSourceUnavailableError("Review requester runtime is unavailable");
 				return [...this.hosted.values()].find((hosted) => sameRef(ref, hosted.conversation.session.sessionRef))
 					?.conversation;
 			},
 			assertCurrent: (runtime) => {
-				if (!this.isHosted(runtime) || this.stopping) throw new Error("Review runtime ownership changed");
+				if (!this.isHosted(runtime) || this.stopping) {
+					throw new ReviewSourceUnavailableError("Review runtime ownership changed");
+				}
 			},
 			// An unloaded source is claimed for the write, so no other worker opens it meanwhile. One open here
 			// under another reference (another group's) is that conversation's to write, not this one's.
 			withSourceWrite: async (requester, ref, write) => {
-				if (!this.isHosted(requester)) throw new Error("Review source writer authority changed");
+				if (!this.isHosted(requester))
+					throw new ReviewSourceUnavailableError("Review source writer authority changed");
 				if (this.hosted.has(ref.sessionId)) {
 					throw new WorkerRequestError("claimed", "another conversation in this worker hosts that source");
 				}
