@@ -303,7 +303,7 @@ A follow-up submitted while a turn runs, then delivered (one block, in order):
 {"type":"message","id":"d4e5f6a7","parentId":"b2c3d4e5","timestamp":"2026-10-06T12:00:09.000Z","ordinal":6,"message":{"role":"user","content":[{"type":"text","text":"Continue"}],"timestamp":1791288009000},"clientMessageId":"client-1"}
 ```
 
-When a session opens, accepted inputs with a queued delivery are replayed in admission order (the ordinal of the queued entry, or of the receipt). A `started` input with no completing message or terminal state is ambiguous: it may or may not have reached the model, so it is never replayed, and later input waits behind it until it is settled (`client_input_outcome_ambiguous`).
+When a session opens, accepted inputs with a queued delivery are replayed in admission order (the ordinal of the queued entry, or of the receipt). A `started` input with no completing message or terminal state is ambiguous: it may or may not have reached the model, so it is never replayed, and later input waits behind it until it is settled (`client_input_outcome_ambiguous`). Only an explicit discard settles it (`discard_client_input`, or `/discard-stuck` in interactive mode): the input becomes `failed`, and the queued input behind it replays in order.
 
 ## Work Entries (host-only)
 

@@ -369,6 +369,7 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 			case "thinking_level_changed":
 			case "planning_state_changed":
 			case "fast_mode_changed":
+			case "ambiguous_client_input_changed":
 				updateIntents();
 				return;
 			default:

@@ -371,6 +371,7 @@ function errorMessage(error: unknown): string {
 /** Rejection codes of the coded errors a run can fail with; any other failure is `failed`. */
 const CODED_REJECTIONS: Readonly<Record<string, RejectionReason["code"]>> = {
 	client_input_conflict: "conflict",
+	client_input_recovery_blocked: "unavailable",
 	conversation_locked: "locked",
 };
 

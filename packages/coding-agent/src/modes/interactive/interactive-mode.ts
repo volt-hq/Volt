@@ -3697,6 +3697,11 @@ export class InteractiveMode {
 				await this.handleClearCommand();
 				return;
 			}
+			if (text === "/discard-stuck") {
+				this.editor.setText("");
+				await this.handleDiscardStuckCommand();
+				return;
+			}
 			if (text === "/compact" || text.startsWith("/compact ")) {
 				const customInstructions = text.startsWith("/compact ") ? text.slice(9).trim() : undefined;
 				this.editor.setText("");
@@ -4412,10 +4417,18 @@ export class InteractiveMode {
 		}
 		const images = await this.collectPromptImages(text);
 		const operation = this.store.phase?.operation;
-		const delivery: Delivery = await this.input.send(text, {
-			followUp: options.followUp,
-			...(images === undefined ? {} : { images }),
-		});
+		let delivery: Delivery;
+		try {
+			delivery = await this.input.send(text, {
+				followUp: options.followUp,
+				...(images === undefined ? {} : { images }),
+			});
+		} catch (error) {
+			// A message the host lost while sending it holds this one back: say how to release it.
+			const stuck = this.input.stuckInput();
+			if (stuck === undefined || !errorText(error).includes(stuck.clientMessageId)) throw error;
+			throw new Error(`${errorText(error)}. Run /discard-stuck to discard the stuck message.`, { cause: error });
+		}
 		if (delivery === "operation") {
 			this.showStatus(
 				operation === "compaction" || operation === "navigation"
@@ -7980,6 +7993,38 @@ export class InteractiveMode {
 			);
 			return { component: hotkeys, focus: hotkeys };
 		});
+	}
+
+	/**
+	 * `/discard-stuck`: discard, once the user confirms, the message the host
+	 * lost while sending it, which holds later input back. It is not sent
+	 * again; queued messages behind it then run in order.
+	 */
+	private async handleDiscardStuckCommand(): Promise<void> {
+		await this.clientConnected.promise;
+		const stuck = this.input.stuckInput();
+		if (stuck === undefined) {
+			this.showStatus("No message is stuck");
+			return;
+		}
+		const confirmed = await this.showExtensionConfirm(
+			"Discard stuck message",
+			`${stuck.preview}\n\nThe host stopped while sending this message; it may or may not have reached the agent. Discard it without sending it again?`,
+		);
+		if (!confirmed) {
+			this.showStatus("Discard cancelled");
+			return;
+		}
+		try {
+			const next = await this.input.discardStuck(stuck.clientMessageId);
+			this.showStatus(
+				next === undefined
+					? "Discarded the stuck message"
+					: "Discarded the stuck message; another one is stuck: run /discard-stuck again",
+			);
+		} catch (error: unknown) {
+			this.showError(`Failed to discard the stuck message: ${errorText(error)}`);
+		}
 	}
 
 	/** `/clear` and the new-session key: a running turn stops, then the client moves to a new session. */

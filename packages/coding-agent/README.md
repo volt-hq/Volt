@@ -184,6 +184,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
 | `/compact [prompt]` | Manually compact context, optional custom instructions |
+| `/discard-stuck` | Discard a message Volt stopped while sending (it may or may not have reached the model), so later messages can run |
 | `/copy` | Copy last assistant message to clipboard |
 | `/export [file]` | Export session to HTML file |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
