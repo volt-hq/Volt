@@ -1359,7 +1359,7 @@ if (result.cancelled) {
 
 Options:
 - `parentSessionRef`: persisted parent identity to record for the new session
-- `setup`: write the new session before it opens, through its async `SessionWriter` (`writer.sessionManager` reads it), before `withSession` runs
+- `setup`: write the new session before it opens, through its async `SessionWriter`, before `withSession` runs. `writer.sessionManager` is a read-only view of the new session with the same methods as [`ctx.sessionManager`](#ctxsessionmanager); they return copies of the entries and header they read, so changing one does not change the session
 - `withSession`: run post-switch work against a fresh context of the new session. Do not use captured old `volt` / command `ctx`; see [Session changes: lifecycle and footguns](#session-changes-lifecycle-and-footguns).
 
 Result (`SessionIntentResult`), the same for `fork()` and `switchSession()`:
