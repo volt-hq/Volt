@@ -1,0 +1,4 @@
+{
+	"reviewTools": ["bash"],
+	"reviewSetup": { "command": "npm ci --ignore-scripts", "timeoutMs": 900000 }
+}
