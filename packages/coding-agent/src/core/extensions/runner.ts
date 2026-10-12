@@ -22,7 +22,7 @@ import type { ExtensionSessionWriter } from "../session-writer.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import type { MessagePresenter } from "../ui/presentation.ts";
 import type { DeclaredWorkKind, StartWorkHandler } from "../work/extension-kinds.ts";
-import { type PermissionHolder, permissionCheckedModelRegistry } from "./permissions.ts";
+import { type PermissionHolder, permissionCheckedModelRegistry, requirePermission } from "./permissions.ts";
 import {
 	type ExtensionServicesManager,
 	extensionServicesForbidden,
@@ -51,6 +51,8 @@ import type {
 	ExtensionFlag,
 	ExtensionLifetime,
 	ExtensionMode,
+	ExtensionReviews,
+	ExtensionReviewsHandler,
 	ExtensionRuntime,
 	ExtensionUIContext,
 	InputEvent,
@@ -508,6 +510,14 @@ export class ExtensionRunner {
 	private staleMessage: string | undefined;
 	private servicesManager: ExtensionServicesManager | undefined;
 	private startWorkFn: StartWorkHandler = () => Promise.reject(new Error("Work is not available in this runtime"));
+	private reviewsHandler: ExtensionReviewsHandler = {
+		engines: () => [],
+		start: () => Promise.reject(new Error("Reviews are not available in this runtime")),
+		result: () => Promise.resolve(undefined),
+		cancel: () => Promise.reject(new Error("Reviews are not available in this runtime")),
+		publish: () => Promise.reject(new Error("Reviews are not available in this runtime")),
+		recordOutcome: () => Promise.reject(new Error("Reviews are not available in this runtime")),
+	};
 
 	/** @throws when an extension's id is not a manifest id or two extensions share one: ownership is by id. */
 	constructor(
@@ -542,6 +552,11 @@ export class ExtensionRunner {
 			this.assertActive();
 			refresh();
 		};
+	}
+
+	/** Run and read the extensions' reviews (`ctx.reviews`) through `handler`. */
+	bindReviews(handler: ExtensionReviewsHandler): void {
+		this.reviewsHandler = handler;
 	}
 
 	emitRequestBoundary(event: RequestBoundaryEvent): void {
@@ -1248,6 +1263,55 @@ export class ExtensionRunner {
 			startWork: (kind, options, run) => {
 				assertRunning();
 				return runner.startWorkFn(owner, kind, options, run);
+			},
+			get reviews() {
+				assertActive();
+				return runner.reviewsFor(owner, assertActive, assertRunning);
+			},
+		};
+	}
+
+	/** `ctx.reviews` of the extension `owner`: starting, posting, and recording outcomes need `exec`. */
+	private reviewsFor(
+		owner: string | undefined,
+		assertActive: () => void,
+		assertRunning: () => void,
+	): ExtensionReviews {
+		const requireOwner = (use: string): string => {
+			if (owner === undefined)
+				throw new Error(`${use} is available only in an extension's own handlers, commands, and tools`);
+			return owner;
+		};
+		return {
+			engines: () => {
+				assertActive();
+				return this.reviewsHandler.engines();
+			},
+			start: async (options) => {
+				assertRunning();
+				const id = requireOwner("ctx.reviews.start");
+				requirePermission(this.permissionHolder(id), "exec", "ctx.reviews.start");
+				return await this.reviewsHandler.start(id, options);
+			},
+			result: async (runId) => {
+				assertActive();
+				return await this.reviewsHandler.result(runId);
+			},
+			cancel: async (runId) => {
+				assertRunning();
+				await this.reviewsHandler.cancel(requireOwner("ctx.reviews.cancel"), runId);
+			},
+			publish: async (runId, options) => {
+				assertRunning();
+				const id = requireOwner("ctx.reviews.publish");
+				requirePermission(this.permissionHolder(id), "exec", "ctx.reviews.publish");
+				return await this.reviewsHandler.publish(id, runId, options);
+			},
+			recordOutcome: async (runId, findingId, outcome) => {
+				assertRunning();
+				const id = requireOwner("ctx.reviews.recordOutcome");
+				requirePermission(this.permissionHolder(id), "exec", "ctx.reviews.recordOutcome");
+				await this.reviewsHandler.recordOutcome(id, runId, findingId, outcome);
 			},
 		};
 	}

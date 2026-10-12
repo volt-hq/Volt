@@ -44,6 +44,7 @@ import type {
 import { type ReviewSnapshot, resolveReviewSnapshot } from "../../src/core/review-snapshot.ts";
 import {
 	createReviewRunRecord,
+	followUpReviewPlan,
 	getReviewRun,
 	listReviewRuns,
 	type ReviewRunRecord,
@@ -1547,6 +1548,462 @@ describe("review pipeline", () => {
 			completionStatus: "complete",
 			overallCorrectness: "correct",
 			summary: "Review completed with 1 verified finding.",
+		});
+	});
+
+	it("follows an earlier run: reviews everything, keeps the id of a finding still open, and returns the fixed ones", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const snapshot = await createSnapshotRepository(harness);
+		snapshots.push(snapshot);
+		const prior = (id: string, fingerprint: string): ReviewFinding => ({
+			id,
+			fingerprint,
+			status: "open",
+			title: `Earlier ${id}`,
+			body: "Found by the earlier round.",
+			trigger: "Call divide.",
+			impact: "Wrong result.",
+			category: "correctness",
+			rootCauseKey: id,
+			priority: 2,
+			confidence: 0.9,
+			changeLocation: { path: "src/value.ts", side: "head", startLine: 1, endLine: 1 },
+			evidenceLocations: [],
+			verification: { outcome: "accepted", method: "Read it.", rationale: "It was there.", confidence: 0.9 },
+		});
+		const previousRun = createReviewRunRecord({
+			workflowId: "review:previous-round",
+			workflowAction: "review.uncommitted",
+			startedAt: 1,
+			snapshot,
+			controls: { ...DEFAULT_REVIEW_RUN_CONTROLS, scopeMode: "full" },
+			status: "completed",
+			result: {
+				completionStatus: "complete",
+				summary: "Two findings.",
+				findings: [prior("still-open", "a".repeat(64)), prior("was-fixed", "b".repeat(64))],
+				coverage: {
+					changedFileInventoryComplete: true,
+					filesInspected: [],
+					hunksInspected: [],
+					commandsRun: [],
+					failedVerificationAttempts: [],
+					exclusions: [],
+					uncheckedAreas: [],
+					residualRisk: [],
+					modelReportedLimitations: [],
+				},
+				overallCorrectness: "incorrect",
+				overallExplanation: "Two findings remain.",
+			},
+		});
+		const prompts: string[] = [];
+		const pageDiffs = [
+			fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("review_diff", { path: "REVIEW.md" }), { stopReason: "toolUse" }),
+		];
+		// Each pass pages the changed files first, and its prompt is recorded.
+		const recordPrompt: FauxResponseFactory = (context) => {
+			prompts.push(JSON.stringify(context.messages));
+			return fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" });
+		};
+		harness.setResponses([
+			recordPrompt,
+			...pageDiffs,
+			fauxAssistantMessage(fauxToolCall("report_review_candidates", candidateReport() as never), {
+				stopReason: "toolUse",
+			}),
+			recordPrompt,
+			...pageDiffs,
+			fauxAssistantMessage(
+				fauxToolCall("report_review_verification", {
+					...verificationReport(),
+					priorFindingDecisions: [
+						{
+							findingId: "still-open",
+							outcome: "open",
+							candidateId: "candidate-1",
+							method: "Read the head.",
+							rationale: "It moved to line 2.",
+							confidence: 0.9,
+						},
+						{
+							findingId: "was-fixed",
+							outcome: "fixed",
+							method: "Read the head.",
+							rationale: "The guard is gone.",
+							confidence: 0.9,
+						},
+					],
+				} as never),
+				{ stopReason: "toolUse" },
+			),
+		]);
+
+		const run = await runReview({
+			cwd: harness.tempDir,
+			agentDir: harness.tempDir,
+			model: harness.getModel(),
+			verifierModel: harness.getModel(),
+			authStorage: harness.authStorage,
+			modelRegistry: harness.session.modelRegistry,
+			settingsManager: harness.settingsManager,
+			resolved: snapshot,
+			controls: { scopeMode: "full" },
+			incrementalPlan: followUpReviewPlan(previousRun, snapshot, []),
+		});
+		snapshots.splice(snapshots.indexOf(snapshot), 1);
+		expect(run.errorMessage).toBeUndefined();
+		// Both passes were given the earlier round's open findings, and the whole change to review.
+		expect(prompts[0]).toContain('previous_review run_id=\\"review:previous-round\\"');
+		expect(prompts[0]).not.toContain("incremental_context");
+		expect(prompts[1]).toContain("prior_finding_guidance");
+		expect(prompts[1]).toContain("still-open");
+		expect(run.parsed?.findings).toEqual([
+			expect.objectContaining({
+				id: "still-open",
+				status: "open",
+				title: "Zero returns the numerator",
+				changeLocation: { path: "src/value.ts", side: "head", startLine: 2, endLine: 2 },
+			}),
+		]);
+		expect(run.fixedPriorFindings).toEqual([expect.objectContaining({ findingId: "was-fixed", outcome: "fixed" })]);
+		expect(run.parsed).toMatchObject({ completionStatus: "complete", overallCorrectness: "incorrect" });
+	});
+
+	describe("the checkout of a review that runs commands", () => {
+		async function reviewWithSetup(setup: { command: string; timeoutMs?: number }, responses: FauxResponseFactory[]) {
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const snapshot = await createSnapshotRepository(harness);
+			snapshots.push(snapshot);
+			harness.setResponses(responses);
+			const run = await runReview({
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				model: harness.getModel(),
+				verifierModel: harness.getModel(),
+				authStorage: harness.authStorage,
+				modelRegistry: harness.session.modelRegistry,
+				settingsManager: harness.settingsManager,
+				resolved: snapshot,
+				controls: { scopeMode: "full", scope: ["src/**"] },
+				tools: ["bash"],
+				setup,
+			});
+			snapshots.splice(snapshots.indexOf(snapshot), 1);
+			return { run, workspace: harness.tempDir };
+		}
+
+		it("is set up before the first pass, so the passes' commands find what the setup made", async () => {
+			const seen: string[] = [];
+			const { run, workspace } = await reviewWithSetup({ command: "printf ready > setup-marker" }, [
+				() =>
+					fauxAssistantMessage(fauxToolCall("bash", { command: "cat setup-marker" }), { stopReason: "toolUse" }),
+				(context) => {
+					seen.push(JSON.stringify(context.messages.at(-1)));
+					return fauxAssistantMessage(
+						fauxToolCall("report_review_candidates", { summary: "Nothing.", candidates: [], limitations: [] }),
+						{ stopReason: "toolUse" },
+					);
+				},
+				() =>
+					fauxAssistantMessage(
+						fauxToolCall("report_review_verification", {
+							summary: "Nothing omitted.",
+							assessment: "complete",
+							decisions: [],
+							priorFindingDecisions: [],
+							limitations: [],
+						}),
+						{ stopReason: "toolUse" },
+					),
+			]);
+			expect(run.errorMessage).toBeUndefined();
+			expect(seen[0]).toContain("ready");
+			expect(run.parsed?.coverage.commandsRun).toEqual(["cat setup-marker"]);
+			// The setup ran in the disposable checkout, never in the workspace.
+			expect(existsSync(join(workspace, "setup-marker"))).toBe(false);
+		});
+
+		it("fails the review, saying why, when its setup fails or runs too long", async () => {
+			const failed = await reviewWithSetup({ command: "echo no-registry >&2; exit 3" }, []);
+			expect(failed.run.errorMessage).toBe("The review checkout's setup failed (exit 3): no-registry");
+			expect(failed.run.publicErrorMessage).toBe(failed.run.errorMessage);
+			const slow = await reviewWithSetup({ command: "sleep 5", timeoutMs: 100 }, []);
+			expect(slow.run.errorMessage).toBe("The review checkout's setup timed out");
+		});
+
+		it("leaves no log of a long setup's output behind", async () => {
+			const scratch = mkdtempSync(join(tmpdir(), "review-setup-log-"));
+			// After afterEach, which removes the harness made under it.
+			onTestFinished(() => rm(scratch, { recursive: true, force: true }));
+			vi.stubEnv("TMPDIR", scratch);
+			const { run } = await reviewWithSetup({ command: "yes setup-output | head -n 20000; exit 3" }, []);
+			expect(run.errorMessage).toMatch(/^The review checkout's setup failed \(exit 3\): .*setup-output$/s);
+			expect(readdirSync(scratch).filter((name) => name.startsWith("volt-bash-"))).toEqual([]);
+		});
+	});
+
+	describe("follow-ups", () => {
+		const followUp = (body = "AGENTS.md carries a one-line policy with no review rules.") => ({
+			followUpId: "f1",
+			title: "Policy file is terse",
+			body,
+			category: "docs",
+			rootCauseKey: "terse-policy",
+			priority: 3,
+			// A file the change does not touch.
+			location: { path: "AGENTS.md", side: "head", startLine: 1, endLine: 1 },
+		});
+		const acceptFollowUp = {
+			followUpId: "f1",
+			outcome: "accept",
+			method: "Read AGENTS.md at head.",
+			rationale: "It holds one line.",
+			confidence: 0.8,
+		};
+
+		/** A review of src/value.ts whose discovery reports one follow-up and whose verifier accepts it. */
+		async function reviewWithFollowUp(collect: boolean) {
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const snapshot = await createSnapshotRepository(harness);
+			snapshots.push(snapshot);
+			const prompts: string[] = [];
+			const recordPrompt: FauxResponseFactory = (context) => {
+				prompts.push(JSON.stringify(context.messages));
+				return fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" });
+			};
+			const pageDiff = fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), {
+				stopReason: "toolUse",
+			});
+			harness.setResponses([
+				recordPrompt,
+				pageDiff,
+				fauxAssistantMessage(
+					fauxToolCall("report_review_candidates", {
+						summary: "No defect in the change.",
+						candidates: [],
+						followUps: [followUp()],
+						limitations: [],
+					}),
+					{ stopReason: "toolUse" },
+				),
+				recordPrompt,
+				pageDiff,
+				fauxAssistantMessage(
+					fauxToolCall("report_review_verification", {
+						summary: "Nothing omitted.",
+						assessment: "complete",
+						decisions: [],
+						priorFindingDecisions: [],
+						...(collect ? { followUpDecisions: [acceptFollowUp] } : {}),
+						limitations: [],
+					}),
+					{ stopReason: "toolUse" },
+				),
+			]);
+			const run = await runReview({
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				model: harness.getModel(),
+				verifierModel: harness.getModel(),
+				authStorage: harness.authStorage,
+				modelRegistry: harness.session.modelRegistry,
+				settingsManager: harness.settingsManager,
+				resolved: snapshot,
+				controls: { scopeMode: "full", scope: ["src/**"] },
+				...(collect ? { followUps: true } : {}),
+			});
+			snapshots.splice(snapshots.indexOf(snapshot), 1);
+			return { run, prompts };
+		}
+
+		it("keeps verified follow-ups apart from the findings, without touching the verdict", async () => {
+			const { run, prompts } = await reviewWithFollowUp(true);
+			expect(run.errorMessage).toBeUndefined();
+			expect(prompts[0]).toContain("follow_up_guidance");
+			expect(prompts[1]).toContain("follow_up_candidates");
+			expect(run.parsed).toMatchObject({
+				completionStatus: "complete",
+				overallCorrectness: "correct",
+				findings: [],
+				followUps: [
+					{
+						id: expect.any(String),
+						fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
+						title: "Policy file is terse",
+						category: "docs",
+						priority: 3,
+						location: { path: "AGENTS.md", side: "head", startLine: 1, endLine: 1 },
+						verification: { method: "Read AGENTS.md at head.", rationale: "It holds one line.", confidence: 0.8 },
+					},
+				],
+			});
+		});
+
+		it("leaves follow-ups out of a review that does not collect them", async () => {
+			const { run, prompts } = await reviewWithFollowUp(false);
+			expect(run.errorMessage).toBeUndefined();
+			expect(prompts[0]).not.toContain("follow_up_guidance");
+			expect(prompts[1]).not.toContain("follow_up_candidates");
+			expect(run.parsed).not.toHaveProperty("followUps");
+		});
+
+		it("leaves out follow-ups still invalid after the repair attempt, rather than fail the review", async () => {
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const snapshot = await createSnapshotRepository(harness);
+			snapshots.push(snapshot);
+			const repairs: string[] = [];
+			const report =
+				(name: string, payload: object): FauxResponseFactory =>
+				(context) => {
+					const prompt = JSON.stringify(context.messages.at(-1));
+					if (prompt.includes("This is the only repair attempt")) repairs.push(prompt);
+					return fauxAssistantMessage(fauxToolCall(name, payload as never), { stopReason: "toolUse" });
+				};
+			const page = [
+				fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), { stopReason: "toolUse" }),
+			];
+			// A follow-up on the base side is invalid, and so is a decision about a follow-up the review did not keep.
+			const candidates = {
+				summary: "No defect in the change.",
+				candidates: [],
+				followUps: [
+					followUp(),
+					{
+						...followUp(),
+						followUpId: "f2",
+						rootCauseKey: "base-side",
+						location: { path: "AGENTS.md", side: "base", startLine: 1, endLine: 1 },
+					},
+				],
+				limitations: [],
+			};
+			const verification = {
+				summary: "Nothing omitted.",
+				assessment: "complete",
+				decisions: [],
+				priorFindingDecisions: [],
+				followUpDecisions: [acceptFollowUp, { ...acceptFollowUp, followUpId: "f2" }],
+				limitations: [],
+			};
+			harness.setResponses([
+				...page,
+				report("report_review_candidates", candidates),
+				report("report_review_candidates", candidates),
+				...page,
+				report("report_review_verification", verification),
+				report("report_review_verification", verification),
+			]);
+			const run = await runReview({
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				model: harness.getModel(),
+				verifierModel: harness.getModel(),
+				authStorage: harness.authStorage,
+				modelRegistry: harness.session.modelRegistry,
+				settingsManager: harness.settingsManager,
+				resolved: snapshot,
+				controls: { scopeMode: "full", scope: ["src/**"] },
+				followUps: true,
+			});
+			snapshots.splice(snapshots.indexOf(snapshot), 1);
+			expect(run.errorMessage).toBeUndefined();
+			// Each pass was asked once to correct its follow-ups.
+			expect(repairs).toHaveLength(2);
+			expect(repairs[0]).toContain("followUps[1].location must be on the head side");
+			expect(repairs[1]).toContain("references unknown follow-up f2");
+			expect(run.parsed).toMatchObject({
+				completionStatus: "complete",
+				overallCorrectness: "correct",
+				findings: [],
+			});
+			expect(run.parsed?.followUps).toEqual([expect.objectContaining({ title: "Policy file is terse" })]);
+		});
+
+		it("renders a pull request review's follow-ups without its discussion", async () => {
+			const privateMarker = "private-follow-up-marker";
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const snapshot = await createSnapshotRepository(harness);
+			attachGitHubContext(snapshot, privateMarker);
+			snapshots.push(snapshot);
+			const presentationPrompts: string[] = [];
+			const pass = (report: object, name: string) => [
+				fauxAssistantMessage(fauxToolCall("review_context", {}), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall(name, report as never), { stopReason: "toolUse" }),
+			];
+			harness.setResponses([
+				...pass(
+					{ summary: privateMarker, candidates: [], followUps: [followUp(privateMarker)], limitations: [] },
+					"report_review_candidates",
+				),
+				...pass(
+					{
+						summary: privateMarker,
+						assessment: "complete",
+						decisions: [],
+						priorFindingDecisions: [],
+						followUpDecisions: [{ ...acceptFollowUp, rationale: privateMarker }],
+						limitations: [],
+					},
+					"report_review_verification",
+				),
+				(context) => {
+					presentationPrompts.push(JSON.stringify(context.messages));
+					return fauxAssistantMessage(fauxToolCall("review_file", { path: "AGENTS.md" }), {
+						stopReason: "toolUse",
+					});
+				},
+				(context) =>
+					fauxAssistantMessage(
+						fauxToolCall("report_review_presentations", {
+							findings: [],
+							followUps: [
+								{
+									presentationId: presentationIdFromMessages(context.messages),
+									title: "Policy file is terse",
+									body: "AGENTS.md is a single line.",
+									category: "docs",
+									rationale: "The head file has one line.",
+								},
+							],
+						}),
+						{ stopReason: "toolUse" },
+					),
+			]);
+
+			const run = await runReview({
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				model: harness.getModel(),
+				verifierModel: harness.getModel(),
+				authStorage: harness.authStorage,
+				modelRegistry: harness.session.modelRegistry,
+				settingsManager: harness.settingsManager,
+				resolved: snapshot,
+				controls: { scopeMode: "full", scope: ["src/**"] },
+				followUps: true,
+			});
+			snapshots.splice(snapshots.indexOf(snapshot), 1);
+			expect(run.errorMessage).toBeUndefined();
+			// The pass that wrote it saw the follow-up's place, not what discovery or the verifier wrote about it.
+			expect(presentationPrompts[0]).toContain("declassified_follow_ups");
+			expect(presentationPrompts[0]).not.toContain(privateMarker);
+			expect(run.parsed?.followUps).toEqual([
+				expect.objectContaining({
+					body: "AGENTS.md is a single line.",
+					verification: expect.objectContaining({ rationale: "The head file has one line." }),
+				}),
+			]);
+			expect(JSON.stringify(run.parsed)).not.toContain(privateMarker);
 		});
 	});
 

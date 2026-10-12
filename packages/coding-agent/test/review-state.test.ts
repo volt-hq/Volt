@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { convertToLlm } from "../src/core/messages.ts";
 import { createReviewSeedMessage, STATIC_REVIEW_LIMITATION } from "../src/core/review-presentation.ts";
-import type { ParsedReview, ReviewFinding } from "../src/core/review-report.ts";
+import { type ParsedReview, type ReviewFinding, settleReviewVerdict } from "../src/core/review-report.ts";
 import type { ReviewSnapshot } from "../src/core/review-snapshot.ts";
 import {
 	acknowledgeReviewRun,
@@ -12,9 +12,15 @@ import {
 	appendReviewPublication,
 	appendReviewRun,
 	appendReviewRunDurably,
+	applyPreviousFindingDecisions,
+	assertFollowsReviewOf,
 	captureReviewStateForHandoff,
+	closeFixedFindings,
 	createReviewRunRecord,
+	decidesPreviousFindings,
+	dismissedFingerprintsOfFollowedRuns,
 	exportReviewFeedback,
+	followUpReviewPlan,
 	getReviewRun,
 	listReviewRuns,
 	MAX_HYDRATED_REVIEW_RUNS,
@@ -28,6 +34,7 @@ import {
 	restoreReviewStateFromHandoff,
 	reviewRunEngine,
 	STANDARD_REVIEW_ENGINE,
+	settlePreviousFindings,
 } from "../src/core/review-state.ts";
 import { createReviewFileMetadata } from "../src/core/review-target-metadata.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -666,6 +673,287 @@ describe("durable review state", () => {
 			mode: "incremental",
 			previousRun: { runId: "run-1" },
 			changedPaths: [],
+		});
+	});
+
+	describe("a review that follows an earlier run", () => {
+		const decision = (findingId: string, outcome: "open" | "fixed" | "uncertain", candidateId?: string) => ({
+			findingId,
+			outcome,
+			...(candidateId === undefined ? {} : { candidateId }),
+			method: "Read the head.",
+			rationale: `It is ${outcome}.`,
+			confidence: 0.9,
+		});
+
+		it("reviews every changed path and decides the findings that run left open", () => {
+			const previous = record("run-1", 1, [
+				finding({ id: "open-1" }),
+				finding({ id: "fixed-1", status: "fixed", fingerprint: "b".repeat(64) }),
+				finding({ id: "dismissed-1", status: "dismissed", fingerprint: "c".repeat(64) }),
+			]);
+			const plan = followUpReviewPlan(previous, snapshot("blob-2"), []);
+			expect(plan).toMatchObject({
+				mode: "full",
+				previousRun: { runId: "run-1" },
+				changedPaths: ["src/value.ts"],
+				suppressedDismissedFingerprints: ["c".repeat(64)],
+			});
+			expect(plan.priorOpenFindings.map((open) => open.id)).toEqual(["open-1"]);
+			expect(decidesPreviousFindings(plan)).toBe(true);
+			const manager = SessionManager.inMemory("/tmp/review-state");
+			expect(
+				decidesPreviousFindings(
+					planIncrementalReview(manager, snapshot("blob-2"), {
+						scope: [],
+						effort: "standard",
+						includeOptional: false,
+						scopeMode: "incremental",
+					}),
+				),
+			).toBe(false);
+		});
+
+		it("does not report again a finding dismissed in a run the previous run followed", async () => {
+			const manager = SessionManager.inMemory("/tmp/review-state");
+			await appendReviewRun(
+				manager.logWriter,
+				record("run-1", 1, [finding({ id: "x" }), finding({ id: "y", fingerprint: "b".repeat(64) })]),
+			);
+			await appendReviewFindingTransition(manager.logWriter, {
+				runId: "run-1",
+				findingId: "x",
+				status: "dismissed",
+				reason: "intentional",
+			});
+			// The round that followed it left the dismissed finding out.
+			await appendReviewRun(manager.logWriter, {
+				...record("run-2", 2, [finding({ id: "y", fingerprint: "b".repeat(64) })]),
+				parentRunId: "run-1",
+			});
+			const previous = getReviewRun(manager, "run-2");
+			if (!previous) throw new Error("Expected run-2");
+
+			const dismissedEarlier = await dismissedFingerprintsOfFollowedRuns(manager, previous);
+			expect(dismissedEarlier).toEqual(["a".repeat(64)]);
+			const plan = followUpReviewPlan(previous, snapshot("blob-2"), dismissedEarlier);
+			expect(plan.suppressedDismissedFingerprints).toEqual(["a".repeat(64)]);
+			expect(plan.priorOpenFindings.map((open) => open.id)).toEqual(["y"]);
+			expect(reconcileFindingIdentities([finding({ id: "new-1" })], plan)).toEqual([]);
+
+			// A run the conversation does not hold ends the walk.
+			await expect(
+				dismissedFingerprintsOfFollowedRuns(manager, { ...previous, parentRunId: "run-missing" }),
+			).resolves.toEqual([]);
+		});
+
+		it("follows only a review of its own target", () => {
+			expect(() => assertFollowsReviewOf(record("run-1", 1), snapshot("blob-2"))).not.toThrow();
+			expect(() => assertFollowsReviewOf(record("run-1", 1), prSnapshot("blob-2", "f".repeat(64), "x"))).toThrow(
+				"Review run-1 reviewed another target",
+			);
+		});
+
+		it("keeps the id of a finding still open, carries one no candidate reports or no decision settles, and returns the fixed ones", () => {
+			const current = finding({ id: "new-1", fingerprint: "d".repeat(64), title: "Moved guard" });
+			const decided = applyPreviousFindingDecisions(
+				[current],
+				[
+					finding({ id: "kept-1" }),
+					finding({ id: "fixed-1", fingerprint: "b".repeat(64) }),
+					finding({ id: "carried-1", fingerprint: "c".repeat(64) }),
+					finding({ id: "uncertain-1", fingerprint: "e".repeat(64) }),
+					finding({ id: "undecided-1", fingerprint: "f".repeat(64) }),
+				],
+				[
+					decision("kept-1", "open", "c1"),
+					decision("fixed-1", "fixed"),
+					decision("carried-1", "open"),
+					decision("uncertain-1", "uncertain"),
+				],
+				new Map([["c1", "d".repeat(64)]]),
+			);
+			expect(decided.findings.map(({ id, status, title }) => ({ id, status, title }))).toEqual([
+				{ id: "kept-1", status: "open", title: "Moved guard" },
+				{ id: "carried-1", status: "open", title: "Broken guard" },
+				{ id: "uncertain-1", status: "uncertain", title: "Broken guard" },
+				{ id: "undecided-1", status: "open", title: "Broken guard" },
+			]);
+			expect(decided.fixed).toEqual([decision("fixed-1", "fixed")]);
+			// The current findings it was given are left as they were.
+			expect(current.id).toBe("new-1");
+		});
+
+		it("settles as open an uncertain finding reported again with its anchor", () => {
+			const plan = followUpReviewPlan(
+				record("run-1", 1, [finding({ id: "uncertain-1", status: "uncertain" })]),
+				snapshot("blob-2"),
+				[],
+			);
+			// Reported again with the same anchor, the finding takes the earlier id and status.
+			const reported = reconcileFindingIdentities([finding({ id: "new-1" })], plan);
+			expect(reported).toEqual([expect.objectContaining({ id: "uncertain-1", status: "uncertain" })]);
+			const decided = applyPreviousFindingDecisions(
+				reported,
+				plan.priorOpenFindings,
+				[decision("uncertain-1", "open", "c1")],
+				new Map([["c1", "a".repeat(64)]]),
+			);
+			expect(decided.findings.map(({ id, status }) => ({ id, status }))).toEqual([
+				{ id: "uncertain-1", status: "open" },
+			]);
+			const review = result(decided.findings);
+			settleReviewVerdict(review);
+			expect(review).toMatchObject({ completionStatus: "complete", overallCorrectness: "incorrect" });
+		});
+
+		it("settles as uncertain an open finding reported again with its anchor", () => {
+			const plan = followUpReviewPlan(record("run-1", 1, [finding({ id: "open-1" })]), snapshot("blob-2"), []);
+			const decided = applyPreviousFindingDecisions(
+				reconcileFindingIdentities([finding({ id: "new-1" })], plan),
+				plan.priorOpenFindings,
+				[decision("open-1", "uncertain")],
+				new Map(),
+			);
+			expect(decided.findings.map(({ id, status }) => ({ id, status }))).toEqual([
+				{ id: "open-1", status: "uncertain" },
+			]);
+			const review = result(decided.findings);
+			settleReviewVerdict(review);
+			expect(review.completionStatus).toBe("incomplete");
+		});
+
+		it("leaves one finding with a decided finding's id when the decision names another candidate", () => {
+			const plan = followUpReviewPlan(record("run-1", 1, [finding({ id: "open-1" })]), snapshot("blob-2"), []);
+			const decided = applyPreviousFindingDecisions(
+				reconcileFindingIdentities(
+					[finding({ id: "new-1" }), finding({ id: "new-2", fingerprint: "d".repeat(64) })],
+					plan,
+				),
+				plan.priorOpenFindings,
+				[decision("open-1", "open", "c2")],
+				new Map([["c2", "d".repeat(64)]]),
+			);
+			expect(decided.findings.map(({ id, status }) => ({ id, status }))).toEqual([
+				{ id: "open-1", status: "open" },
+				{ id: "new-2", status: "open" },
+			]);
+		});
+
+		it("carries a finding without a decision as it was", () => {
+			const priors = [
+				finding({ id: "accepted-1", status: "accepted" }),
+				finding({ id: "uncertain-1", status: "uncertain", fingerprint: "b".repeat(64) }),
+			];
+			const decided = applyPreviousFindingDecisions([], priors, [], new Map());
+			expect(decided.findings).toEqual(priors);
+			expect(decided.fixed).toEqual([]);
+		});
+
+		it("gives the id and status of a finding without a decision to the finding reported again with its anchor", () => {
+			const decided = applyPreviousFindingDecisions(
+				[finding({ id: "new-1", title: "Reported again" }), finding({ id: "new-2", fingerprint: "d".repeat(64) })],
+				[finding({ id: "accepted-1", status: "accepted" })],
+				[],
+				new Map(),
+			);
+			expect(decided.findings.map(({ id, status, title }) => ({ id, status, title }))).toEqual([
+				{ id: "accepted-1", status: "accepted", title: "Reported again" },
+				{ id: "new-2", status: "open", title: "Broken guard" },
+			]);
+		});
+
+		it("carries a finding without a decision rather than take the finding a decision gave another id", () => {
+			const decided = applyPreviousFindingDecisions(
+				[finding({ id: "new-1" })],
+				[finding({ id: "undecided-1" }), finding({ id: "moved-1", fingerprint: "b".repeat(64) })],
+				[decision("moved-1", "open", "c1")],
+				new Map([["c1", "a".repeat(64)]]),
+			);
+			expect(decided.findings.map(({ id, status }) => ({ id, status }))).toEqual([
+				{ id: "moved-1", status: "open" },
+				{ id: "undecided-1", status: "open" },
+			]);
+		});
+
+		it("returns what a complete review decided fixed to close, and leaves it out of the review", () => {
+			const review = result([]);
+			const fixed = settlePreviousFindings(
+				review,
+				[finding({ id: "fixed-1" })],
+				[decision("fixed-1", "fixed")],
+				new Map(),
+			);
+			expect(fixed).toEqual([decision("fixed-1", "fixed")]);
+			expect(review.findings).toEqual([]);
+			expect(review).toMatchObject({ completionStatus: "complete", overallCorrectness: "correct" });
+		});
+
+		it("carries what an incomplete review decided fixed as it was, for the round that follows it to decide", () => {
+			const review: ParsedReview = { ...result([]), completionStatus: "incomplete" };
+			const priors = [finding({ id: "fixed-1", status: "accepted" })];
+			const fixed = settlePreviousFindings(review, priors, [decision("fixed-1", "fixed")], new Map());
+			expect(fixed).toEqual([]);
+			expect(review.findings).toEqual(priors);
+			const next = followUpReviewPlan(
+				{ ...record("run-2", 2), status: "incomplete", result: review },
+				snapshot("blob-3"),
+				[],
+			);
+			expect(next.priorOpenFindings.map(({ id }) => id)).toEqual(["fixed-1"]);
+		});
+
+		it("carries what a review an uncertain finding leaves incomplete decided fixed", () => {
+			const review = result([]);
+			const fixed = settlePreviousFindings(
+				review,
+				[finding({ id: "fixed-1" }), finding({ id: "uncertain-1", fingerprint: "b".repeat(64) })],
+				[decision("fixed-1", "fixed"), decision("uncertain-1", "uncertain")],
+				new Map(),
+			);
+			expect(fixed).toEqual([]);
+			expect(review.completionStatus).toBe("incomplete");
+			expect(review.findings.map(({ id, status }) => ({ id, status }))).toEqual([
+				{ id: "uncertain-1", status: "uncertain" },
+				{ id: "fixed-1", status: "open" },
+			]);
+		});
+
+		it("closes a fixed finding in the run it follows and in each run that run followed", async () => {
+			const manager = SessionManager.inMemory("/tmp/review-state");
+			await appendReviewRun(
+				manager.logWriter,
+				record("run-1", 1, [finding({ id: "x" }), finding({ id: "y", fingerprint: "b".repeat(64) })]),
+			);
+			await appendReviewRun(manager.logWriter, {
+				...record("run-2", 2, [finding({ id: "x" })]),
+				parentRunId: "run-1",
+			});
+			await appendReviewFindingTransition(manager.logWriter, {
+				runId: "run-1",
+				findingId: "y",
+				status: "dismissed",
+				reason: "intentional",
+			});
+			await closeFixedFindings(manager.logWriter, "run-2", "run-3", [
+				decision("x", "fixed"),
+				decision("y", "fixed"),
+			]);
+			expect(getReviewRun(manager, "run-2")?.result?.findings).toEqual([
+				expect.objectContaining({ id: "x", status: "fixed" }),
+			]);
+			expect(getReviewRun(manager, "run-1")?.result?.findings).toEqual([
+				expect.objectContaining({ id: "x", status: "fixed" }),
+				// A finding someone dismissed stays dismissed.
+				expect.objectContaining({ id: "y", status: "dismissed" }),
+			]);
+			expect(exportReviewFeedback(manager).outcomes).toContainEqual(
+				expect.objectContaining({
+					runId: "run-1",
+					findingId: "x",
+					note: "Review run-3 found it fixed: It is fixed.",
+				}),
+			);
 		});
 	});
 
