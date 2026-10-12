@@ -125,7 +125,7 @@ export const RpcActiveRetrySchema = Type.Object(
 		attempt: Type.Number(),
 		maxAttempts: Type.Number(),
 		/** Unix epoch milliseconds when the attempt starts, after its backoff. */
-		retryAt: Type.Optional(Type.Number()),
+		retryAt: Type.Optional(RpcEpochMillisecondsSchema),
 		/** What failed the attempt before it. */
 		error: Type.Optional(Type.String()),
 	},
@@ -141,11 +141,11 @@ export const RpcPromptCacheStatusSchema = Type.Union([
 		{
 			kind: Type.Literal("retained"),
 			/** Unix epoch milliseconds when the latest request or cache refresh with the current model started. */
-			lastRequestAt: Type.Number(),
+			lastRequestAt: RpcEpochMillisecondsSchema,
 			/** Unix epoch milliseconds when the documented retention window lapses; absent when the provider publishes none. */
-			expiresAt: Type.Optional(Type.Number()),
+			expiresAt: Type.Optional(RpcEpochMillisecondsSchema),
 			/** Unix epoch milliseconds until which the host keeps refreshing the idle cache; absent unless idle keepalive applies. */
-			keepAliveUntil: Type.Optional(Type.Number()),
+			keepAliveUntil: Type.Optional(RpcEpochMillisecondsSchema),
 		},
 		{ additionalProperties: false },
 	),
