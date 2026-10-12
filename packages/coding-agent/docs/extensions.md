@@ -640,6 +640,8 @@ volt.on("session_tree", async (event, ctx) => {
 });
 ```
 
+Each `session_compact` and `session_tree` handler receives its own copy of the event: changing `event.compactionEntry` or `event.summaryEntry` affects neither the session's saved entry nor later handlers.
+
 #### activate / deactivate
 
 `activate` reaches an extension when it starts running in a conversation, before its `session_start`: `reason` is `"startup"` (the session started), `"enable"` (it was enabled while the session runs), or `"reload"`. `deactivate` reaches it after its `session_shutdown` when it stops: `"disable"` or `"reload"`. Each reaches only the extension starting or stopping. After `deactivate`, everything the extension contributed is removed (see [Enabling and disabling](#enabling-and-disabling)).

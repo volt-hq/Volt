@@ -140,6 +140,16 @@ type SessionBeforeEvent = Extract<
 	{ type: "session_before_switch" | "session_before_fork" | "session_before_compact" | "session_before_tree" }
 >;
 
+/**
+ * Events that carry the session manager's committed entries (`compactionEntry`,
+ * `summaryEntry`): each handler gets its own copy, so its changes reach neither
+ * the session nor later handlers.
+ */
+const COMMITTED_ENTRY_EVENT_TYPES: ReadonlySet<RunnerEmitEvent["type"]> = new Set<RunnerEmitEvent["type"]>([
+	"session_compact",
+	"session_tree",
+]);
+
 type PreparationEvent = Extract<RunnerEmitEvent, { type: "session_before_compact" | "session_before_tree" }>;
 
 /**
@@ -1469,7 +1479,7 @@ export class ExtensionRunner {
 			return undefined as RunnerEmitResult<TEvent>;
 		}
 		let result: SessionBeforeEventResult | undefined;
-		const copyPerHandler = LOOP_EVENT_TYPES.has(event.type);
+		const copyPerHandler = LOOP_EVENT_TYPES.has(event.type) || COMMITTED_ENTRY_EVENT_TYPES.has(event.type);
 		const preparationEvent =
 			event.type === "session_before_compact" || event.type === "session_before_tree"
 				? (event as PreparationEvent)
