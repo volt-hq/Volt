@@ -318,6 +318,11 @@ function isObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Whether `value` is a timestamp clients accept: safe non-negative integer epoch milliseconds. */
+function isEpochMilliseconds(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
 function parseRun(value: unknown): ReviewRunRecord | undefined {
 	if (!isObject(value) || value.schemaVersion !== REVIEW_STATE_SCHEMA_VERSION) return undefined;
 	if (typeof value.runId !== "string" || typeof value.workflowAction !== "string") return undefined;
@@ -330,8 +335,8 @@ function parseRun(value: unknown): ReviewRunRecord | undefined {
 	)
 		return undefined;
 	if (
-		!Number.isFinite(value.startedAt) ||
-		!Number.isFinite(value.endedAt) ||
+		!isEpochMilliseconds(value.startedAt) ||
+		!isEpochMilliseconds(value.endedAt) ||
 		!isObject(value.target) ||
 		!isObject(value.options)
 	)
@@ -352,7 +357,7 @@ function parseRun(value: unknown): ReviewRunRecord | undefined {
 
 function parseAcknowledgment(value: unknown): ReviewAcknowledgmentRecord | undefined {
 	if (!isObject(value) || value.schemaVersion !== REVIEW_STATE_SCHEMA_VERSION) return undefined;
-	if (typeof value.runId !== "string" || !Number.isFinite(value.acknowledgedAt)) return undefined;
+	if (typeof value.runId !== "string" || !isEpochMilliseconds(value.acknowledgedAt)) return undefined;
 	return structuredClone(value) as unknown as ReviewAcknowledgmentRecord;
 }
 
@@ -664,7 +669,8 @@ export async function acknowledgeReviewRun(
 ): Promise<ReviewAcknowledgmentRecord> {
 	const run = getReviewRun(writer.sessionManager, runId);
 	if (!run) throw new Error(`Unknown durable review run: ${runId}`);
-	if (!Number.isFinite(acknowledgedAt)) throw new Error("Review acknowledgment timestamp must be finite.");
+	if (!isEpochMilliseconds(acknowledgedAt))
+		throw new Error("Review acknowledgment timestamp must be a safe non-negative integer.");
 	if (run.acknowledgedAt !== undefined) {
 		return { schemaVersion: REVIEW_STATE_SCHEMA_VERSION, runId, acknowledgedAt: run.acknowledgedAt };
 	}
