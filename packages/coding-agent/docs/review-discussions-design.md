@@ -43,7 +43,7 @@ Ordinary transport correlation `id` is separate from semantic `requestId`. Mutat
 { type: "get_review_discussion_source" }
 ```
 
-Start accepts 1–50 unique finding IDs and returns independent `created | existing | failed` outcomes. List pages are bounded to 50. Reset returns `reset | conflict | busy` with the current discussion descriptor. A host without the sibling backend returns `review_discussions_unavailable`; unavailable source authority returns `review_source_unavailable`. Both are registered stable errors.
+Start accepts 1–50 unique finding IDs and returns independent `created | existing | failed` outcomes. List pages are bounded to 50. Reset returns `reset | conflict | busy` with the current discussion descriptor. A host without the sibling backend returns `review_discussions_unavailable`; unavailable source authority returns `review_source_unavailable`. Both are registered stable errors. A reset whose `requestId` already reset another predecessor is rejected `conflict`, a stale branch `stale`, and any other failure keeps its own reason.
 
 ```ts
 type Link = {
