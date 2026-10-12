@@ -1,14 +1,14 @@
 /**
  * The repository's workflow contract (`.volt/WORKFLOW.md`): YAML front matter
  * for the orchestrator's settings, and a Markdown body whose `## implement`,
- * `## review`, and `## fix` sections are the prompts of each role. A role
- * without a section uses the built-in prompt.
+ * `## review`, `## fix`, and `## update` sections are the prompts of each
+ * role. A role without a section uses the built-in prompt.
  */
 
 import { readFile } from "node:fs/promises";
 import { parseFrontmatter } from "@hansjm10/volt-coding-agent";
 
-export const ROLES = ["implement", "review", "fix"] as const;
+export const ROLES = ["implement", "review", "fix", "update"] as const;
 export type Role = (typeof ROLES)[number];
 
 export type WorkflowErrorCode =
@@ -144,6 +144,15 @@ Failing checks: {{ ci.failing }}
 Fix every blocking finding and failing check, run the affected checks and tests, commit, and push to {{ worktree.branch }}. File findings outside the pull request's scope as new issues with {{ gh }} issue create --repo {{ repo }}, labeled {{ tracker.filed_labels }}, saying in each body that you found it while fixing {{ pr.url }}. Do not post review verdicts.
 
 Stop once the fixes are pushed.`,
+	update: `Pull request #{{ pr.number }} ({{ pr.url }}) for issue {{ issue.identifier }}: {{ issue.title }} conflicts with {{ pr.base_ref }}.
+
+The worktree at {{ worktree.path }} is on the pull request's branch {{ worktree.branch }}. Update it first (git pull --ff-only), then merge the base branch in: git fetch origin {{ pr.base_ref }}, then git merge origin/{{ pr.base_ref }}. Do not rebase or force push.
+
+Resolve each conflict so the pull request keeps its change on top of what {{ pr.base_ref }} has now, run the affected checks and tests, commit the merge, and push to {{ worktree.branch }}.
+
+If {{ pr.base_ref }} already has the pull request's change, so that nothing it still needs is left once the merge resolves, do not push. Close the pull request and issue {{ issue.identifier }} instead, each with a comment naming the commit that made it unnecessary.
+
+Stop once the merge is pushed, or the pull request and issue are closed.`,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -216,7 +225,7 @@ class Section {
 	}
 }
 
-/** The role prompts of a workflow body: its `## implement`, `## review`, and `## fix` sections. */
+/** The role prompts of a workflow body: its `## implement`, `## review`, `## fix`, and `## update` sections. */
 export function splitRolePrompts(body: string): Partial<Record<Role, string>> {
 	const prompts: Partial<Record<Role, string>> = {};
 	const headings = [...body.matchAll(/^##[ \t]+(\S+)[ \t]*$/gm)];

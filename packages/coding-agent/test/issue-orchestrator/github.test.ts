@@ -76,10 +76,22 @@ describe("issue orchestrator GitHub tracker", () => {
 					state,
 					headRefOid: SHA,
 					isDraft: false,
+					baseRefName: "main",
+					mergeable: ["MERGEABLE", "CONFLICTING", "UNKNOWN"][index],
 				})),
 			);
 		const open = new GitHubTracker(scriptedGh({ "pr list": prs(["CLOSED", "OPEN"]) }).run, "o/r", "bot");
-		expect(await open.pullRequest("volt/issue-12")).toMatchObject({ number: 2, state: "open", headSha: SHA });
+		expect(await open.pullRequest("volt/issue-12")).toEqual({
+			number: 2,
+			url: "u2",
+			state: "open",
+			headSha: SHA,
+			draft: false,
+			baseRef: "main",
+			mergeable: "conflicting",
+		});
+		const unknown = new GitHubTracker(scriptedGh({ "pr list": prs(["CLOSED", "CLOSED", "OPEN"]) }).run, "o/r", "bot");
+		expect(await unknown.pullRequest("volt/issue-12")).toMatchObject({ number: 3, mergeable: "unknown" });
 		const closed = new GitHubTracker(scriptedGh({ "pr list": prs(["CLOSED", "MERGED"]) }).run, "o/r", "bot");
 		expect(await closed.pullRequest("volt/issue-12")).toMatchObject({ number: 2, state: "merged" });
 		const none = new GitHubTracker(scriptedGh({ "pr list": "[]" }).run, "o/r", "bot");
@@ -135,6 +147,27 @@ describe("issue orchestrator GitHub tracker", () => {
 			),
 		).toEqual({ state: "passing" });
 		await expect(checks("", 1, "HTTP 502")).rejects.toThrow("HTTP 502");
+	});
+
+	it("tells merge commits by their parents, asking once per commit", async () => {
+		const gh = scriptedGh({ [`api repos/o/r/commits/${SHA}`]: "2\n", "api repos/o/r/commits/bbb": "1\n" });
+		const tracker = new GitHubTracker(gh.run, "o/r", "bot");
+		expect(await tracker.isMergeCommit(SHA)).toBe(true);
+		expect(await tracker.isMergeCommit(SHA)).toBe(true);
+		expect(await tracker.isMergeCommit("bbb")).toBe(false);
+		expect(gh.calls).toEqual([
+			["api", `repos/o/r/commits/${SHA}`, "--jq", ".parents | length"],
+			["api", "repos/o/r/commits/bbb", "--jq", ".parents | length"],
+		]);
+	});
+
+	it("takes an approval back with a comment", async () => {
+		const gh = scriptedGh({ "issue comment 12": "", "issue edit 12": "" });
+		await new GitHubTracker(gh.run, "o/r", "bot").takeBack(12, "agent-approved", "Conflicts now");
+		expect(gh.calls).toEqual([
+			["issue", "comment", "12", "--repo", "o/r", "--body", "Conflicts now"],
+			["issue", "edit", "12", "--repo", "o/r", "--remove-label", "agent-approved"],
+		]);
 	});
 
 	it("merges, and hands off with a comment even when the label is missing", async () => {

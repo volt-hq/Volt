@@ -4,7 +4,9 @@
  * breaks), stops the runs of issues that left the workflow, then works each
  * labeled issue by what it needs next (`phase.ts`): it starts an agent of the
  * phase's role in the issue's worktree, merges, or hands the issue to a
- * human. A run that ends wakes the loop at once.
+ * human. A run that ends wakes the loop at once. An approved issue stays
+ * watched: once its pull request conflicts with its base branch (another one
+ * merged), the approval is taken back and the pull request updated.
  *
  * Its state is in memory only. GitHub is the source of truth: after a
  * restart the next tick finds each issue's phase again. Bounded by:
@@ -14,7 +16,7 @@
 
 import type { Issue, Tracker } from "./github.ts";
 import { reviewMarker } from "./github.ts";
-import { inspectIssue, isRoutable, type Phase } from "./phase.ts";
+import { inspectIssue, isRoutable, issueBranch, type Phase } from "./phase.ts";
 import {
 	type Role,
 	type RoleLimits,
@@ -147,6 +149,8 @@ export class Orchestrator {
 	private readonly handedOff = new Map<number, HandedOff>();
 	/** Issues whose checkouts the orchestrator is done with and has yet to release, with their titles. */
 	private readonly pendingReleases = new Map<number, string>();
+	/** Issues it started agents for and is not done with, with their titles. */
+	private readonly known = new Map<number, string>();
 	private readonly finished: NotedIssue[] = [];
 	private totals = { runs: 0, tokens: 0, cost: 0 };
 	private signal: AbortSignal | undefined;
@@ -238,6 +242,14 @@ export class Orchestrator {
 			this.error = `GitHub: ${errorText(error)}`;
 			return this.emit();
 		}
+		// An issue that left the candidates (closed, or unlabeled) is done with.
+		const listed = new Set(candidates.map((issue) => issue.number));
+		for (const [number, title] of this.known) {
+			if (listed.has(number) || this.running.has(number)) continue;
+			this.forget(number);
+			this.pendingReleases.set(number, title);
+		}
+		candidates = await this.recheckApproved(tracker, config, candidates);
 		const waiting = new Map<number, NotedIssue>();
 		this.waiting = waiting;
 		const ordered = candidates
@@ -363,6 +375,7 @@ export class Orchestrator {
 			ended: ended.promise,
 		};
 		this.running.set(issue.number, entry);
+		this.known.set(issue.number, issue.title);
 		this.log(`#${issue.number}: starting ${phase.kind} (${role.agent})`);
 		void (async () => {
 			let result: AgentResult;
@@ -423,6 +436,43 @@ export class Orchestrator {
 		}
 		this.emit();
 		this.wake();
+	}
+
+	/**
+	 * Take back the approval of each approved issue whose pull request has come
+	 * to conflict with its base branch, so it is worked again, from an update.
+	 * Resolves with the candidates as they are after that.
+	 */
+	private async recheckApproved(tracker: Tracker, config: WorkflowConfig, candidates: Issue[]): Promise<Issue[]> {
+		const ready = config.merge.readyLabel.toLowerCase();
+		const result: Issue[] = [];
+		for (const issue of candidates) {
+			const unapproved = { ...issue, labels: issue.labels.filter((label) => label !== ready) };
+			// Not approved, or excluded anyway (handed to a human as well, say).
+			if (
+				unapproved.labels.length === issue.labels.length ||
+				!isRoutable(unapproved, config) ||
+				this.signal?.aborted
+			) {
+				result.push(issue);
+				continue;
+			}
+			try {
+				const pr = await tracker.pullRequest(issueBranch(issue.number));
+				if (pr?.state !== "open" || pr.mergeable !== "conflicting") {
+					result.push(issue);
+					continue;
+				}
+				const reason = `Pull request #${pr.number} now conflicts with ${pr.baseRef || "its base branch"}, so it is no longer ready to merge. The orchestrator is updating it.`;
+				await tracker.takeBack(issue.number, config.merge.readyLabel, `${reason}\n\n_Volt issue orchestrator_`);
+				this.log(`#${issue.number}: took the approval back: ${reason}`);
+				result.push(unapproved);
+			} catch (error) {
+				this.log(`#${issue.number}: checking its approved pull request failed: ${errorText(error)}`);
+				result.push(issue);
+			}
+		}
+		return result;
 	}
 
 	/** Stop the runs of issues that closed, or lost a required label or gained an excluded one. */
@@ -505,6 +555,7 @@ export class Orchestrator {
 	private forget(number: number): void {
 		this.retries.delete(number);
 		this.handedOff.delete(number);
+		this.known.delete(number);
 		for (const key of [...this.attempts.keys()]) if (key.startsWith(`${number}:`)) this.attempts.delete(key);
 	}
 
@@ -536,7 +587,12 @@ export class Orchestrator {
 			attempt: attempts === 0 ? null : attempts + 1,
 			round: "round" in phase ? phase.round : null,
 			reason: "reason" in phase ? phase.reason : null,
-			pr: { number: pr?.number ?? null, url: pr?.url ?? null, head_sha: pr?.headSha ?? null },
+			pr: {
+				number: pr?.number ?? null,
+				url: pr?.url ?? null,
+				head_sha: pr?.headSha ?? null,
+				base_ref: pr?.baseRef ?? null,
+			},
 			review: {
 				max_rounds: config.review.maxRounds,
 				clean_marker: pr === undefined ? null : reviewMarker(pr.headSha, "clean"),

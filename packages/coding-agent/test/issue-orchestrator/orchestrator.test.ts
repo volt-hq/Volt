@@ -40,6 +40,9 @@ Review #{{ pr.number }} at {{ pr.head_sha }}, round {{ round }}: {{ review.clean
 
 ## fix
 Fix #{{ pr.number }}: {{ reason }} [{{ ci.failing }}]
+
+## update
+Update #{{ pr.number }} from {{ pr.base_ref }}: {{ reason }}
 `);
 }
 
@@ -56,6 +59,9 @@ class FakeGitHub implements Tracker {
 	readonly checkStates = new Map<number, ChecksState>();
 	readonly merged: number[] = [];
 	readonly handoffs: Array<{ issue: number; label: string; comment: string }> = [];
+	readonly takenBack: Array<{ issue: number; label: string; comment: string }> = [];
+	/** Head commits that merged the base branch in. */
+	readonly mergeCommits = new Set<string>();
 	labelsExist = true;
 	/** How many times the labeled issues were listed: once per tick. */
 	listings = 0;
@@ -81,22 +87,36 @@ class FakeGitHub implements Tracker {
 		if (issue) this.issues.set(number, { ...issue, labels });
 	}
 
-	/** What an implementer or fixer does: push a commit to the issue's branch, opening its pull request first. */
-	push(number: number): PullRequest {
+	/**
+	 * What an implementer or fixer does: push a commit to the issue's branch,
+	 * opening its pull request first. An updater pushes a `merge` of the base
+	 * branch, which resolves the conflict.
+	 */
+	push(number: number, options: { merge?: boolean } = {}): PullRequest {
 		const branch = issueBranch(number);
 		const existing = this.prs.get(branch);
 		this.commits += 1;
 		const pr: PullRequest = existing
-			? { ...existing, headSha: sha(this.commits) }
+			? { ...existing, headSha: sha(this.commits), mergeable: "mergeable" }
 			: {
 					number: 100 + number,
 					url: `https://github.com/o/r/pull/${100 + number}`,
 					state: "open",
 					headSha: sha(this.commits),
 					draft: false,
+					baseRef: "main",
+					mergeable: "mergeable",
 				};
+		if (options.merge) this.mergeCommits.add(pr.headSha);
 		this.prs.set(branch, pr);
 		return pr;
+	}
+
+	/** What another pull request merging does to this one, or what GitHub says before it knows. */
+	setMergeable(number: number, mergeable: PullRequest["mergeable"]): void {
+		const branch = issueBranch(number);
+		const pr = this.prs.get(branch);
+		if (pr) this.prs.set(branch, { ...pr, mergeable });
 	}
 
 	/** What a reviewer does: post a verdict on the head commit. */
@@ -126,6 +146,9 @@ class FakeGitHub implements Tracker {
 	async checks(number: number): Promise<ChecksState> {
 		return this.checkStates.get(number) ?? { state: "passing" };
 	}
+	async isMergeCommit(head: string): Promise<boolean> {
+		return this.mergeCommits.has(head);
+	}
 	async merge(number: number): Promise<void> {
 		this.merged.push(number);
 		for (const [branch, pr] of this.prs) if (pr.number === number) this.prs.set(branch, { ...pr, state: "merged" });
@@ -136,6 +159,15 @@ class FakeGitHub implements Tracker {
 		const current = this.issues.get(issue);
 		if (current) this.setLabels(issue, [...current.labels, label]);
 		return true;
+	}
+	async takeBack(issue: number, label: string, comment: string): Promise<void> {
+		this.takenBack.push({ issue, label, comment });
+		const current = this.issues.get(issue);
+		if (current)
+			this.setLabels(
+				issue,
+				current.labels.filter((existing) => existing !== label),
+			);
 	}
 }
 
@@ -499,6 +531,113 @@ describe("issue orchestrator", () => {
 		await runs(2);
 	});
 
+	it("updates a conflicting pull request before reviewing it again, without spending a review round on the merge", async () => {
+		const { github, orchestrator, runs, finish, agents } = setup(workflow("review:\n  max_rounds: 2"));
+		github.addIssue(12);
+		github.push(12);
+		github.review(12, "changes");
+		github.setMergeable(12, "conflicting");
+
+		await orchestrator.tick();
+		const update = await runs(1);
+		expect(update.task).toBe("Update #112 from main: pull request #112 conflicts with main");
+
+		const merge = github.push(12, { merge: true });
+		await finish(update);
+		await orchestrator.tick();
+		const review = await runs(2);
+		expect(review.task).toContain(`at ${merge.headSha}`);
+
+		// Two heads reviewed, but one only merged main in: a fix is still within the two rounds.
+		github.review(12, "changes");
+		await finish(review);
+		await orchestrator.tick();
+		const fix = await runs(3);
+		expect(fix.task).toBe("Fix #112: the review asked for changes []");
+		expect(github.handoffs).toEqual([]);
+		expect(agents.started.map((run) => run.cwd)).toEqual(Array(3).fill("/worktrees/issue-12"));
+	});
+
+	it("does not call a pull request ready before GitHub knows it merges cleanly", async () => {
+		const { github, orchestrator } = setup();
+		github.addIssue(12);
+		github.push(12);
+		github.review(12, "clean");
+		github.setMergeable(12, "unknown");
+
+		await orchestrator.tick();
+		expect(github.handoffs).toEqual([]);
+		expect(orchestrator.snapshot().waiting).toEqual([
+			{ issue: 12, title: "Issue 12", reason: "GitHub is still checking whether pull request #112 merges cleanly" },
+		]);
+		github.setMergeable(12, "mergeable");
+		await orchestrator.tick();
+		expect(github.handoffs).toMatchObject([{ issue: 12, label: "agent-approved" }]);
+	});
+
+	it("takes an approval back once the pull request conflicts, and updates it", async () => {
+		const { github, orchestrator, runs, agents } = setup();
+		github.addIssue(12);
+		github.push(12);
+		github.review(12, "clean");
+		await orchestrator.tick();
+		expect(github.issues.get(12)?.labels).toEqual([LABEL, "agent-approved"]);
+
+		// Still mergeable: left alone.
+		await orchestrator.tick();
+		expect(github.takenBack).toEqual([]);
+		expect(agents.started).toEqual([]);
+
+		// Another pull request merged.
+		github.setMergeable(12, "conflicting");
+		await orchestrator.tick();
+		expect(github.takenBack).toEqual([
+			{
+				issue: 12,
+				label: "agent-approved",
+				comment: expect.stringContaining(
+					"Pull request #112 now conflicts with main, so it is no longer ready to merge.",
+				),
+			},
+		]);
+		expect(github.issues.get(12)?.labels).toEqual([LABEL]);
+		const update = await runs(1);
+		expect(update.task).toBe("Update #112 from main: pull request #112 conflicts with main");
+
+		// An issue handed to a human as well stays theirs.
+		github.addIssue(13, [LABEL, "agent-approved", "agent-needs-human"]);
+		github.push(13);
+		github.setMergeable(13, "conflicting");
+		await orchestrator.tick();
+		expect(github.takenBack.map((entry) => entry.issue)).toEqual([12]);
+	});
+
+	it("releases the checkout of an issue that leaves the workflow, such as one an update closed as superseded", async () => {
+		const { github, orchestrator, runs, finish, workspaces } = setup(
+			parseWorkflow(`---\ntracker:\n  repo: o/r\n  labels: [${LABEL}]\n---\n`),
+		);
+		github.addIssue(12);
+		github.push(12);
+		github.setMergeable(12, "conflicting");
+
+		await orchestrator.tick();
+		const update = await runs(1);
+		// The built-in prompt merges the base branch, and closes what it already has.
+		expect(update.task).toContain("git merge origin/main");
+		expect(update.task).toContain("If main already has the pull request's change");
+
+		github.prs.set(issueBranch(12), { ...(github.prs.get(issueBranch(12)) as PullRequest), state: "closed" });
+		github.issues.set(12, { ...(github.issues.get(12) as Issue), open: false });
+		await finish(update);
+		await orchestrator.tick();
+		expect(workspaces.releases).toEqual([]);
+		await orchestrator.tick();
+		expect(workspaces.releases).toEqual([12]);
+		// Once.
+		await orchestrator.tick();
+		expect(workspaces.releases).toEqual([12]);
+	});
+
 	it("keeps the last good workflow when a reload breaks, and says why", async () => {
 		const github = new FakeGitHub();
 		const agents = fakeAgents();
@@ -533,7 +672,15 @@ describe("issue orchestrator", () => {
 	it("decides phases from GitHub alone", () => {
 		const config = workflow("merge:\n  mode: auto");
 		const issue = new FakeGitHub().addIssue(12);
-		const pr: PullRequest = { number: 7, url: "u", state: "open", headSha: sha(2), draft: false };
+		const pr: PullRequest = {
+			number: 7,
+			url: "u",
+			state: "open",
+			headSha: sha(2),
+			draft: false,
+			baseRef: "main",
+			mergeable: "mergeable",
+		};
 		const verdict = (head: number, value: "clean" | "changes"): ReviewMarker => ({
 			headSha: sha(head),
 			verdict: value,
@@ -562,6 +709,25 @@ describe("issue orchestrator", () => {
 			kind: "handoff",
 			reason: "Pull request #7 was approved, but no CI checks ran on it.",
 		});
+		// A conflict comes first; a review of a head that merged the base in is not a round.
+		expect(decidePhase(config, issue, { ...pr, mergeable: "conflicting" }, [verdict(2, "clean")], undefined)).toEqual(
+			{
+				kind: "update",
+				pr: { ...pr, mergeable: "conflicting" },
+				reason: "pull request #7 conflicts with main",
+			},
+		);
+		expect(decidePhase(config, issue, pr, [verdict(1, "changes"), verdict(2, "changes")], undefined)).toMatchObject({
+			kind: "fix",
+			round: 2,
+		});
+		expect(
+			decidePhase(config, issue, pr, [verdict(1, "changes"), verdict(2, "changes")], undefined, new Set([sha(2)])),
+		).toMatchObject({ kind: "fix", round: 1 });
+		// Approved and green, but GitHub has yet to say it merges cleanly.
+		expect(
+			decidePhase(config, issue, { ...pr, mergeable: "unknown" }, [verdict(2, "clean")], { state: "passing" }),
+		).toEqual({ kind: "wait", reason: "GitHub is still checking whether pull request #7 merges cleanly" });
 		// A short head in a verdict matches the full head.
 		expect(
 			decidePhase(config, issue, pr, [{ ...verdict(2, "changes"), headSha: sha(2).slice(0, 12) }], undefined),

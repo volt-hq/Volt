@@ -152,9 +152,10 @@ Ignored too.
 	});
 
 	it("splits role sections from the body", () => {
-		expect(splitRolePrompts("## Implement\nDo it.\n## fix\n\n## review \nLook.\n")).toEqual({
+		expect(splitRolePrompts("## Implement\nDo it.\n## fix\n\n## review \nLook.\n## update\nMerge main.\n")).toEqual({
 			implement: "Do it.",
 			review: "Look.",
+			update: "Merge main.",
 		});
 	});
 

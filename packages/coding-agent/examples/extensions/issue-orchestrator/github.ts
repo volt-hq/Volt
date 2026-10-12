@@ -1,9 +1,9 @@
 /**
  * The GitHub tracker, through GitHub CLI: the issues a maintainer labeled,
  * the pull request of an issue's branch, the review verdicts the review
- * author posted on it, its CI checks, and the two writes the orchestrator
- * makes itself (merging, and handing an issue to a human). Everything else
- * GitHub sees, the agents do with `gh` themselves.
+ * author posted on it, its CI checks, and the writes the orchestrator makes
+ * itself (merging, handing an issue to a human, and taking an approval back).
+ * Everything else GitHub sees, the agents do with `gh` themselves.
  */
 
 import type { MergeMethod } from "./workflow.ts";
@@ -37,6 +37,10 @@ export interface PullRequest {
 	readonly state: "open" | "closed" | "merged";
 	readonly headSha: string;
 	readonly draft: boolean;
+	/** The branch it merges into. */
+	readonly baseRef: string;
+	/** Whether it merges into its base without conflicts; `unknown` while GitHub works it out. */
+	readonly mergeable: "mergeable" | "conflicting" | "unknown";
 }
 
 export type ReviewVerdict = "clean" | "changes";
@@ -66,9 +70,13 @@ export interface Tracker {
 	/** The review verdicts the review author posted on pull request `number`, oldest first. */
 	reviews(number: number): Promise<ReviewMarker[]>;
 	checks(number: number): Promise<ChecksState>;
+	/** Whether commit `sha` has more than one parent: an agent merged the base branch into the pull request. */
+	isMergeCommit(sha: string): Promise<boolean>;
 	merge(number: number, method: MergeMethod): Promise<void>;
 	/** Comment `comment` on issue `number` and label it `label`; resolves with whether the label was applied. */
 	handOff(number: number, label: string, comment: string): Promise<boolean>;
+	/** Comment `comment` on issue `number` and remove its label `label`, which a handoff applied. */
+	takeBack(number: number, label: string, comment: string): Promise<void>;
 }
 
 export class GhError extends Error {
@@ -128,6 +136,8 @@ export class GitHubTracker implements Tracker {
 	readonly repo: string;
 	private readonly run: GhRunner;
 	private readonly reviewAuthor: string;
+	/** Whether each commit asked about is a merge: a commit's parents never change. */
+	private readonly merges = new Map<string, boolean>();
 
 	constructor(run: GhRunner, repo: string, reviewAuthor: string) {
 		this.run = run;
@@ -175,7 +185,7 @@ export class GitHubTracker implements Tracker {
 			"--limit",
 			"10",
 			"--json",
-			"number,url,state,headRefOid,isDraft",
+			"number,url,state,headRefOid,isDraft,baseRefName,mergeable",
 		]);
 		const all = (Array.isArray(prs) ? prs : []).filter(isRecord).map(
 			(pr): PullRequest => ({
@@ -184,6 +194,9 @@ export class GitHubTracker implements Tracker {
 				state: pr.state === "OPEN" ? "open" : pr.state === "MERGED" ? "merged" : "closed",
 				headSha: text(pr.headRefOid),
 				draft: pr.isDraft === true,
+				baseRef: text(pr.baseRefName),
+				mergeable:
+					pr.mergeable === "MERGEABLE" ? "mergeable" : pr.mergeable === "CONFLICTING" ? "conflicting" : "unknown",
 			}),
 		);
 		return all.find((pr) => pr.state === "open") ?? all.sort((left, right) => right.number - left.number)[0];
@@ -220,6 +233,15 @@ export class GitHubTracker implements Tracker {
 		return { state: "passing" };
 	}
 
+	async isMergeCommit(sha: string): Promise<boolean> {
+		const known = this.merges.get(sha);
+		if (known !== undefined) return known;
+		const parents = await json(this.run, ["api", `repos/${this.repo}/commits/${sha}`, "--jq", ".parents | length"]);
+		const merge = Number(parents) > 1;
+		this.merges.set(sha, merge);
+		return merge;
+	}
+
 	async merge(number: number, method: MergeMethod): Promise<void> {
 		await json(this.run, ["pr", "merge", String(number), "--repo", this.repo, `--${method}`], false);
 	}
@@ -229,6 +251,11 @@ export class GitHubTracker implements Tracker {
 		// A label the repository does not have fails; the comment still says why the orchestrator stopped.
 		const labeled = await this.run(["issue", "edit", String(number), "--repo", this.repo, "--add-label", label]);
 		return labeled.code === 0;
+	}
+
+	async takeBack(number: number, label: string, comment: string): Promise<void> {
+		await json(this.run, ["issue", "comment", String(number), "--repo", this.repo, "--body", comment], false);
+		await json(this.run, ["issue", "edit", String(number), "--repo", this.repo, "--remove-label", label], false);
 	}
 
 	private toIssue(value: unknown): Issue[] {
