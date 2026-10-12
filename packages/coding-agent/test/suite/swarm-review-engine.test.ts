@@ -232,7 +232,14 @@ describe("the swarm review as an engine", () => {
 		expect(harness.faux.state.callCount).toBe(0);
 	});
 
-	test("lets verifiers run commands when a client at the host grants bash, and reports what they ran", async () => {
+	test("lets verifiers run commands when a client at the host grants bash, in a checkout each reuses once reset", async () => {
+		const toolResults: string[] = [];
+		const afterCommand =
+			(line: number): FauxResponseFactory =>
+			(context) => {
+				toolResults.push(JSON.stringify(context.messages.at(-1)));
+				return verdict(line);
+			};
 		const { client, conversation } = await setup([
 			fauxAssistantMessage(fauxToolCall("report_findings", { findings: [finding] }), { stopReason: "toolUse" }),
 			fauxAssistantMessage(
@@ -241,12 +248,16 @@ describe("the swarm review as an engine", () => {
 				}),
 				{ stopReason: "toolUse" },
 			),
-			// The first verifier checks with a command before it reports.
-			fauxAssistantMessage(fauxToolCall("bash", { command: "echo   checked   the guard" }), {
+			// The first verifier checks with a command, leaving a file behind, before it reports.
+			fauxAssistantMessage(fauxToolCall("bash", { command: "pwd;   printf x > left-by-first" }), {
 				stopReason: "toolUse",
 			}),
-			verdict(2),
-			verdict(2),
+			afterCommand(2),
+			// The second works in the same checkout, reset: the file is gone, or the command fails.
+			fauxAssistantMessage(fauxToolCall("bash", { command: "pwd; test ! -e left-by-first" }), {
+				stopReason: "toolUse",
+			}),
+			afterCommand(2),
 		]);
 
 		// A paired remote device is refused the grant, as for any review.
@@ -275,7 +286,16 @@ describe("the swarm review as an engine", () => {
 		);
 		const run = getReviewRun(conversation.session.sessionManager, workId)!;
 		// A review that ran a command is not a static one.
-		expect(run.result?.coverage.commandsRun).toEqual(["echo checked the guard"]);
+		expect(run.result?.coverage.commandsRun).toEqual([
+			"pwd; printf x > left-by-first",
+			"pwd; test ! -e left-by-first",
+		]);
+		expect(run.result?.coverage.failedVerificationAttempts).toEqual([]);
+		// One checkout, set up once, served both verifiers.
+		const checkouts = toolResults.map((result) => /volt-review-checkout-[\w]+/.exec(result)?.[0]);
+		expect(checkouts).toHaveLength(2);
+		expect(checkouts[0]).toBeDefined();
+		expect(checkouts[1]).toBe(checkouts[0]);
 		expect(run.result?.coverage.residualRisk).not.toContain(
 			"Static review only. This review did not run tests or runtime checks.",
 		);

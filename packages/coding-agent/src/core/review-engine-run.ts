@@ -12,22 +12,25 @@ import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { Api, Model } from "@hansjm10/volt-ai";
 import type { ModelRegistry } from "./model-registry.ts";
 import { readPrReviewBinding } from "./pr-review-binding.ts";
+import type { ResourceLoader } from "./resource-loader.ts";
 import {
 	controlsWithDefaults,
 	createReviewWorkflowId,
 	decidePreviousFindings,
 	formatReviewWorkflowSummary,
+	type PreviousFindingDecisions,
 	REMOTE_REVIEW_FAILURE_MESSAGE,
 	type ReviewCheckoutSetup,
 	type ReviewRunControls,
 	type ReviewTarget,
 	resolveBoundReviewSnapshot,
-	resolveReviewVerifierModel,
 	reviewActionIdForTarget,
 	reviewWorkTarget,
+	uncertainPriorFindingDecision,
 	verifyBoundPullRequest,
 } from "./review.ts";
 import { type ReviewEngineDeclaration, ReviewEngineRun, resolveReviewEngineParameters } from "./review-engine.ts";
+import type { ReviewPasses } from "./review-passes.ts";
 import {
 	appendReviewRunDurably,
 	assertFollowsReviewOf,
@@ -85,6 +88,10 @@ export interface StartEngineReviewOptions {
 	tools?: readonly string[];
 	/** Prepares each checkout of the review. */
 	setup?: ReviewCheckoutSetup;
+	/** The conversation's resources, whose extension tools the host's own verification may use as granted. */
+	parentResourceLoader?: ResourceLoader;
+	/** Hosts the host's own verification pass as a conversation clients can open. */
+	passes?: ReviewPasses;
 }
 
 /**
@@ -185,38 +192,46 @@ export async function startEngineReview(options: StartEngineReviewOptions): Prom
 			run.end();
 		}
 		try {
-			const undecided = failure || work.signal.aborted ? [] : run.undecidedPreviousFindings();
-			if (undecided.length > 0) {
-				const count = undecided.length === 1 ? "1 earlier finding" : `${undecided.length} earlier findings`;
+			const pending = failure || work.signal.aborted ? undefined : run.pendingPreviousFindings();
+			let host: PreviousFindingDecisions | undefined;
+			if (pending && pending.findings.length > 0) {
+				const count =
+					pending.findings.length === 1 ? "1 earlier finding" : `${pending.findings.length} earlier findings`;
 				work.progress({ text: `Deciding ${count} the ${engine.label} engine left open` });
 				try {
-					run.settle(
-						await decidePreviousFindings({
-							snapshot: resolution,
-							controls,
-							findings: undecided,
-							cwd: options.cwd,
-							agentDir: options.agentDir,
-							model: resolveReviewVerifierModel({
-								settingsManager: options.settingsManager,
-								modelRegistry: options.modelRegistry,
-								...(options.model === undefined ? {} : { currentModel: options.model }),
-							}),
-							...(options.thinkingLevel === undefined ? {} : { thinkingLevel: options.thinkingLevel }),
-							...(options.fastModeEnabled === undefined ? {} : { fastModeEnabled: options.fastModeEnabled }),
-							modelRegistry: options.modelRegistry,
-							settingsManager: options.settingsManager,
-							...(options.tools === undefined ? {} : { tools: options.tools }),
-							...(options.setup === undefined ? {} : { setup: options.setup }),
-							signal: work.signal,
-						}),
-					);
-				} catch {
-					// Only a cancelled review stops the host's verification: the record says cancelled.
+					host = await decidePreviousFindings({
+						snapshot: resolution,
+						controls,
+						findings: pending.findings,
+						candidates: pending.candidates,
+						cwd: options.cwd,
+						agentDir: options.agentDir,
+						...(options.model === undefined ? {} : { currentModel: options.model }),
+						...(options.thinkingLevel === undefined ? {} : { thinkingLevel: options.thinkingLevel }),
+						...(options.fastModeEnabled === undefined ? {} : { fastModeEnabled: options.fastModeEnabled }),
+						modelRegistry: options.modelRegistry,
+						settingsManager: options.settingsManager,
+						...(options.tools === undefined ? {} : { tools: options.tools }),
+						...(options.setup === undefined ? {} : { setup: options.setup }),
+						...(options.parentResourceLoader === undefined
+							? {}
+							: { parentResourceLoader: options.parentResourceLoader }),
+						...(options.passes === undefined ? {} : { passes: options.passes }),
+						signal: work.signal,
+					});
+				} catch (error) {
+					// A cancelled review records no result. Anything else leaves the findings undecided, never dropped.
+					if (!work.signal.aborted) {
+						const rationale = `The host's verification of the earlier finding failed: ${error instanceof Error ? error.message : String(error)}`;
+						host = {
+							decisions: pending.findings.map((finding) => uncertainPriorFindingDecision(finding, rationale)),
+							commandsRun: [],
+							failedVerificationAttempts: [],
+						};
+					}
 				}
-			} else {
-				run.settle();
 			}
+			run.settle(host);
 			const parsed = run.result();
 			let status: ReviewRunStatus;
 			let errorMessage: string | undefined;

@@ -9,6 +9,7 @@ import {
 	VERIFIER_SYSTEM_PROMPT,
 	VERIFIER_WRAP_UP,
 } from "./prompts.ts";
+import { git } from "./git.ts";
 import { runPass } from "./session.ts";
 import { candidateFor } from "./submit.ts";
 import { normalizeFile } from "./tools.ts";
@@ -173,6 +174,49 @@ function recordCommand(state: SwarmState, pending: Map<string, string>, event: D
 	}
 }
 
+/** A checkout verifiers run commands in, and the commit it was made at. */
+interface VerifierCheckout {
+	readonly path: string;
+	readonly head: string;
+}
+
+/**
+ * The checkouts verifiers that run commands work in, one verifier at a time each. The host runs the review's setup
+ * in each new checkout (such as installing dependencies), so a checkout is reused: once a verifier is done it is reset
+ * to the reviewed head, its untracked files removed, and it goes to the next verifier. A review then sets up at most as
+ * many checkouts as verifiers run at once, not one per verifier. Ignored files (installed dependencies, build output)
+ * carry over between verifiers.
+ */
+function verifierCheckouts(setup: SwarmSetup) {
+	const idle: VerifierCheckout[] = [];
+	const created: string[] = [];
+	return {
+		async take(): Promise<VerifierCheckout> {
+			const reused = idle.pop();
+			if (reused) return reused;
+			const path = await setup.target.createCheckout();
+			created.push(path);
+			const head = await git(path, ["rev-parse", "HEAD"], setup.signal);
+			if (head.code !== 0) throw new Error(`Could not read the checkout's head: ${head.stderr.trim()}`);
+			return { path, head: head.stdout.trim() };
+		},
+		/** Give `checkout` back for the next verifier, or leave it out when it cannot be reset. */
+		async give(checkout: VerifierCheckout): Promise<void> {
+			try {
+				const reset = await git(checkout.path, ["reset", "--hard", "--quiet", checkout.head], setup.signal);
+				const clean =
+					reset.code === 0 ? await git(checkout.path, ["clean", "-d", "--force", "--quiet"], setup.signal) : reset;
+				if (clean.code === 0) idle.push(checkout);
+			} catch {
+				// Cancelled: nothing runs in it again.
+			}
+		},
+		async removeAll(): Promise<void> {
+			await Promise.all(created.map((path) => rm(path, { recursive: true, force: true })));
+		},
+	};
+}
+
 /** Verifies every pending cluster with independent verifier sessions, then combines their verdicts. */
 export async function verifyClusters(setup: SwarmSetup, state: SwarmState): Promise<void> {
 	const { options, signal, target } = setup;
@@ -191,7 +235,16 @@ export async function verifyClusters(setup: SwarmSetup, state: SwarmState): Prom
 	const systemPrompt = options.exec
 		? `${VERIFIER_SYSTEM_PROMPT}\n\n${VERIFIER_EXEC_ADDENDUM}`
 		: VERIFIER_SYSTEM_PROMPT;
-	await runPool(jobs.length, options.verifierConcurrency, async (index) => {
+	const checkouts = verifierCheckouts(setup);
+	try {
+		await runPool(jobs.length, options.verifierConcurrency, (index) => verify(index));
+	} finally {
+		await checkouts.removeAll();
+	}
+	if (signal.aborted) return;
+	for (const cluster of pending) cluster.outcome = combine(cluster);
+
+	async function verify(index: number): Promise<void> {
 		const { cluster, slot } = jobs[index];
 		const pass = cluster.verifiers[slot];
 		if (signal.aborted) {
@@ -204,11 +257,11 @@ export async function verifyClusters(setup: SwarmSetup, state: SwarmState): Prom
 		// One host pass per verifier: the diff it is given counts for it alone.
 		const hostPass = setup.engine.pass();
 		const pending = new Map<string, string>();
-		// With bash, commands can change files, so each verifier gets a private checkout.
-		let privateCheckout: string | undefined;
+		// With bash, commands can change files, so a verifier works in a checkout no other verifier uses meanwhile.
+		let privateCheckout: VerifierCheckout | undefined;
 		try {
-			if (options.exec) privateCheckout = await target.createCheckout();
-			const checkout = privateCheckout ?? target.checkout;
+			if (options.exec) privateCheckout = await checkouts.take();
+			const checkout = privateCheckout?.path ?? target.checkout;
 			await runPass(setup, {
 				label: `Swarm review verifier ${cluster.id}.${slot + 1}`,
 				model: setup.verifierModel,
@@ -234,10 +287,8 @@ export async function verifyClusters(setup: SwarmSetup, state: SwarmState): Prom
 			pass.status = signal.aborted ? "cancelled" : "failed";
 			if (!signal.aborted) pass.error = errorText(error);
 		} finally {
-			if (privateCheckout) await rm(privateCheckout, { recursive: true, force: true });
+			if (privateCheckout) await checkouts.give(privateCheckout);
 			setup.onProgress();
 		}
-	});
-	if (signal.aborted) return;
-	for (const cluster of pending) cluster.outcome = combine(cluster);
+	}
 }

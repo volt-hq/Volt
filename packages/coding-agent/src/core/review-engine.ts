@@ -35,6 +35,7 @@ import { formatSchemaError } from "./protocol/schema-errors.ts";
 import {
 	controlsWithDefaults,
 	inRunScope,
+	type PreviousFindingDecisions,
 	type ReviewCheckoutSetup,
 	type ReviewEffort,
 	type ReviewRunControls,
@@ -421,9 +422,10 @@ export interface ReviewEngineContext {
 	 * When this review follows an earlier review of its target: the findings that run left open, which the code may
 	 * have fixed or moved since. A decision for one in the verification's `priorFindingDecisions` settles it: `fixed`
 	 * closes it in the run where it was found, and `open` with the `candidateId` of the accepted candidate that
-	 * reports it now keeps its id there. One the engine neither decides nor reports again (a candidate with its
-	 * fingerprint) the host decides after the engine returns, with a verification pass of its own, so that no finding
-	 * outlives a round undecided: deciding them is the engine's to do where it can, not a duty. Empty otherwise.
+	 * reports it now keeps its id there. One the engine does not decide but reports again (an accepted candidate with
+	 * its fingerprint) is open at that candidate. The host decides the rest after the engine returns, with a
+	 * verification pass of its own, so that no finding outlives a round undecided: deciding them is the engine's to do
+	 * where it can, not a duty. Empty otherwise.
 	 */
 	readonly previousFindings: readonly ReviewFinding[];
 	/**
@@ -474,7 +476,8 @@ export interface ReviewEngineContext {
 	/**
 	 * A new disposable checkout of the reviewed head, removed when the review ends. When the review was started with
 	 * a setup (such as installing dependencies), it has run there, so commands find what a working copy has; a setup
-	 * that fails rejects with its output.
+	 * that fails rejects with its output. The setup runs in every new checkout, so an engine that runs commands in
+	 * several passes should reuse checkouts (reset to the head between uses) rather than ask for one per pass.
 	 */
 	checkout(): Promise<string>;
 }
@@ -540,9 +543,49 @@ export interface ReviewEngineRunOptions {
 
 /** What the engine decided of the previous findings, kept until the host decided the rest. */
 interface PendingPriorDecisions {
+	/** The engine's decisions, and an `open` one for each previous finding it reported again without deciding. */
 	readonly decisions: readonly ReviewPriorFindingDecision[];
 	/** The fingerprints of the accepted candidates, by candidate id. */
 	readonly candidateFingerprints: ReadonlyMap<string, string>;
+	/** The accepted candidates no decision links to a previous finding. */
+	readonly unlinked: readonly ValidatedReviewCandidate[];
+}
+
+/**
+ * The engine's decisions on `previous`, plus an `open` decision for each one it did not decide but reported again: an
+ * accepted candidate with its fingerprint that no other decision names. Settling links the finding to that candidate,
+ * so it is open where the engine reports it now, whatever status an earlier round left it in.
+ */
+function withReportedAgain(
+	previous: readonly ReviewFinding[],
+	decisions: readonly ReviewPriorFindingDecision[],
+	accepted: readonly ValidatedReviewCandidate[],
+): { decisions: ReviewPriorFindingDecision[]; unlinked: ValidatedReviewCandidate[] } {
+	const decided = new Set(decisions.map((decision) => decision.findingId));
+	const linked = new Set(
+		decisions.flatMap((decision) => (decision.candidateId === undefined ? [] : [decision.candidateId])),
+	);
+	const implicit: ReviewPriorFindingDecision[] = [];
+	for (const finding of previous) {
+		if (decided.has(finding.id)) continue;
+		const candidate = accepted.find(
+			(entry) => entry.fingerprint === finding.fingerprint && !linked.has(entry.candidateId),
+		);
+		if (!candidate) continue;
+		linked.add(candidate.candidateId);
+		implicit.push({
+			findingId: finding.id,
+			outcome: "open",
+			candidateId: candidate.candidateId,
+			method: "Reported again by the review",
+			rationale: "The review reported this finding again at its current location.",
+			confidence: candidate.confidence,
+		});
+	}
+	return {
+		decisions: [...decisions, ...implicit],
+		unlinked: accepted.filter((candidate) => !linked.has(candidate.candidateId)),
+	};
 }
 
 /** The state of one engine run: its passes' coverage, and the result it submitted. */
@@ -584,9 +627,12 @@ export class ReviewEngineRun {
 	}
 
 	/**
-	 * The result the engine submitted, if it did: once {@link settle} ran, with every previous finding decided.
+	 * The result the engine submitted, if it did, with its previous findings settled. Read before {@link settle}, it
+	 * settles them with the engine's decisions alone: a previous finding nobody decided is carried as it was, so it
+	 * still counts against the verdict, and is never dropped.
 	 */
 	result(): ParsedReview | undefined {
+		if (this.pendingPrior) this.settle();
 		return this.submitted;
 	}
 
@@ -596,33 +642,42 @@ export class ReviewEngineRun {
 	}
 
 	/**
-	 * The previous findings the submitted result left for the host: the engine neither decided them nor reported
-	 * them again (an accepted finding with their fingerprint, which takes their id as it is settled).
+	 * What the submitted result leaves the host to decide: the previous findings the engine neither decided nor
+	 * reported again, and the accepted candidates no decision links to, one of which may report such a finding under
+	 * another root cause.
 	 */
-	undecidedPreviousFindings(): ReviewFinding[] {
+	pendingPreviousFindings(): { findings: ReviewFinding[]; candidates: ValidatedReviewCandidate[] } {
 		const pending = this.pendingPrior;
-		if (!this.submitted || !pending) return [];
+		if (!this.submitted || !pending) return { findings: [], candidates: [] };
 		const decided = new Set(pending.decisions.map((decision) => decision.findingId));
-		const reported = new Set(this.submitted.findings.map((finding) => finding.fingerprint));
-		return structuredClone(
-			this.previousFindings.filter((finding) => !decided.has(finding.id) && !reported.has(finding.fingerprint)),
-		);
+		return structuredClone({
+			findings: this.previousFindings.filter((finding) => !decided.has(finding.id)),
+			candidates: [...pending.unlinked],
+		});
 	}
 
 	/**
-	 * Settle the previous findings of the submitted result with the engine's decisions and `hostDecisions`, the
-	 * host's for {@link undecidedPreviousFindings}, then its verdict. Once only.
+	 * Settle the previous findings of the submitted result with the engine's decisions and `host`'s, the host's on
+	 * {@link pendingPreviousFindings}, then its verdict; the commands the host's pass ran join the coverage. Once only.
 	 */
-	settle(hostDecisions: readonly ReviewPriorFindingDecision[] = []): void {
+	settle(host?: PreviousFindingDecisions): void {
 		const pending = this.pendingPrior;
 		if (!this.submitted || !pending) return;
 		this.pendingPrior = undefined;
 		this.fixed = settlePreviousFindings(
 			this.submitted,
 			this.previousFindings,
-			[...pending.decisions, ...hostDecisions],
+			[...pending.decisions, ...(host?.decisions ?? [])],
 			pending.candidateFingerprints,
 		);
+		if (!host) return;
+		const coverage = this.submitted.coverage;
+		coverage.commandsRun.push(...host.commandsRun);
+		coverage.failedVerificationAttempts.push(...host.failedVerificationAttempts);
+		// The review ran commands after all: it is no longer a static one.
+		if (host.commandsRun.length > 0) {
+			coverage.residualRisk = coverage.residualRisk.filter((risk) => risk !== STATIC_REVIEW_LIMITATION);
+		}
 	}
 
 	/** The run is over: its context refuses further calls. */
@@ -841,11 +896,25 @@ export class ReviewEngineRun {
 		let reported = parsed;
 		if (this.previousFindings.length > 0) {
 			// Settled once the host decided what the engine left: the engine is told what its own decisions give.
+			const acceptedIds = new Set(
+				verification.decisions
+					.filter((decision) => decision.outcome === "accept")
+					.map((decision) => decision.candidateId),
+			);
+			const prior = withReportedAgain(
+				this.previousFindings,
+				verification.priorFindingDecisions,
+				validated.filter(
+					(candidate) =>
+						acceptedIds.has(candidate.candidateId) && !this.suppressedFingerprints.has(candidate.fingerprint),
+				),
+			);
 			this.pendingPrior = {
-				decisions: verification.priorFindingDecisions,
+				decisions: prior.decisions,
 				candidateFingerprints: new Map(
 					validated.map((candidate) => [candidate.candidateId, candidate.fingerprint]),
 				),
+				unlinked: prior.unlinked,
 			};
 			reported = structuredClone(parsed);
 			settlePreviousFindings(

@@ -33,7 +33,7 @@ export interface DiffShard {
 }
 
 export interface ReviewTarget {
-	/** Original repository root. Dependency symlinks in the checkout resolve here. */
+	/** Original repository root. */
 	repoRoot: string;
 	/** Frozen, materialized checkout of the reviewed state; the working directory of every pass. */
 	checkout: string;
@@ -53,7 +53,7 @@ export interface ReviewTarget {
 	commonDir: string;
 	/** A file as it was before the change, from the host's snapshot; undefined when it did not exist or is not text. */
 	readBase(path: string, signal: AbortSignal): Promise<string | undefined>;
-	/** Materializes another private checkout of the reviewed state, with dependencies linked; the caller removes it. */
+	/** Materializes another private checkout of the reviewed state, set up as the review asked; the caller removes it. */
 	createCheckout(): Promise<string>;
 }
 

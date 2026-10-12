@@ -392,7 +392,9 @@ export interface ExtensionReviewStartOptions {
 	 * checkout before the review uses it, such as installing its dependencies
 	 * (`npm ci --ignore-scripts`): a fresh checkout has none. It runs with the
 	 * user's shell and permissions, for at most `timeoutMs` (ten minutes by
-	 * default); one that fails or times out fails the review with its output.
+	 * default). One that fails or times out fails the standard review with
+	 * its output; an engine is refused the checkout, and decides what its
+	 * review does without it.
 	 * It applies with `tools`.
 	 */
 	readonly setup?: { readonly command: string; readonly timeoutMs?: number };

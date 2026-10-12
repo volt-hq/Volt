@@ -10,6 +10,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type FauxProvider, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
+import { Type } from "typebox";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createLoopbackClient, type LoopbackClient } from "../../src/client/protocol-client.ts";
 import type { ExtensionContext, ExtensionFactory } from "../../src/core/extensions/index.ts";
@@ -178,6 +179,8 @@ interface Fixture {
 	ran: Array<{ tools: readonly string[]; marker: string | undefined }>;
 	/** The conversation's model, which the host's own verification passes run on. */
 	faux: FauxProvider;
+	/** How many times the reviewer extension's `review_probe` tool ran. */
+	probed: () => number;
 }
 
 async function setup(): Promise<Fixture> {
@@ -186,6 +189,7 @@ async function setup(): Promise<Fixture> {
 	const decide: { next: Decide } = { next: "open" };
 	const decided: ReviewEngineContext["previousFindings"][] = [];
 	const ran: Fixture["ran"] = [];
+	let probed = 0;
 	const recordContext =
 		(id: string): ExtensionFactory =>
 		(volt) => {
@@ -201,6 +205,16 @@ async function setup(): Promise<Fixture> {
 				factory: (volt) => {
 					recordContext("reviewer")(volt);
 					volt.registerWorkKind("loop", {});
+					volt.registerTool({
+						name: "review_probe",
+						label: "review_probe",
+						description: "An extension tool a review may be granted.",
+						parameters: Type.Object({}),
+						async execute() {
+							probed++;
+							return { content: [{ type: "text", text: "probed" }], details: {} };
+						},
+					});
 					volt.registerReviewEngine("probe", {
 						label: "Probe",
 						description: "Reports one finding.",
@@ -268,6 +282,7 @@ async function setup(): Promise<Fixture> {
 		decided,
 		ran,
 		faux: harness.faux,
+		probed: () => probed,
 	};
 }
 
@@ -525,6 +540,84 @@ describe("ctx.reviews", () => {
 			completionStatus: "incomplete",
 			findings: [expect.objectContaining({ id: found.id, status: "uncertain" })],
 		});
+		expect((await reviewer.reviews.result(first.id))?.findings).toEqual([
+			expect.objectContaining({ id: found.id, status: "open" }),
+		]);
+	});
+
+	test("decides earlier findings with the review's tools in a set-up checkout, extension tools among them, and records its commands", async () => {
+		const { reviewer, decide, faux, probed } = await setup();
+		const first = await reviewer.reviews.start({ target: { kind: "uncommitted" }, engine: PROBE });
+		const found = (await first.ended).run?.findings?.[0];
+		if (!found) throw new Error("Expected a finding");
+
+		decide.next = "skip";
+		const seen: string[] = [];
+		const call = (name: string, args: Parameters<typeof fauxToolCall>[1]) =>
+			fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
+		faux.setResponses([
+			call("bash", { command: "cat setup-marker" }),
+			(context) => {
+				seen.push(JSON.stringify(context.messages.at(-1)));
+				return call("review_probe", {});
+			},
+			(context) => {
+				seen.push(JSON.stringify(context.messages.at(-1)));
+				return call("report_review_verification", {
+					summary: "Checked.",
+					assessment: "complete",
+					decisions: [],
+					priorFindingDecisions: [
+						{ findingId: found.id, outcome: "fixed", method: "Ran it.", rationale: "Gone.", confidence: 0.9 },
+					],
+					limitations: [],
+				});
+			},
+		]);
+		const second = await reviewer.reviews.start({
+			target: { kind: "uncommitted" },
+			engine: DECIDER,
+			previousRunId: first.id,
+			tools: ["bash", "review_probe"],
+			setup: { command: "printf ready > setup-marker" },
+		});
+		const run = (await second.ended).run;
+		expect(seen[0]).toContain("ready");
+		expect(seen[1]).toContain("probed");
+		expect(probed()).toBe(1);
+		expect(run).toMatchObject({ completionStatus: "complete", findings: [] });
+		// The review ran a command after all: it is not a static one.
+		expect(run?.coverage?.commandsRun).toEqual(["cat setup-marker"]);
+		expect(run?.coverage?.residualRisk).not.toContain(
+			"Static review only. This review did not run tests or runtime checks.",
+		);
+	});
+
+	test("cancels with the review while the host decides the earlier findings, closing none", async () => {
+		const { reviewer, decide, faux } = await setup();
+		const first = await reviewer.reviews.start({ target: { kind: "uncommitted" }, engine: PROBE });
+		const found = (await first.ended).run?.findings?.[0];
+		if (!found) throw new Error("Expected a finding");
+
+		decide.next = "skip";
+		const deciding = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		faux.setResponses([
+			async () => {
+				deciding.resolve();
+				await release.promise;
+				return fauxAssistantMessage("Too late.");
+			},
+		]);
+		const second = await reviewer.reviews.start({
+			target: { kind: "uncommitted" },
+			engine: DECIDER,
+			previousRunId: first.id,
+		});
+		await deciding.promise;
+		await reviewer.reviews.cancel(second.id);
+		release.resolve();
+		expect(await second.ended).toMatchObject({ status: "cancelled" });
 		expect((await reviewer.reviews.result(first.id))?.findings).toEqual([
 			expect.objectContaining({ id: found.id, status: "open" }),
 		]);

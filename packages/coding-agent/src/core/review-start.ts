@@ -115,6 +115,9 @@ export async function startConversationReview(
 			fastModeEnabled: session.fastModeEnabled,
 			...(tools === undefined ? {} : { tools }),
 			...(setup === undefined ? {} : { setup }),
+			// As for the built-in pipeline: a remote review gets no extension tools.
+			...(options.remote ? {} : { parentResourceLoader: session.resourceLoader }),
+			passes: session.reviewPasses,
 			settingsManager: session.settingsManager,
 			sessionManager: session.sessionManager,
 			sessionWriter: session.sessionWriter,
