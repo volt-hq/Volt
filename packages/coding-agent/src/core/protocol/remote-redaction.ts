@@ -419,9 +419,15 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 	const rawText = (view: StreamingView, index: number): string | undefined =>
 		blockText(view.raw.assistant?.message.content[index]);
 
-	/** Text the client may append to what it holds, or `undefined` when its text must be replaced. */
-	const appendable = (held: string, next: string): string | undefined =>
-		next.startsWith(held) ? next.slice(held.length) : undefined;
+	/**
+	 * Text the client may append to what it holds, or `undefined` when its text
+	 * must be replaced. Nothing while `next` falls short of it: a token the
+	 * client holds part of is held back again until it ends.
+	 */
+	const appendable = (held: string, next: string): string | undefined => {
+		if (next.startsWith(held)) return next.slice(held.length);
+		return held.startsWith(next) ? "" : undefined;
+	};
 
 	/**
 	 * The redacted text after `block`'s checkpoint once the fold grew the
