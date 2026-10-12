@@ -738,7 +738,7 @@ volt.on("turn_end", async (event, ctx) => {
 
 Fired for message lifecycle updates.
 
-- `message_start` and `message_end` fire for user, assistant, and toolResult messages.
+- `message_start` and `message_end` fire for user, assistant, and toolResult messages, and for custom messages delivered to a turn: [`volt.sendMessage()`](#voltsendmessagemessage-options) messages queued while the agent streams or sent with `triggerTurn`, `"nextTurn"` and [`before_agent_start`](#before_agent_start) messages with the prompt that carries them, and the host's own custom messages delivered the same way, such as `volt-plan-execution`. A custom message appended while the agent is idle, such as a `volt.sendMessage()` message without `triggerTurn`, gets neither.
 - `message_update` fires for assistant streaming updates.
 - `message_end` handlers can return `{ message }` to replace the finalized message. The replacement must keep the same `role` and satisfy the [JSON data boundary](#json-data-boundary). An invalid replacement fails message preparation before it commits.
 
