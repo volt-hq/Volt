@@ -459,8 +459,11 @@ describe("structured review reports", () => {
 		);
 	});
 
-	it("keeps follow-ups anywhere in the head, one per defect, each verified, with a fingerprint that holds across heads", async () => {
+	it("keeps follow-ups off the change's lines, one per defect, each verified, with a fingerprint that holds across heads", async () => {
 		const snapshot = await setup();
+		const inScope = {
+			inScopeHunkIds: new Set(snapshot.changedFiles.flatMap((file) => file.hunks.map((hunk) => hunk.id))),
+		};
 		const followUp = (overrides: Partial<ReviewFollowUpCandidate> = {}): ReviewFollowUpCandidate => ({
 			followUpId: "f1",
 			title: "Context file is padded",
@@ -472,33 +475,66 @@ describe("structured review reports", () => {
 			location: { path: "docs/context.txt", side: "head", startLine: 1, endLine: 1 },
 			...overrides,
 		});
-		const checked = await validateReviewFollowUps(snapshot, [
-			followUp(),
-			followUp({
-				followUpId: "f2",
-				rootCauseKey: "base-side",
-				location: { path: "docs/context.txt", side: "base", startLine: 1, endLine: 1 },
-			}),
-			followUp({ followUpId: "f3", location: { path: "docs/missing.txt", side: "head", startLine: 1, endLine: 1 } }),
-			followUp({
-				followUpId: "f4",
-				rootCauseKey: "long",
-				location: { path: "src/divide.ts", side: "head", startLine: 1, endLine: 11 },
-			}),
-			followUp({ followUpId: "f5", title: "Same defect again" }),
-			followUp({ followUpId: "f1", rootCauseKey: "other" }),
-		]);
+		const checked = await validateReviewFollowUps(
+			snapshot,
+			[
+				followUp(),
+				followUp({
+					followUpId: "f2",
+					rootCauseKey: "base-side",
+					location: { path: "docs/context.txt", side: "base", startLine: 1, endLine: 1 },
+				}),
+				followUp({
+					followUpId: "f3",
+					location: { path: "docs/missing.txt", side: "head", startLine: 1, endLine: 1 },
+				}),
+				followUp({
+					followUpId: "f4",
+					rootCauseKey: "long",
+					location: { path: "src/divide.ts", side: "head", startLine: 1, endLine: 11 },
+				}),
+				followUp({ followUpId: "f5", title: "Same defect again" }),
+				followUp({ followUpId: "f1", rootCauseKey: "other" }),
+				// The line the change adds: a defect there is the change's own, so it is a candidate.
+				followUp({
+					followUpId: "f6",
+					rootCauseKey: "zero-guard",
+					location: { path: "src/divide.ts", side: "head", startLine: 2, endLine: 2 },
+				}),
+			],
+			inScope,
+		);
 		expect(checked.followUps.map((kept) => kept.followUpId)).toEqual(["f1"]);
 		expect(checked.errors).toEqual([
 			"followUps[1].location must be on the head side",
 			"followUps[2].location does not exist in the head snapshot: docs/missing.txt",
 			"followUps[3].location exceeds src/divide.ts's head line count",
+			"followUps[3].location is on a line the change touches: a defect there is the change's own, even one that predates it, so report it as a candidate instead",
 			"followUps[3].location exceeds 10 lines",
 			"followUps[4] repeats another follow-up's root cause at docs/context.txt",
 			"followUps[5].followUpId is duplicated: f1",
+			"followUps[6].location is on a line the change touches: a defect there is the change's own, even one that predates it, so report it as a candidate instead",
 		]);
+		// An unchanged line of a changed file is outside the change.
+		const unchangedLine = await validateReviewFollowUps(
+			snapshot,
+			[followUp({ location: { path: "src/divide.ts", side: "head", startLine: 3, endLine: 3 } })],
+			inScope,
+		);
+		expect(unchangedLine.errors).toEqual([]);
+		// A changed line outside the review's scope is no candidate's: a follow-up may stand there.
+		const outOfScope = await validateReviewFollowUps(
+			snapshot,
+			[followUp({ location: { path: "src/divide.ts", side: "head", startLine: 2, endLine: 2 } })],
+			{ inScopeHunkIds: new Set() },
+		);
+		expect(outOfScope.errors).toEqual([]);
 		// Another head with the same defect gives the same fingerprint.
-		const again = await validateReviewFollowUps(snapshot, [followUp({ followUpId: "other-id", title: "Reworded" })]);
+		const again = await validateReviewFollowUps(
+			snapshot,
+			[followUp({ followUpId: "other-id", title: "Reworded" })],
+			inScope,
+		);
 		expect(again.followUps[0]?.fingerprint).toBe(checked.followUps[0]?.fingerprint);
 
 		const verification = (decisions: ReviewVerificationReport["followUpDecisions"]): ReviewVerificationReport => ({

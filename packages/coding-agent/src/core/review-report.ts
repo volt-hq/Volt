@@ -669,9 +669,15 @@ function followUpFingerprint(followUp: ReviewFollowUpCandidate): string {
  * Check the follow-ups of a candidate report: each in a file of the reviewed head, at most 10 lines, one per
  * defect. Returns the valid ones with their fingerprints, and what is wrong with the others.
  */
+/**
+ * Check `followUps` against `snapshot`. A follow-up is a defect outside the change: one on a changed line of an
+ * in-scope hunk (`inScopeHunkIds`) is the change's own, even when it predates the change, so it is refused, for the
+ * review to report it as a candidate that this change fixes.
+ */
 export async function validateReviewFollowUps(
 	snapshot: ReviewSnapshot,
 	followUps: readonly ReviewFollowUpCandidate[],
+	options: { inScopeHunkIds: ReadonlySet<string> },
 ): Promise<{ followUps: ValidatedReviewFollowUp[]; errors: string[] }> {
 	const errors: string[] = [];
 	const valid: ValidatedReviewFollowUp[] = [];
@@ -690,6 +696,17 @@ export async function validateReviewFollowUps(
 		}
 		if (followUp.location.side !== "head") problems.push(`${label}.location must be on the head side`);
 		else problems.push(...(await validateLocationExists(snapshot, followUp.location, `${label}.location`)));
+		const changedFile = matchingChangedFile(snapshot, followUp.location);
+		if (
+			changedFile &&
+			changedRanges(changedFile, followUp.location.side).some(
+				({ hunkId, range }) => options.inScopeHunkIds.has(hunkId) && rangesOverlap(followUp.location, range),
+			)
+		) {
+			problems.push(
+				`${label}.location is on a line the change touches: a defect there is the change's own, even one that predates it, so report it as a candidate instead`,
+			);
+		}
 		if (followUp.location.endLine - followUp.location.startLine + 1 > 10) {
 			problems.push(`${label}.location exceeds 10 lines`);
 		}

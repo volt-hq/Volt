@@ -467,7 +467,7 @@ export function buildReviewPrompt(
 					? `<incremental_fallback>${escapeXml(incrementalPlan.fallbackReason)}</incremental_fallback>`
 					: "",
 		followUps
-			? `<follow_up_guidance>Also report, in followUps (at most ${REVIEW_FOLLOW_UPS_MAX}), substantiated defects you notice outside the change: pre-existing defects, or defects in code the change does not touch that it does not cause. Anchor each at its location in the head snapshot (at most 10 lines), with a concrete description. Never report a defect the change introduces as a follow-up: that is a candidate. Follow-ups never block the change; an empty or absent followUps is fine.</follow_up_guidance>`
+			? `<follow_up_guidance>Also report, in followUps (at most ${REVIEW_FOLLOW_UPS_MAX}), substantiated defects you notice outside the change: in code the change does not touch, which the change does not cause. In this review a defect on a line the change touches is the change's own, even when it predates the change: report it as a candidate, so this change fixes it, never as a follow-up; the host refuses a follow-up on a changed line. Never report a defect the change introduces as a follow-up either: that is a candidate. Anchor each follow-up at its location in the head snapshot (at most 10 lines), with a concrete description. Follow-ups never block the change; an empty or absent followUps is fine.</follow_up_guidance>`
 			: "",
 		"<available_tool_guidance>",
 		...reviewSnapshotToolGuidelines(commandCapable, resolved.codeHostContext !== undefined).map(
@@ -490,6 +490,7 @@ function buildVerificationPrompt(
 	commandCapable: boolean,
 	incrementalPlan?: ReviewIncrementalPlan,
 	followUps: readonly ValidatedReviewFollowUp[] = [],
+	collectsFollowUps = false,
 ): string {
 	return [
 		"<review_verification_request>",
@@ -510,6 +511,9 @@ function buildVerificationPrompt(
 					`<follow_up_candidates>${escapeXml(JSON.stringify(followUps))}</follow_up_candidates>`,
 					"<follow_up_guidance>Discovery also reported these defects outside the change. Return one followUpDecisions entry for each: accept only a substantiated, actionable defect at its location that the change does not introduce; reject the rest. They never block the change and do not affect your assessment.</follow_up_guidance>",
 				].join("\n")
+			: "",
+		collectsFollowUps
+			? "<changed_line_guidance>In this review a defect on a line the change touches is the change's own, even when it predates the change: accept a substantiated candidate anchored there whether or not the change introduced the defect, so this change fixes it.</changed_line_guidance>"
 			: "",
 		"<available_tool_guidance>",
 		...reviewSnapshotToolGuidelines(commandCapable, resolved.codeHostContext !== undefined).map(
@@ -1648,7 +1652,9 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 						// attempt corrects what is wrong with them, and after it the invalid ones are left out.
 						roundFollowUps = [...validatedFollowUps];
 						if (options.followUps) {
-							const followUps = await validateReviewFollowUps(snapshot, report.followUps ?? []);
+							const followUps = await validateReviewFollowUps(snapshot, report.followUps ?? [], {
+								inScopeHunkIds,
+							});
 							if (!final) validation.errors.push(...followUps.errors);
 							for (const followUp of followUps.followUps) {
 								if (roundFollowUps.some((prior) => prior.fingerprint === followUp.fingerprint)) continue;
@@ -1713,6 +1719,7 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 							commandCapable,
 							options.incrementalPlan,
 							roundFollowUps,
+							options.followUps === true,
 						) + followUp,
 					repair: async (report, final) => {
 						if (!report) return ["report_review_verification was not called with a valid payload"];
