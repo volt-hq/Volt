@@ -375,6 +375,7 @@ describe("ctx.reviews", () => {
 		expect(end.run).toMatchObject({
 			runId: review.id,
 			engine: "standard",
+			engineLabel: "Standard",
 			status: "failed",
 			options: { effort: "low", scopeMode: "full" },
 		});

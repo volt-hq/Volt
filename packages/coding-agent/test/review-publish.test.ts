@@ -287,11 +287,14 @@ switch (args.slice(0, 2).join(" ")) {
 	});
 
 	it("says in the posted review which engine produced it, and that the engine reported its coverage", async () => {
-		const bodyOf = async (engine?: string): Promise<string> => {
+		const bodyOf = async (engine?: { id: string; label: string }): Promise<string> => {
 			const run = reviewRun();
 			if (!run.target.identity.pullRequest) throw new Error("Expected a PR review fixture");
 			run.target.identity.pullRequest.providerId = "test-host";
-			if (engine !== undefined) run.engine = engine;
+			if (engine !== undefined) {
+				run.engine = engine.id;
+				run.engineLabel = engine.label;
+			}
 			let body = "";
 			const provider: CodeHostProvider = {
 				id: "test-host",
@@ -311,9 +314,10 @@ switch (args.slice(0, 2).join(" ")) {
 		};
 		const standard = await bodyOf();
 		expect(standard).not.toContain("review engine");
-		const swarm = await bodyOf("ext:swarm-review/swarm");
+		const swarm = await bodyOf({ id: "ext:swarm-review/swarm", label: "Swarm" });
+		// Named by the label the engine had when it ran, which a reader on the code host recognizes.
 		expect(swarm).toContain(
-			"Reviewed with the ext:swarm-review/swarm review engine; its coverage and verification are reported by the engine.",
+			"Reviewed with the Swarm review engine; its coverage and verification are reported by the engine.",
 		);
 		// Only the engine's line differs.
 		expect(swarm.replace(/\n\nReviewed with the [^\n]*/, "")).toBe(standard);

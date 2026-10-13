@@ -174,6 +174,7 @@ describe("shared schemas", () => {
 			runId: "run-1",
 			workflowAction: "review",
 			engine: "standard",
+			engineLabel: "Standard",
 			status: "completed",
 			startedAt,
 			endedAt: startedAt + 60_000,

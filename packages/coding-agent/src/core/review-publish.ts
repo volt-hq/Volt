@@ -1,6 +1,6 @@
 import { type CodeHostProvider, getCodeHostProvider, type ReviewCodeHostInlineComment } from "./code-host/index.ts";
 import type { ReviewFinding } from "./review-report.ts";
-import { type ReviewRunRecord, reviewRunEngine, STANDARD_REVIEW_ENGINE } from "./review-state.ts";
+import { type ReviewRunRecord, reviewRunEngine, reviewRunEngineLabel, STANDARD_REVIEW_ENGINE } from "./review-state.ts";
 
 function findingText(finding: ReviewFinding): string {
 	return [
@@ -80,14 +80,13 @@ export async function publishReviewRun(
 	const summaryOnly = run.result.findings
 		.filter((finding) => summaryOnlyFindingIds.includes(finding.id))
 		.map((finding) => findingText(finding));
-	const engine = reviewRunEngine(run);
 	const body = [
 		`Volt review (${run.runId})`,
-		...(engine === STANDARD_REVIEW_ENGINE
+		...(reviewRunEngine(run) === STANDARD_REVIEW_ENGINE
 			? []
 			: [
 					"",
-					`Reviewed with the ${engine} review engine; its coverage and verification are reported by the engine.`,
+					`Reviewed with the ${reviewRunEngineLabel(run)} review engine; its coverage and verification are reported by the engine.`,
 				]),
 		"",
 		run.result.summary,
