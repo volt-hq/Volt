@@ -7,6 +7,9 @@ import type { SessionUsageTotals } from "./session-usage.ts";
 
 export const STATIC_REVIEW_LIMITATION = "Static review only. This review did not run tests or runtime checks.";
 
+/** What a finding's text says of a defect the reviewed change did not introduce (`introduced: false`). */
+export const REVIEW_PRE_EXISTING_LINE = "Pre-existing: this defect predates the change.";
+
 /** Render data as inert, single-line Markdown rather than headings, links, or terminal controls. */
 function reviewText(value: string): string {
 	return stripVTControlCharacters(value)
@@ -113,6 +116,7 @@ function compactReview(
 			`### ${index + 1}. [P${finding.priority}] ${reviewText(finding.title)} (${finding.status})`,
 			`ID: ${reviewText(finding.id)}  \nLocation: ${locationText(finding.changeLocation)}`,
 			`Trigger: ${reviewText(finding.trigger)}  \nImpact: ${reviewText(finding.impact)}`,
+			...(finding.introduced === false ? [REVIEW_PRE_EXISTING_LINE] : []),
 		);
 	}
 	lines.push(
@@ -192,6 +196,7 @@ function fullReview(
 			finding.body,
 			`Trigger: ${finding.trigger}`,
 			`Impact: ${finding.impact}`,
+			...(finding.introduced === false ? [REVIEW_PRE_EXISTING_LINE] : []),
 			`Verification: ${finding.verification.method} — ${finding.verification.rationale}`,
 			...finding.evidenceLocations.map((location) => `Evidence: ${locationText(location)}`),
 			"",

@@ -294,6 +294,81 @@ describe("structured review reports", () => {
 		expect(optional.errors.join(" ")).toContain("P3");
 	});
 
+	it("records whether the change introduced a finding: the verifier's determination over discovery's, else unknown", async () => {
+		const snapshot = await setup();
+		const invalid = await validateReviewCandidates(
+			snapshot,
+			report({ introduced: "no" as never }),
+			validationOptions(snapshot),
+		);
+		expect(invalid.errors).toEqual(["candidates[0].introduced must be true or false when present"]);
+
+		const hunkIds = snapshot.changedFiles.flatMap((file) => file.hunks.map((hunk) => hunk.id));
+		const observed: ReviewObservedCoverage = {
+			changedFileInventoryComplete: true,
+			contextInspectionComplete: false,
+			contextPagesRead: 0,
+			filesRead: [],
+			hunksInspected: hunkIds,
+			searchesRun: 0,
+			treePagesRead: 0,
+			diffFilesFullyRead: ["src/divide.ts"],
+		};
+		const verification = (introduced?: unknown): ReviewVerificationReport => ({
+			summary: "Accepted.",
+			assessment: "complete",
+			decisions: [
+				{
+					candidateId: "candidate-1",
+					outcome: "accept",
+					method: "Compared the base and head blobs.",
+					rationale: "The guard returns amount.",
+					confidence: 0.9,
+					...(introduced === undefined ? {} : { introduced: introduced as boolean }),
+				},
+			],
+			priorFindingDecisions: [],
+			limitations: [],
+		});
+		const review = async (discovered: boolean | undefined, verified: boolean | undefined) => {
+			const candidates = report(discovered === undefined ? {} : { introduced: discovered });
+			const validation = await validateReviewCandidates(snapshot, candidates, validationOptions(snapshot));
+			expect(validation.errors).toEqual([]);
+			const verificationReport = verification(verified);
+			expect(validateReviewVerification(validation.candidates, verificationReport)).toEqual([]);
+			return buildParsedReview({
+				snapshot,
+				candidateReport: candidates,
+				validatedCandidates: validation.candidates,
+				verificationReport,
+				discoveryCoverage: observed,
+				verificationCoverage: observed,
+				commandsRun: [],
+				failedVerificationAttempts: [],
+				excludedPaths: [],
+			});
+		};
+		const preExisting = await review(true, false);
+		expect(preExisting.findings[0]?.introduced).toBe(false);
+		// A pre-existing defect still counts against the change.
+		expect(preExisting).toMatchObject({ completionStatus: "complete", overallCorrectness: "incorrect" });
+		expect((await review(false, true)).findings[0]?.introduced).toBe(true);
+		expect((await review(false, undefined)).findings[0]?.introduced).toBe(false);
+		expect((await review(undefined, undefined)).findings[0]).not.toHaveProperty("introduced");
+
+		// The context-blind path carries it through declassification.
+		const validation = await validateReviewCandidates(
+			snapshot,
+			report({ introduced: true }),
+			validationOptions(snapshot),
+		);
+		expect(declassifyReviewFindings(validation.candidates, verification(false))[0]?.introduced).toBe(false);
+		expect(declassifyReviewFindings(validation.candidates, verification())[0]?.introduced).toBe(true);
+		expect(validateReviewVerification(validation.candidates, verification(1))).toEqual([
+			"decisions[0].introduced must be true or false when present",
+		]);
+	});
+
 	it("declassifies only bounded, existing, in-scope changed-code challenge anchors", async () => {
 		const snapshot = await setup();
 		const verification: ReviewVerificationReport = {

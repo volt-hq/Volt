@@ -35,6 +35,11 @@ export interface ReviewCandidate {
 	confidence: number;
 	changeLocation: ReviewLocation;
 	evidenceLocations: ReviewLocation[];
+	/**
+	 * Whether the change introduces the defect: true when it does not exist at the base revision, false when it already
+	 * exists there with the same trigger and impact and the change only touches that code. Absent: unknown.
+	 */
+	introduced?: boolean;
 }
 
 /** The most follow-ups one review reports. */
@@ -77,6 +82,11 @@ export interface ReviewVerificationDecision {
 	method: string;
 	rationale: string;
 	confidence: number;
+	/**
+	 * For an accepted candidate: the verifier's own determination of {@link ReviewCandidate.introduced}, checked against
+	 * the base revision. It overrides the candidate's.
+	 */
+	introduced?: boolean;
 }
 
 export interface ReviewPriorFindingDecision {
@@ -146,6 +156,7 @@ export interface DeclassifiedReviewFinding {
 	changeLocation: ReviewLocation;
 	evidenceLocations: ReviewLocation[];
 	hunkIds: string[];
+	introduced?: boolean;
 }
 
 export interface ReviewFindingVerification {
@@ -169,6 +180,12 @@ export interface ReviewFinding {
 	confidence: number;
 	changeLocation: ReviewLocation;
 	evidenceLocations: ReviewLocation[];
+	/**
+	 * Whether the reviewed change introduced the defect (see {@link ReviewCandidate.introduced}): the verifier's
+	 * determination, else discovery's. False for a defect that predates the change on a line it touches. Absent: unknown.
+	 * It never affects the verdict.
+	 */
+	introduced?: boolean;
 	verification: ReviewFindingVerification;
 }
 
@@ -298,6 +315,7 @@ const CandidateSchema = Type.Object(
 		confidence: Type.Number({ minimum: 0, maximum: 1 }),
 		changeLocation: LocationSchema,
 		evidenceLocations: Type.Array(LocationSchema, { maxItems: 12 }),
+		introduced: Type.Optional(Type.Boolean()),
 	},
 	{ additionalProperties: false },
 );
@@ -343,6 +361,7 @@ const VerificationDecisionSchema = Type.Object(
 		method: Type.String({ minLength: 1, maxLength: 1_000 }),
 		rationale: Type.String({ minLength: 1, maxLength: 2_000 }),
 		confidence: Type.Number({ minimum: 0, maximum: 1 }),
+		introduced: Type.Optional(Type.Boolean()),
 	},
 	{ additionalProperties: false },
 );
@@ -607,6 +626,9 @@ export async function validateReviewCandidates(
 			errors.push(`${label}.priority must be an integer from 0 through 3`);
 		}
 		if (candidate.priority === 3 && !options.includeOptional) errors.push(`${label} uses P3 without includeOptional`);
+		if (candidate.introduced !== undefined && typeof candidate.introduced !== "boolean") {
+			errors.push(`${label}.introduced must be true or false when present`);
+		}
 		errors.push(...(await validateLocationExists(snapshot, candidate.changeLocation, `${label}.changeLocation`)));
 		const anchorLength = candidate.changeLocation.endLine - candidate.changeLocation.startLine + 1;
 		if (anchorLength > maximumAnchorLines) errors.push(`${label}.changeLocation exceeds ${maximumAnchorLines} lines`);
@@ -904,6 +926,9 @@ export function validateReviewVerification(
 		if (!Number.isFinite(decision.confidence) || decision.confidence < 0 || decision.confidence > 1) {
 			errors.push(`decisions[${index}].confidence must be finite and between 0 and 1`);
 		}
+		if (decision.introduced !== undefined && typeof decision.introduced !== "boolean") {
+			errors.push(`decisions[${index}].introduced must be true or false when present`);
+		}
 	}
 	for (const candidateId of expectedIds)
 		if (!seen.has(candidateId)) errors.push(`Missing verification decision for ${candidateId}`);
@@ -983,6 +1008,8 @@ export function declassifyReviewFindings(
 	return candidates.flatMap((candidate) => {
 		const decision = decisions.get(candidate.candidateId);
 		if (!decision || decision.outcome !== "accept") return [];
+		// The verifier's determination overrides discovery's; with neither, it stays unknown.
+		const introduced = decision.introduced ?? candidate.introduced;
 		return [
 			{
 				presentationId: randomUUID(),
@@ -994,6 +1021,7 @@ export function declassifyReviewFindings(
 				changeLocation: structuredClone(candidate.changeLocation),
 				evidenceLocations: structuredClone(candidate.evidenceLocations),
 				hunkIds: [...candidate.hunkIds],
+				...(introduced === undefined ? {} : { introduced }),
 			},
 		];
 	});
@@ -1180,6 +1208,7 @@ export function buildParsedReview(options: BuildParsedReviewOptions): ParsedRevi
 			confidence: finding.confidence,
 			changeLocation: structuredClone(finding.changeLocation),
 			evidenceLocations: structuredClone(finding.evidenceLocations),
+			...(finding.introduced === undefined ? {} : { introduced: finding.introduced }),
 			verification,
 		};
 	});

@@ -1,4 +1,5 @@
 import { type CodeHostProvider, getCodeHostProvider, type ReviewCodeHostInlineComment } from "./code-host/index.ts";
+import { REVIEW_PRE_EXISTING_LINE } from "./review-presentation.ts";
 import type { ReviewFinding } from "./review-report.ts";
 import { type ReviewRunRecord, reviewRunEngine, STANDARD_REVIEW_ENGINE } from "./review-state.ts";
 
@@ -10,6 +11,7 @@ function findingText(finding: ReviewFinding): string {
 		"",
 		`Trigger: ${finding.trigger}`,
 		`Impact: ${finding.impact}`,
+		...(finding.introduced === false ? [REVIEW_PRE_EXISTING_LINE] : []),
 		`Verification: ${finding.verification.method} — ${finding.verification.rationale}`,
 		`Volt finding: ${finding.id}`,
 	].join("\n");

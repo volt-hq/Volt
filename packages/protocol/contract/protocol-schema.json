@@ -21285,6 +21285,9 @@
 						"$ref": "#/$defs/RpcReviewLocation"
 					}
 				},
+				"introduced": {
+					"type": "boolean"
+				},
 				"verification": {
 					"type": "object",
 					"required": [
