@@ -82,17 +82,18 @@ const SECRET_FLAG_PATTERN = new RegExp(String.raw`^--?[\w-]*(?:${SECRET_KEY_PATT
 // A key may also be quoted, as in JSON, YAML, or a Python dict (`"access_token": "abc"`, `'token': 'abc'`), also
 // inside a JSON-encoded string (`\"token\": \"abc\"`), or be the two words `API key`. Such a key needs an explicit
 // `:` or `=`, so a quoted value or prose that ends in a key name (`"grant_type": "refresh_token"`) is never taken
-// for one. The value after it is redacted whole: a quoted string through its closing quote, keeping the quotes and
-// a leading scheme above (`"Bearer [redacted]"`); an object or array through its closing bracket, whatever its
-// keys; any other value like the value of an unquoted key, or up to where a rule above that reads past it starts in
-// it, which then applies (`API key: private sk-abc`).
+// for one; the value may start on the next line after a quoted key. The value after it is redacted whole: a quoted
+// string through its closing quote, keeping the quotes and a leading scheme above with a credential after it
+// (`"Bearer [redacted]"`); an object or array through its closing bracket, whatever its keys; any other value like the
+// value of an unquoted key. A rule above that starts in such a value and reads past its end into more than closing
+// punctuation applies instead, from where it starts (`API key: private sk-abc`), so the value never hides it.
 const SECRET_KEY = `(?:${SECRET_KEY_PATTERN.source})`;
 const AUTHORIZATION_SCHEME = String.raw`(?:bearer|basic|token)\s+`;
 const AUTHORIZATION_PREFIX = String.raw`(?:authorization\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?authorization\s+)["']?(?:${AUTHORIZATION_SCHEME})?`;
 const AUTHORIZATION_VALUE = String.raw`[^\s,;"']+(?:[ \t]+[^\s,;"']+)*`;
 const SECRET_PREFIX = String.raw`(?:${SECRET_KEY}\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?${SECRET_KEY}\s+)(?:["']?${AUTHORIZATION_SCHEME})?`;
 const CREDENTIAL_LIKE_VALUE = String.raw`(?=[^\s,;]{6})(?=[^\s,;]*[\d_-])`;
-const EXPLICIT_KEY_PREFIX = String.raw`(?:${SECRET_KEY}\\?["']|api[ \t]+key(?:\\?["'])?)[ \t]*[:=][ \t]*`;
+const EXPLICIT_KEY_PREFIX = String.raw`(?:${SECRET_KEY}\\?["'][ \t]*[:=]\s*|api[ \t]+key(?:\\?["'])?[ \t]*[:=][ \t]*)`;
 const BEARER_VALUE = String.raw`(?<bearerPrefix>bearer\s+)[A-Za-z0-9._~+/=-]+`;
 const AUTHORIZATION_KEY_VALUE = String.raw`(?<authorizationPrefix>${AUTHORIZATION_PREFIX})${AUTHORIZATION_VALUE}`;
 const KEY_VALUE = String.raw`(?<keyPrefix>${SECRET_PREFIX}|${SECRET_KEY}\s+(?:${AUTHORIZATION_SCHEME})?${CREDENTIAL_LIKE_VALUE})[^\s,;]+`;
@@ -108,6 +109,8 @@ const BARE_AUTHORIZATION_VALUE = new RegExp(
 	String.raw`(?<scheme>${AUTHORIZATION_SCHEME})?${AUTHORIZATION_VALUE}`,
 	"iy",
 );
+/** Text that holds a letter or digit: more than punctuation, so a rule that redacts it hides something. */
+const REVEALING = /[\p{L}\p{N}]/u;
 
 function tokenizeRiskText(value: string): string {
 	return value
@@ -198,10 +201,54 @@ function skipContainer(text: string, start: number): number {
 }
 
 /**
+ * The leftmost match of the rules other than an explicit key's at or after a position of `text`. One redaction asks
+ * from positions that mostly move forward, and the leftmost match from an earlier position is also the leftmost from
+ * a later one it does not start before, so a text with many explicit keys is not scanned to its end for each.
+ */
+function otherMatches(text: string): (from: number) => RegExpExecArray | null {
+	let found: { from: number; match: RegExpExecArray | null } | undefined;
+	return (from) => {
+		if (found !== undefined && found.from <= from && (found.match === null || found.match.index >= from)) {
+			return found.match;
+		}
+		OTHER_VALUE_PATTERN.lastIndex = from;
+		found = { from, match: OTHER_VALUE_PATTERN.exec(text) };
+		return found.match;
+	};
+}
+
+/**
+ * The redacted form of the value at `start` after a quoted key or `API key`, and the index after the value, unless a
+ * rule other than an explicit key's starts in the value and reads past its end into more than punctuation: then the
+ * value is redacted only up to where that rule starts, which applies from there, or not at all when only punctuation
+ * comes before it.
+ */
+function redactExplicitKeyValue(
+	text: string,
+	start: number,
+	authorization: boolean,
+	others: (from: number) => RegExpExecArray | null,
+): { text: string; end: number } | undefined {
+	const value = explicitKeyValue(text, start, authorization);
+	if (value === undefined) return undefined;
+	for (
+		let other = others(start);
+		other !== null && other.index < value.end;
+		other = others(other.index + other[0].length)
+	) {
+		const otherEnd = other.index + other[0].length;
+		if (otherEnd > value.end && REVEALING.test(text.slice(value.end, otherEnd))) {
+			return REVEALING.test(text.slice(start, other.index)) ? { text: "[redacted]", end: other.index } : undefined;
+		}
+	}
+	return value;
+}
+
+/**
  * The redacted form of the value at `start` after a quoted key or `API key`, and the index after the value. A bare
  * value after an `authorization` key is redacted like one after `Authorization:`.
  */
-function redactExplicitKeyValue(
+function explicitKeyValue(
 	text: string,
 	start: number,
 	authorization: boolean,
@@ -216,43 +263,33 @@ function redactExplicitKeyValue(
 	// A closing quote that more of a word follows (`"Bearer "abc`) does not end the value, which is then read as bare.
 	if (quote !== undefined && (!closed || end === text.length || QUOTED_VALUE_END.test(text[end]))) {
 		const contentStart = start + quote.length;
-		if ((closed ? end - quote.length : end) <= contentStart) {
+		const contentEnd = closed ? end - quote.length : end;
+		if (contentEnd <= contentStart) {
 			return undefined;
 		}
 		VISIBLE_SCHEME.lastIndex = contentStart;
 		const scheme = VISIBLE_SCHEME.exec(text)?.[0] ?? "";
-		return { text: `${quote}${scheme}[redacted]${closed ? quote : ""}`, end };
+		// Kept only with a credential after it inside the quotes.
+		const visible = contentStart + scheme.length < contentEnd ? scheme : "";
+		return { text: `${quote}${visible}[redacted]${closed ? quote : ""}`, end };
 	}
 	const barePattern = authorization ? BARE_AUTHORIZATION_VALUE : BARE_VALUE;
 	barePattern.lastIndex = start;
 	const bare = barePattern.exec(text);
-	if (!bare) {
-		return undefined;
-	}
-	const bareEnd = start + bare[0].length;
-	OTHER_VALUE_PATTERN.lastIndex = start;
-	for (
-		let other = OTHER_VALUE_PATTERN.exec(text);
-		other && other.index < bareEnd;
-		other = OTHER_VALUE_PATTERN.exec(text)
-	) {
-		if (other.index + other[0].length > bareEnd) {
-			return other.index > start ? { text: "[redacted]", end: other.index } : undefined;
-		}
-	}
-	return { text: `${bare.groups?.scheme ?? ""}[redacted]`, end: bareEnd };
+	return bare ? { text: `${bare.groups?.scheme ?? ""}[redacted]`, end: start + bare[0].length } : undefined;
 }
 
 export function redactMcpText(value: string): string {
 	let result = "";
 	let copied = 0;
+	const others = otherMatches(value);
 	SECRET_VALUE_PATTERN.lastIndex = 0;
 	for (let match = SECRET_VALUE_PATTERN.exec(value); match; match = SECRET_VALUE_PATTERN.exec(value)) {
 		const { bearerPrefix, authorizationPrefix, explicitKeyPrefix, keyPrefix } = match.groups ?? {};
 		let replacement = `${bearerPrefix ?? authorizationPrefix ?? keyPrefix ?? ""}[redacted]`;
 		let end = match.index + match[0].length;
 		if (explicitKeyPrefix !== undefined) {
-			const secret = redactExplicitKeyValue(value, end, /authorization/i.test(explicitKeyPrefix));
+			const secret = redactExplicitKeyValue(value, end, /authorization/i.test(explicitKeyPrefix), others);
 			if (!secret) {
 				continue;
 			}

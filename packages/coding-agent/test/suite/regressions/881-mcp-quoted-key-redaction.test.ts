@@ -19,6 +19,8 @@ describe("issue #881: MCP redaction covers quoted keys and API key", () => {
 		expect(redactMcpText("{'token': 'abc123', 'user': 'bob'}")).toBe("{'token': '[redacted]', 'user': 'bob'}");
 		expect(redactMcpText('"refresh_token" = "abc123"')).toBe('"refresh_token" = "[redacted]"');
 		expect(redactMcpText('"token": abc123')).toBe('"token": [redacted]');
+		// The value may start on the next line.
+		expect(redactMcpText('{"password":\n"abc123"}')).toBe('{"password":\n"[redacted]"}');
 	});
 
 	it("redacts the value after API key", () => {
@@ -94,6 +96,11 @@ describe("issue #881: MCP redaction covers quoted keys and API key", () => {
 		expect(redactMcpText("API key: token: abc123")).toBe("API key: token: [redacted]");
 		expect(redactMcpText("API key=Authorization abc123 def")).toBe("API key=Authorization [redacted] def");
 		expect(redactMcpText('"Authorization": password\nhunter2-x')).toBe('"Authorization": password\n[redacted]');
+		// A quoted value that ends at a line break or a closing quote does not hide what a rule reads past it.
+		expect(redactMcpText('"token": "Bearer\nabc123"')).toBe('"token": "Bearer\n[redacted]"');
+		expect(redactMcpText('"token": "token:abc")s3cret')).toBe('"token": "token:[redacted]');
+		// A scheme stays visible only with a credential after it inside the quotes.
+		expect(redactMcpText('{"Authorization": "Bearer "}')).toBe('{"Authorization": "[redacted]"}');
 	});
 
 	it("leaves already redacted text unchanged", () => {
