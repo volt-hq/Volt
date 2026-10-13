@@ -61,7 +61,10 @@ const READ_NAME_PATTERN = new RegExp(
 	`${TOKEN_START}(read|get|list|search|find|query|fetch|lookup|inspect|describe|show|view|download)${TOKEN_END}`,
 	"i",
 );
-const SECRET_KEY_PATTERN = /token|secret|password|passwd|api[-_]?key|authorization|credential|private/i;
+// A request signature (presigned URL `X-Amz-Signature`, Azure SAS `sig`, OAuth 1.0 `oauth_signature`) grants
+// access like a bearer token until it expires. `sig` counts only as a whole word, so `signal` stays visible.
+const SECRET_KEY_PATTERN =
+	/token|secret|password|passwd|api[-_]?key|authorization|credential|private|signature|(?<![a-z0-9])sig(?![a-z0-9])/i;
 // An argv element that is a flag named for a secret (`--token`, `--github-token`, `-password`). In argv-style
 // arrays its value is the next element, which carries no key name of its own.
 const SECRET_FLAG_PATTERN = new RegExp(String.raw`^--?[\w-]*(?:${SECRET_KEY_PATTERN.source})$`, "i");
