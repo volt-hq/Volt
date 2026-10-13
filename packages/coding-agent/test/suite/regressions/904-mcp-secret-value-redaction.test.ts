@@ -26,6 +26,33 @@ describe("issue #904: MCP redaction covers the whole value of a secret key", () 
 		expect(redactMcpText("token: 'Bot MTk4NjIy.Cl2FMQ'")).toBe("token: '[redacted]'");
 	});
 
+	it("redacts the value of a quoted key name", () => {
+		expect(redactMcpText('{"password":"correct horse battery"}')).toBe('{"password":"[redacted]"}');
+		expect(redactMcpText("{'api_key': 'sk-live-123'}")).toBe("{'api_key': '[redacted]'}");
+		expect(redactMcpText('{"api_key":"sk-live-123"}')).toBe('{"api_key":"[redacted]"}');
+		expect(redactMcpText('{"token": abc123, "user": "bob"}')).toBe('{"token": [redacted], "user": "bob"}');
+		expect(redactMcpText('{"access_token":"ya29.a0","token_type":"Bearer","max_tokens":4096}')).toBe(
+			'{"access_token":"[redacted]","token_type":"Bearer","max_tokens":4096}',
+		);
+		expect(redactMcpText('{"Authorization": "Bot MTk4NjIy.Cl2FMQ"}')).toBe('{"Authorization": "[redacted]"}');
+		expect(redactMcpText('{"authorization":"Bearer abc def"}')).toBe('{"authorization":"Bearer [redacted]"}');
+		expect(redactMcpText("{'authorization': 'Basic dXNlcjpwYXNz'}")).toBe("{'authorization': 'Basic [redacted]'}");
+		expect(redactMcpText('Missing field "token" in request')).toBe('Missing field "token" in request');
+	});
+
+	it("redacts a Base64 Basic credential after a key without a separator", () => {
+		expect(redactMcpText("Authorization Basic dXNlcjpwYXNz")).toBe("Authorization Basic [redacted]");
+		expect(redactMcpText("authorization basic YTpiYw== rejected")).toBe("authorization basic [redacted] rejected");
+		expect(redactMcpText("token Basic dXNlcjpwYXNz")).toBe("token Basic [redacted]");
+		for (const message of [
+			"authorization basic auth is required",
+			"authorization basic authentication failed",
+			"authorization basic credentials missing",
+		]) {
+			expect(redactMcpText(message)).toBe(message);
+		}
+	});
+
 	it("redacts an unclosed quoted value up to the end of the line", () => {
 		expect(redactMcpText('password: "correct horse battery\nnext line')).toBe('password: "[redacted]\nnext line');
 	});

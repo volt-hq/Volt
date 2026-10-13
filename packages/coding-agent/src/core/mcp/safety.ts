@@ -72,7 +72,10 @@ const SECRET_FLAG_PATTERN = new RegExp(String.raw`^--?[\w-]*(?:${SECRET_KEY_PATT
 // redacted after a `:` or `=` separator (`token: abc`, `api_key=abc`) or after a command-line flag whose
 // name ends in a key name (`--token abc`, `--github-token abc`). After whitespace alone it is redacted only
 // when it looks like a credential: at least 6 characters including a digit, `_`, or `-`
-// (`token ghp_abc123`, `x-api-key sk-live-123`, `password hunter2`).
+// (`token ghp_abc123`, `x-api-key sk-live-123`, `password hunter2`). After whitespace and the `Basic` scheme it
+// is also redacted when it is well-formed Base64 of at least 8 characters, whose length is a multiple of 4
+// (`Authorization Basic dXNlcjpwYXNz`). Prose such as `basic auth` or `basic authentication` stays.
+// A key name may be quoted before its separator, as in JSON or a dict repr (`{"api_key": "sk-live-123"}`).
 // A secret value may start with an authorization scheme, optionally quoted (`token: Bearer abc`,
 // `Basic dXNlcjpwYXNz`, GitHub's `token ghp_abc`, `"Bearer abc"`). The scheme stays visible and the
 // credential after it is redacted.
@@ -86,13 +89,15 @@ const SECRET_FLAG_PATTERN = new RegExp(String.raw`^--?[\w-]*(?:${SECRET_KEY_PATT
 // schemes above stay visible: an unknown first word cannot be told apart from a credential followed by text.
 const SECRET_KEY = `(?:${SECRET_KEY_PATTERN.source})`;
 const AUTHORIZATION_SCHEME = String.raw`(?:bearer|basic|token)\s+`;
-const AUTHORIZATION_PREFIX = String.raw`(?:authorization\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?authorization\s+)["']?(?:${AUTHORIZATION_SCHEME})?`;
+const AUTHORIZATION_PREFIX = String.raw`(?:authorization["']?\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?authorization\s+)["']?(?:${AUTHORIZATION_SCHEME})?`;
 const AUTHORIZATION_VALUE = String.raw`[^\s,;"']+(?:[ \t]+[^\s,;"']+)*`;
-const SECRET_KEY_PREFIX = String.raw`(?:${SECRET_KEY}\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?${SECRET_KEY}\s+)`;
+const SECRET_KEY_PREFIX = String.raw`(?:${SECRET_KEY}["']?\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?${SECRET_KEY}\s+)`;
 const CREDENTIAL_LIKE_VALUE = String.raw`(?=[^\s,;]{6})(?=[^\s,;]*[\d_-])`;
+const BASE64_CREDENTIAL_VALUE =
+	"(?=[A-Za-z0-9+/=]{8})(?=(?:[A-Za-z0-9+/]{4})+(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![A-Za-z0-9+/=]))";
 const SECRET_VALUE = String.raw`(?:[A-Za-z]+[ \t]+(?!-)${CREDENTIAL_LIKE_VALUE})?[^\s,;]+`;
 const SECRET_VALUE_PATTERN = new RegExp(
-	String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+|(${AUTHORIZATION_PREFIX})${AUTHORIZATION_VALUE}|(${SECRET_KEY_PREFIX}"(?:${AUTHORIZATION_SCHEME})?)(?:\\.|[^"\\\n])*|(${SECRET_KEY_PREFIX}'(?:${AUTHORIZATION_SCHEME})?)(?:\\.|[^'\\\n])*|(${SECRET_KEY_PREFIX}(?:${AUTHORIZATION_SCHEME})?|${SECRET_KEY}\s+(?:${AUTHORIZATION_SCHEME})?${CREDENTIAL_LIKE_VALUE})${SECRET_VALUE}`,
+	String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+|(${AUTHORIZATION_PREFIX})${AUTHORIZATION_VALUE}|(${SECRET_KEY_PREFIX}"(?:${AUTHORIZATION_SCHEME})?)(?:\\.|[^"\\\n])*|(${SECRET_KEY_PREFIX}'(?:${AUTHORIZATION_SCHEME})?)(?:\\.|[^'\\\n])*|(${SECRET_KEY_PREFIX}(?:${AUTHORIZATION_SCHEME})?|${SECRET_KEY}\s+(?:basic\s+${BASE64_CREDENTIAL_VALUE}|(?:${AUTHORIZATION_SCHEME})?${CREDENTIAL_LIKE_VALUE}))${SECRET_VALUE}`,
 	"gi",
 );
 
