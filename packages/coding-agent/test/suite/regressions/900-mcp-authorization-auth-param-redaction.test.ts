@@ -41,6 +41,27 @@ describe("issue #900: MCP redaction of Authorization values with auth-params", (
 		expect(redactMcpText('Authorization: Digest response="6629fae4')).toBe("Authorization: [redacted]");
 	});
 
+	it("redacts space-separated auth-params", () => {
+		expect(redactMcpText("Authorization: Digest username=alice response=6629fae49393a05397450978507c4ef1")).toBe(
+			"Authorization: [redacted]",
+		);
+		expect(
+			redactMcpText(
+				"Authorization: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request " +
+					"SignedHeaders=host Signature=fe5f80f77d5f",
+			),
+		).toBe("Authorization: [redacted]");
+		expect(redactMcpText("Authorization: Digest username=alice, response=abc123 nonce=def456")).toBe(
+			"Authorization: [redacted]",
+		);
+		expect(redactMcpText("Authorization: Digest username=alice cnonce=xyz123 response=6629fae4 was rejected")).toBe(
+			"Authorization: [redacted] was rejected",
+		);
+		expect(redactMcpText("Authorization Digest username=alice response=6629fae4 was rejected")).toBe(
+			"Authorization [redacted] was rejected",
+		);
+	});
+
 	it("keeps the text after the Authorization value", () => {
 		expect(redactMcpText(`401 (Authorization: ${DIGEST}; retry later)`)).toBe(
 			"401 (Authorization: [redacted]; retry later)",
@@ -75,6 +96,15 @@ describe("issue #900: MCP redaction of Authorization values with auth-params", (
 		);
 		expect(redactMcpText('Authorization Digest username="u", response="abc123" was rejected')).toBe(
 			"Authorization [redacted] was rejected",
+		);
+		expect(redactMcpText("authorization via access_token ya29.a0AfH6SMBx")).toBe(
+			"authorization via access_token [redacted]",
+		);
+		expect(redactMcpText("Authorization header X-Api-Key sk-live-abc123def")).toBe(
+			"Authorization header X-Api-Key [redacted]",
+		);
+		expect(redactMcpText("authorization for client_secret s3cr3t-value")).toBe(
+			"authorization for client_secret [redacted]",
 		);
 		for (const message of [
 			"Existing OAuth client information is required when exchanging an authorization code",
