@@ -76,9 +76,19 @@ const SECRET_FLAG_PATTERN = new RegExp(String.raw`^--?[\w-]*(?:${SECRET_KEY_PATT
 // A secret value may start with an authorization scheme, optionally quoted (`token: Bearer abc`,
 // `Basic dXNlcjpwYXNz`, GitHub's `token ghp_abc`, `"Bearer abc"`). The scheme stays visible and the
 // credential after it is redacted.
-// An `Authorization` value after `:`, `=`, or a flag is redacted up to `,`, `;`, a quote, or the end of
-// the line, so the credential after any scheme (`Bot`, `Negotiate`, `DPoP`, `ApiKey`) is covered. Only the
-// schemes above stay visible: an unknown first word cannot be told apart from a credential followed by text.
+// An `Authorization` value is a scheme followed by a single credential or by auth-params separated by commas
+// or, in some logs, by spaces, whose values may be quoted and contain spaces or commas, including JSON-encoded
+// quoted strings with escaped quotes and backslashes (RFC 9110 section 11.4: `Bearer
+// abc`, `Digest username="u", nonce="n", response="..."`, OAuth 1.0 `OAuth oauth_nonce="...",
+// oauth_signature="..."`, AWS `AWS4-HMAC-SHA256 Credential=... SignedHeaders=... Signature=...`). After `:`, `=`,
+// or a flag, optionally inside quotes, it is redacted through its last auth-param, or else up to `,`, `;`, a
+// quote, or the end of the line, so the credential after any scheme (`Bot`, `Negotiate`, `DPoP`, `ApiKey`) is
+// covered. Only the schemes above stay visible: an unknown first word cannot be told apart from a credential
+// followed by text. After whitespace alone `authorization` is usually prose (`authorization server
+// https://auth-a.example`), so only a scheme followed by `name=` auth-params or by one whole token68 word that
+// looks like a credential is redacted (`Authorization Bot MTk4NjIy`), and the text after it stays. A word that
+// ends in a key name (`access_token`, `X-Api-Key`) is not that credential, so the key path below still
+// redacts the value after it. The visible schemes are left to the key path as well.
 // A key may also be quoted, as in JSON, YAML, or a Python dict (`"access_token": "abc"`, `'token': 'abc'`), also
 // inside a JSON-encoded string (`\"token\": \"abc\"`), or be the two words `API key`. Such a key needs an explicit
 // `:` or `=`, so a quoted value or prose that ends in a key name (`"grant_type": "refresh_token"`) is never taken
@@ -89,19 +99,31 @@ const SECRET_FLAG_PATTERN = new RegExp(String.raw`^--?[\w-]*(?:${SECRET_KEY_PATT
 // punctuation applies instead, from where it starts (`API key: private sk-abc`), so the value never hides it.
 const SECRET_KEY = `(?:${SECRET_KEY_PATTERN.source})`;
 const AUTHORIZATION_SCHEME = String.raw`(?:bearer|basic|token)\s+`;
-const AUTHORIZATION_PREFIX = String.raw`(?:authorization\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?authorization\s+)["']?(?:${AUTHORIZATION_SCHEME})?`;
-const AUTHORIZATION_VALUE = String.raw`[^\s,;"']+(?:[ \t]+[^\s,;"']+)*`;
 const SECRET_PREFIX = String.raw`(?:${SECRET_KEY}\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?${SECRET_KEY}\s+)(?:["']?${AUTHORIZATION_SCHEME})?`;
 const CREDENTIAL_LIKE_VALUE = String.raw`(?=[^\s,;]{6})(?=[^\s,;]*[\d_-])`;
-const EXPLICIT_KEY_PREFIX = String.raw`(?:${SECRET_KEY}\\?["'][ \t]*[:=]\s*|api[ \t]+key(?:\\?["'])?[ \t]*[:=][ \t]*)`;
+const HTTP_TOKEN = String.raw`[\w!#$%&*+.^|~-]+`;
+// Read JSON-encoded `\"...\"` values before raw quoted or unquoted values, so spaces, commas, and
+// JSON-encoded quoted-pairs (`\\\"` or `\\\\`) cannot end a value before later auth-params.
+const AUTH_PARAM = String.raw`${HTTP_TOKEN}[ \t]*=[ \t]*(?:\\"(?:\\\\\\[\\"]|\\\\|(?!\\")[^\n])*(?:\\")?|"(?:\\.|[^"\\\n])*"?|(?:\\.|[^\s,"\\])*)`;
+const AUTH_PARAMS = String.raw`${AUTH_PARAM}(?:(?:[ \t]*,[ \t]*|[ \t]+)${AUTH_PARAM})*`;
+const TOKEN68_CREDENTIAL = String.raw`(?![\w.~+/-]*${SECRET_KEY}(?![\w.~+/-]))${CREDENTIAL_LIKE_VALUE}[\w.~+/-]+=*(?=[\s,;"')\]}>]|$)`;
+const AUTHORIZATION_PREFIX = String.raw`(?:authorization\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?authorization\s+)["']?(?:${AUTHORIZATION_SCHEME})?`;
+const AUTHORIZATION_VALUE = String.raw`[^\s,;"']+(?:[ \t]+(?:${AUTH_PARAMS}|[^\s,;"']+(?:[ \t]+[^\s,;"']+)*))?`;
+const AUTHORIZATION_SPACE_PREFIX = String.raw`(?<![a-z0-9])authorization[ \t]+(?!${AUTHORIZATION_SCHEME})`;
+const AUTHORIZATION_SPACE_VALUE = String.raw`${HTTP_TOKEN}[ \t]+(?:(?=${HTTP_TOKEN}=)${AUTH_PARAMS}|${TOKEN68_CREDENTIAL})`;
+const EXPLICIT_KEY_PREFIX = String.raw`(?:${SECRET_KEY}\\?["'][ \t]*[:=][\s:=]*|api[ \t]+key(?:\\?["'])?[ \t]*[:=][ \t:=]*)`;
 const BEARER_VALUE = String.raw`(?<bearerPrefix>bearer\s+)[A-Za-z0-9._~+/=-]+`;
 const AUTHORIZATION_KEY_VALUE = String.raw`(?<authorizationPrefix>${AUTHORIZATION_PREFIX})${AUTHORIZATION_VALUE}`;
+const AUTHORIZATION_SPACE_KEY_VALUE = String.raw`(?<authorizationSpacePrefix>${AUTHORIZATION_SPACE_PREFIX})${AUTHORIZATION_SPACE_VALUE}`;
 const KEY_VALUE = String.raw`(?<keyPrefix>${SECRET_PREFIX}|${SECRET_KEY}\s+(?:${AUTHORIZATION_SCHEME})?${CREDENTIAL_LIKE_VALUE})[^\s,;]+`;
 const SECRET_VALUE_PATTERN = new RegExp(
-	`${BEARER_VALUE}|${AUTHORIZATION_KEY_VALUE}|(?<explicitKeyPrefix>${EXPLICIT_KEY_PREFIX})|${KEY_VALUE}`,
+	`${BEARER_VALUE}|${AUTHORIZATION_KEY_VALUE}|${AUTHORIZATION_SPACE_KEY_VALUE}|(?<explicitKeyPrefix>${EXPLICIT_KEY_PREFIX})|${KEY_VALUE}`,
 	"gi",
 );
-const OTHER_VALUE_PATTERN = new RegExp(`${BEARER_VALUE}|${AUTHORIZATION_KEY_VALUE}|${KEY_VALUE}`, "gi");
+const OTHER_VALUE_PATTERN = new RegExp(
+	`${BEARER_VALUE}|${AUTHORIZATION_KEY_VALUE}|${AUTHORIZATION_SPACE_KEY_VALUE}|${KEY_VALUE}`,
+	"gi",
+);
 const VISIBLE_SCHEME = new RegExp(AUTHORIZATION_SCHEME, "iy");
 const QUOTED_VALUE_END = /[\s,;:)\]}\\"']/;
 const BARE_VALUE = new RegExp(String.raw`(?<scheme>${AUTHORIZATION_SCHEME})?[^\s,;]+`, "iy");
@@ -285,8 +307,9 @@ export function redactMcpText(value: string): string {
 	const others = otherMatches(value);
 	SECRET_VALUE_PATTERN.lastIndex = 0;
 	for (let match = SECRET_VALUE_PATTERN.exec(value); match; match = SECRET_VALUE_PATTERN.exec(value)) {
-		const { bearerPrefix, authorizationPrefix, explicitKeyPrefix, keyPrefix } = match.groups ?? {};
-		let replacement = `${bearerPrefix ?? authorizationPrefix ?? keyPrefix ?? ""}[redacted]`;
+		const { bearerPrefix, authorizationPrefix, authorizationSpacePrefix, explicitKeyPrefix, keyPrefix } =
+			match.groups ?? {};
+		let replacement = `${bearerPrefix ?? authorizationPrefix ?? authorizationSpacePrefix ?? keyPrefix ?? ""}[redacted]`;
 		let end = match.index + match[0].length;
 		if (explicitKeyPrefix !== undefined) {
 			const secret = redactExplicitKeyValue(value, end, /authorization/i.test(explicitKeyPrefix), others);
