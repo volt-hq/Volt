@@ -70,19 +70,27 @@ const SECRET_FLAG_PATTERN = new RegExp(String.raw`^--?[\w-]*(?:${SECRET_KEY_PATT
 // name ends in a key name (`--token abc`, `--github-token abc`). After whitespace alone it is redacted only
 // when it looks like a credential: at least 6 characters including a digit, `_`, or `-`
 // (`token ghp_abc123`, `x-api-key sk-live-123`, `password hunter2`).
+// A secret value may start with an authorization scheme, optionally quoted (`token: Bearer abc`,
+// `Basic dXNlcjpwYXNz`, GitHub's `token ghp_abc`, `"Bearer abc"`). The scheme stays visible and the
+// credential after it is redacted.
 // An `Authorization` value is a scheme followed by a single credential or by comma-separated auth-params,
 // whose values may be quoted and contain commas (RFC 9110 section 11.4: `Bearer abc`, `Digest username="u",
-// nonce="n", response="..."`, OAuth 1.0 `OAuth oauth_nonce="...", oauth_signature="..."`). The whole value,
-// scheme included, is redacted after `:`, `=`, or a flag, optionally inside quotes. After whitespace alone it
-// is redacted when the second word is an auth-param or looks like a credential (`Authorization Bot MTk4NjIy`).
+// nonce="n", response="..."`, OAuth 1.0 `OAuth oauth_nonce="...", oauth_signature="..."`). After `:`, `=`,
+// or a flag, optionally inside quotes, it is redacted through its last auth-param, or else up to `,`, `;`, a
+// quote, or the end of the line, so the credential after any scheme (`Bot`, `Negotiate`, `DPoP`, `ApiKey`) is
+// covered. Only the schemes above stay visible: an unknown first word cannot be told apart from a credential
+// followed by text. After whitespace alone it is redacted when the second word is an auth-param or looks like
+// a credential (`Authorization Bot MTk4NjIy`).
 const SECRET_KEY = `(?:${SECRET_KEY_PATTERN.source})`;
+const AUTHORIZATION_SCHEME = String.raw`(?:bearer|basic|token)\s+`;
+const SECRET_PREFIX = String.raw`(?:${SECRET_KEY}\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?${SECRET_KEY}\s+)(?:["']?${AUTHORIZATION_SCHEME})?`;
 const CREDENTIAL_LIKE_VALUE = String.raw`(?=[^\s,;]{6})(?=[^\s,;]*[\d_-])`;
 const HTTP_TOKEN = String.raw`[\w!#$%&*+.^|~-]+`;
 const AUTH_PARAM = String.raw`${HTTP_TOKEN}[ \t]*=[ \t]*(?:"(?:\\.|[^"\\\n])*"?|(?:\\.|[^\s,"\\])*)`;
-const AUTHORIZATION_PREFIX = String.raw`(?:authorization\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?authorization\s+)["']?|authorization[ \t]+(?=${HTTP_TOKEN}[ \t]+(?:${HTTP_TOKEN}=|${CREDENTIAL_LIKE_VALUE}))`;
-const AUTHORIZATION_VALUE = String.raw`[^\s,;"']+(?:[ \t]+(?:${AUTH_PARAM}(?:[ \t]*,[ \t]*${AUTH_PARAM})*|[^\s,;"']+))?`;
+const AUTHORIZATION_PREFIX = String.raw`(?:(?:authorization\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?authorization\s+)["']?|authorization[ \t]+(?=${HTTP_TOKEN}[ \t]+(?:${HTTP_TOKEN}=|${CREDENTIAL_LIKE_VALUE})))(?:${AUTHORIZATION_SCHEME})?`;
+const AUTHORIZATION_VALUE = String.raw`[^\s,;"']+(?:[ \t]+(?:${AUTH_PARAM}(?:[ \t]*,[ \t]*${AUTH_PARAM})*|[^\s,;"']+(?:[ \t]+[^\s,;"']+)*))?`;
 const SECRET_VALUE_PATTERN = new RegExp(
-	String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+|(${AUTHORIZATION_PREFIX})${AUTHORIZATION_VALUE}|(${SECRET_KEY}\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?${SECRET_KEY}\s+|${SECRET_KEY}\s+${CREDENTIAL_LIKE_VALUE})[^\s,;]+`,
+	String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+|(${AUTHORIZATION_PREFIX})${AUTHORIZATION_VALUE}|(${SECRET_PREFIX}|${SECRET_KEY}\s+(?:${AUTHORIZATION_SCHEME})?${CREDENTIAL_LIKE_VALUE})[^\s,;]+`,
 	"gi",
 );
 

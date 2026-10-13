@@ -51,7 +51,7 @@ describe("issue #900: MCP redaction of Authorization values with auth-params", (
 		expect(redactMcpText("Authorization: Digest response=abc123, status 401")).toBe(
 			"Authorization: [redacted], status 401",
 		);
-		expect(redactMcpText("Authorization: Bearer abc123; retry")).toBe("Authorization: [redacted]; retry");
+		expect(redactMcpText("Authorization: Bearer abc123; retry")).toBe("Authorization: Bearer [redacted]; retry");
 	});
 
 	it("redacts a quoted or escaped Authorization value up to its closing quote", () => {
