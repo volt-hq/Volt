@@ -55,7 +55,7 @@ describe("issue #884: MCP redaction removes the credential after an authorizatio
 		expect(redactMcpText('deploy --authorization "Negotiate YIIGhgYGKwYBBQUC" --verbose')).toBe(
 			'deploy --authorization "[redacted]" --verbose',
 		);
-		expect(redactMcpText('token: "Bearer abc123"')).toBe('token: "Bearer [redacted]');
+		expect(redactMcpText('token: "Bearer abc123"')).toBe('token: "Bearer [redacted]"');
 	});
 
 	it("keeps the bearer token out of the MCP audit log", async () => {

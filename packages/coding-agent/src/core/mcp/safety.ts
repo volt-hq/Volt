@@ -73,20 +73,33 @@ const SECRET_FLAG_PATTERN = new RegExp(String.raw`^--?[\w-]*(?:${SECRET_KEY_PATT
 // name ends in a key name (`--token abc`, `--github-token abc`). After whitespace alone it is redacted only
 // when it looks like a credential: at least 6 characters including a digit, `_`, or `-`
 // (`token ghp_abc123`, `x-api-key sk-live-123`, `password hunter2`).
+// A key name may be quoted before its separator, as in JSON or a dict repr (`{"password":"abc"}`,
+// `{'api_key': 'abc'}`), also with backslash-escaped quotes when the JSON is itself inside a string
+// (`{\"password\":\"abc\"}`).
+// A quoted value, also one whose quotes are backslash-escaped, is redacted up to its closing quote: the
+// first quote escaped like the opening one and not preceded by a further backslash, or the end of the line
+// when there is none (`password: "correct horse"`, `client_secret="abc,def"`, `{"password":"a\"b"}`). A
+// value that ends in an escaped backslash therefore runs on to the next such quote. An unquoted value is
+// redacted up to whitespace, `,`, or `;`.
 // A secret value may start with an authorization scheme, optionally quoted (`token: Bearer abc`,
 // `Basic dXNlcjpwYXNz`, GitHub's `token ghp_abc`, `"Bearer abc"`). The scheme stays visible and the
 // credential after it is redacted.
-// An `Authorization` value after `:`, `=`, or a flag is redacted up to `,`, `;`, a quote, or the end of
-// the line, so the credential after any scheme (`Bot`, `Negotiate`, `DPoP`, `ApiKey`) is covered. Only the
-// schemes above stay visible: an unknown first word cannot be told apart from a credential followed by text.
+// An `Authorization` value after `:`, `=`, or a flag is redacted up to `,`, `;`, a quote (escaped or not),
+// or the end of the line, so the credential after any scheme (`Bot`, `Negotiate`, `DPoP`, `ApiKey`) is
+// covered. Only the schemes above stay visible: an unknown first word cannot be told apart from a credential
+// followed by text.
 const SECRET_KEY = `(?:${SECRET_KEY_PATTERN.source})`;
+const OPTIONAL_QUOTE = String.raw`(?:\\*["'])?`;
 const AUTHORIZATION_SCHEME = String.raw`(?:bearer|basic|token)\s+`;
-const AUTHORIZATION_PREFIX = String.raw`(?:authorization\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?authorization\s+)["']?(?:${AUTHORIZATION_SCHEME})?`;
-const AUTHORIZATION_VALUE = String.raw`[^\s,;"']+(?:[ \t]+[^\s,;"']+)*`;
-const SECRET_PREFIX = String.raw`(?:${SECRET_KEY}\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?${SECRET_KEY}\s+)(?:["']?${AUTHORIZATION_SCHEME})?`;
+const AUTHORIZATION_PREFIX = String.raw`(?:authorization${OPTIONAL_QUOTE}\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?authorization\s+)${OPTIONAL_QUOTE}(?:${AUTHORIZATION_SCHEME})?`;
+const AUTHORIZATION_WORD = String.raw`(?:[^\s,;"'\\]|\\+(?![\\"']))+`;
+const AUTHORIZATION_VALUE = String.raw`${AUTHORIZATION_WORD}(?:[ \t]+${AUTHORIZATION_WORD})*`;
+const SECRET_PREFIX = String.raw`(?:${SECRET_KEY}${OPTIONAL_QUOTE}\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?${SECRET_KEY}\s+)`;
+const QUOTED_SECRET_PREFIX = String.raw`${SECRET_PREFIX}(?<quoteEscape>\\*)(?<quote>["'])(?:${AUTHORIZATION_SCHEME})?`;
+const QUOTED_SECRET_VALUE = String.raw`(?:(?!(?<!\\)\k<quoteEscape>\k<quote>)[^\n])*`;
 const CREDENTIAL_LIKE_VALUE = String.raw`(?=[^\s,;]{6})(?=[^\s,;]*[\d_-])`;
 const SECRET_VALUE_PATTERN = new RegExp(
-	String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+|(${AUTHORIZATION_PREFIX})${AUTHORIZATION_VALUE}|(${SECRET_PREFIX}|${SECRET_KEY}\s+(?:${AUTHORIZATION_SCHEME})?${CREDENTIAL_LIKE_VALUE})[^\s,;]+`,
+	String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+|(${AUTHORIZATION_PREFIX})${AUTHORIZATION_VALUE}|(${QUOTED_SECRET_PREFIX})${QUOTED_SECRET_VALUE}|(${SECRET_PREFIX}(?:${AUTHORIZATION_SCHEME})?|${SECRET_KEY}\s+(?:${AUTHORIZATION_SCHEME})?${CREDENTIAL_LIKE_VALUE})[^\s,;]+`,
 	"gi",
 );
 
@@ -129,6 +142,9 @@ export function redactMcpText(value: string): string {
 			_match,
 			bearerPrefix: string | undefined,
 			authorizationPrefix: string | undefined,
+			quotedPrefix: string | undefined,
+			_quoteEscape: string | undefined,
+			_quote: string | undefined,
 			keyPrefix: string | undefined,
 		) => {
 			if (bearerPrefix) {
@@ -136,6 +152,9 @@ export function redactMcpText(value: string): string {
 			}
 			if (authorizationPrefix) {
 				return `${authorizationPrefix}[redacted]`;
+			}
+			if (quotedPrefix) {
+				return `${quotedPrefix}[redacted]`;
 			}
 			if (keyPrefix) {
 				return `${keyPrefix}[redacted]`;
