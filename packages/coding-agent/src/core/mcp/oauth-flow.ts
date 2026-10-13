@@ -262,6 +262,27 @@ function saveDiscoveryState(
 	});
 }
 
+/** Same comparison as the SDK: parsed URLs, tolerating a single trailing `/` difference. */
+function issuersMatch(a: string, b: string): boolean {
+	let [x, y] = [a, b];
+	try {
+		[x, y] = [new URL(a).href, new URL(b).href];
+	} catch {
+		// Not two URLs: compared as written.
+	}
+	return x === y || (x.endsWith("/") && x.slice(0, -1) === y) || (y.endsWith("/") && y.slice(0, -1) === x);
+}
+
+function isBoundTo(clientInformation: OAuthClientInformationMixed, issuer: string): boolean {
+	return typeof clientInformation.issuer === "string" && issuersMatch(clientInformation.issuer, issuer);
+}
+
+function boundElsewhereError(clientInformation: OAuthClientInformationMixed | undefined, issuer: string): Error {
+	return new Error(
+		`MCP OAuth client information is bound to authorization server ${clientInformation?.issuer ?? "(none)"} and is not presented to ${issuer}`,
+	);
+}
+
 async function ensureClientInformation(
 	_server: McpResolvedServerConfig,
 	provider: VoltMcpOAuthProvider,
@@ -271,36 +292,53 @@ async function ensureClientInformation(
 	fetchFn: typeof fetch = fetch,
 ): Promise<OAuthClientInformationMixed> {
 	const existing = provider.clientInformation();
-	if (existing) {
+	if (existing && isBoundTo(existing, authorizationServerUrl)) {
 		return existing;
 	}
+	// Only a pre-registered client cannot be saved; it is never replaced by a registration elsewhere.
+	const saveClientInformation = provider.saveClientInformation;
+	if (!saveClientInformation) {
+		throw boundElsewhereError(existing, authorizationServerUrl);
+	}
+	// A stored registration bound to another authorization server is replaced, not presented here.
 	if (metadata?.client_id_metadata_document_supported && provider.clientMetadataUrl) {
 		if (!isHttpsUrl(provider.clientMetadataUrl)) {
 			throw new Error("MCP OAuth client metadata URL must be an HTTPS URL with a path");
 		}
-		const clientInformation: OAuthClientInformationMixed = { client_id: provider.clientMetadataUrl };
-		provider.saveClientInformation(clientInformation);
+		const clientInformation: OAuthClientInformationMixed = {
+			client_id: provider.clientMetadataUrl,
+			issuer: authorizationServerUrl,
+		};
+		saveClientInformation(clientInformation);
 		return clientInformation;
 	}
 	if (!metadata?.registration_endpoint) {
 		throw new Error("MCP OAuth dynamic client registration is not available; configure auth.clientId");
 	}
-	const registered = await registerClient(authorizationServerUrl, {
-		metadata,
-		clientMetadata: provider.clientMetadata,
-		scope,
-		fetchFn,
-	});
-	provider.saveClientInformation(registered);
+	const registered: OAuthClientInformationMixed = {
+		...(await registerClient(authorizationServerUrl, {
+			metadata,
+			clientMetadata: provider.clientMetadata,
+			scope,
+			fetchFn,
+		})),
+		issuer: authorizationServerUrl,
+	};
+	saveClientInformation(registered);
 	return registered;
 }
 
+/** Attaches client credentials only for the authorization server they are bound to. */
 function addClientAuthentication(
 	params: URLSearchParams,
 	headers: Headers,
 	clientInformation: OAuthClientInformationMixed,
+	issuer: string,
 	metadata: AuthorizationServerMetadata,
 ): void {
+	if (!isBoundTo(clientInformation, issuer)) {
+		throw boundElsewhereError(clientInformation, issuer);
+	}
 	const supported = metadata.token_endpoint_auth_methods_supported ?? [];
 	const method = selectClientAuthMethod(clientInformation, supported);
 	if (method === "client_secret_basic") {
@@ -482,7 +520,7 @@ export async function startMcpOAuthDeviceAuth(options: {
 		assertHttpsEndpoint(endpoint, "device authorization endpoint");
 		const params = new URLSearchParams();
 		const headers = new Headers({ "content-type": "application/x-www-form-urlencoded" });
-		addClientAuthentication(params, headers, clientInformation, metadata);
+		addClientAuthentication(params, headers, clientInformation, serverInfo.authorizationServerUrl, metadata);
 		if (scope) {
 			params.set("scope", scope);
 		}
@@ -567,7 +605,13 @@ export async function pollMcpOAuthDeviceAuth(options: {
 	}
 	const params = new URLSearchParams({ grant_type: DEVICE_CODE_GRANT, device_code: options.pending.deviceCode });
 	const headers = new Headers({ "content-type": "application/x-www-form-urlencoded" });
-	addClientAuthentication(params, headers, options.pending.clientInformation, options.pending.metadata);
+	addClientAuthentication(
+		params,
+		headers,
+		options.pending.clientInformation,
+		options.pending.authorizationServerUrl,
+		options.pending.metadata,
+	);
 	if (options.pending.resource) {
 		params.set("resource", options.pending.resource.toString());
 	}
@@ -580,7 +624,9 @@ export async function pollMcpOAuthDeviceAuth(options: {
 	});
 	if (response.ok) {
 		const tokens = await parseOAuthTokenResponse(response);
-		options.store.patchRecord(options.server, { tokens });
+		options.store.patchRecord(options.server, {
+			tokens: { ...tokens, issuer: options.pending.authorizationServerUrl },
+		});
 		return {
 			result: {
 				action: "auth",

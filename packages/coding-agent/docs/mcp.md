@@ -224,7 +224,9 @@ HTTP/SSE fields:
 - `url: string`
 - `headers?: Record<string, string>`
 - `auth?: { type: "none" | "bearer" | "oauth" | "env"; ... }`
-- OAuth auth also supports `flow?: "browser" | "device" | "auto"`, `scope?: string`, `clientId?: string`, `clientSecret?: string`, `clientMetadataUrl?: string`, `resourceMetadataUrl?: string`, and `tokenEndpointAuthMethod?: "client_secret_basic" | "client_secret_post" | "none"`.
+- OAuth auth also supports `flow?: "browser" | "device" | "auto"`, `scope?: string`, `clientId?: string`, `clientSecret?: string`, `issuer?: string`, `clientMetadataUrl?: string`, `resourceMetadataUrl?: string`, and `tokenEndpointAuthMethod?: "client_secret_basic" | "client_secret_post" | "none"`.
+- A pre-registered `clientId` requires `issuer`, the authorization server URL the client is registered with. Volt presents the client credentials only to that authorization server, even if the MCP server names a different one.
+- Stored OAuth tokens and dynamically registered clients are bound to the authorization server that issued them and are never sent to another one. Credentials stored without that binding, as earlier Volt versions stored them, are discarded; authenticate the affected servers again with `volt mcp auth <server>` or `volt mcp auth-device <server>`.
 
 ### Merge rules
 

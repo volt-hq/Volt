@@ -63,13 +63,24 @@ function assertSafeDiscoveryState(state: OAuthDiscoveryState): void {
 	}
 }
 
+/**
+ * Pre-registered credentials carry the configured authorization server as
+ * `issuer`, so the SDK and the device flow never present them to another one.
+ */
 function staticClientInformation(server: McpResolvedServerConfig): OAuthClientInformationMixed | undefined {
 	const clientId = server.auth?.clientId?.trim();
 	if (!clientId) {
 		return undefined;
 	}
+	const issuer = server.auth?.issuer?.trim();
+	if (!issuer) {
+		throw new Error(
+			`MCP OAuth server ${server.id} configures auth.clientId without auth.issuer; set auth.issuer to the authorization server URL the client is registered with`,
+		);
+	}
 	return {
 		client_id: clientId,
+		issuer,
 		...(server.auth?.clientSecret ? { client_secret: server.auth.clientSecret } : {}),
 		...(server.auth?.tokenEndpointAuthMethod
 			? { token_endpoint_auth_method: server.auth.tokenEndpointAuthMethod }
@@ -100,6 +111,12 @@ export class VoltMcpOAuthProvider implements OAuthClientProvider {
 	private authorizationUrlValue: URL | undefined;
 	private stateValue: string;
 	private onAuthorizationUrl: ((url: URL) => void | Promise<void>) | undefined;
+	/**
+	 * Defined only for dynamically obtained clients. A pre-registered client cannot
+	 * register again, so without this the SDK refuses an authorization server other
+	 * than the configured issuer instead of registering a replacement client there.
+	 */
+	saveClientInformation?: (clientInformation: OAuthClientInformationMixed) => void;
 
 	constructor(options: VoltMcpOAuthProviderOptions) {
 		this.server = options.server;
@@ -108,6 +125,11 @@ export class VoltMcpOAuthProvider implements OAuthClientProvider {
 		this.metadata = clientMetadata(options);
 		this.stateValue = randomState();
 		this.onAuthorizationUrl = options.onAuthorizationUrl;
+		if (!options.server.auth?.clientId?.trim()) {
+			this.saveClientInformation = (clientInformation) => {
+				this.store.patchRecord(this.server, { clientInformation });
+			};
+		}
 	}
 
 	get redirectUrl(): string | URL | undefined {
@@ -139,13 +161,6 @@ export class VoltMcpOAuthProvider implements OAuthClientProvider {
 		return (
 			staticClientInformation(this.server) ?? this.store.getClientInformation(this.server, this.redirectUrlValue)
 		);
-	}
-
-	saveClientInformation(clientInformation: OAuthClientInformationMixed): void {
-		if (staticClientInformation(this.server)) {
-			return;
-		}
-		this.store.patchRecord(this.server, { clientInformation });
 	}
 
 	tokens(): OAuthTokens | undefined {
