@@ -129,6 +129,38 @@ export class ClientInputOutcomeAmbiguousError extends Error {
 }
 
 /**
+ * Raised for fresh or later input while an input with an ambiguous outcome
+ * holds it back: {@link AgentSession.discardAmbiguousClientInput} resolves it.
+ */
+export class ClientInputRecoveryBlockedError extends Error {
+	readonly code = "client_input_recovery_blocked";
+	readonly clientMessageId: string;
+
+	constructor(clientMessageId: string) {
+		super(
+			`Ambiguous recovered client input ${JSON.stringify(clientMessageId)} must be resolved before later or fresh input can be admitted: discard it to continue`,
+		);
+		this.clientMessageId = clientMessageId;
+	}
+}
+
+/**
+ * An input whose outcome is ambiguous: it crossed its dispatch boundary (an
+ * extension command, input hook, or `before_agent_start`) and its owner
+ * stopped before recording an outcome, so it may or may not have reached the
+ * model. It is never replayed, and it holds later input back until discarded.
+ */
+export interface AmbiguousClientInput {
+	readonly clientMessageId: string;
+	/** The input's text, as its client sent it. */
+	readonly message: string;
+}
+
+/** The failure a discarded ambiguous input records. */
+export const DISCARDED_CLIENT_INPUT_ERROR =
+	"client_input_discarded: discarded after an ambiguous interruption; not replayed";
+
+/**
  * Raised when {@link AgentSession.clearQueue} revoked the runtime queues but their
  * cancellation could not be made durable. The queues are already gone, so the
  * captured text is carried on the error: it is the only remaining copy of what the
@@ -177,6 +209,8 @@ export class SessionClientInputs {
 	private readonly admissions = new Set<Promise<unknown>>();
 	/** The queue the session last published, serialized, so it publishes only changes. */
 	private publishedQueue: string | undefined;
+	/** The id of the ambiguous input the session last published (`null` for none), so it publishes only changes. */
+	private publishedAmbiguous: string | null | undefined;
 	/**
 	 * Queue text handed back once the queue can no longer be cleared durably:
 	 * captured by the synchronous dispose fence, or by the first clear after
@@ -201,6 +235,65 @@ export class SessionClientInputs {
 	/** Fence fresh input behind the input a previous runtime left to replay. */
 	fenceRecovered(): void {
 		this.recoveredReplayPending = wakingInputRecovery(this.host.conversation().state).kind !== "idle";
+	}
+
+	/**
+	 * The first input, in admission order, whose dispatch started without an
+	 * outcome and that no live admission of this runtime owns: its owner was
+	 * lost mid-dispatch. Undefined once the session is disposed or lost.
+	 */
+	ambiguous(): AmbiguousClientInput | undefined {
+		if (this.host.isDisposed() || this.host.isLost()) return undefined;
+		const { inputs, started } = this.host.conversation().state.clientInputs;
+		for (const clientMessageId of started) {
+			const record = inputs.get(clientMessageId);
+			if (record && !this.live.has(clientMessageId)) return { clientMessageId, message: record.input.message };
+		}
+		return undefined;
+	}
+
+	/**
+	 * Discard an input whose outcome is ambiguous ({@link ambiguous}): it is
+	 * recorded `failed` and never replayed, and the recovery fence is
+	 * recomputed, so queued input behind it replays once recovery resumes. A
+	 * discarded (or otherwise failed) input is discarded again as a no-op.
+	 * Resolves the next ambiguous input, if one remains.
+	 */
+	async discardAmbiguous(clientMessageId: string): Promise<AmbiguousClientInput | undefined> {
+		this.host.assertActive();
+		const state = () => this.host.conversation().state.clientInputs.inputs.get(clientMessageId)?.state;
+		const current = state();
+		if (current === undefined) throw new Error(`Unknown client input ${JSON.stringify(clientMessageId)}`);
+		if (current === "started") {
+			if (this.live.has(clientMessageId)) {
+				throw new Error(`Client input ${JSON.stringify(clientMessageId)} is still being dispatched`);
+			}
+			try {
+				await this.host
+					.conversation()
+					.settleClientInput(clientMessageId, { state: "failed", error: DISCARDED_CLIENT_INPUT_ERROR });
+			} catch (error) {
+				// A concurrent discard of the same input recorded it first.
+				if (state() !== "failed") throw error;
+			}
+		} else if (current !== "failed") {
+			throw new Error(
+				`Client input ${JSON.stringify(clientMessageId)} is ${current}; only an ambiguous input is discarded`,
+			);
+		}
+		if (this.recoveredReplayPending) this.fenceRecovered();
+		this.publishQueue();
+		this.publishAmbiguous();
+		return this.ambiguous();
+	}
+
+	/** Publish the ambiguous input ({@link ambiguous}) when it changed since the session last published it. */
+	publishAmbiguous(): void {
+		const input = this.ambiguous();
+		const clientMessageId = input?.clientMessageId ?? null;
+		if (clientMessageId === this.publishedAmbiguous) return;
+		this.publishedAmbiguous = clientMessageId;
+		this.host.emit({ type: "ambiguous_client_input_changed", ...(input === undefined ? {} : { input }) });
 	}
 
 	private ambiguousRecoveredError(clientMessageId: string): ClientInputOutcomeAmbiguousError {
@@ -713,11 +806,7 @@ export class SessionClientInputs {
 		) {
 			return;
 		}
-		if (recovery.kind === "blocked") {
-			throw new Error(
-				`Ambiguous recovered client input ${JSON.stringify(recovery.blocker.clientMessageId)} must be resolved before later or fresh input can be admitted`,
-			);
-		}
+		if (recovery.kind === "blocked") throw new ClientInputRecoveryBlockedError(recovery.blocker.clientMessageId);
 		throw new Error("Recovered client input must finish replaying before fresh input can be admitted");
 	}
 }

@@ -9,7 +9,7 @@ import { minimatch } from "minimatch";
 import { maxSatisfying, rcompare, satisfies, validRange } from "semver";
 import { CONFIG_DIR_NAME } from "../config.ts";
 import { spawnProcess, spawnProcessSync, waitForChildProcess } from "../utils/child-process.ts";
-import { type GitSource, parseGitUrl } from "../utils/git.ts";
+import { type GitSource, isPinnedRefOf, parseGitUrl } from "../utils/git.ts";
 import { addIgnoreRules, createIgnoreMatcher, type IgnoreMatcher } from "../utils/ignore-files.ts";
 import { getNpmUpdateSpec, parseNpmSpec } from "../utils/npm-spec.ts";
 import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, resolvePath } from "../utils/paths.ts";
@@ -41,6 +41,27 @@ function canonicalizePathForRelative(path: string): string {
 
 function getNpmVersionRange(version: string | undefined): string | undefined {
 	return version ? (validRange(version) ?? undefined) : undefined;
+}
+
+/** A git source's identity: its host and path, and its ref when pinned. Each pinned ref is its own package. */
+function getGitSourceIdentity(source: GitSource): string {
+	return `git:${source.host}/${source.path}${source.ref ? `@${source.ref}` : ""}`;
+}
+
+/**
+ * Where a git source is checked out below `<install root>/<host>`: its path,
+ * and `<path>@<ref>` beside it for a pinned ref. A ref that is not a plain
+ * name (it has a slash, or a dot not between name characters) is hashed into
+ * one path segment.
+ */
+function getGitSourceInstallPath(source: GitSource): string {
+	if (!source.ref) {
+		return source.path;
+	}
+	const ref = /^[\w-]+(?:\.[\w-]+)*$/.test(source.ref)
+		? source.ref
+		: createHash("sha256").update(source.ref).digest("hex").slice(0, 16);
+	return `${source.path}@${ref}`;
 }
 
 export interface PathMetadata {
@@ -101,6 +122,15 @@ export interface PackageUpdateOptions {
 	scripts?: PackageInstallScriptPolicy;
 }
 
+export interface PackageSettingsOptions extends PackageInstallOptions {
+	/**
+	 * A configured source the added one takes the place of: when the added
+	 * source has no entry of its own, it takes over this source's entry, with
+	 * its position and filters.
+	 */
+	replace?: string;
+}
+
 export interface PackageManager {
 	resolve(onMissing?: (source: string) => Promise<MissingSourceAction>): Promise<ResolvedPaths>;
 	install(source: string, options?: PackageInstallOptions): Promise<void>;
@@ -113,7 +143,7 @@ export interface PackageManager {
 		sources: string[],
 		options?: { local?: boolean; temporary?: boolean },
 	): Promise<ResolvedPaths>;
-	addSourceToSettings(source: string, options?: PackageInstallOptions): boolean;
+	addSourceToSettings(source: string, options?: PackageSettingsOptions): boolean;
 	removeSourceFromSettings(source: string, options?: { local?: boolean }): boolean;
 	setProgressCallback(callback: ProgressCallback | undefined): void;
 	getInstalledPath(source: string, scope: "user" | "project"): string | undefined;
@@ -745,7 +775,7 @@ export class DefaultPackageManager implements PackageManager {
 		this.progressCallback = callback;
 	}
 
-	addSourceToSettings(source: string, options?: PackageInstallOptions): boolean {
+	addSourceToSettings(source: string, options?: PackageSettingsOptions): boolean {
 		const scope: InstalledSourceScope = options?.local ? "project" : "user";
 		const currentSettings =
 			scope === "project"
@@ -753,7 +783,11 @@ export class DefaultPackageManager implements PackageManager {
 				: this.settingsManager.getGlobalEffectiveSettings();
 		const currentPackages = currentSettings.packages ?? [];
 		const normalizedSource = this.normalizePackageSourceForSettings(source, scope);
-		const matchIndex = currentPackages.findIndex((existing) => this.packageSourcesMatch(existing, source, scope));
+		const replace = options?.replace;
+		let matchIndex = currentPackages.findIndex((existing) => this.packageSourcesMatch(existing, source, scope));
+		if (matchIndex === -1 && replace !== undefined) {
+			matchIndex = currentPackages.findIndex((existing) => this.packageSourcesMatch(existing, replace, scope));
+		}
 		if (matchIndex !== -1) {
 			const existing = currentPackages[matchIndex];
 			const nextPackage = this.updatePackageSourceForSettings(existing, normalizedSource, options?.scripts);
@@ -973,6 +1007,21 @@ export class DefaultPackageManager implements PackageManager {
 		return this.resolvePathFromBase(parsed.path, this.getBaseDirForScope(scope));
 	}
 
+	/**
+	 * The configured source a remove of `source`, as a user names it, acts on in
+	 * the scope (see resolveActionSource). `removeAndPersist` takes its source as
+	 * given: a source the scope no longer configures, such as a tracking install
+	 * a store update just replaced, must not name another ref of its repository.
+	 */
+	resolveRemoveSource(source: string, options?: { local?: boolean }): string {
+		const scope: InstalledSourceScope = options?.local ? "project" : "user";
+		const settings =
+			scope === "project"
+				? this.settingsManager.getProjectEffectiveSettings()
+				: this.settingsManager.getGlobalEffectiveSettings();
+		return this.resolveActionSource(settings.packages ?? [], source, scope);
+	}
+
 	private getPackageRemovalChange(
 		source: string,
 		scope: InstalledSourceScope,
@@ -1114,7 +1163,11 @@ export class DefaultPackageManager implements PackageManager {
 		if (scopeFilter !== "project") {
 			const globalPackages = globalSettings.packages ?? [];
 			const packages = source
-				? this.getPackageSourceMatchesForAction(globalPackages, source, "user")
+				? this.getPackageSourceMatchesForAction(
+						globalPackages,
+						this.resolveActionSource(globalPackages, source, "user"),
+						"user",
+					)
 				: globalPackages;
 			for (const pkg of packages) {
 				const sourceStr = typeof pkg === "string" ? pkg : pkg.source;
@@ -1129,7 +1182,11 @@ export class DefaultPackageManager implements PackageManager {
 		if (scopeFilter !== "user") {
 			const projectPackages = projectSettings.packages ?? [];
 			const packages = source
-				? this.getPackageSourceMatchesForAction(projectPackages, source, "project")
+				? this.getPackageSourceMatchesForAction(
+						projectPackages,
+						this.resolveActionSource(projectPackages, source, "project"),
+						"project",
+					)
 				: projectPackages;
 			for (const pkg of packages) {
 				const sourceStr = typeof pkg === "string" ? pkg : pkg.source;
@@ -1164,8 +1221,8 @@ export class DefaultPackageManager implements PackageManager {
 
 		for (const entry of sources) {
 			const parsed = this.parseSource(entry.source);
-			// Pinned npm versions are fixed. Pinned git refs are configured checkout targets,
-			// so include them to reconcile an existing clone when the configured ref changes.
+			// Pinned npm versions are fixed. Pinned git refs are checkout targets: include them to
+			// reconcile each ref's clone with its ref, which a branch or a moved tag changes.
 			if (parsed.type === "npm") {
 				if (!parsed.pinned) {
 					npmCandidates.push({ ...entry, parsed });
@@ -1479,7 +1536,7 @@ export class DefaultPackageManager implements PackageManager {
 			return [`npm:${parsed.name}`];
 		}
 		if (parsed.type === "git") {
-			return [`git:${parsed.host}/${parsed.path}`];
+			return [getGitSourceIdentity(parsed)];
 		}
 		const keys = new Set<string>();
 		keys.add(`local:${this.resolvePath(parsed.path)}`);
@@ -1493,7 +1550,7 @@ export class DefaultPackageManager implements PackageManager {
 			return `npm:${parsed.name}`;
 		}
 		if (parsed.type === "git") {
-			return `git:${parsed.host}/${parsed.path}`;
+			return getGitSourceIdentity(parsed);
 		}
 		const baseDir = this.getBaseDirForScope(scope);
 		return `local:${this.resolvePathFromBase(parsed.path, baseDir)}`;
@@ -1546,6 +1603,35 @@ export class DefaultPackageManager implements PackageManager {
 			return false;
 		}
 		return canonicalizePath(left.slice("local:".length)) === canonicalizePath(right.slice("local:".length));
+	}
+
+	/**
+	 * The source a remove or update of `source` acts on in `packages`. A git
+	 * source without a ref names its repository: when `packages` does not
+	 * configure it, the action takes the repository's pinned ref, and refuses to
+	 * pick one of several. `update` resolves its source with it; a remove
+	 * resolves the source a user names with `resolveRemoveSource`.
+	 */
+	private resolveActionSource(packages: PackageSource[], source: string, scope: InstalledSourceScope): string {
+		const parsed = this.parseSource(source);
+		if (parsed.type !== "git" || parsed.ref || packages.some((pkg) => this.packageSourcesMatch(pkg, source, scope))) {
+			return source;
+		}
+		const refs = new Map<string, string>();
+		for (const pkg of packages) {
+			const configured = this.getPackageSourceString(pkg);
+			const configuredParsed = this.parseSource(configured);
+			if (configuredParsed.type === "git" && isPinnedRefOf(configuredParsed, parsed)) {
+				const identity = getGitSourceIdentity(configuredParsed);
+				if (!refs.has(identity)) refs.set(identity, configured);
+			}
+		}
+		if (refs.size > 1) {
+			throw new Error(
+				`${source} is configured at several refs (${[...refs.values()].join(", ")}); name the ref to act on`,
+			);
+		}
+		return refs.values().next().value ?? source;
 	}
 
 	private getPackageSourceMatchesForAction(
@@ -1848,10 +1934,11 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	/**
-	 * Get a unique identity for a package, ignoring version/ref.
+	 * Get a unique identity for a package: an npm package's name, ignoring its
+	 * version; a git repository's normalized host/path (so SSH and HTTPS URLs
+	 * for it are identical) with its ref when pinned, since each pinned ref is
+	 * its own package; or a local package's path.
 	 * Used to detect when the same package is in both global and project settings.
-	 * For git packages, uses normalized host/path to ensure SSH and HTTPS URLs
-	 * for the same repository are treated as identical.
 	 */
 	getPackageIdentity(source: string, scope?: "user" | "project"): string {
 		const parsed = this.parseSource(source);
@@ -1859,8 +1946,7 @@ export class DefaultPackageManager implements PackageManager {
 			return `npm:${parsed.name}`;
 		}
 		if (parsed.type === "git") {
-			// Use host/path for identity to normalize SSH and HTTPS
-			return `git:${parsed.host}/${parsed.path}`;
+			return getGitSourceIdentity(parsed);
 		}
 		if (scope) {
 			const baseDir = this.getBaseDirForScope(scope);
@@ -2203,14 +2289,15 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private getGitInstallPath(source: GitSource, scope: SourceScope): string {
+		const path = getGitSourceInstallPath(source);
 		if (scope === "temporary") {
-			return this.getTemporaryDir(`git-${source.host}`, source.path);
+			return this.getTemporaryDir(`git-${source.host}`, path);
 		}
 		const installRoot = this.getGitInstallRoot(scope);
 		if (!installRoot) {
 			throw new Error("Missing git install root");
 		}
-		return this.resolveManagedPath(installRoot, source.host, source.path);
+		return this.resolveManagedPath(installRoot, source.host, path);
 	}
 
 	private getGitInstallRoot(scope: SourceScope): string | undefined {

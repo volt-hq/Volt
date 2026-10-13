@@ -86,7 +86,8 @@ function compactReview(
 		);
 	}
 	if (record.options.scope.length) lines.push("Limited to the selected paths; see details.");
-	if (record.parentRunId && !record.incrementalFallbackReason)
+	// A full review that follows an earlier run retains none of its evidence.
+	if (record.parentRunId && record.options.scopeMode === "incremental" && !record.incrementalFallbackReason)
 		lines.push("Includes evidence retained from a prior review.");
 	if (incomplete) {
 		const coverage = parsed.coverage;

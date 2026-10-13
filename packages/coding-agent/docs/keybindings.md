@@ -30,16 +30,18 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 |--------|---------|-------------|
 | `tui.editor.cursorUp` | `up` | Move cursor up |
 | `tui.editor.cursorDown` | `down` | Move cursor down |
+| `tui.editor.historyPrevious` | *(none)* | Recall the previous prompt from history, from any cursor position |
+| `tui.editor.historyNext` | *(none)* | Recall the next prompt from history, from any cursor position |
 | `tui.editor.cursorLeft` | `left`, `ctrl+b` | Move cursor left |
 | `tui.editor.cursorRight` | `right`, `ctrl+f` | Move cursor right |
 | `tui.editor.cursorWordLeft` | `alt+left`, `ctrl+left`, `alt+b` | Move cursor word left |
 | `tui.editor.cursorWordRight` | `alt+right`, `ctrl+right`, `alt+f` | Move cursor word right |
-| `tui.editor.cursorLineStart` | `home`, `ctrl+a` | Move to line start |
-| `tui.editor.cursorLineEnd` | `end`, `ctrl+e` | Move to line end |
+| `tui.editor.cursorLineStart` | `home`, `ctrl+home`, `ctrl+a` | Move to line start |
+| `tui.editor.cursorLineEnd` | `end`, `ctrl+end`, `ctrl+e` | Move to line end |
 | `tui.editor.jumpForward` | `ctrl+]` | Jump forward to character |
 | `tui.editor.jumpBackward` | `ctrl+alt+]` | Jump backward to character |
-| `tui.editor.pageUp` | `pageUp` | Scroll up by page |
-| `tui.editor.pageDown` | `pageDown` | Scroll down by page |
+| `tui.editor.pageUp` | `pageUp`, `ctrl+pageUp` | Scroll up by page |
+| `tui.editor.pageDown` | `pageDown`, `ctrl+pageDown` | Scroll down by page |
 
 ### TUI Editor Deletion
 
@@ -56,7 +58,7 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
-| `tui.input.newLine` | `shift+enter` | Insert new line |
+| `tui.input.newLine` | `shift+enter`, `ctrl+j` | Insert new line |
 | `tui.input.submit` | `enter` | Submit input |
 | `tui.input.tab` | `tab` | Tab / autocomplete |
 
@@ -79,6 +81,18 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 | `tui.select.pageDown` | `pageDown` | Page down in list |
 | `tui.select.confirm` | `enter` | Confirm selection |
 | `tui.select.cancel` | `escape`, `ctrl+c` | Cancel selection |
+| `tui.select.left` | `left` | Move selection left, or collapse a tree node |
+| `tui.select.right` | `right` | Move selection right, or expand a tree node |
+| `tui.select.toggle` | `space` | Toggle the selected item |
+
+### TUI Focus
+
+Used in forms, dialogs, cards, tabs, and extension panels. From an empty editor, `tui.focus.next` moves focus into extension panels that show actions, forms, or trees.
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `tui.focus.next` | `tab` | Move focus to the next control |
+| `tui.focus.previous` | `shift+tab` | Move focus to the previous control |
 
 ### TUI Fullscreen Viewport
 
@@ -183,7 +197,7 @@ Plain PageUp/PageDown also scroll the question in regular mode. In fullscreen mo
 | `app.model.select` | `ctrl+l` | Open model selector |
 | `app.model.cycleForward` | `ctrl+p` | Cycle to next model |
 | `app.model.cycleBackward` | `shift+ctrl+p` | Cycle to previous model |
-| `app.thinking.cycle` | `shift+tab` | Cycle thinking level |
+| `app.thinking.cycle` | `shift+ctrl+t` | Cycle thinking level |
 | `app.thinking.toggle` | `ctrl+t` | Collapse or expand thinking blocks |
 
 ### Display and Message Queue
@@ -223,6 +237,14 @@ Used inside the scoped models selector (opened via `/scoped-models`).
 | `app.models.reorderUp` | `alt+up` | Move the selected model up in the cycle order |
 | `app.models.reorderDown` | `alt+down` | Move the selected model down in the cycle order |
 
+### Review Tools Selector
+
+Used inside the review tools selector (opened via `/review tools`).
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.reviewTools.toggle` | `space` | Toggle whether reviews may use the selected auxiliary tool |
+
 ## Custom Configuration
 
 Create `~/.volt/agent/keybindings.json`:
@@ -231,11 +253,14 @@ Create `~/.volt/agent/keybindings.json`:
 {
   "tui.editor.cursorUp": ["up", "ctrl+p"],
   "tui.editor.cursorDown": ["down", "ctrl+n"],
-  "tui.editor.deleteWordBackward": ["ctrl+w", "alt+backspace"]
+  "tui.editor.deleteWordBackward": ["ctrl+w", "alt+backspace"],
+  "app.model.cycleForward": "alt+m"
 }
 ```
 
 Each action can have a single key or an array of keys. User config overrides defaults.
+
+`ctrl+p` cycles models by default, and volt handles that shortcut before the editor sees the key. The example therefore moves `app.model.cycleForward` to `alt+m` so `ctrl+p` moves the cursor up.
 
 On native Windows, `app.suspend` has no default binding because Windows terminals do not support Unix job control. If you bind it manually, volt shows a status message instead of suspending. In WSL, the normal Linux `ctrl+z`/`fg` behavior still applies.
 
@@ -251,9 +276,12 @@ On native Windows, `app.suspend` has no default binding because Windows terminal
   "tui.editor.cursorWordRight": ["alt+right", "alt+f"],
   "tui.editor.deleteCharForward": ["delete", "ctrl+d"],
   "tui.editor.deleteCharBackward": ["backspace", "ctrl+h"],
-  "tui.input.newLine": ["shift+enter", "ctrl+j"]
+  "tui.input.newLine": ["shift+enter", "ctrl+j"],
+  "app.model.cycleForward": "alt+m"
 }
 ```
+
+As in the example above, `app.model.cycleForward` moves to `alt+m` so `ctrl+p` moves the cursor up.
 
 ### Vim Example
 
@@ -264,6 +292,9 @@ On native Windows, `app.suspend` has no default binding because Windows terminal
   "tui.editor.cursorLeft": ["left", "alt+h"],
   "tui.editor.cursorRight": ["right", "alt+l"],
   "tui.editor.cursorWordLeft": ["alt+left", "alt+b"],
-  "tui.editor.cursorWordRight": ["alt+right", "alt+w"]
+  "tui.editor.cursorWordRight": ["alt+right", "alt+w"],
+  "app.work.open": "alt+o"
 }
 ```
+
+`alt+j` opens the work inspector by default, and volt handles that shortcut before the editor sees the key. The example therefore moves `app.work.open` to `alt+o` so `alt+j` moves the cursor down.

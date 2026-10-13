@@ -62,10 +62,20 @@ const READ_NAME_PATTERN = new RegExp(
 	"i",
 );
 const SECRET_KEY_PATTERN = /token|secret|password|passwd|api[-_]?key|authorization|credential|private/i;
+// Secret key names are also ordinary prose ("token endpoint", "Refresh token expired"). A value is always
+// redacted after a `:` or `=` separator (`token: abc`, `api_key=abc`) or after a command-line flag whose
+// name ends in a key name (`--token abc`, `--github-token abc`). After whitespace alone it is redacted only
+// when it looks like a credential: at least 6 characters including a digit, `_`, or `-`
+// (`token ghp_abc123`, `x-api-key sk-live-123`, `password hunter2`).
 // A secret value may start with an authorization scheme (`Authorization: Bearer abc`, `Basic dXNlcjpwYXNz`,
 // GitHub's `token ghp_abc`). The scheme stays visible and the credential after it is redacted.
-const SECRET_VALUE_PATTERN =
-	/(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:token|secret|password|passwd|api[-_]?key|authorization|credential|private)[\s:=]+(?:(?:bearer|basic|token)\s+)?)[^\s,;]+/gi;
+const SECRET_KEY = `(?:${SECRET_KEY_PATTERN.source})`;
+const AUTHORIZATION_SCHEME = String.raw`(?:(?:bearer|basic|token)\s+)?`;
+const CREDENTIAL_LIKE_VALUE = String.raw`(?=[^\s,;]{6})(?=[^\s,;]*[\d_-])`;
+const SECRET_VALUE_PATTERN = new RegExp(
+	String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:${SECRET_KEY}\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?${SECRET_KEY}\s+)${AUTHORIZATION_SCHEME}|${SECRET_KEY}\s+${AUTHORIZATION_SCHEME}${CREDENTIAL_LIKE_VALUE})[^\s,;]+`,
+	"gi",
+);
 
 function tokenizeRiskText(value: string): string {
 	return value

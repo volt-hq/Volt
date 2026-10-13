@@ -32,6 +32,13 @@ function inlineComment(finding: ReviewFinding, run: ReviewRunRecord): ReviewCode
 	};
 }
 
+export interface ReviewPublishOptions {
+	/** Text added after the review's body, such as a marker a tool reads back. */
+	trailer?: string;
+	/** The command that runs the code host's CLI in place of its default: the account it is signed in as posts. */
+	command?: readonly string[];
+}
+
 export interface ReviewPublishResult {
 	reviewId?: number;
 	url?: string;
@@ -43,7 +50,9 @@ export async function publishReviewRun(
 	cwd: string,
 	run: ReviewRunRecord,
 	provider?: CodeHostProvider,
+	options: ReviewPublishOptions = {},
 ): Promise<ReviewPublishResult> {
+	const command = options.command === undefined ? {} : { command: options.command };
 	const pullRequest = run.target.identity.pullRequest;
 	if (run.status !== "completed" || run.result?.completionStatus !== "complete") {
 		throw new Error("Only complete review results can be published.");
@@ -55,7 +64,7 @@ export async function publishReviewRun(
 	if (codeHostProvider.id !== pullRequest.providerId) {
 		throw new Error("The selected code-host provider does not match the reviewed pull request.");
 	}
-	await codeHostProvider.verifyPullRequestHead(cwd, pullRequest);
+	await codeHostProvider.verifyPullRequestHead(cwd, pullRequest, command);
 	const comments: ReviewCodeHostInlineComment[] = [];
 	const inlineFindingIds: string[] = [];
 	const summaryOnlyFindingIds: string[] = [];
@@ -85,12 +94,14 @@ export async function publishReviewRun(
 		"",
 		`Verdict: ${run.result.overallCorrectness ?? "unavailable"} — ${run.result.overallExplanation}`,
 		...(summaryOnly.length > 0 ? ["", "Findings without a safe inline anchor:", "", ...summaryOnly] : []),
+		...(options.trailer === undefined ? [] : ["", options.trailer]),
 	].join("\n");
 	const published = await codeHostProvider.publishPullRequestReview({
 		cwd,
 		pullRequest,
 		body,
 		comments,
+		...command,
 	});
 	return {
 		...published,

@@ -43,6 +43,7 @@ import {
 	RpcClientMessageIdSchema,
 	RpcConversationIdentifierSchema,
 	RpcConversationInputImagesSchema,
+	RpcEpochMillisecondsSchema,
 	RpcQueueModeSchema,
 	RpcRegisterPushTargetArgsSchema,
 	RpcSafeNonNegativeIntegerSchema,
@@ -66,6 +67,10 @@ export const INTENT_OUTCOME_WINDOW = 256;
 export const REVIEW_TOOLS_MAX = 64;
 /** Longest tool name a review start names, in characters. */
 export const REVIEW_TOOL_NAME_MAX_CHARS = 128;
+/** Longest shell command a review's checkout setup runs, in characters. */
+export const REVIEW_SETUP_COMMAND_MAX_CHARS = 10_000;
+/** Longest a review's checkout setup may run, in milliseconds. */
+export const REVIEW_SETUP_TIMEOUT_MAX_MS = 3_600_000;
 
 /** Longest intent name, in characters. */
 export const INTENT_NAME_MAX_CHARS = 160;
@@ -126,6 +131,21 @@ export type WithdrawnInput = Static<typeof WithdrawnInputSchema>;
 
 /** The output of `withdraw_queued` and of `abort{withdrawQueued}`: the withdrawn input, steering first, then follow-up. */
 export const WithdrawnQueueSchema = Type.Object({ messages: Type.Array(WithdrawnInputSchema) }, closed);
+
+/** Longest preview of an ambiguous input's text, in characters. */
+export const AMBIGUOUS_CLIENT_INPUT_PREVIEW_MAX_CHARS = 200;
+
+/**
+ * An input whose outcome is ambiguous, by its client message id, with the
+ * start of its text; the client fold's queue holds the whole text.
+ */
+export const AmbiguousClientInputSchema = Type.Object(
+	{
+		clientMessageId: RpcClientMessageIdSchema,
+		preview: Type.String({ maxLength: AMBIGUOUS_CLIENT_INPUT_PREVIEW_MAX_CHARS }),
+	},
+	closed,
+);
 
 /** Longest host path an intent takes, in characters. */
 export const HOST_PATH_MAX_CHARS = 4_096;
@@ -211,6 +231,22 @@ const reviewOptions = {
 			maxItems: REVIEW_TOOLS_MAX,
 			uniqueItems: true,
 		}),
+	),
+	/**
+	 * A shell command the host runs, with the user's shell, in the root of
+	 * each disposable checkout the review's auxiliary tools run in before the
+	 * review uses it, such as installing dependencies: a fresh checkout has
+	 * none. It runs for at most `timeoutMs` (ten minutes by default). It
+	 * applies with `tools` (local clients only).
+	 */
+	setup: Type.Optional(
+		Type.Object(
+			{
+				command: Type.String({ minLength: 1, maxLength: REVIEW_SETUP_COMMAND_MAX_CHARS }),
+				timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: REVIEW_SETUP_TIMEOUT_MAX_MS })),
+			},
+			closed,
+		),
 	),
 };
 
@@ -306,6 +342,16 @@ export const INTENT_SCHEMAS = {
 	},
 	/** Take the queued steering and follow-up input back, without stopping the run. */
 	withdraw_queued: { input: EmptyInputSchema, output: WithdrawnQueueSchema },
+	/**
+	 * Discard an input whose outcome is ambiguous: its dispatch started and the
+	 * host was lost before recording an outcome. It fails without being sent
+	 * again, and the queued input it held back replays in order. `blocker`
+	 * names the next ambiguous input, if one remains.
+	 */
+	discard_client_input: {
+		input: Type.Object({ clientMessageId: RpcClientMessageIdSchema }, closed),
+		output: Type.Object({ blocker: Type.Optional(AmbiguousClientInputSchema) }, closed),
+	},
 	abort_retry: { input: EmptyInputSchema },
 	/**
 	 * Run a user shell command on the host (`excludeFromContext`: the model
@@ -571,7 +617,7 @@ export const INTENT_SCHEMAS = {
 				status: stringEnum(["accepted", "fixed", "dismissed"]),
 				reason: Type.Optional(stringEnum(["false_positive", "intentional", "not_actionable", "other"])),
 				note: Type.Optional(Type.String()),
-				createdAt: Type.Number(),
+				createdAt: RpcEpochMillisecondsSchema,
 			},
 			closed,
 		),

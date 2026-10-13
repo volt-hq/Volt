@@ -202,6 +202,7 @@
 				"follow_up",
 				"abort",
 				"withdraw_queued",
+				"discard_client_input",
 				"abort_retry",
 				"bash",
 				"abort_bash",
@@ -712,10 +713,10 @@
 					"type": "string"
 				},
 				"pairedAtMs": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"lastSeenAtMs": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"allowedTools": {
 					"type": "array",
@@ -3491,7 +3492,7 @@
 					"type": "number"
 				},
 				"startedAtMs": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"environment": {
 					"$ref": "#/$defs/Control.EnvironmentStatus"
@@ -3800,16 +3801,16 @@
 					"type": "string"
 				},
 				"pairedAtMs": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"lastSeenAtMs": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"revokedAtMs": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"rePairApprovedAtMs": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"rpcGrant": {
 					"$ref": "#/$defs/RemoteGrant"
@@ -4427,7 +4428,7 @@
 					"type": "string"
 				},
 				"createdAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"sessionIds": {
 					"type": "array",
@@ -5296,6 +5297,9 @@
 					"$ref": "#/$defs/Frame.intent.withdraw_queued"
 				},
 				{
+					"$ref": "#/$defs/Frame.intent.discard_client_input"
+				},
+				{
 					"$ref": "#/$defs/Frame.intent.abort_retry"
 				},
 				{
@@ -5822,6 +5826,35 @@
 				},
 				"input": {
 					"$ref": "#/$defs/IntentInput.delete_session"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.discard_client_input": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "discard_client_input"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.discard_client_input"
 				}
 			},
 			"additionalProperties": false
@@ -10354,6 +10387,18 @@
 			},
 			"additionalProperties": false
 		},
+		"IntentInput.discard_client_input": {
+			"type": "object",
+			"required": [
+				"clientMessageId"
+			],
+			"properties": {
+				"clientMessageId": {
+					"$ref": "#/$defs/RpcClientMessageId"
+				}
+			},
+			"additionalProperties": false
+		},
 		"IntentInput.export_html": {
 			"type": "object",
 			"properties": {
@@ -10959,6 +11004,25 @@
 					},
 					"maxItems": 64,
 					"uniqueItems": true
+				},
+				"setup": {
+					"type": "object",
+					"required": [
+						"command"
+					],
+					"properties": {
+						"command": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 10000
+						},
+						"timeoutMs": {
+							"type": "integer",
+							"minimum": 1,
+							"maximum": 3600000
+						}
+					},
+					"additionalProperties": false
 				}
 			},
 			"additionalProperties": false,
@@ -11671,7 +11735,7 @@
 							"type": "string"
 						},
 						"createdAt": {
-							"type": "number"
+							"$ref": "#/$defs/RpcEpochMilliseconds"
 						},
 						"sessionIds": {
 							"type": "array",
@@ -11717,6 +11781,29 @@
 			"properties": {
 				"trashed": {
 					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentOutput.discard_client_input": {
+			"type": "object",
+			"properties": {
+				"blocker": {
+					"type": "object",
+					"required": [
+						"clientMessageId",
+						"preview"
+					],
+					"properties": {
+						"clientMessageId": {
+							"$ref": "#/$defs/RpcClientMessageId"
+						},
+						"preview": {
+							"type": "string",
+							"maxLength": 200
+						}
+					},
+					"additionalProperties": false
 				}
 			},
 			"additionalProperties": false
@@ -12086,7 +12173,7 @@
 					"type": "string"
 				},
 				"createdAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				}
 			},
 			"additionalProperties": false
@@ -17744,7 +17831,7 @@
 								"type": "string"
 							},
 							"createdAt": {
-								"type": "number"
+								"$ref": "#/$defs/RpcEpochMilliseconds"
 							},
 							"sessionIds": {
 								"type": "array",
@@ -18760,7 +18847,7 @@
 			],
 			"properties": {
 				"startedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				}
 			},
 			"additionalProperties": false
@@ -18781,7 +18868,7 @@
 					]
 				},
 				"startedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				}
 			},
 			"additionalProperties": false
@@ -18800,7 +18887,7 @@
 					"type": "number"
 				},
 				"retryAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"error": {
 					"type": "string"
@@ -19314,6 +19401,13 @@
 				}
 			},
 			"additionalProperties": false
+		},
+		"RpcEpochMilliseconds": {
+			"type": "integer",
+			"minimum": 0,
+			"maximum": 9007199254740991,
+			"x-volt-expected": "be a safe non-negative integer",
+			"description": "Unix epoch milliseconds"
 		},
 		"RpcGitChangeCounts": {
 			"type": "object",
@@ -20650,13 +20744,13 @@
 							"const": "retained"
 						},
 						"lastRequestAt": {
-							"type": "number"
+							"$ref": "#/$defs/RpcEpochMilliseconds"
 						},
 						"expiresAt": {
-							"type": "number"
+							"$ref": "#/$defs/RpcEpochMilliseconds"
 						},
 						"keepAliveUntil": {
-							"type": "number"
+							"$ref": "#/$defs/RpcEpochMilliseconds"
 						}
 					},
 					"additionalProperties": false
@@ -20825,7 +20919,7 @@
 					"type": "string"
 				},
 				"acknowledgedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				}
 			},
 			"additionalProperties": false
@@ -21326,10 +21420,10 @@
 					"$ref": "#/$defs/RpcReviewRunStatus"
 				},
 				"startedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"endedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"usage": {
 					"anyOf": [
@@ -21474,10 +21568,10 @@
 					]
 				},
 				"usageUpdatedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"acknowledgedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"target": {
 					"type": "object",
@@ -21620,7 +21714,7 @@
 									"additionalProperties": false
 								},
 								"observedAt": {
-									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+									"$ref": "#/$defs/RpcEpochMilliseconds"
 								}
 							},
 							"additionalProperties": false
@@ -21902,10 +21996,10 @@
 					"$ref": "#/$defs/RpcReviewRunStatus"
 				},
 				"startedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"endedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"usage": {
 					"anyOf": [
@@ -22050,10 +22144,10 @@
 					]
 				},
 				"usageUpdatedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"acknowledgedAt": {
-					"type": "number"
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				},
 				"target": {
 					"type": "object",
@@ -22196,7 +22290,7 @@
 									"additionalProperties": false
 								},
 								"observedAt": {
-									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+									"$ref": "#/$defs/RpcEpochMilliseconds"
 								}
 							},
 							"additionalProperties": false

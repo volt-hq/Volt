@@ -63,7 +63,9 @@ export const TranscriptAssistantPartSchema = Type.Union([
  * Text is bounded per entry by the profile; `truncated` says the full text is
  * available through the `content` query. A tool item's `text` is its
  * presentation's title and how the call ended; its result's content is
- * fetched with the `content` query.
+ * fetched with the `content` query. An assistant item's `parts` are its text
+ * and thinking blocks, which clients render; its `text` is a plain summary:
+ * the text blocks joined by a blank line, without thinking.
  *
  * `presentation` is how the entry looks as `UiNode` data, computed from the
  * presenters the host has registered when the entry is projected (RFC §4.3):

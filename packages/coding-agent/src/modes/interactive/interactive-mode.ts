@@ -133,6 +133,7 @@ import { formatMissingSessionCwdPrompt } from "../../core/session-cwd.ts";
 import { SettingsManager } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
+import { formatDuration } from "../../core/tools/render-utils.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { stripTerminalControls } from "../../core/ui/ansi-tokens.ts";
 import type { UserInputResponse } from "../../core/user-input.ts";
@@ -159,10 +160,9 @@ import { resolveStoreSource } from "../../store/resolver.ts";
 import {
 	chooseStoreRemoveTarget,
 	chooseStoreUpdateTarget,
+	findStoreCatalogRevision,
 	type StoreScopeTarget,
 	storeReviewSource,
-	storeSourcePinsCommit,
-	storeTargetMatchesUpdateSource,
 	storeUpdateTouches,
 } from "../../store/targets.ts";
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
@@ -379,16 +379,6 @@ const PANEL_SIDEBAR_COLUMNS = 40;
 /** Narrowest terminal that shows the panel sidebar; narrower ones show sidebar panels above the editor. */
 const PANEL_SIDEBAR_MIN_TERMINAL_COLUMNS = 100;
 
-/** Format an elapsed duration for the working indicator, e.g. "42s", "3m 12s", "1h 4m". */
-function formatElapsedDuration(ms: number): string {
-	const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-	if (totalSeconds < 60) return `${totalSeconds}s`;
-	const minutes = Math.floor(totalSeconds / 60);
-	const seconds = totalSeconds % 60;
-	if (minutes < 60) return `${minutes}m ${seconds}s`;
-	return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
-}
-
 /** Local wall-clock time, e.g. "3:42 PM". */
 function formatClockTime(ms: number): string {
 	return new Date(ms).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
@@ -478,10 +468,16 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 	const terminal = options.terminal ?? new ProcessTerminal();
 	if (options.tuiMode === "fullscreen") {
 		const styleSearchMatch = (text: string) => theme.bg("searchMatchBg", theme.fg("searchMatchText", text));
-		return new TuiAltScreen(terminal, options.showHardwareCursor, options.logDirectory, {
+		const tui: TuiAltScreen = new TuiAltScreen(terminal, options.showHardwareCursor, options.logDirectory, {
 			searchMatchStyle: (text) => theme.underline(styleSearchMatch(text)),
 			searchCurrentMatchStyle: (text) => theme.bold(theme.inverse(styleSearchMatch(text))),
-			openUrl: openBrowser,
+			openUrl: (url) => {
+				// Link targets come from rendered transcript content, which model and tool output
+				// control, and platform openers also launch file:, smb:, and custom scheme handlers.
+				const target = URL.parse(url);
+				if (target?.protocol === "https:" || target?.protocol === "http:") openBrowser(target.href);
+				else tui.flash("Link not opened: only http and https links open", 3000);
+			},
 			onRightClickPaste: options.onRightClickPaste,
 			copySelection: async (text) => {
 				try {
@@ -492,6 +488,7 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 				}
 			},
 		});
+		return tui;
 	}
 	return new TuiMainScreen(terminal, options.showHardwareCursor, options.logDirectory);
 }
@@ -1950,7 +1947,7 @@ export class InteractiveMode {
 			const label = this.hostWait.open ?? this.hostWait.reconnect;
 			if (label === undefined) return undefined;
 			const waited = Date.now() - (this.hostWaitLoader?.startedAt ?? Date.now());
-			return `${label}...${waited >= 2_000 ? ` (${formatElapsedDuration(waited)})` : ""}`;
+			return `${label}...${waited >= 2_000 ? ` (${formatDuration(waited, { wholeSeconds: true })})` : ""}`;
 		};
 		if (text() === undefined) {
 			if (!shown) return;
@@ -2496,7 +2493,7 @@ export class InteractiveMode {
 	private getWorkingLoaderMessage(): string {
 		const base = this.defaultWorkingMessage;
 		if (this.turnStartedAt === undefined) return base;
-		const elapsed = formatElapsedDuration(Date.now() - this.turnStartedAt);
+		const elapsed = formatDuration(Date.now() - this.turnStartedAt, { wholeSeconds: true });
 		return `${base} (${elapsed} · ${keyText("app.interrupt")} to interrupt)`;
 	}
 
@@ -2594,7 +2591,7 @@ export class InteractiveMode {
 		this.workSummary = undefined;
 		if (!summary || summary.aborted || this.shutdownRequested) return;
 		const doneAt = Date.now();
-		const text = `Worked for ${formatElapsedDuration(doneAt - summary.startedAt)} · done ${formatClockTime(doneAt)}`;
+		const text = `Worked for ${formatDuration(doneAt - summary.startedAt, { wholeSeconds: true })} · done ${formatClockTime(doneAt)}`;
 		this.workSummaryTimer = setTimeout(() => {
 			this.workSummaryTimer = undefined;
 			if (this.isShuttingDown || this.runActive() || this.store.phase?.compaction !== undefined) return;
@@ -3697,6 +3694,11 @@ export class InteractiveMode {
 				await this.handleClearCommand();
 				return;
 			}
+			if (text === "/discard-stuck") {
+				this.editor.setText("");
+				await this.handleDiscardStuckCommand();
+				return;
+			}
 			if (text === "/compact" || text.startsWith("/compact ")) {
 				const customInstructions = text.startsWith("/compact ") ? text.slice(9).trim() : undefined;
 				this.editor.setText("");
@@ -4412,10 +4414,18 @@ export class InteractiveMode {
 		}
 		const images = await this.collectPromptImages(text);
 		const operation = this.store.phase?.operation;
-		const delivery: Delivery = await this.input.send(text, {
-			followUp: options.followUp,
-			...(images === undefined ? {} : { images }),
-		});
+		let delivery: Delivery;
+		try {
+			delivery = await this.input.send(text, {
+				followUp: options.followUp,
+				...(images === undefined ? {} : { images }),
+			});
+		} catch (error) {
+			// A message the host lost while sending it holds this one back: say how to release it.
+			const stuck = this.input.stuckInput();
+			if (stuck === undefined || !errorText(error).includes(stuck.clientMessageId)) throw error;
+			throw new Error(`${errorText(error)}. Run /discard-stuck to discard the stuck message.`, { cause: error });
+		}
 		if (delivery === "operation") {
 			this.showStatus(
 				operation === "compaction" || operation === "navigation"
@@ -5633,6 +5643,18 @@ export class InteractiveMode {
 		try {
 			this.showStatus(`Preparing store install for ${formatStoreSourceSummary(input)}...`);
 			const resolved = await resolveStoreSource({ input, catalog: storeCatalog, pinGit: true });
+			const packageManager = this.getStorePackageManager();
+			const catalogId = resolved.catalogPackage?.id;
+			const installed =
+				catalogId === undefined
+					? undefined
+					: findStoreCatalogRevision(packageManager, resolved.source, catalogId, scope);
+			if (installed !== undefined) {
+				this.showWarning(
+					`${catalogId} is installed from ${formatStoreSourceSummary(installed.source)}; update it with /store update ${catalogId}`,
+				);
+				return;
+			}
 			const inspection = await inspectStorePackage({
 				source: resolved.source,
 				cwd: this.settingsScope.cwd,
@@ -5656,7 +5678,6 @@ export class InteractiveMode {
 				return;
 			}
 
-			const packageManager = this.getStorePackageManager();
 			await packageManager.installAndPersist(plan.source, {
 				local: scope === "project",
 				scripts: "never",
@@ -5695,9 +5716,18 @@ export class InteractiveMode {
 		try {
 			const resolved = await resolveStoreSource({ input, catalog: storeCatalog, pinGit: false });
 			const packageManager = this.getStorePackageManager();
-			const selection = chooseStoreRemoveTarget(packageManager, resolved.source, local ?? false);
+			const selection = chooseStoreRemoveTarget(
+				packageManager,
+				resolved.source,
+				local ?? false,
+				resolved.catalogPackage?.id,
+			);
 			if (selection.conflict === "both-scopes") {
 				this.showWarning("Package is installed in both user and project scopes. Use /extensions to pick one.");
+				return;
+			}
+			if (selection.conflict === "several-refs") {
+				this.showWarning(`${input} is installed at several refs. Name the ref to remove.`);
 				return;
 			}
 			if (!selection.target) {
@@ -5757,7 +5787,7 @@ export class InteractiveMode {
 		try {
 			this.showStatus(`Preparing store update for ${input}...`);
 			const resolved = await resolveStoreSource({ input, catalog: storeCatalog, pinGit: true });
-			const selection = chooseStoreUpdateTarget(packageManager, resolved.source);
+			const selection = chooseStoreUpdateTarget(packageManager, resolved.source, false, catalogPackage.id);
 			if (selection.conflict === "both-scopes") {
 				this.showWarning("Package is installed in both user and project scopes. Use /extensions to pick one.");
 				return;
@@ -5766,7 +5796,8 @@ export class InteractiveMode {
 				this.showWarning(`No matching installed package found for catalog ID ${input}`);
 				return;
 			}
-			if (storeTargetMatchesUpdateSource(selection.target, resolved.source)) {
+			// Already the catalog pin: update it in place.
+			if (storeUpdateTouches(packageManager, selection.target, resolved.source)) {
 				const targetLabel = formatStoreSourceSummary(selection.target.source);
 				const confirmed = await this.showExtensionConfirm("Store update", `Update ${targetLabel}?`);
 				if (!confirmed) {
@@ -5805,58 +5836,29 @@ export class InteractiveMode {
 				this.showStatus("Store update cancelled");
 				return;
 			}
-			const local = selection.target.scope === "project";
-			await packageManager.installAndPersist(plan.source, { local, scripts: "never" });
-			await this.settingsManager.flush();
-			if (this.reportStoreSettingsErrors(packageManager, plan.source, selection.target.scope)) {
-				return;
-			}
+			const target = selection.target;
+			const local = target.scope === "project";
+			// The new pin installs beside the installed one, which stays configured until the new pin is acknowledged.
+			await packageManager.install(plan.source, { local, scripts: "never" });
 			if (
 				!(await this.confirmPackagePermissions(
 					packageManager,
 					plan.source,
-					selection.target.scope,
+					target.scope,
 					`Declining keeps ${currentLabel}.`,
 					{ installed: true },
 				))
 			) {
-				// Back to the reviewed pin: the update's new permissions were not acknowledged.
-				const scope = selection.target.scope;
-				const removeDeclined = async (reason: string): Promise<void> => {
-					// The declined revision must not stay installed: without the previous one, the package goes.
-					await packageManager.removeAndPersist(plan.source, { local });
-					await this.settingsManager.flush();
-					if (this.reportStoreSettingsErrors(packageManager, plan.source, scope)) return;
-					this.showWarning(`Removed ${currentLabel}: ${reason}`);
-					await this.offerStoreReload(`Removed ${currentLabel}`);
-				};
-				try {
-					await packageManager.installAndPersist(selection.target.source, { local, scripts: "never" });
-					await this.settingsManager.flush();
-				} catch (error: unknown) {
-					this.showError(
-						`Could not reinstall ${currentLabel}: ${sanitizeText(error instanceof Error ? error.message : String(error))}`,
-					);
-					await removeDeclined("the update's permissions were not acknowledged");
-					return;
-				}
-				if (this.reportStoreSettingsErrors(packageManager, selection.target.source, selection.target.scope)) return;
-				// A source without a commit pin reinstalls at its newest revision, which has its own permissions:
-				// declining them too removes the package.
-				if (
-					!storeSourcePinsCommit(selection.target.source) &&
-					!(await this.confirmPackagePermissions(
-						packageManager,
-						selection.target.source,
-						selection.target.scope,
-						"Declining removes the package.",
-						{ installed: true },
-					))
-				) {
-					await removeDeclined("the reinstalled revision's permissions were not acknowledged");
-					return;
-				}
+				// The new pin was never configured: dropping its checkout leaves the installed pin as it was.
+				await packageManager.removeAndPersist(plan.source, { local });
 				this.showStatus(`Kept ${currentLabel}: the update's permissions were not acknowledged`);
+				return;
+			}
+			// The new pin takes over the installed one's settings entry, and the installed pin's checkout goes.
+			packageManager.addSourceToSettings(plan.source, { local, scripts: "never", replace: target.source });
+			await packageManager.removeAndPersist(target.actionSource ?? target.source, { local });
+			await this.settingsManager.flush();
+			if (this.reportStoreSettingsErrors(packageManager, plan.source, target.scope)) {
 				return;
 			}
 			await this.offerStoreReload(`Updated ${currentLabel} to ${targetLabel}`);
@@ -7982,6 +7984,38 @@ export class InteractiveMode {
 		});
 	}
 
+	/**
+	 * `/discard-stuck`: discard, once the user confirms, the message the host
+	 * lost while sending it, which holds later input back. It is not sent
+	 * again; queued messages behind it then run in order.
+	 */
+	private async handleDiscardStuckCommand(): Promise<void> {
+		await this.clientConnected.promise;
+		const stuck = this.input.stuckInput();
+		if (stuck === undefined) {
+			this.showStatus("No message is stuck");
+			return;
+		}
+		const confirmed = await this.showExtensionConfirm(
+			"Discard stuck message",
+			`${stuck.preview}\n\nThe host stopped while sending this message; it may or may not have reached the agent. Discard it without sending it again?`,
+		);
+		if (!confirmed) {
+			this.showStatus("Discard cancelled");
+			return;
+		}
+		try {
+			const next = await this.input.discardStuck(stuck.clientMessageId);
+			this.showStatus(
+				next === undefined
+					? "Discarded the stuck message"
+					: "Discarded the stuck message; another one is stuck: run /discard-stuck again",
+			);
+		} catch (error: unknown) {
+			this.showError(`Failed to discard the stuck message: ${errorText(error)}`);
+		}
+	}
+
 	/** `/clear` and the new-session key: a running turn stops, then the client moves to a new session. */
 	private async handleClearCommand(): Promise<void> {
 		await this.clientConnected.promise;
@@ -8425,14 +8459,20 @@ export class InteractiveMode {
 		return choice === undefined ? undefined : entries.find((entry) => entry.label === choice)?.engine;
 	}
 
-	/** Start a review through the conversation's review intent, with the configured auxiliary tools; resolves its work id. */
+	/**
+	 * Start a review through the conversation's review intent, with the configured auxiliary tools and the setup of
+	 * the checkouts they run in; resolves its work id.
+	 */
 	private async startReview(start: ReviewEngineStart): Promise<string> {
-		// An engine's passes are its own: the conversation's auxiliary tools are for the built-in review.
-		const tools = start.input.engine === undefined ? await this.getReviewToolsForRun() : [];
+		// Every engine gets the configured auxiliary tools, as the built-in review does.
+		const tools = await this.getReviewToolsForRun();
+		// A setup prepares the checkout the tools run in: without tools, there is none.
+		const setup = tools.length === 0 ? undefined : this.settingsManager.getReviewSetup();
 		const accepted = await this.store.client.intent("review", {
 			...start.input,
 			...(start.engineParams === undefined ? {} : { engineParams: start.engineParams }),
 			...(tools.length === 0 ? {} : { tools }),
+			...(setup === undefined ? {} : { setup }),
 		} as IntentInput<"review">);
 		const workId = accepted.result?.workId;
 		if (workId === undefined) throw new Error("The review did not start");

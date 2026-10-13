@@ -282,7 +282,13 @@ export interface ReviewCodeHostInlineComment {
 	body: string;
 }
 
-export interface ReviewCodeHostPublishRequest {
+/** How a code host's CLI is run for one operation. */
+export interface CodeHostCommandOptions {
+	/** The command that runs the code host's CLI in place of its default, such as `["volt-agent", "gh"]`. */
+	command?: readonly string[];
+}
+
+export interface ReviewCodeHostPublishRequest extends CodeHostCommandOptions {
 	cwd: string;
 	pullRequest: ReviewPullRequestIdentity;
 	body: string;
@@ -307,6 +313,10 @@ export interface CodeHostProvider {
 	capturePullRequestIdentity(
 		options: ReviewCodeHostContextCaptureOptions,
 	): Promise<ReviewCodeHostIdentityCaptureResult>;
-	verifyPullRequestHead(cwd: string, pullRequest: ReviewPullRequestIdentity): Promise<void>;
+	verifyPullRequestHead(
+		cwd: string,
+		pullRequest: ReviewPullRequestIdentity,
+		options?: CodeHostCommandOptions,
+	): Promise<void>;
 	publishPullRequestReview(request: ReviewCodeHostPublishRequest): Promise<ReviewCodeHostPublishResult>;
 }

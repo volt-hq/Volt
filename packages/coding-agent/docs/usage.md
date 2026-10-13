@@ -54,6 +54,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
 | `/compact [prompt]` | Manually compact context, optionally with custom instructions |
+| `/discard-stuck` | Discard a message Volt stopped while sending (it may or may not have reached the model), so later messages can run |
 | `/review [target] [options]` | Snapshot and independently verify uncommitted, branch (with or without uncommitted changes), PR, or commit changes |
 | `/copy` | Copy last assistant message to clipboard |
 | `/export [file]` | Export session to HTML |
@@ -176,9 +177,17 @@ See [Sessions](sessions.md) and [Compaction](compaction.md) for details.
 /review branch main --engine swarm --workers 10 # review on an extension's engine, with its own options
 ```
 
+With auxiliary tools such as `bash` (`/review tools`), a review runs its checks and tests in disposable checkouts of the reviewed head, never in your working tree. A fresh checkout has no dependencies or build output; the `reviewSetup` setting names a shell command Volt runs in each one first, with your shell and permissions:
+
+```json
+{ "reviewTools": ["bash"], "reviewSetup": { "command": "npm ci --ignore-scripts", "timeoutMs": 600000 } }
+```
+
+A setup that fails or runs past `timeoutMs` (ten minutes by default, an hour at most) fails the built-in review with its output. In a trusted project, `.volt/settings.json` can set both for everyone who works on it.
+
 With no arguments, `/review` asks what to review, then shows one form for the options: focus, scope, effort, optional findings, and scope mode. Enter starts the review with the values shown and Escape cancels it. Volt then shows the command you could have typed for the same review, such as `Equivalent command: /review branch main --effort high`. Arguments skip the pickers and the form. A flag is `--name value` or `--name=value`, a boolean is a bare flag, and `--scope` may repeat. The slash menu completes the target word, the base branches and recent commits the host offers, the flags not yet used, and the values of `--effort`. The words and flags are the ones the host declares for its review command ([RPC mode](rpc.md#built-in-intents)), so the menu and the form stay in step with it.
 
-`--engine <name>` runs the review on an engine an extension registered instead of the built-in pipeline (`standard`, the default). Type `--engine ` in the slash menu to see the engines, with what each costs; once the line names one, its own options are flags too (`--workers 10`, shown in the usage line and completed like the review's), and an unknown engine is refused with the names that exist. An engine reviews a pull request's code, not its linked issues or discussion. It runs as `review` work like any review, opens the same findings conversation, and its runs are recorded under its name: a rerun of one is refused, and the built-in review's incremental scope never builds on it. The auxiliary tools of `/review tools` are for the built-in review only. See [Extensions](extensions.md#voltregisterreviewenginename-engine) to write an engine.
+`--engine <name>` runs the review on an engine an extension registered instead of the built-in pipeline (`standard`, the default). Type `--engine ` in the slash menu to see the engines, with what each costs; once the line names one, its own options are flags too (`--workers 10`, shown in the usage line and completed like the review's), and an unknown engine is refused with the names that exist. An engine reviews a pull request's code, not its linked issues or discussion. It runs as `review` work like any review, opens the same findings conversation, and its runs are recorded under its name: a rerun of one is refused, and the built-in review's incremental scope never builds on it. The auxiliary tools of `/review tools`, and the `reviewSetup` below, apply to every engine. See [Extensions](extensions.md#voltregisterreviewenginename-engine) to write an engine.
 
 When an extension offers an engine for the target you chose, the no-argument launcher asks which engine reviews, between the target and the options form. Each engine's line has its description and what it costs, and the default is first and marked. The engine's own options follow the review's in the form, and the `Equivalent command:` line names the engine and the options you changed. With no engine offered for the target, there is no engine question. The `reviewEngine` setting in `settings.json` (`"reviewEngine": "swarm"`) makes an engine the default: it is first in the launcher, and a command line that does not name an engine runs on it, with its flags completed, after a status line that says so and gives its cost. `--engine standard` runs the built-in review once. A setting that names an engine no extension offers is reported, and the review runs on the standard engine. See [Settings](settings.md).
 

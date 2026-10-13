@@ -168,8 +168,13 @@ describe("remote frame redactor", () => {
 				{
 					type: "assistant_start",
 					message: assistantMessage([
-						{ type: "text", text: `answer ${hostFile}`, textSignature: "private-text-signature" },
-						{ type: "thinking", thinking: `plan ${hostFile}`, thinkingSignature: "private-thinking-signature" },
+						// A path at the end of a block that may still stream is held back: these end in a word.
+						{ type: "text", text: `answer ${hostFile} now`, textSignature: "private-text-signature" },
+						{
+							type: "thinking",
+							thinking: `plan ${hostFile} first`,
+							thinkingSignature: "private-thinking-signature",
+						},
 						{
 							type: "toolCall",
 							id: "tool-1",
@@ -197,8 +202,8 @@ describe("remote frame redactor", () => {
 					type: "assistant_start",
 					message: {
 						content: [
-							{ type: "text", text: "answer /workspace/notes.md" },
-							{ type: "thinking", thinking: "plan /workspace/notes.md" },
+							{ type: "text", text: "answer /workspace/notes.md now" },
+							{ type: "thinking", thinking: "plan /workspace/notes.md first" },
 							{ type: "toolCall", id: "tool-1", name: "read", arguments: { path: "/workspace/notes.md" } },
 						],
 					},

@@ -5,8 +5,13 @@
  */
 
 import { supportsFastInference } from "@hansjm10/volt-ai";
-import type { IntentAvailability as IntentAvailabilityValue, IntentStateValue } from "@hansjm10/volt-protocol";
+import {
+	AMBIGUOUS_CLIENT_INPUT_PREVIEW_MAX_CHARS,
+	type IntentAvailability as IntentAvailabilityValue,
+	type IntentStateValue,
+} from "@hansjm10/volt-protocol";
 import type { AgentSession } from "../../agent-session.ts";
+import type { AmbiguousClientInput } from "../../session/client-inputs.ts";
 import {
 	IDLE_INTENT_STATE,
 	INTENT_ENABLED,
@@ -29,6 +34,7 @@ export function intentStateOf(session: AgentSession | undefined): IntentState {
 		fastModeEnabled: session.fastModeEnabled,
 		planningState: session.planningState,
 		settingsManager: session.settingsManager,
+		ambiguousInput: session.ambiguousClientInput,
 	};
 }
 
@@ -95,6 +101,41 @@ export function fastModeAvailability(view: IntentView, input?: { enabled: boolea
 	return INTENT_ENABLED;
 }
 
+/** An ambiguous input as clients see it: its id and the start of its text, never splitting a character. */
+export function ambiguousInputPreview(input: AmbiguousClientInput): { clientMessageId: string; preview: string } {
+	let preview = input.message;
+	if (preview.length > AMBIGUOUS_CLIENT_INPUT_PREVIEW_MAX_CHARS) {
+		let end = AMBIGUOUS_CLIENT_INPUT_PREVIEW_MAX_CHARS - 1;
+		const last = preview.charCodeAt(end - 1);
+		if (last >= 0xd800 && last <= 0xdbff) end--;
+		preview = `${preview.slice(0, end)}…`;
+	}
+	return { clientMessageId: input.clientMessageId, preview };
+}
+
+/** The ambiguous input `discard_client_input` resolves: its client message id, labeled with its preview. */
+export function ambiguousInputState(view: IntentView): IntentStateValue {
+	const input = view.state.ambiguousInput;
+	if (input === undefined) return { type: "string", value: null };
+	const { clientMessageId, preview } = ambiguousInputPreview(input);
+	return { type: "string", value: clientMessageId, label: preview };
+}
+
+/**
+ * `discard_client_input` waits for the conversation to be idle, so the queued
+ * input behind the discarded one can replay; without input (a descriptor), it
+ * is enabled only while an ambiguous input holds later input back.
+ */
+export function ambiguousInputAvailability(view: IntentView, input?: { clientMessageId: string }): IntentAvailability {
+	if (isIntentStateBusy(view.state)) {
+		return { enabled: false, reason: "Wait for the agent to finish before discarding a stuck message" };
+	}
+	if (input === undefined && view.state.ambiguousInput === undefined) {
+		return { enabled: false, reason: "No message is stuck" };
+	}
+	return INTENT_ENABLED;
+}
+
 export type CompactionField = "enabled" | "modelThresholds";
 
 export function compactionSaveScope(view: IntentView): string {
@@ -150,6 +191,7 @@ export function liveIntentAvailability(session: AgentSession): IntentAvailabilit
 			compactionSettingsAvailability(view, "modelThresholds"),
 			compactionThresholdState(view),
 		),
+		liveAvailability("discard_client_input", ambiguousInputAvailability(view), ambiguousInputState(view)),
 	];
 }
 

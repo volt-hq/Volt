@@ -37,6 +37,7 @@ import type {
 import type {
 	ExtensionManifest,
 	ExtensionSettingsScope,
+	QueryResult,
 	RemoteCapability,
 	ToolPresentation,
 	UiNode,
@@ -56,6 +57,7 @@ import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { CustomMessage, CustomMessageInput } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ReviewEngineDeclaration } from "../review-engine.ts";
+import type { ReviewFollowUp } from "../review-report.ts";
 import type {
 	BranchSummaryEntry,
 	CompactionEntry,
@@ -312,6 +314,195 @@ export interface ExtensionContext {
 	 * recorded. An extension starts only its own kinds.
 	 */
 	startWork(kind: string, options: StartWorkOptions, run: WorkRun): Promise<{ readonly workId: string }>;
+	/**
+	 * Reviews of the conversation: the extension starts one on any engine the
+	 * conversation can run, as `/review` does, and reads how it ended. Starting
+	 * one needs the `exec` permission.
+	 */
+	readonly reviews: ExtensionReviews;
+}
+
+// ============================================================================
+// Reviews
+// ============================================================================
+
+/** A review engine the conversation can run (`ctx.reviews.engines()`). */
+export interface ExtensionReviewEngine {
+	/** `standard` for the host's own review, else the engine's `ext:<extension id>/<engine name>`. */
+	readonly id: string;
+	readonly label: string;
+	readonly description: string;
+	/** What choosing it costs compared with the standard review. */
+	readonly cost?: string;
+	readonly targets: readonly ExtensionReviewTarget["kind"][];
+}
+
+/**
+ * What a review reviews: the uncommitted changes, a branch against its base
+ * (with or without the uncommitted changes), a pull request's code, or a commit.
+ */
+export type ExtensionReviewTarget =
+	| { readonly kind: "uncommitted" }
+	| { readonly kind: "branch" | "branch_uncommitted"; readonly base?: string }
+	| { readonly kind: "pr"; readonly number: number }
+	| { readonly kind: "commit"; readonly ref: string };
+
+/** A review to start (`ctx.reviews.start`). */
+export interface ExtensionReviewStartOptions {
+	readonly target: ExtensionReviewTarget;
+	/** The engine's id, one of `ctx.reviews.engines()`: the standard review by default. */
+	readonly engine?: string;
+	/** The engine's parameters by name, checked against what it declares. The standard review takes none. */
+	readonly params?: Readonly<Record<string, string | number | boolean>>;
+	/** What to look at most closely. */
+	readonly focus?: string;
+	/** Path patterns the review is limited to. */
+	readonly scope?: readonly string[];
+	readonly effort?: "low" | "standard" | "high";
+	/** Whether optional (P3) findings are kept. */
+	readonly includeOptional?: boolean;
+	/**
+	 * An earlier review of the same target this one follows, such as the
+	 * previous round of a review loop. The review is full either way; following
+	 * a run, it also decides each finding that run left open. A finding still
+	 * there keeps its id in this review; one found fixed is closed in the run
+	 * where it was found (and in the runs that run followed), once this review
+	 * completes. Every engine's review decides each such finding: one an
+	 * engine leaves undecided, the host decides with a verification pass of
+	 * its own.
+	 */
+	readonly previousRunId?: string;
+	/**
+	 * Also collect follow-ups: defects the review notices outside the change,
+	 * such as pre-existing bugs, each verified like a finding and kept apart
+	 * from the findings (`followUps` of the result). They never affect the
+	 * verdict; an extension may file them as issues of their own. An engine
+	 * reports the ones it can.
+	 */
+	readonly followUps?: boolean;
+	/**
+	 * Tools of the conversation the review may use beside its read-only
+	 * snapshot tools, such as `bash` to run checks and tests, on any engine:
+	 * they run in disposable checkouts of the reviewed head. The workspace file
+	 * tools (read, grep, find, ls, edit, write) are refused.
+	 */
+	readonly tools?: readonly string[];
+	/**
+	 * A shell command the host runs in the root of each such disposable
+	 * checkout before the review uses it, such as installing its dependencies
+	 * (`npm ci --ignore-scripts`): a fresh checkout has none. It runs with the
+	 * user's shell and permissions, for at most `timeoutMs` (ten minutes by
+	 * default). One that fails or times out fails the standard review with
+	 * its output; an engine is refused the checkout, and decides what its
+	 * review does without it.
+	 * It applies with `tools`.
+	 */
+	readonly setup?: { readonly command: string; readonly timeoutMs?: number };
+	/** Running work of the extension's own kind the review belongs to: clients show it under that work. */
+	readonly parentWorkId?: string;
+}
+
+/** A review run as clients see it (`review.result`): its target, status, and, once it has one, its result. */
+export type ExtensionReviewResult = QueryResult<"review.result"> & {
+	/**
+	 * The follow-ups of a review that collected them: verified defects outside
+	 * the change. A follow-up's `fingerprint` names the defect by its path,
+	 * category, and root cause, so it is the same in every review that reports
+	 * it: an extension filing follow-ups can tell one it filed before.
+	 */
+	readonly followUps?: readonly ReviewFollowUp[];
+};
+
+/** How a review the extension started ended. */
+export interface ExtensionReviewEnd {
+	/** Its run's status; `failed` also when it ended without a run record. */
+	readonly status: "completed" | "incomplete" | "failed" | "cancelled";
+	readonly error?: string;
+	/** The run, once its record was written. */
+	readonly run?: ExtensionReviewResult;
+}
+
+/** A started review. */
+export interface ExtensionReviewRun {
+	/** The run id, which is the review's work id: `result` and `cancel` take it, and a panel action may open it. */
+	readonly id: string;
+	/** Resolves once the review ended; never rejects. */
+	readonly ended: Promise<ExtensionReviewEnd>;
+}
+
+/** How a review is posted to its pull request (`ctx.reviews.publish`). */
+export interface ExtensionReviewPublishOptions {
+	/** Text added after the posted review's body, such as a marker the extension reads back. */
+	readonly trailer?: string;
+	/**
+	 * The command that runs GitHub CLI in place of `gh`, such as `["volt-agent", "gh"]`: its first word is the
+	 * program, the rest its leading arguments, and the account it is signed in as posts the review.
+	 */
+	readonly command?: readonly string[];
+}
+
+/** A review posted to its pull request. */
+export interface ExtensionReviewPublication {
+	/** The code host's id of the posted review. */
+	readonly reviewId?: number;
+	readonly url?: string;
+	/** The findings posted as comments on their lines. */
+	readonly inlineFindingIds: readonly string[];
+	/** The findings posted in the review's body, having no line the code host accepts. */
+	readonly summaryOnlyFindingIds: readonly string[];
+}
+
+/** What became of a finding (`ctx.reviews.recordOutcome`). */
+export interface ExtensionReviewFindingOutcome {
+	readonly status: "accepted" | "fixed" | "dismissed";
+	/** Why it was dismissed: required for `dismissed`. */
+	readonly reason?: "false_positive" | "intentional" | "not_actionable" | "other";
+	readonly note?: string;
+}
+
+/** The reviews an extension runs and reads (`ctx.reviews`). */
+export interface ExtensionReviews {
+	/** The engines the conversation can run now, the standard review first. */
+	engines(): ExtensionReviewEngine[];
+	/**
+	 * Start a review as the conversation's `review` work. Resolves once it
+	 * started; what is reviewed is resolved first, so a target that cannot be
+	 * reviewed rejects. It counts against the conversation's limit of reviews
+	 * at once. Needs the `exec` permission. A finding discussion starts none:
+	 * what a review records there belongs to the source review.
+	 */
+	start(options: ExtensionReviewStartOptions): Promise<ExtensionReviewRun>;
+	/** A review run of the conversation by id, as clients see it; undefined when the conversation does not hold it. */
+	result(runId: string): Promise<ExtensionReviewResult | undefined>;
+	/** Cancel a review the extension started; one that ended is left alone. */
+	cancel(runId: string): Promise<void>;
+	/**
+	 * Post a review the extension started to its pull request, as one review
+	 * with each finding on its line where the code host accepts it, and record
+	 * that it was posted. Only a complete review of a pull request whose head
+	 * has not moved since is posted. Needs the `exec` permission.
+	 */
+	publish(runId: string, options?: ExtensionReviewPublishOptions): Promise<ExtensionReviewPublication>;
+	/**
+	 * Record what became of a finding of a review the extension started: it
+	 * was accepted, fixed, or dismissed for a reason. Needs the `exec` permission.
+	 */
+	recordOutcome(runId: string, findingId: string, outcome: ExtensionReviewFindingOutcome): Promise<void>;
+}
+
+/** How the session runs the extensions' reviews: `owner` is the extension's manifest id. */
+export interface ExtensionReviewsHandler {
+	engines(): ExtensionReviewEngine[];
+	start(owner: string, options: ExtensionReviewStartOptions): Promise<ExtensionReviewRun>;
+	result(runId: string): Promise<ExtensionReviewResult | undefined>;
+	cancel(owner: string, runId: string): Promise<void>;
+	publish(owner: string, runId: string, options?: ExtensionReviewPublishOptions): Promise<ExtensionReviewPublication>;
+	recordOutcome(
+		owner: string,
+		runId: string,
+		findingId: string,
+		outcome: ExtensionReviewFindingOutcome,
+	): Promise<void>;
 }
 
 // ============================================================================
@@ -419,7 +610,7 @@ export interface ExtensionCommandContext extends ExtensionContext {
 	 */
 	signal: AbortSignal;
 
-	/** Get the current base system-prompt construction options. */
+	/** Get a copy of the current base system-prompt construction options; changing it changes nothing in the session. */
 	getSystemPromptOptions(): BuildSystemPromptOptions;
 
 	/** Wait for the agent to finish streaming */
@@ -740,7 +931,10 @@ export interface ContextEvent {
 	messages: AgentMessage[];
 }
 
-/** Fired before a provider request is sent. Can replace the payload. */
+/**
+ * Fired before a provider request is sent. Can replace the payload. `payload` is a copy of the
+ * payload's arrays and plain objects, so editing it in place changes only this request.
+ */
 export interface BeforeProviderRequestEvent {
 	type: "before_provider_request";
 	payload: unknown;
@@ -762,7 +956,7 @@ export interface BeforeAgentStartEvent {
 	images?: ImageContent[];
 	/** The fully assembled system prompt string. */
 	systemPrompt: string;
-	/** Structured options used to build the system prompt. Extensions can inspect this to understand what Volt loaded without re-discovering resources. */
+	/** Structured options used to build the system prompt. Extensions can inspect this to understand what Volt loaded without re-discovering resources. Each handler gets its own copy; changing it changes nothing in the session. */
 	systemPromptOptions: BuildSystemPromptOptions;
 }
 
@@ -1622,13 +1816,13 @@ export interface ExtensionAPI<TSettings extends ExtensionSettingsShape = Extensi
 	/** Get the list of currently active tool names. */
 	getActiveTools(): string[];
 
-	/** Get all configured tools with parameter schema, prompt guidelines, and source metadata. */
+	/** Get all configured tools with copies of their parameter schema, prompt guidelines, and source metadata. */
 	getAllTools(): ToolInfo[];
 
 	/** Set the active tools by name. */
 	setActiveTools(toolNames: string[]): void;
 
-	/** Get available slash commands in the current session. */
+	/** Get available slash commands in the current session, with a copy of their source metadata. */
 	getCommands(): SlashCommandInfo[];
 
 	// =========================================================================

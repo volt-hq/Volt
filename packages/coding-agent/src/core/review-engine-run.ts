@@ -3,29 +3,44 @@
  * the conversation's `review` work (the work id is the run id, as for the built-in pipeline), and writes the
  * run record when the engine returns. Whatever the engine does, the record ends the work: completed or
  * incomplete with the result the engine submitted, failed when the engine threw or submitted nothing, and
- * cancelled when the work was. The host disposes the snapshot after the engine returns.
+ * cancelled when the work was. A review that follows an earlier run first has the host decide the earlier
+ * findings the engine left undecided, so every engine's rounds converge as the built-in pipeline's do. The host
+ * disposes the snapshot after the engine returns.
  */
 
+import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { Api, Model } from "@hansjm10/volt-ai";
 import type { ModelRegistry } from "./model-registry.ts";
 import { readPrReviewBinding } from "./pr-review-binding.ts";
+import type { ResourceLoader } from "./resource-loader.ts";
 import {
 	controlsWithDefaults,
 	createReviewWorkflowId,
+	decidePreviousFindings,
 	formatReviewWorkflowSummary,
+	type PreviousFindingDecisions,
 	REMOTE_REVIEW_FAILURE_MESSAGE,
+	type ReviewCheckoutSetup,
 	type ReviewRunControls,
 	type ReviewTarget,
 	resolveBoundReviewSnapshot,
 	reviewActionIdForTarget,
 	reviewWorkTarget,
+	uncertainPriorFindingDecision,
 	verifyBoundPullRequest,
 } from "./review.ts";
 import { type ReviewEngineDeclaration, ReviewEngineRun, resolveReviewEngineParameters } from "./review-engine.ts";
+import type { ReviewPasses } from "./review-passes.ts";
 import {
 	appendReviewRunDurably,
+	assertFollowsReviewOf,
 	assertReviewControlsPersistLosslessly,
+	closeFixedFindings,
 	createReviewRunRecord,
+	dismissedFingerprintsOfFollowedRuns,
+	followUpReviewPlan,
+	getCanonicalReviewRun,
+	type ReviewIncrementalPlan,
 	type ReviewRunStatus,
 } from "./review-state.ts";
 import { type ReviewWorkData, reviewWorkInput } from "./review-work.ts";
@@ -51,10 +66,32 @@ export interface StartEngineReviewOptions {
 	modelRegistry: ModelRegistry;
 	/** The conversation's current model. */
 	model?: Model<Api>;
-	settingsManager: Pick<SettingsManager, "isProjectTrusted">;
+	/** The user's agent directory, which the host's own verification reads context files from. */
+	agentDir: string;
+	/** The conversation's thinking level and fast mode, which the host's own verification runs with. */
+	thinkingLevel?: ThinkingLevel;
+	fastModeEnabled?: boolean;
+	settingsManager: SettingsManager;
 	/** The conversation's log, which a pull request review's binding and the run's records belong to. */
 	sessionManager: SessionManager;
 	sessionWriter: SessionWriter;
+	/** Running work the review belongs to: clients show it under that work. */
+	parentWorkId?: string;
+	/**
+	 * An earlier review of the same target this one follows: the engine gets the findings it left open to decide, and
+	 * the ones it finds fixed are closed there.
+	 */
+	previousRunId?: string;
+	/** Also collect follow-ups: verified defects outside the change, kept apart from the findings. */
+	followUps?: boolean;
+	/** Tools of the conversation the review may use beside the snapshot tools, run in checkouts of the head. */
+	tools?: readonly string[];
+	/** Prepares each checkout of the review. */
+	setup?: ReviewCheckoutSetup;
+	/** The conversation's resources, whose extension tools the host's own verification may use as granted. */
+	parentResourceLoader?: ResourceLoader;
+	/** Hosts the host's own verification pass as a conversation clients can open. */
+	passes?: ReviewPasses;
 }
 
 /**
@@ -71,27 +108,68 @@ export async function startEngineReview(options: StartEngineReviewOptions): Prom
 		throw new Error("Project trust is required before running a remote review.");
 	}
 	const params = resolveReviewEngineParameters(engine, options.params, { remote });
-	const controls = controlsWithDefaults(options.controls);
+	// A review that follows an earlier run reviews everything.
+	const controls = controlsWithDefaults({
+		...options.controls,
+		...(options.previousRunId === undefined ? {} : { scopeMode: "full" as const }),
+	});
 	assertReviewControlsPersistLosslessly(controls);
+	const previousRun =
+		options.previousRunId === undefined
+			? undefined
+			: await getCanonicalReviewRun(options.sessionManager, options.previousRunId);
+	if (options.previousRunId !== undefined && !previousRun) {
+		throw new Error(`Unknown review run: ${options.previousRunId}`);
+	}
+	const dismissedEarlier = previousRun
+		? await dismissedFingerprintsOfFollowedRuns(options.sessionManager, previousRun)
+		: [];
 	// An engine reviews a pull request's code, not its discussion: the snapshot has its identity only.
 	const { target, resolution } = await resolveBoundReviewSnapshot({
 		target: options.target,
 		cwd: options.cwd,
 		sessionManager: options.sessionManager,
+		// A run it follows holds the pull request's binding when this conversation does not.
+		parentRunId: options.previousRunId,
 		pullRequestContext: false,
 		sanitizeRemoteErrors: remote,
 	});
+	let followUp: ReviewIncrementalPlan | undefined;
+	try {
+		if (previousRun) {
+			assertFollowsReviewOf(previousRun, resolution);
+			followUp = followUpReviewPlan(previousRun, resolution, dismissedEarlier);
+		}
+	} catch (error) {
+		await resolution.dispose();
+		throw error;
+	}
 	const workId = createReviewWorkflowId();
 	const startedAt = Date.now();
 	const action = reviewActionIdForTarget(options.target);
 	const shown = `${reviewWorkTarget(resolution)} with ${engine.label}`;
 
 	const execute = async (work: WorkContext): Promise<WorkExecution> => {
-		const run = new ReviewEngineRun({ snapshot: resolution, target, controls, cwd: options.cwd });
+		const run = new ReviewEngineRun({
+			snapshot: resolution,
+			target,
+			controls,
+			cwd: options.cwd,
+			...(followUp === undefined
+				? {}
+				: {
+						previousFindings: followUp.priorOpenFindings,
+						suppressedFingerprints: followUp.suppressedDismissedFingerprints,
+					}),
+			...(options.followUps ? { followUps: true } : {}),
+			...(options.tools === undefined ? {} : { tools: options.tools }),
+			...(options.setup === undefined ? {} : { setup: options.setup }),
+			shellPath: options.settingsManager.getShellPath(),
+		});
 		let failure: Error | undefined;
 		try {
 			if (target.kind === "pr") {
-				const binding = await readPrReviewBinding(options.sessionManager);
+				const binding = await readPrReviewBinding(options.sessionManager, previousRun?.runId);
 				if (binding) await verifyBoundPullRequest(binding, resolution, options.cwd, work.signal);
 			}
 			work.progress({ text: `Reviewing ${shown}` });
@@ -114,6 +192,46 @@ export async function startEngineReview(options: StartEngineReviewOptions): Prom
 			run.end();
 		}
 		try {
+			const pending = failure || work.signal.aborted ? undefined : run.pendingPreviousFindings();
+			let host: PreviousFindingDecisions | undefined;
+			if (pending && pending.findings.length > 0) {
+				const count =
+					pending.findings.length === 1 ? "1 earlier finding" : `${pending.findings.length} earlier findings`;
+				work.progress({ text: `Deciding ${count} the ${engine.label} engine left open` });
+				try {
+					host = await decidePreviousFindings({
+						snapshot: resolution,
+						controls,
+						findings: pending.findings,
+						candidates: pending.candidates,
+						cwd: options.cwd,
+						agentDir: options.agentDir,
+						...(options.model === undefined ? {} : { currentModel: options.model }),
+						...(options.thinkingLevel === undefined ? {} : { thinkingLevel: options.thinkingLevel }),
+						...(options.fastModeEnabled === undefined ? {} : { fastModeEnabled: options.fastModeEnabled }),
+						modelRegistry: options.modelRegistry,
+						settingsManager: options.settingsManager,
+						...(options.tools === undefined ? {} : { tools: options.tools }),
+						...(options.setup === undefined ? {} : { setup: options.setup }),
+						...(options.parentResourceLoader === undefined
+							? {}
+							: { parentResourceLoader: options.parentResourceLoader }),
+						...(options.passes === undefined ? {} : { passes: options.passes }),
+						signal: work.signal,
+					});
+				} catch (error) {
+					// A cancelled review records no result. Anything else leaves the findings undecided, never dropped.
+					if (!work.signal.aborted) {
+						const rationale = `The host's verification of the earlier finding failed: ${error instanceof Error ? error.message : String(error)}`;
+						host = {
+							decisions: pending.findings.map((finding) => uncertainPriorFindingDecision(finding, rationale)),
+							commandsRun: [],
+							failedVerificationAttempts: [],
+						};
+					}
+				}
+			}
+			run.settle(host);
 			const parsed = run.result();
 			let status: ReviewRunStatus;
 			let errorMessage: string | undefined;
@@ -137,8 +255,13 @@ export async function startEngineReview(options: StartEngineReviewOptions): Prom
 				status,
 				...(parsed && (status === "completed" || status === "incomplete") ? { result: parsed } : {}),
 				...(errorMessage === undefined ? {} : { errorMessage }),
+				...(followUp === undefined ? {} : { incrementalPlan: followUp }),
 			});
 			await appendReviewRunDurably(options.sessionWriter, record);
+			// A complete review closes what it found fixed; an incomplete one may not have settled the rest.
+			if (status === "completed" && record.parentRunId) {
+				await closeFixedFindings(options.sessionWriter, record.parentRunId, record.runId, run.fixedPriorFindings());
+			}
 			if (status === "cancelled") return { outcome: "cancelled" };
 			if (errorMessage !== undefined) return { outcome: "failed", error: errorMessage };
 			const result = record.result;
@@ -163,7 +286,10 @@ export async function startEngineReview(options: StartEngineReviewOptions): Prom
 	};
 
 	try {
-		await options.work.start("review", reviewWorkInput(action, shown), execute, { workId });
+		await options.work.start("review", reviewWorkInput(action, shown), execute, {
+			workId,
+			...(options.parentWorkId === undefined ? {} : { parentWorkId: options.parentWorkId }),
+		});
 	} catch (error) {
 		await resolution.dispose();
 		throw error;

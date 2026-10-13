@@ -1,6 +1,7 @@
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import type { CodeHostProvider, ReviewCodeHostPublishRequest } from "../src/core/code-host/index.ts";
 import { publishReviewRun } from "../src/core/review-publish.ts";
@@ -196,6 +197,26 @@ switch (args.slice(0, 2).join(" ")) {
 				.split("\n")
 				.filter((line) => line.startsWith("api ")),
 		).toHaveLength(1);
+	});
+
+	it("posts through the command it is given, with the trailer after the review's body", async () => {
+		const fixture = installGh();
+		// The fixture's `gh` is on PATH: name another program, which runs the same fixture behind a leading argument.
+		const wrapper = join(fixture.cwd, "wrapper.mjs");
+		writeFileSync(
+			wrapper,
+			`import { appendFileSync } from "node:fs";\nappendFileSync(${JSON.stringify(fixture.callsPath)}, "wrapper " + process.argv[2] + "\\n");\nprocess.argv.splice(2, 1);\nawait import(${JSON.stringify(pathToFileURL(join(fixture.cwd, "bin", "fake-gh.mjs")).href)});\n`,
+		);
+		const trailer = "<!-- marker head=head-oid verdict=changes -->";
+		await publishReviewRun(fixture.cwd, reviewRun(), undefined, {
+			trailer,
+			command: [process.execPath, wrapper, "gh"],
+		});
+		const calls = readFileSync(fixture.callsPath, "utf8").split("\n");
+		// The head check and the review both ran through the wrapper.
+		expect(calls.filter((line) => line === "wrapper gh")).toHaveLength(2);
+		const payload = JSON.parse(readFileSync(fixture.payloadPath, "utf8")) as { body: string };
+		expect(payload.body.endsWith(`\n\n${trailer}`)).toBe(true);
 	});
 
 	it("refuses stale heads before publishing", async () => {

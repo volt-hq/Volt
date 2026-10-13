@@ -141,10 +141,13 @@ describe("native Iroh test prerequisite", () => {
 					reconnect: false,
 				});
 				await expect
-					.poll(async () => {
-						const status = await control?.request({ type: "status" });
-						return status?.type === "status_result" ? status.remoteTransport : undefined;
-					})
+					.poll(
+						async () => {
+							const status = await control?.request({ type: "status" });
+							return status?.type === "status_result" ? status.remoteTransport : undefined;
+						},
+						{ timeout: 5_000 },
+					)
 					.toMatchObject({ state: "unavailable", reasonCode: "endpoint_start_failed" });
 				await control.request({ type: "shutdown" });
 				await expect(daemon).resolves.toBe(0);
@@ -203,10 +206,13 @@ describe("native Iroh test prerequisite", () => {
 					reconnect: false,
 				});
 				await expect
-					.poll(async () => {
-						const status = await control?.request({ type: "status" });
-						return status?.type === "status_result" ? status.remoteTransport : undefined;
-					})
+					.poll(
+						async () => {
+							const status = await control?.request({ type: "status" });
+							return status?.type === "status_result" ? status.remoteTransport : undefined;
+						},
+						{ timeout: 5_000 },
+					)
 					.toMatchObject({ state: "ready" });
 				await expect.poll(() => acceptStarted).toBe(true);
 
@@ -1533,12 +1539,12 @@ describe.skipIf(!nativeAvailable)("voltd iroh live workspace unregister", () => 
 				ordinals: [],
 				result: { workspaceName: "ws", unregistered: true },
 			});
-			// The stream ends after the answer: fatal{workspace_unregistered} is its last frame, unless
-			// native Iroh exposes the ensuing transport retirement as a reset first.
+			// The stream ends after the answer: fatal{workspace_unregistered} is its last frame, even
+			// when the pipelined frame finds the worker's relay socket closed.
 			await device.ended;
-			const tail = device.frames.slice(device.frames.indexOf(accepted) + 1);
-			expect(tail.length === 0 || (tail.length === 1 && tail[0]?.type === "fatal")).toBe(true);
-			if (tail[0]) expect(tail[0]).toEqual({ type: "fatal", code: "workspace_unregistered" });
+			expect(device.frames.slice(device.frames.indexOf(accepted) + 1)).toEqual([
+				{ type: "fatal", code: "workspace_unregistered" },
+			]);
 			expect(
 				device.frames.some(
 					(frame) => (frame.type === "result" || frame.type === "query_error") && frame.queryId === "pipelined",
