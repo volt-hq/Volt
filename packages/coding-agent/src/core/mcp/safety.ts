@@ -76,6 +76,11 @@ const SECRET_FLAG_PATTERN = new RegExp(String.raw`^--?[\w-]*(?:${SECRET_KEY_PATT
 // A secret value may start with an authorization scheme, optionally quoted (`token: Bearer abc`,
 // `Basic dXNlcjpwYXNz`, GitHub's `token ghp_abc`, `"Bearer abc"`). The scheme stays visible and the
 // credential after it is redacted.
+// After a separator or flag, a quoted value is redacted up to its closing quote, or the end of the line when
+// the quote is not closed (`password: "correct horse battery"`, `--password 'a b c'`, `api_key="sk;live123"`).
+// An unquoted value is redacted up to whitespace, `,`, or `;`. When it is a word of letters followed by a
+// credential-like word, the redaction runs through that word, so the credential after an unknown scheme is
+// covered (`token: Bot MTk4NjIy`).
 // An `Authorization` value after `:`, `=`, or a flag is redacted up to `,`, `;`, a quote, or the end of
 // the line, so the credential after any scheme (`Bot`, `Negotiate`, `DPoP`, `ApiKey`) is covered. Only the
 // schemes above stay visible: an unknown first word cannot be told apart from a credential followed by text.
@@ -83,10 +88,11 @@ const SECRET_KEY = `(?:${SECRET_KEY_PATTERN.source})`;
 const AUTHORIZATION_SCHEME = String.raw`(?:bearer|basic|token)\s+`;
 const AUTHORIZATION_PREFIX = String.raw`(?:authorization\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?authorization\s+)["']?(?:${AUTHORIZATION_SCHEME})?`;
 const AUTHORIZATION_VALUE = String.raw`[^\s,;"']+(?:[ \t]+[^\s,;"']+)*`;
-const SECRET_PREFIX = String.raw`(?:${SECRET_KEY}\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?${SECRET_KEY}\s+)(?:["']?${AUTHORIZATION_SCHEME})?`;
+const SECRET_KEY_PREFIX = String.raw`(?:${SECRET_KEY}\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?${SECRET_KEY}\s+)`;
 const CREDENTIAL_LIKE_VALUE = String.raw`(?=[^\s,;]{6})(?=[^\s,;]*[\d_-])`;
+const SECRET_VALUE = String.raw`(?:[A-Za-z]+[ \t]+(?!-)${CREDENTIAL_LIKE_VALUE})?[^\s,;]+`;
 const SECRET_VALUE_PATTERN = new RegExp(
-	String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+|(${AUTHORIZATION_PREFIX})${AUTHORIZATION_VALUE}|(${SECRET_PREFIX}|${SECRET_KEY}\s+(?:${AUTHORIZATION_SCHEME})?${CREDENTIAL_LIKE_VALUE})[^\s,;]+`,
+	String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+|(${AUTHORIZATION_PREFIX})${AUTHORIZATION_VALUE}|(${SECRET_KEY_PREFIX}"(?:${AUTHORIZATION_SCHEME})?)(?:\\.|[^"\\\n])*|(${SECRET_KEY_PREFIX}'(?:${AUTHORIZATION_SCHEME})?)(?:\\.|[^'\\\n])*|(${SECRET_KEY_PREFIX}(?:${AUTHORIZATION_SCHEME})?|${SECRET_KEY}\s+(?:${AUTHORIZATION_SCHEME})?${CREDENTIAL_LIKE_VALUE})${SECRET_VALUE}`,
 	"gi",
 );
 
@@ -129,6 +135,8 @@ export function redactMcpText(value: string): string {
 			_match,
 			bearerPrefix: string | undefined,
 			authorizationPrefix: string | undefined,
+			doubleQuotedPrefix: string | undefined,
+			singleQuotedPrefix: string | undefined,
 			keyPrefix: string | undefined,
 		) => {
 			if (bearerPrefix) {
@@ -136,6 +144,12 @@ export function redactMcpText(value: string): string {
 			}
 			if (authorizationPrefix) {
 				return `${authorizationPrefix}[redacted]`;
+			}
+			if (doubleQuotedPrefix) {
+				return `${doubleQuotedPrefix}[redacted]`;
+			}
+			if (singleQuotedPrefix) {
+				return `${singleQuotedPrefix}[redacted]`;
 			}
 			if (keyPrefix) {
 				return `${keyPrefix}[redacted]`;
