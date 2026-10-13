@@ -21400,6 +21400,7 @@
 				"runId",
 				"workflowAction",
 				"engine",
+				"engineLabel",
 				"status",
 				"startedAt",
 				"endedAt",
@@ -21414,6 +21415,9 @@
 					"type": "string"
 				},
 				"engine": {
+					"type": "string"
+				},
+				"engineLabel": {
 					"type": "string"
 				},
 				"status": {
@@ -21976,6 +21980,7 @@
 				"runId",
 				"workflowAction",
 				"engine",
+				"engineLabel",
 				"status",
 				"startedAt",
 				"endedAt",
@@ -21990,6 +21995,9 @@
 					"type": "string"
 				},
 				"engine": {
+					"type": "string"
+				},
+				"engineLabel": {
 					"type": "string"
 				},
 				"status": {

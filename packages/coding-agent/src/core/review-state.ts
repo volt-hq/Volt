@@ -44,6 +44,9 @@ export type ReviewRunStatus = "completed" | "incomplete" | "failed" | "cancelled
 /** The engine of the built-in review pipeline. A run of it records no engine. */
 export const STANDARD_REVIEW_ENGINE = "standard";
 
+/** What clients call the built-in pipeline. */
+export const STANDARD_REVIEW_ENGINE_LABEL = "Standard";
+
 /** An extension's engine is named like its work kinds: `ext:<extension id>/<engine name>`. */
 const EXTENSION_REVIEW_ENGINE_PATTERN = new RegExp(EXTENSION_WORK_KIND_PATTERN);
 
@@ -55,6 +58,16 @@ export function isExtensionReviewEngine(value: unknown): value is string {
 /** The engine that produced `run`: `standard`, or an extension's engine. */
 export function reviewRunEngine(run: Pick<ReviewRunRecord, "engine">): string {
 	return run.engine ?? STANDARD_REVIEW_ENGINE;
+}
+
+/** What clients call the engine that produced `run`: its label when the run started, or the built-in pipeline's. */
+export function reviewRunEngineLabel(run: Pick<ReviewRunRecord, "engineLabel">): string {
+	return run.engineLabel ?? STANDARD_REVIEW_ENGINE_LABEL;
+}
+
+/** Whether `value` is an engine's label: text that is not blank. */
+function isReviewEngineLabel(value: unknown): value is string {
+	return typeof value === "string" && value.trim().length > 0;
 }
 
 export interface ReviewRunFileIdentity {
@@ -101,6 +114,11 @@ export interface ReviewRunRecord {
 	 * never its own claim.
 	 */
 	engine?: string;
+	/**
+	 * The label the engine had when the host started the run, kept so clients name the engine after its extension
+	 * changed or left. Present exactly when {@link engine} is.
+	 */
+	engineLabel?: string;
 	status: ReviewRunStatus;
 	startedAt: number;
 	endedAt: number;
@@ -350,6 +368,8 @@ function parseRun(value: unknown): ReviewRunRecord | undefined {
 	if (!isObject(value) || value.schemaVersion !== REVIEW_STATE_SCHEMA_VERSION) return undefined;
 	if (typeof value.runId !== "string" || typeof value.workflowAction !== "string") return undefined;
 	if (value.engine !== undefined && !isExtensionReviewEngine(value.engine)) return undefined;
+	if (value.engine === undefined ? value.engineLabel !== undefined : !isReviewEngineLabel(value.engineLabel))
+		return undefined;
 	if (
 		value.status !== "completed" &&
 		value.status !== "incomplete" &&
@@ -798,8 +818,8 @@ function snapshotContextMetadata(snapshot: ReviewSnapshot): ReviewRunContextMeta
 export function createReviewRunRecord(options: {
 	workflowId: string;
 	workflowAction: string;
-	/** The extension engine running the review; none for the built-in pipeline. */
-	engine?: string;
+	/** The extension engine running the review, by id and label; none for the built-in pipeline. */
+	engine?: { readonly id: string; readonly label: string };
 	startedAt: number;
 	endedAt?: number;
 	snapshot: ReviewSnapshot;
@@ -812,15 +832,18 @@ export function createReviewRunRecord(options: {
 }): ReviewRunRecord {
 	assertReviewControlsPersistLosslessly(options.controls);
 	if (options.usage && !parseReviewUsage(options.usage)) throw new Error("Invalid review accounting");
-	if (options.engine !== undefined && !isExtensionReviewEngine(options.engine)) {
-		throw new Error(`Invalid review engine ${JSON.stringify(options.engine)}`);
+	if (options.engine !== undefined && !isExtensionReviewEngine(options.engine.id)) {
+		throw new Error(`Invalid review engine ${JSON.stringify(options.engine.id)}`);
+	}
+	if (options.engine !== undefined && !isReviewEngineLabel(options.engine.label)) {
+		throw new Error(`Review engine ${options.engine.id} needs a label`);
 	}
 	const fileInventory = snapshotFileInventory(options.snapshot);
 	const createRecord = (includeEvidence: boolean): ReviewRunRecord => ({
 		schemaVersion: REVIEW_STATE_SCHEMA_VERSION,
 		runId: options.workflowId,
 		workflowAction: options.workflowAction,
-		...(options.engine === undefined ? {} : { engine: options.engine }),
+		...(options.engine === undefined ? {} : { engine: options.engine.id, engineLabel: options.engine.label }),
 		status: options.status,
 		startedAt: options.startedAt,
 		endedAt: options.endedAt ?? Date.now(),

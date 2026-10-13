@@ -186,7 +186,7 @@ describe("the swarm review as an engine", () => {
 		);
 
 		const run = getReviewRun(conversation.session.sessionManager, workId)!;
-		expect(run).toMatchObject({ engine: ENGINE, workflowAction: "review.uncommitted" });
+		expect(run).toMatchObject({ engine: ENGINE, engineLabel: "Swarm", workflowAction: "review.uncommitted" });
 		expect(run.result).toMatchObject({ completionStatus: "complete", overallCorrectness: "incorrect" });
 		expect(run.result?.findings).toHaveLength(1);
 		const [result] = run.result!.findings;
