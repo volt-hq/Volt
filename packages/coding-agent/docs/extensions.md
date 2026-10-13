@@ -264,7 +264,7 @@ export default function (volt: ExtensionAPI<ExtensionSettingsOf<typeof manifest>
 
 | Permission | Allows | Enforced |
 |------------|--------|----------|
-| `exec` | `volt.exec`, starting subagents with `ctx.subagents.start`, and creating worktrees with `ctx.worktrees.create` | Yes: each rejects without it |
+| `exec` | `volt.exec`, starting subagents with `ctx.subagents.start`, and creating or removing worktrees with `ctx.worktrees` | Yes: each rejects without it |
 | `providers` | `volt.registerProvider`, `volt.unregisterProvider`, and registering or reaching provider implementations through `ctx.modelRegistry` and its `client` | Yes |
 | `secrets` | `ctx.modelRegistry.authStorage`, `getApiKeyAndHeaders`, `getApiKeyForProvider`, `login`, and `client.generateImages`; without it, `ctx.modelRegistry.client` requests go only to catalog models as the catalog has them (same `baseUrl` and headers) | Yes |
 | `network` | Network access | No: declared and shown only |
@@ -1258,7 +1258,7 @@ volt.registerCommand("fix-issue", {
 ```
 
 - `definitions()` lists the agent definitions the conversation may start now (`name`, `description`).
-- `start({ agent, task, cwd?, limits?, parentWorkId? })` resolves once the child accepted `task`, with the run's `id` (its work id), the child's `sessionId`, and `ended`, which resolves with how the run ended and never rejects: `status` (`completed`, `failed`, or `cancelled`), the child's final reply as `output`, an `error`, and the `usage` its replies reported (tokens, cache reads and writes included, and cost in USD).
+- `start({ agent, task, cwd?, limits?, parentWorkId? })` resolves once the child accepted `task`, with the run's `id` (its work id), the child's `sessionId`, and `ended`, which resolves once the run ended and its conversation closed (so what the child held, such as its checkout, is free; it waits at most 10 seconds for the close) and never rejects: `status` (`completed`, `failed`, or `cancelled`), the child's final reply as `output`, an `error`, and the `usage` its replies reported (tokens, cache reads and writes included, and cost in USD).
   - `cwd` is an absolute path to a directory inside the conversation's working directory, or inside a [managed worktree](daemon.md#git-worktrees) of the same repository; the conversation's working directory by default.
   - `limits` stop the run: `maxTurns` (assistant turns before the child must give a final report without tools), `maxTotalTokens`, `maxTotalCostUsd`, and `maxDurationMs` (the child and the subagents it starts). Omitted ones keep the host's. A run started inside a subagent's conversation stays within that subagent's limits.
   - `parentWorkId` names running work of the extension's own kind: clients show the run under it.
@@ -1277,7 +1277,9 @@ await ctx.subagents.start({ agent: "general", task: "Fix issue #12.", cwd: workt
 ```
 
 - `list()` resolves with the workspace's worktrees: `id`, checkout `path`, `branch`, `baseRef`, whether the checkout is `available` (the daemon archives an idle, clean checkout it may reclaim; an archived one has no checkout to run in), and whether it is `dirty` when the daemon checked.
-- `create({ name?, branch?, baseRef? })` needs the `exec` permission. It creates the worktree `name` (a generated id by default) on `branch` (`volt/<name>` by default) from `baseRef` (the workspace checkout's current branch by default), and rejects with the daemon's error, such as an id in use or the workspace's checkout limit.
+- `create({ name?, branch?, baseRef?, reuseBranch? })` needs the `exec` permission. It creates the worktree `name` (a generated id by default) on a new `branch` (`volt/<name>` by default) from `baseRef` (the workspace checkout's current branch by default). With `reuseBranch: true`, an existing local `branch` is checked out instead, with its commits; `baseRef` then only records the base.
+- `remove(id)` needs the `exec` permission. It removes the worktree's checkout and keeps its branch. It is never forced: a checkout with changes, or one a conversation still has open, stays.
+- Both reject with the daemon's error, whose message starts with its code: `worktree_exists`, `worktree_branch_conflict`, `worktree_limit_reached` (a workspace holds at most 16 checkouts), `worktree_dirty`, `worktree_busy`, `worktree_not_found`, and so on.
 
 The daemon's retention and removal rules apply to these worktrees as to any other; merging a branch back stays the extension's or the user's action.
 

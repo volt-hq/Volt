@@ -90,6 +90,7 @@ const heldUntilAborted: FauxResponseStep = async (_context, options) => {
 
 interface Setup {
 	readonly parent: Harness;
+	readonly manager: SubagentManager;
 	/** The working directory each child runtime was created in. */
 	readonly childCwds: string[];
 }
@@ -99,6 +100,7 @@ async function setup(
 	extensions: Array<ExtensionFactory | CreateTestExtensionsResultInput>,
 	childResponses: FauxResponseStep[] = [fauxAssistantMessage("issue worked", { usage })],
 	agentDir?: string,
+	retainRuntimeOnDispose = false,
 ): Promise<Setup> {
 	const childCwds: string[] = [];
 	const children: Harness[] = [];
@@ -138,6 +140,7 @@ async function setup(
 		cwd: tmpdir(),
 		agentDir: tmpdir(),
 		resourceLoader: resourceLoader(),
+		retainRuntimeOnDispose,
 	});
 	const parent = await createHarness({
 		...(agentDir === undefined ? {} : { agentDir }),
@@ -150,7 +153,7 @@ async function setup(
 		await manager.dispose().catch(() => undefined);
 		for (const child of children) await child.cleanupAsync().catch(() => undefined);
 	});
-	return { parent, childCwds };
+	return { parent, manager, childCwds };
 }
 
 /** An extension whose `/delegate` command starts a run with the options `options` gives, keeping the run or the error. */
@@ -250,6 +253,19 @@ describe("extension subagents", () => {
 		]);
 		expect((await delegator.runs[0]?.ended)?.status).toBe("completed");
 		expect(childCwds).toEqual([realpathSync.native(ours)]);
+	});
+
+	it("closes a run's conversation once it ended, also where the host keeps children open", async () => {
+		const delegator = delegating(() => ({ agent: "worker", task: "Work issue 12" }));
+		// Daemon workers keep subagent conversations open for live attachment.
+		const { parent, manager } = await setup([delegator.extension], undefined, undefined, true);
+
+		await parent.session.prompt("/delegate");
+		const [run] = delegator.runs;
+		if (!run) throw new Error(`no run: ${delegator.errors.join("; ")}`);
+		expect((await run.ended).status).toBe("completed");
+		// Closed by the time `ended` resolves: what it held, such as its checkout, is free.
+		expect(manager.childConversation(run.sessionId)).toBeUndefined();
 	});
 
 	it("stops a run at its limits", async () => {

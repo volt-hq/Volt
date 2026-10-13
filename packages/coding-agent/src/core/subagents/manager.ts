@@ -245,7 +245,7 @@ export interface SubagentRunEnd {
 export interface SubagentRun {
 	readonly workId: string;
 	readonly conversation: string;
-	/** Resolves once the run ended; never rejects. */
+	/** Resolves once the run ended and its conversation closed (waiting at most 10 seconds for that); never rejects. */
 	readonly ended: Promise<SubagentRunEnd>;
 }
 
@@ -287,6 +287,8 @@ const VALID_THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low"
 const MAX_RETAINED_ACTIVITIES = 50;
 const MAX_RETAINED_ACTIVITY_EVENTS = 2_000;
 const DELEGATION_SNAPSHOT_MAX_RECORDS = 25;
+/** Longest a started run's `ended` waits, after the run ended, for its conversation to close. */
+const RUN_CLOSE_WAIT_MS = 10_000;
 
 interface SubagentCallerBatchReservation {
 	reserve(): () => void;
@@ -996,6 +998,21 @@ export class SubagentManager {
 					usage: { tokens, cost },
 				}),
 			)
+			.then(async (end) => {
+				// The run's conversation closes as its work ends: wait for it, so what the child held
+				// (such as its checkout) is free once `ended` resolves. Bounded: a close that hangs
+				// does not hold the caller.
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				await Promise.race([
+					handle.conversation.whenClosed(),
+					new Promise<void>((resolve) => {
+						timer = setTimeout(resolve, RUN_CLOSE_WAIT_MS);
+						timer.unref?.();
+					}),
+				]);
+				clearTimeout(timer);
+				return end;
+			})
 			.finally(() => scope?.dispose());
 		// A rejected prompt disposes the handle; its work, if recorded, ends failed.
 		await handle.prompt(task);
@@ -1844,7 +1861,12 @@ export class SubagentManager {
 				} finally {
 					unsubscribeActivity();
 					ctx.signal.removeEventListener("abort", stop);
-					if (control.detached) await handle!.dispose().catch(() => undefined);
+					if (control.detached) {
+						await handle!.dispose().catch(() => undefined);
+						// A detached run's conversation closes with the run, also where the host retains
+						// children for live attachment: nothing else would close it before its owner does.
+						if (!runtime.closed) await childHost.close(runtime).catch(() => undefined);
+					}
 				}
 			};
 			/** Record the child's work before its first prompt, in the conversation the manager belongs to. */

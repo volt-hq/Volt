@@ -593,6 +593,7 @@ export class ExtensionRunner {
 	private worktreesHandler: ExtensionWorktreesHandler = {
 		list: () => Promise.reject(new Error("Managed worktrees are available only in conversations the daemon hosts")),
 		create: () => Promise.reject(new Error("Managed worktrees are available only in conversations the daemon hosts")),
+		remove: () => Promise.reject(new Error("Managed worktrees are available only in conversations the daemon hosts")),
 	};
 	private reviewsHandler: ExtensionReviewsHandler = {
 		engines: () => [],
@@ -1393,6 +1394,16 @@ export class ExtensionRunner {
 				}
 				requirePermission(this.permissionHolder(owner), "exec", "ctx.worktrees.create");
 				return await this.worktreesHandler.create(options);
+			},
+			remove: async (id) => {
+				assertRunning();
+				if (owner === undefined) {
+					throw new Error(
+						"ctx.worktrees.remove is available only in an extension's own handlers, commands, and tools",
+					);
+				}
+				requirePermission(this.permissionHolder(owner), "exec", "ctx.worktrees.remove");
+				await this.worktreesHandler.remove(id);
 			},
 		};
 	}

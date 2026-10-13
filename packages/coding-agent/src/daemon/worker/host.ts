@@ -279,6 +279,7 @@ async function openConversation(
 			restore: (sessionRef, cwd) => client.restoreWorktree(sessionRef, cwd),
 			create: (options) => client.createWorktree(options),
 			list: () => client.listWorktrees(),
+			remove: (id) => client.removeWorktree(id),
 		},
 	});
 	return runtime;

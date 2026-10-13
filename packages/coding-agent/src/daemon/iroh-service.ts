@@ -4605,6 +4605,7 @@ class IrohDaemonService {
 			case "worker_worktree_release":
 			case "worker_worktree_create":
 			case "worker_worktree_list":
+			case "worker_worktree_remove":
 				await this.handleWorkerRequest(connection, request);
 				return true;
 			case "pair_request":
@@ -4994,7 +4995,8 @@ class IrohDaemonService {
 					| "worker_worktree_restore"
 					| "worker_worktree_release"
 					| "worker_worktree_create"
-					| "worker_worktree_list";
+					| "worker_worktree_list"
+					| "worker_worktree_remove";
 			}
 		>,
 	): Promise<void> {
@@ -5153,7 +5155,8 @@ class IrohDaemonService {
 				return;
 			}
 			case "worker_worktree_create":
-			case "worker_worktree_list": {
+			case "worker_worktree_list":
+			case "worker_worktree_remove": {
 				// The worktrees of the workspace the worker serves, for its extensions, while it serves it.
 				const workerId = this.workers.workerOf(connection.connectionId);
 				const key = workerId === undefined ? undefined : this.workers.keyOf(workerId);
@@ -5164,6 +5167,13 @@ class IrohDaemonService {
 					(candidate) => candidate.name === key.workspaceName,
 				);
 				if (!workspace) return refuse("not_found", `no registered workspace named ${key.workspaceName}`);
+				if (request.type === "worker_worktree_remove") {
+					// Never forced: a dirty checkout, or one a conversation still holds, stays.
+					const removed = await this.removeWorkspaceWorktree(workspace, request.worktreeId, false);
+					if (!removed.ok) return refuse(removed.error, removed.detail ?? removed.error);
+					connection.send({ type: "ok", id: request.id });
+					return;
+				}
 				if (request.type === "worker_worktree_list") {
 					const worktrees = await this.worktrees.list(workspace);
 					connection.send({
@@ -5177,6 +5187,7 @@ class IrohDaemonService {
 					...(request.worktreeName === undefined ? {} : { id: request.worktreeName }),
 					...(request.branch === undefined ? {} : { branch: request.branch }),
 					...(request.baseRef === undefined ? {} : { baseRef: request.baseRef }),
+					...(request.reuseBranch === true ? { reuseBranch: true } : {}),
 				});
 				if (!created.ok) return refuse(created.error, created.detail ?? created.error);
 				connection.send({

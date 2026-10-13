@@ -31,8 +31,9 @@ const issue12: ControlWorktreeStatus = {
 };
 
 /** A daemon route that keeps the worktrees it created, beside an archived one. */
-function fakeDaemon(): SessionWorktreeDaemon & { created: SessionWorktreeCreateOptions[] } {
+function fakeDaemon(): SessionWorktreeDaemon & { created: SessionWorktreeCreateOptions[]; removed: string[] } {
 	const created: SessionWorktreeCreateOptions[] = [];
+	const removed: string[] = [];
 	const archived: ControlWorktreeStatus = {
 		id: "issue-3",
 		workspaceName: "volt",
@@ -44,12 +45,18 @@ function fakeDaemon(): SessionWorktreeDaemon & { created: SessionWorktreeCreateO
 	};
 	return {
 		created,
+		removed,
 		restore: vi.fn(),
 		create: async (options) => {
 			created.push(options);
 			return issue12;
 		},
 		list: async () => [archived, issue12],
+		remove: async (id) => {
+			// The daemon refuses a checkout with changes, as the worker connection reports it.
+			if (id === "issue-3") throw Object.assign(new Error("checkout has changes"), { code: "worktree_dirty" });
+			removed.push(id);
+		},
 	};
 }
 
@@ -103,7 +110,27 @@ describe("extension worktrees", () => {
 			id: "issue-12",
 			path: "/agent/worktrees/volt/issue-12",
 		});
-		expect(daemon.created).toEqual([{ name: "issue-12", baseRef: "main" }]);
+		await ctx.worktrees.create({ name: "issue-12", branch: "volt/issue-12", reuseBranch: true });
+		expect(daemon.created).toEqual([
+			{ name: "issue-12", baseRef: "main" },
+			{ name: "issue-12", branch: "volt/issue-12", reuseBranch: true },
+		]);
+	});
+
+	it("removes a worktree through the daemon, which says why it refuses", async () => {
+		const daemon = fakeDaemon();
+		const ctx = await setup({ worktreeDaemon: daemon });
+
+		await ctx.worktrees.remove("issue-12");
+		expect(daemon.removed).toEqual(["issue-12"]);
+		await expect(ctx.worktrees.remove("issue-3")).rejects.toThrow("worktree_dirty: checkout has changes");
+		await expect(ctx.worktrees.remove(" ")).rejects.toThrow("ctx.worktrees.remove: id must name a worktree");
+
+		const withoutExec = await setup({ worktreeDaemon: daemon, permissions: [] });
+		await expect(withoutExec.worktrees.remove("issue-12")).rejects.toThrow(
+			'Extension "orchestrator" needs the "exec" permission to use ctx.worktrees.remove',
+		);
+		expect(daemon.removed).toEqual(["issue-12"]);
 	});
 
 	it("needs the exec permission to create one, and checks what it asks for", async () => {
@@ -127,5 +154,6 @@ describe("extension worktrees", () => {
 		const unavailable = "Managed worktrees are available only in conversations the daemon hosts";
 		await expect(ctx.worktrees.list()).rejects.toThrow(unavailable);
 		await expect(ctx.worktrees.create({ name: "issue-12" })).rejects.toThrow(unavailable);
+		await expect(ctx.worktrees.remove("issue-12")).rejects.toThrow(unavailable);
 	});
 });

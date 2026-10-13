@@ -22,7 +22,7 @@ function createContext(tokens: number | null, compact = vi.fn()): ExtensionConte
 		getSystemPrompt: () => "",
 		startWork: vi.fn(),
 		subagents: { definitions: () => [], start: vi.fn(), cancel: vi.fn() },
-		worktrees: { list: vi.fn(), create: vi.fn() },
+		worktrees: { list: vi.fn(), create: vi.fn(), remove: vi.fn() },
 		reviews: {
 			engines: () => [],
 			start: vi.fn(),
