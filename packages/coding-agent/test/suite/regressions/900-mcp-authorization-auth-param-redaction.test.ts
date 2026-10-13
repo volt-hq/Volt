@@ -69,6 +69,9 @@ describe("issue #900: MCP redaction of Authorization values with auth-params", (
 		expect(redactMcpText('Authorization: Digest response="abc123" was rejected')).toBe(
 			"Authorization: [redacted] was rejected",
 		);
+		expect(redactMcpText('Authorization: Digest username="u", response="6629fae4" was rejected')).toBe(
+			"Authorization: [redacted] was rejected",
+		);
 		expect(redactMcpText("Authorization: Digest response=abc123, status 401")).toBe(
 			"Authorization: [redacted], status 401",
 		);
@@ -86,6 +89,53 @@ describe("issue #900: MCP redaction of Authorization values with auth-params", (
 		expect(redactMcpText(`deploy --authorization '${OAUTH1}' --verbose`)).toBe(
 			"deploy --authorization '[redacted]' --verbose",
 		);
+	});
+
+	it.each([
+		{
+			name: "a space inside username",
+			input: '{"header":"Authorization: Digest username=\\"Mufasa Lion\\", response=\\"6629fae4\\""}',
+			expected: '{"header":"Authorization: [redacted]"}',
+		},
+		{
+			name: "a comma inside uri",
+			input: '{"header":"Authorization: Digest uri=\\"/s?q=a,b\\", response=\\"6629fae4\\""}',
+			expected: '{"header":"Authorization: [redacted]"}',
+		},
+		{
+			name: "an RFC 9110 quoted-pair inside realm",
+			input: JSON.stringify({ h: 'Authorization: Digest realm="a \\" b", response="6629fae4"' }),
+			expected: '{"h":"Authorization: [redacted]"}',
+		},
+		{
+			name: "both a space and a comma inside username",
+			input: '{"header":"Authorization: Digest username=\\"Mufasa Lion, King\\", response=\\"6629fae4\\"","status":401}',
+			expected: '{"header":"Authorization: [redacted]","status":401}',
+		},
+	])("redacts JSON-encoded auth-params with $name in MCP text and audit logs", async ({ input, expected }) => {
+		const redacted = redactMcpText(input);
+		expect(redacted).toBe(expected);
+		expect(redacted).not.toContain("6629fae4");
+		expect(sanitizeMcpArguments({ body: input })).toEqual({ body: expected });
+
+		const agentDir = mkdtempSync(join(tmpdir(), "volt-900-"));
+		directories.push(agentDir);
+		await new McpAuditLogger(agentDir).write({
+			callerSurface: "model",
+			server: "remote",
+			item: "fetch",
+			kind: "tool",
+			risk: "read",
+			status: "failed",
+			arguments: { body: input },
+			error: input,
+		});
+
+		const log = readFileSync(join(agentDir, "mcp", "audit.jsonl"), "utf-8");
+		expect(log).not.toContain("6629fae4");
+		const entry = JSON.parse(log.trim()) as { arguments: unknown; error: string };
+		expect(entry.arguments).toEqual({ body: expected });
+		expect(entry.error).toBe(expected);
 	});
 
 	it("redacts an Authorization value after whitespace when it has a scheme and a credential", () => {

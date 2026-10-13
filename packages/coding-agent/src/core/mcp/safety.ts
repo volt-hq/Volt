@@ -77,7 +77,8 @@ const SECRET_FLAG_PATTERN = new RegExp(String.raw`^--?[\w-]*(?:${SECRET_KEY_PATT
 // `Basic dXNlcjpwYXNz`, GitHub's `token ghp_abc`, `"Bearer abc"`). The scheme stays visible and the
 // credential after it is redacted.
 // An `Authorization` value is a scheme followed by a single credential or by auth-params separated by commas
-// or, in some logs, by spaces, whose values may be quoted and contain commas (RFC 9110 section 11.4: `Bearer
+// or, in some logs, by spaces, whose values may be quoted and contain spaces or commas, including JSON-encoded
+// quoted strings with escaped quotes and backslashes (RFC 9110 section 11.4: `Bearer
 // abc`, `Digest username="u", nonce="n", response="..."`, OAuth 1.0 `OAuth oauth_nonce="...",
 // oauth_signature="..."`, AWS `AWS4-HMAC-SHA256 Credential=... SignedHeaders=... Signature=...`). After `:`, `=`,
 // or a flag, optionally inside quotes, it is redacted through its last auth-param, or else up to `,`, `;`, a
@@ -93,7 +94,9 @@ const AUTHORIZATION_SCHEME = String.raw`(?:bearer|basic|token)\s+`;
 const SECRET_PREFIX = String.raw`(?:${SECRET_KEY}\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?${SECRET_KEY}\s+)(?:["']?${AUTHORIZATION_SCHEME})?`;
 const CREDENTIAL_LIKE_VALUE = String.raw`(?=[^\s,;]{6})(?=[^\s,;]*[\d_-])`;
 const HTTP_TOKEN = String.raw`[\w!#$%&*+.^|~-]+`;
-const AUTH_PARAM = String.raw`${HTTP_TOKEN}[ \t]*=[ \t]*(?:"(?:\\.|[^"\\\n])*"?|(?:\\.|[^\s,"\\])*)`;
+// Read JSON-encoded `\"...\"` values before raw quoted or unquoted values, so spaces, commas, and
+// JSON-encoded quoted-pairs (`\\\"` or `\\\\`) cannot end a value before later auth-params.
+const AUTH_PARAM = String.raw`${HTTP_TOKEN}[ \t]*=[ \t]*(?:\\"(?:\\\\\\[\\"]|\\\\|(?!\\")[^\n])*(?:\\")?|"(?:\\.|[^"\\\n])*"?|(?:\\.|[^\s,"\\])*)`;
 const AUTH_PARAMS = String.raw`${AUTH_PARAM}(?:(?:[ \t]*,[ \t]*|[ \t]+)${AUTH_PARAM})*`;
 const TOKEN68_CREDENTIAL = String.raw`(?![\w.~+/-]*${SECRET_KEY}(?![\w.~+/-]))${CREDENTIAL_LIKE_VALUE}[\w.~+/-]+=*(?=[\s,;"')\]}>]|$)`;
 const AUTHORIZATION_PREFIX = String.raw`(?:authorization\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?authorization\s+)["']?(?:${AUTHORIZATION_SCHEME})?`;
