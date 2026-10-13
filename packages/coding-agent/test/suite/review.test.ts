@@ -1582,7 +1582,10 @@ describe("review pipeline", () => {
 			result: {
 				completionStatus: "complete",
 				summary: "Two findings.",
-				findings: [prior("still-open", "a".repeat(64)), prior("was-fixed", "b".repeat(64))],
+				findings: [
+					{ ...prior("still-open", "a".repeat(64)), introduced: false },
+					prior("was-fixed", "b".repeat(64)),
+				],
 				coverage: {
 					changedFileInventoryComplete: true,
 					filesInspected: [],
@@ -1666,6 +1669,8 @@ describe("review pipeline", () => {
 				status: "open",
 				title: "Zero returns the numerator",
 				changeLocation: { path: "src/value.ts", side: "head", startLine: 2, endLine: 2 },
+				// Neither this round's candidate nor its decision said whether it was introduced: the earlier finding's stands.
+				introduced: false,
 			}),
 		]);
 		expect(run.fixedPriorFindings).toEqual([expect.objectContaining({ findingId: "was-fixed", outcome: "fixed" })]);
@@ -1911,6 +1916,58 @@ describe("review pipeline", () => {
 				{ title: "Zero divisor returns the numerator", changeLocation: location },
 			]);
 			expect(run.parsed?.followUps).toEqual([]);
+		});
+
+		it("keeps the verifier's finding that a defect on a changed line predates the change, which still counts against it", async () => {
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const snapshot = await createSnapshotRepository(harness);
+			snapshots.push(snapshot);
+			const toolUse = { stopReason: "toolUse" } as const;
+			const pageDiff = fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), toolUse);
+			const verifierPrompts: string[] = [];
+			const candidate = { ...candidateReport().candidates[0], introduced: true };
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("review_changed_files", {}), toolUse),
+				pageDiff,
+				fauxAssistantMessage(
+					fauxToolCall("report_review_candidates", { ...candidateReport(), candidates: [candidate] } as never),
+					toolUse,
+				),
+				(context) => {
+					verifierPrompts.push(JSON.stringify(context.messages));
+					return fauxAssistantMessage(fauxToolCall("review_changed_files", {}), toolUse);
+				},
+				pageDiff,
+				fauxAssistantMessage(
+					fauxToolCall("report_review_verification", {
+						...verificationReport(),
+						decisions: [{ ...verificationReport().decisions[0], introduced: false }],
+						followUpDecisions: [],
+					} as never),
+					toolUse,
+				),
+			]);
+			const run = await runReview({
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				model: harness.getModel(),
+				verifierModel: harness.getModel(),
+				authStorage: harness.authStorage,
+				modelRegistry: harness.session.modelRegistry,
+				settingsManager: harness.settingsManager,
+				resolved: snapshot,
+				controls: { scopeMode: "full", scope: ["src/**"] },
+				followUps: true,
+			});
+			snapshots.splice(snapshots.indexOf(snapshot), 1);
+			expect(run.errorMessage).toBeUndefined();
+			expect(verifierPrompts[0]).toContain("changed_line_guidance");
+			// The verifier's determination overrides discovery's.
+			expect(run.parsed?.findings).toEqual([
+				expect.objectContaining({ title: "Zero returns the numerator", status: "open", introduced: false }),
+			]);
+			expect(run.parsed).toMatchObject({ completionStatus: "complete", overallCorrectness: "incorrect" });
 		});
 
 		it("keeps verified follow-ups apart from the findings, without touching the verdict", async () => {

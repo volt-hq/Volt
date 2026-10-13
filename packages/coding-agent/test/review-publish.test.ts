@@ -286,6 +286,42 @@ switch (args.slice(0, 2).join(" ")) {
 		});
 	});
 
+	it("says of a finding the change did not introduce that it predates the change, inline and in the summary", async () => {
+		const run = reviewRun();
+		if (!run.target.identity.pullRequest || !run.result) throw new Error("Expected a PR review fixture");
+		run.target.identity.pullRequest.providerId = "test-host";
+		const [inline, summary] = run.result.findings;
+		if (!inline || !summary) throw new Error("Expected two findings");
+		inline.introduced = false;
+		summary.introduced = false;
+		const introduced = { ...structuredClone(inline), id: "finding-introduced", introduced: true };
+		const unknown = { ...structuredClone(inline), id: "finding-unknown" };
+		delete unknown.introduced;
+		run.result.findings.push(introduced, unknown);
+		let request: ReviewCodeHostPublishRequest | undefined;
+		const provider: CodeHostProvider = {
+			id: "test-host",
+			displayName: "Test Host",
+			probeCurrentPullRequest: async () => undefined,
+			resolvePullRequestCheckout: async () => ({ ok: false, error: "unused" }),
+			capturePullRequestContext: async () => ({ ok: false, error: "unused" }),
+			capturePullRequestIdentity: async () => ({ ok: false, error: "unused" }),
+			verifyPullRequestHead: async () => {},
+			publishPullRequestReview: async (published) => {
+				request = published;
+				return { reviewId: 1 };
+			},
+		};
+		await publishReviewRun("/workspace", run, provider);
+		const line = "Pre-existing: this defect predates the change.";
+		const comment = (id: string): string => request?.comments.find((entry) => entry.body.includes(id))?.body ?? "";
+		expect(comment("finding-inline")).toContain(`Impact: The caller receives incorrect data.\n${line}\n`);
+		expect(comment("finding-introduced")).not.toContain(line);
+		expect(comment("finding-unknown")).not.toContain(line);
+		expect(request?.body).toContain(`Impact: The operation fails.\n${line}\n`);
+		expect(request?.body.split(line)).toHaveLength(2);
+	});
+
 	it("says in the posted review which engine produced it, and that the engine reported its coverage", async () => {
 		const bodyOf = async (engine?: string): Promise<string> => {
 			const run = reviewRun();

@@ -1082,13 +1082,22 @@ export function assertFollowsReviewOf(previousRun: ReviewRunRecord, snapshot: Re
 }
 
 /**
+ * `current`, which reports the earlier finding `prior` again, keeps whether `prior` was introduced unless this review
+ * determined it.
+ */
+function carryIntroduced(current: ReviewFinding, prior: ReviewFinding): void {
+	if (current.introduced === undefined && prior.introduced !== undefined) current.introduced = prior.introduced;
+}
+
+/**
  * The findings of a full review that follows an earlier run, once its verifier decided that run's open findings. A
  * finding decided open or uncertain takes that status in the finding that holds its id; held by none, one decided open
  * gives its id to the finding that reports it now (`candidateFingerprints` maps candidate ids to the fingerprints of
  * their findings), or, reported by none, is carried with that status. One without a decision stays as it was: in the
  * finding that holds its id, else its id and status go to a finding with its fingerprint that holds no other earlier
- * finding's id, else it is carried unchanged. Findings decided fixed are not carried: they are returned, to be closed
- * where they were found.
+ * finding's id, else it is carried unchanged. A finding that takes an earlier finding's id keeps whether that one was
+ * introduced, unless this review determined it. Findings decided fixed are not carried: they are returned, to be
+ * closed where they were found.
  */
 export function applyPreviousFindingDecisions(
 	findings: readonly ReviewFinding[],
@@ -1120,6 +1129,7 @@ export function applyPreviousFindingDecisions(
 		if (current) {
 			current.id = prior.id;
 			current.status = decision.outcome;
+			carryIntroduced(current, prior);
 		} else result.push({ ...structuredClone(prior), status: decision.outcome });
 	}
 	// After the decided ones, so one does not take a finding a decision gave its id.
@@ -1130,6 +1140,7 @@ export function applyPreviousFindingDecisions(
 		if (current) {
 			current.id = prior.id;
 			current.status = prior.status;
+			carryIntroduced(current, prior);
 		} else result.push(structuredClone(prior));
 	}
 	return { findings: result, fixed };
@@ -1236,7 +1247,13 @@ export function reconcileFindingIdentities(
 	return findings.flatMap((finding) => {
 		if (plan.suppressedDismissedFingerprints.includes(finding.fingerprint)) return [];
 		const previous = previousByFingerprint.get(finding.fingerprint);
-		return [{ ...structuredClone(finding), ...(previous ? { id: previous.id, status: previous.status } : {}) }];
+		const reconciled = structuredClone(finding);
+		if (previous) {
+			reconciled.id = previous.id;
+			reconciled.status = previous.status;
+			carryIntroduced(reconciled, previous);
+		}
+		return [reconciled];
 	});
 }
 
