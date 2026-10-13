@@ -61,78 +61,6 @@ const READ_NAME_PATTERN = new RegExp(
 	`${TOKEN_START}(read|get|list|search|find|query|fetch|lookup|inspect|describe|show|view|download)${TOKEN_END}`,
 	"i",
 );
-// A request signature (presigned URL `X-Amz-Signature`, Azure SAS `sig`, OAuth 1.0 `oauth_signature`) grants
-// access like a bearer token until it expires. `sig` counts only as a whole word, so `signal` stays visible.
-const SECRET_KEY_PATTERN =
-	/token|secret|password|passwd|api[-_]?key|authorization|credential|private|signature|(?<![a-z0-9])sig(?![a-z0-9])/i;
-// An argv element that is a flag named for a secret (`--token`, `--github-token`, `-password`). In argv-style
-// arrays its value is the next element, which carries no key name of its own.
-const SECRET_FLAG_PATTERN = new RegExp(String.raw`^--?[\w-]*(?:${SECRET_KEY_PATTERN.source})$`, "i");
-// Secret key names are also ordinary prose ("token endpoint", "Refresh token expired"). A value is always
-// redacted after a `:` or `=` separator (`token: abc`, `api_key=abc`) or after a command-line flag whose
-// name ends in a key name (`--token abc`, `--github-token abc`). After whitespace alone it is redacted only
-// when it looks like a credential: at least 6 characters including a digit, `_`, or `-`
-// (`token ghp_abc123`, `x-api-key sk-live-123`, `password hunter2`).
-// A secret value may start with an authorization scheme, optionally quoted (`token: Bearer abc`,
-// `Basic dXNlcjpwYXNz`, GitHub's `token ghp_abc`, `"Bearer abc"`). The scheme stays visible and the
-// credential after it is redacted.
-// An `Authorization` value is a scheme followed by a single credential or by auth-params separated by commas
-// or, in some logs, by spaces, whose values may be quoted and contain spaces or commas, including JSON-encoded
-// quoted strings with escaped quotes and backslashes (RFC 9110 section 11.4: `Bearer
-// abc`, `Digest username="u", nonce="n", response="..."`, OAuth 1.0 `OAuth oauth_nonce="...",
-// oauth_signature="..."`, AWS `AWS4-HMAC-SHA256 Credential=... SignedHeaders=... Signature=...`). After `:`, `=`,
-// or a flag, optionally inside quotes, it is redacted through its last auth-param, or else up to `,`, `;`, a
-// quote, or the end of the line, so the credential after any scheme (`Bot`, `Negotiate`, `DPoP`, `ApiKey`) is
-// covered. Only the schemes above stay visible: an unknown first word cannot be told apart from a credential
-// followed by text. After whitespace alone `authorization` is usually prose (`authorization server
-// https://auth-a.example`), so only a scheme followed by `name=` auth-params or by one whole token68 word that
-// looks like a credential is redacted (`Authorization Bot MTk4NjIy`), and the text after it stays. A word that
-// ends in a key name (`access_token`, `X-Api-Key`) is not that credential, so the key path below still
-// redacts the value after it. The visible schemes are left to the key path as well.
-// A key may also be quoted, as in JSON, YAML, or a Python dict (`"access_token": "abc"`, `'token': 'abc'`), also
-// inside a JSON-encoded string (`\"token\": \"abc\"`), or be the two words `API key`. Such a key needs an explicit
-// `:` or `=`, so a quoted value or prose that ends in a key name (`"grant_type": "refresh_token"`) is never taken
-// for one; the value may start on the next line after a quoted key. The value after it is redacted whole: a quoted
-// string through its closing quote, keeping the quotes and a leading scheme above with a credential after it
-// (`"Bearer [redacted]"`); an object or array through its closing bracket, whatever its keys; any other value like the
-// value of an unquoted key. A rule above that starts in such a value and reads past its end into more than closing
-// punctuation applies instead, from where it starts (`API key: private sk-abc`), so the value never hides it.
-const SECRET_KEY = `(?:${SECRET_KEY_PATTERN.source})`;
-const AUTHORIZATION_SCHEME = String.raw`(?:bearer|basic|token)\s+`;
-const SECRET_PREFIX = String.raw`(?:${SECRET_KEY}\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?${SECRET_KEY}\s+)(?:["']?${AUTHORIZATION_SCHEME})?`;
-const CREDENTIAL_LIKE_VALUE = String.raw`(?=[^\s,;]{6})(?=[^\s,;]*[\d_-])`;
-const HTTP_TOKEN = String.raw`[\w!#$%&*+.^|~-]+`;
-// Read JSON-encoded `\"...\"` values before raw quoted or unquoted values, so spaces, commas, and
-// JSON-encoded quoted-pairs (`\\\"` or `\\\\`) cannot end a value before later auth-params.
-const AUTH_PARAM = String.raw`${HTTP_TOKEN}[ \t]*=[ \t]*(?:\\"(?:\\\\\\[\\"]|\\\\|(?!\\")[^\n])*(?:\\")?|"(?:\\.|[^"\\\n])*"?|(?:\\.|[^\s,"\\])*)`;
-const AUTH_PARAMS = String.raw`${AUTH_PARAM}(?:(?:[ \t]*,[ \t]*|[ \t]+)${AUTH_PARAM})*`;
-const TOKEN68_CREDENTIAL = String.raw`(?![\w.~+/-]*${SECRET_KEY}(?![\w.~+/-]))${CREDENTIAL_LIKE_VALUE}[\w.~+/-]+=*(?=[\s,;"')\]}>]|$)`;
-const AUTHORIZATION_PREFIX = String.raw`(?:authorization\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?authorization\s+)["']?(?:${AUTHORIZATION_SCHEME})?`;
-const AUTHORIZATION_VALUE = String.raw`[^\s,;"']+(?:[ \t]+(?:${AUTH_PARAMS}|[^\s,;"']+(?:[ \t]+[^\s,;"']+)*))?`;
-const AUTHORIZATION_SPACE_PREFIX = String.raw`(?<![a-z0-9])authorization[ \t]+(?!${AUTHORIZATION_SCHEME})`;
-const AUTHORIZATION_SPACE_VALUE = String.raw`${HTTP_TOKEN}[ \t]+(?:(?=${HTTP_TOKEN}=)${AUTH_PARAMS}|${TOKEN68_CREDENTIAL})`;
-const EXPLICIT_KEY_PREFIX = String.raw`(?:${SECRET_KEY}\\?["'][ \t]*[:=][\s:=]*|api[ \t]+key(?:\\?["'])?[ \t]*[:=][ \t:=]*)`;
-const BEARER_VALUE = String.raw`(?<bearerPrefix>bearer\s+)[A-Za-z0-9._~+/=-]+`;
-const AUTHORIZATION_KEY_VALUE = String.raw`(?<authorizationPrefix>${AUTHORIZATION_PREFIX})${AUTHORIZATION_VALUE}`;
-const AUTHORIZATION_SPACE_KEY_VALUE = String.raw`(?<authorizationSpacePrefix>${AUTHORIZATION_SPACE_PREFIX})${AUTHORIZATION_SPACE_VALUE}`;
-const KEY_VALUE = String.raw`(?<keyPrefix>${SECRET_PREFIX}|${SECRET_KEY}\s+(?:${AUTHORIZATION_SCHEME})?${CREDENTIAL_LIKE_VALUE})[^\s,;]+`;
-const SECRET_VALUE_PATTERN = new RegExp(
-	`${BEARER_VALUE}|${AUTHORIZATION_KEY_VALUE}|${AUTHORIZATION_SPACE_KEY_VALUE}|(?<explicitKeyPrefix>${EXPLICIT_KEY_PREFIX})|${KEY_VALUE}`,
-	"gi",
-);
-const OTHER_VALUE_PATTERN = new RegExp(
-	`${BEARER_VALUE}|${AUTHORIZATION_KEY_VALUE}|${AUTHORIZATION_SPACE_KEY_VALUE}|${KEY_VALUE}`,
-	"gi",
-);
-const VISIBLE_SCHEME = new RegExp(AUTHORIZATION_SCHEME, "iy");
-const QUOTED_VALUE_END = /[\s,;:)\]}\\"']/;
-const BARE_VALUE = new RegExp(String.raw`(?<scheme>${AUTHORIZATION_SCHEME})?[^\s,;]+`, "iy");
-const BARE_AUTHORIZATION_VALUE = new RegExp(
-	String.raw`(?<scheme>${AUTHORIZATION_SCHEME})?${AUTHORIZATION_VALUE}`,
-	"iy",
-);
-/** Text that holds a letter or digit: more than punctuation, so a rule that redacts it hides something. */
-const REVEALING = /[\p{L}\p{N}]/u;
 
 function tokenizeRiskText(value: string): string {
 	return value
@@ -166,9 +94,106 @@ export function isMcpToolTrustedReadCandidate(tool: Pick<SdkTool, "name" | "desc
 	return tool.annotations?.readOnlyHint === true && classifyMcpToolRisk(tool) === "read";
 }
 
+// Secrets in MCP text (error messages, string arguments, and the MCP audit log) are redacted by rules that each
+// find the spans of secret values; `redactMcpText` masks the union of every rule's spans. No rule consumes text that
+// another needs, so a rule can only add to what is redacted, and each can be read and tested on its own. Key names,
+// separators, quotes, and a known authorization scheme stay visible.
+
+// A request signature (presigned URL `X-Amz-Signature`, Azure SAS `sig`, OAuth 1.0 `oauth_signature`) grants
+// access like a bearer token until it expires. Short or common names (`sig`, `pwd`, `pass`, `auth`, `jwt`,
+// `session_id`) count only as whole words, so `signal`, `bypass`, `OAuth`, `author`, and `passenger` stay visible.
+const SECRET_KEY_PATTERN =
+	/token|secret|password|passwd|passphrase|api[-_]?key|authorization|credential|private|signature|cookie|(?<![a-z0-9])(?:sig|pwd|pass|auth|jwt|session[-_]?id)(?![a-z0-9])/i;
+// An argv element that is a flag named for a secret (`--token`, `--github-token`, `-password`). In argv-style
+// arrays its value is the next element, which carries no key name of its own.
+const SECRET_FLAG_PATTERN = new RegExp(String.raw`^--?[\w-]*(?:${SECRET_KEY_PATTERN.source})$`, "i");
+const SECRET_KEY = `(?:${SECRET_KEY_PATTERN.source})`;
+
+// A value follows a key in one of these forms, and is redacted whatever words it holds:
+// - a key name and a `:` or `=` separator; the name may end a longer one (`token: abc`, `access_token=abc`,
+//   `X-Amz-Signature: abc`, `token := abc`);
+// - a quoted key, as in JSON, YAML, or a Python dict, also inside a JSON-encoded string, and a separator
+//   (`"access_token": "abc"`, `'token': 'abc'`, `\"token\":\"abc\"`). The separator is required, so a quoted value or
+//   prose that ends in a key name (`"grant_type": "refresh_token"`) is never taken for a key;
+// - the two words `API key` and a separator;
+// - a command-line flag whose name ends in a key name, and whitespace (`--token abc`, `--github-token abc`,
+//   `-password abc`); `--token-file /tmp/token` names no secret.
+const KEYED_VALUE = new RegExp(
+	String.raw`(?<key>${SECRET_KEY})(?:\\?["'][ \t]*[:=]|\s*[:=])[\s:=]*|api[ \t]+key(?:\\?["'])?[ \t]*[:=][ \t:=]*|(?<![\w-])--?[\w-]*?(?<flag>${SECRET_KEY})\s+`,
+	"gi",
+);
+// After whitespace alone a key name is usually prose ("token endpoint", "Refresh token expired"), so the value is
+// redacted only when it looks like a credential: at least 6 characters including a digit, `_`, or `-`
+// (`token ghp_abc123`, `x-api-key sk-live-123`, `password hunter2`), also after a known scheme, or when it is a quoted
+// string that starts like one (`password "hunter2 x"`).
+const SPACED_KEY = new RegExp(String.raw`${SECRET_KEY}\s+`, "gi");
+const CREDENTIAL_LIKE = /(?=[^\s,;]{6})(?=[^\s,;]*[\d_-])[^\s,;]+/y;
+// A known scheme stays visible before the credential it introduces (`Bearer abc`, `Basic dXNlcjpwYXNz`, GitHub's
+// `token ghp_abc`). Any other first word cannot be told apart from a credential followed by text, so it is redacted
+// with the rest: after a key other than `Authorization`, a capitalized word and a word that looks like a credential
+// or like Base64 together (`token: Bot MTk4NjIy.Cl2FMQ`, `secret: Negotiate YIIGhgYG`), else the first word alone.
+const VISIBLE_SCHEME = /(?:bearer|basic|token)\s+/iy;
+const SCHEME_WORD = /[A-Z][A-Za-z0-9-]*[ \t]+/y;
+const BARE_VALUE = /[^\s,;]+/y;
+/** A word that looks like a credential: 6 or more characters with a digit, `_`, `-`, or `.`. */
+const CREDENTIAL_WORD = /^(?=.{6})[^\s,;]*[\d_.-]/;
+/**
+ * A word that looks like Base64 rather than prose: 8 or more characters of the alphabet with a digit, `+`, `/`, or
+ * `=`, or with two capital letters and one right after a small letter (`dXNlcjpwYXNz`, `YIIGhgYG`; not `Yesterday`).
+ */
+const BASE64_WORD = /^(?=[A-Za-z0-9+/]{8,}={0,2}$)(?:.*[0-9+/=]|(?=.*[a-z][A-Z])(?=(?:.*[A-Z]){2}))/;
+// An `Authorization` value is a scheme followed by a single credential or by auth-params separated by commas or, in
+// some logs, by spaces, whose values may be quoted and contain spaces or commas, including JSON-encoded quoted
+// strings with escaped quotes and backslashes (RFC 9110 section 11.4: `Bearer abc`, `Digest username="u",
+// nonce="n", response="..."`, OAuth 1.0 `OAuth oauth_nonce="...", oauth_signature="..."`, AWS `AWS4-HMAC-SHA256
+// Credential=... SignedHeaders=... Signature=...`). After `Authorization:`, `=`, or `--authorization`, it is redacted
+// through its last auth-param, or else up to `,`, `;`, a quote, or the end of the line, so the credential after any
+// scheme (`Bot`, `Negotiate`, `DPoP`, `ApiKey`) is covered and text after the auth-params stays readable.
+const HTTP_TOKEN = String.raw`[\w!#$%&*+.^|~-]+`;
+// JSON-encoded `\"...\"` values are read before raw quoted or unquoted ones, so spaces, commas, and JSON-encoded
+// quoted-pairs (`\\\"` or `\\\\`) cannot end a value before later auth-params.
+const AUTH_PARAM = String.raw`${HTTP_TOKEN}[ \t]*=[ \t]*(?:\\"(?:\\\\\\[\\"]|\\\\|(?!\\")[^\n])*(?:\\")?|"(?:\\.|[^"\\\n])*"?|(?:\\.|[^\s,"\\])*)`;
+const AUTH_PARAMS = String.raw`${AUTH_PARAM}(?:(?:[ \t]*,[ \t]*|[ \t]+)${AUTH_PARAM})*`;
+const AUTHORIZATION_VALUE = new RegExp(
+	String.raw`[^\s,;"']+(?:[ \t]+(?:${AUTH_PARAMS}|[^\s,;"']+(?:[ \t]+[^\s,;"']+)*))?`,
+	"y",
+);
+// After whitespace alone `authorization` is usually prose (`authorization server https://auth-a.example`), so only a
+// scheme followed by `name=` auth-params or by one whole token68 word that looks like a credential is redacted
+// (`Authorization Bot MTk4NjIy`), and the text after it stays. A word that ends in a key name and has a value after it
+// (`access_token ya29...`, `X-Api-Key sk-...`) is not that credential: the rules above redact that value, and the key
+// name stays readable. `Bearer` is redacted by its own
+// rule below, and `Basic` with a Base64 credential, which need not look like a credential otherwise
+// (`Authorization Basic dXNlcjpwYXNz`).
+const TOKEN68_CREDENTIAL = String.raw`(?![\w.~+/-]*${SECRET_KEY}(?![\w.~+/-])[ \t]+[^\s])(?=[^\s,;]{6})(?=[^\s,;]*[\d_-])[\w.~+/-]+=*(?=[\s,;"')\]}>]|$)`;
+const SPACED_AUTHORIZATION = new RegExp(
+	String.raw`(?<![a-z0-9])authorization[ \t]+(?!(?:bearer|basic|token)\s)(${HTTP_TOKEN}[ \t]+(?:(?=${HTTP_TOKEN}=)${AUTH_PARAMS}|${TOKEN68_CREDENTIAL}))`,
+	"gi",
+);
+const SPACED_BASIC = /(?<![a-z0-9])authorization[ \t]+basic[ \t]+([A-Za-z0-9+/]+={0,2})(?=[\s,;"')\]}>]|$)/gi;
+// A bearer token is a secret wherever it appears (`sent Bearer abc123`).
+const BEARER_TOKEN = /(bearer\s+)[A-Za-z0-9._~+/=-]+/gi;
+/** The rest of a word, after a closing quote or bracket. */
+const WORD_TAIL = /[^\s,;]*/y;
+
+/** Characters of value parsing per character of text before the rest of the text is redacted unread. */
+const WORK_PER_CHARACTER = 32;
+
+/** A range of text, from `start` to before `end`. */
+interface Span {
+	readonly start: number;
+	readonly end: number;
+	/** A quoted value's text or an object or array: what ends it is known. */
+	readonly bounded?: boolean;
+}
+
+/** Text that holds a letter or digit: more than punctuation. */
+const REVEALING = /[\p{L}\p{N}]/u;
+
 /**
  * The index after the string that starts at `start`, quoted with `"`, `'`, or, inside a JSON-encoded string, `\"`.
- * An unterminated string ends at the end of its line.
+ * A raw string may span lines (a shell argument may hold a line break); one that never closes runs to the end of
+ * the text. A JSON-encoded one ends at the end of its line or of the enclosing string.
  */
 function skipQuoted(text: string, start: number): number {
 	if (text.startsWith('\\"', start)) {
@@ -195,8 +220,6 @@ function skipQuoted(text: string, start: number): number {
 			index++;
 		} else if (text[index] === quote) {
 			return index + 1;
-		} else if (text[index] === "\n") {
-			return index;
 		}
 	}
 	return text.length;
@@ -222,105 +245,178 @@ function skipContainer(text: string, start: number): number {
 	return text.length;
 }
 
-/**
- * The leftmost match of the rules other than an explicit key's at or after a position of `text`. One redaction asks
- * from positions that mostly move forward, and the leftmost match from an earlier position is also the leftmost from
- * a later one it does not start before, so a text with many explicit keys is not scanned to its end for each.
- */
-function otherMatches(text: string): (from: number) => RegExpExecArray | null {
-	let found: { from: number; match: RegExpExecArray | null } | undefined;
-	return (from) => {
-		if (found !== undefined && found.from <= from && (found.match === null || found.match.index >= from)) {
-			return found.match;
-		}
-		OTHER_VALUE_PATTERN.lastIndex = from;
-		found = { from, match: OTHER_VALUE_PATTERN.exec(text) };
-		return found.match;
-	};
+/** The span of `pattern`, a sticky expression, matched at `start`; undefined when it does not match there. */
+function stickySpan(pattern: RegExp, text: string, start: number): Span | undefined {
+	pattern.lastIndex = start;
+	const match = pattern.exec(text);
+	return match === null || match[0].length === 0 ? undefined : { start, end: start + match[0].length };
+}
+
+/** The length of the known scheme at `start`, which stays visible, or 0. */
+function visibleScheme(text: string, start: number): number {
+	VISIBLE_SCHEME.lastIndex = start;
+	return VISIBLE_SCHEME.exec(text)?.[0].length ?? 0;
+}
+
+/** The spans `span` makes up: none when it is undefined. */
+function spansOf(span: Span | undefined): Span[] {
+	return span === undefined ? [] : [span];
 }
 
 /**
- * The redacted form of the value at `start` after a quoted key or `API key`, and the index after the value, unless a
- * rule other than an explicit key's starts in the value and reads past its end into more than punctuation: then the
- * value is redacted only up to where that rule starts, which applies from there, or not at all when only punctuation
- * comes before it.
+ * The rest of the word at `end`, after a closing quote or bracket, when it holds more than punctuation: what reading
+ * the value as one word would redact (`"abc"def`, `[x]abc`), while `"}` or `\"}` after a value stays visible.
  */
-function redactExplicitKeyValue(
-	text: string,
-	start: number,
-	authorization: boolean,
-	others: (from: number) => RegExpExecArray | null,
-): { text: string; end: number } | undefined {
-	const value = explicitKeyValue(text, start, authorization);
-	if (value === undefined) return undefined;
-	for (
-		let other = others(start);
-		other !== null && other.index < value.end;
-		other = others(other.index + other[0].length)
-	) {
-		const otherEnd = other.index + other[0].length;
-		if (otherEnd > value.end && REVEALING.test(text.slice(value.end, otherEnd))) {
-			return REVEALING.test(text.slice(start, other.index)) ? { text: "[redacted]", end: other.index } : undefined;
-		}
-	}
-	return value;
+function tailSpans(text: string, end: number): Span[] {
+	WORD_TAIL.lastIndex = end;
+	const tail = WORD_TAIL.exec(text)?.[0] ?? "";
+	return REVEALING.test(tail) ? [{ start: end, end: end + tail.length }] : [];
 }
 
 /**
- * The redacted form of the value at `start` after a quoted key or `API key`, and the index after the value. A bare
- * value after an `authorization` key is redacted like one after `Authorization:`.
+ * The spans of the quoted value at `start`: the text between the quotes, after a known scheme that a credential
+ * follows inside them, and the rest of the word after the closing quote (see {@link tailSpans}). Undefined when no
+ * value is quoted there; none for an empty one.
  */
-function explicitKeyValue(
-	text: string,
-	start: number,
-	authorization: boolean,
-): { text: string; end: number } | undefined {
+function quotedSpans(text: string, start: number): Span[] | undefined {
+	const first = text[start];
+	const quote = text.startsWith('\\"', start) ? '\\"' : first === '"' || first === "'" ? first : undefined;
+	if (quote === undefined) return undefined;
+	const end = skipQuoted(text, start);
+	const closed = end - quote.length > start && text.startsWith(quote, end - quote.length);
+	const contentStart = start + quote.length;
+	const contentEnd = closed ? end - quote.length : end;
+	const tail = tailSpans(text, end);
+	if (contentEnd <= contentStart) return tail;
+	const scheme = visibleScheme(text, contentStart);
+	const content = contentStart + scheme < contentEnd ? contentStart + scheme : contentStart;
+	return [{ start: content, end: contentEnd, bounded: true }, ...tail];
+}
+
+/**
+ * The spans of the secret value at `start`, after a key. An `Authorization` key's value is read as one, also when
+ * it starts like an object, which an Authorization value never is.
+ */
+function keyedValueSpans(text: string, start: number, authorization: boolean): Span[] {
 	const first = text[start];
 	if (first === "{" || first === "[") {
-		return { text: "[redacted]", end: skipContainer(text, start) };
+		const end = skipContainer(text, start);
+		const value = authorization ? spansOf(stickySpan(AUTHORIZATION_VALUE, text, start)) : [];
+		return [{ start, end, bounded: true }, ...tailSpans(text, end), ...value];
 	}
-	const quote = text.startsWith('\\"', start) ? '\\"' : first === '"' || first === "'" ? first : undefined;
-	const end = quote === undefined ? 0 : skipQuoted(text, start);
-	const closed = quote !== undefined && end - quote.length > start && text.startsWith(quote, end - quote.length);
-	// A closing quote that more of a word follows (`"Bearer "abc`) does not end the value, which is then read as bare.
-	if (quote !== undefined && (!closed || end === text.length || QUOTED_VALUE_END.test(text[end]))) {
-		const contentStart = start + quote.length;
-		const contentEnd = closed ? end - quote.length : end;
-		if (contentEnd <= contentStart) {
-			return undefined;
+	const quoted = quotedSpans(text, start);
+	if (quoted !== undefined) return quoted;
+	const scheme = visibleScheme(text, start);
+	if (scheme > 0) {
+		const credential =
+			quotedSpans(text, start + scheme) ??
+			spansOf(stickySpan(authorization ? AUTHORIZATION_VALUE : BARE_VALUE, text, start + scheme));
+		if (credential.length > 0) return credential;
+	}
+	if (authorization) return spansOf(stickySpan(AUTHORIZATION_VALUE, text, start));
+	const schemeWord = stickySpan(SCHEME_WORD, text, start);
+	const credential = schemeWord && stickySpan(BARE_VALUE, text, schemeWord.end);
+	if (credential) {
+		const word = text.slice(credential.start, credential.end);
+		if (CREDENTIAL_WORD.test(word) || BASE64_WORD.test(word)) return [{ start, end: credential.end }];
+	}
+	return spansOf(stickySpan(BARE_VALUE, text, start));
+}
+
+/**
+ * The spans of a credential-like value at `start`, after a key name and whitespace alone. A quoted value is redacted
+ * whole when it, or the word its opening quote starts, looks like a credential.
+ */
+function spacedValueSpans(text: string, start: number): Span[] {
+	const at = start + visibleScheme(text, start);
+	const word = stickySpan(CREDENTIAL_LIKE, text, at);
+	const quoted = quotedSpans(text, at);
+	if (quoted === undefined) return spansOf(word);
+	const content = quoted.find((span) => span.bounded);
+	return word || (content && stickySpan(CREDENTIAL_LIKE, text, content.start)) ? quoted : [];
+}
+
+/**
+ * The spans of the values after keys, keyed or separated by whitespace alone. Each key is read, also one inside
+ * another's value, so no value hides a later one. Past a budget of value parsing (only nested or unterminated
+ * values in adversarial text get there), the rest of the text is redacted unread.
+ */
+function valueSpans(text: string): Span[] {
+	const spans: Span[] = [];
+	let budget = WORK_PER_CHARACTER * text.length + 4_096;
+	const add = (found: readonly Span[]): boolean => {
+		for (const span of found) {
+			budget -= span.end - span.start;
+			if (budget < 0) {
+				spans.push({ start: span.start, end: text.length });
+				return false;
+			}
+			spans.push(span);
 		}
-		VISIBLE_SCHEME.lastIndex = contentStart;
-		const scheme = VISIBLE_SCHEME.exec(text)?.[0] ?? "";
-		// Kept only with a credential after it inside the quotes.
-		const visible = contentStart + scheme.length < contentEnd ? scheme : "";
-		return { text: `${quote}${visible}[redacted]${closed ? quote : ""}`, end };
+		return true;
+	};
+	KEYED_VALUE.lastIndex = 0;
+	for (let match = KEYED_VALUE.exec(text); match; match = KEYED_VALUE.exec(text)) {
+		const key = match.groups?.key ?? match.groups?.flag ?? "";
+		const start = match.index + match[0].length;
+		if (start < text.length && !add(keyedValueSpans(text, start, /^authorization$/i.test(key)))) return spans;
 	}
-	const barePattern = authorization ? BARE_AUTHORIZATION_VALUE : BARE_VALUE;
-	barePattern.lastIndex = start;
-	const bare = barePattern.exec(text);
-	return bare ? { text: `${bare.groups?.scheme ?? ""}[redacted]`, end: start + bare[0].length } : undefined;
+	SPACED_KEY.lastIndex = 0;
+	for (let match = SPACED_KEY.exec(text); match; match = SPACED_KEY.exec(text)) {
+		if (!add(spacedValueSpans(text, match.index + match[0].length))) return spans;
+	}
+	return spans;
+}
+
+/** The spans of the last group of each match of `pattern`, a global expression whose match ends with that group. */
+function trailingGroupSpans(pattern: RegExp, text: string): Span[] {
+	const spans: Span[] = [];
+	pattern.lastIndex = 0;
+	for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+		const end = match.index + match[0].length;
+		const group = match[match.length - 1] ?? "";
+		spans.push({ start: end - group.length, end });
+	}
+	return spans;
 }
 
 export function redactMcpText(value: string): string {
+	const spans = [
+		...valueSpans(value),
+		...trailingGroupSpans(SPACED_AUTHORIZATION, value),
+		...trailingGroupSpans(SPACED_BASIC, value).filter((span) => BASE64_WORD.test(value.slice(span.start, span.end))),
+		...[...value.matchAll(BEARER_TOKEN)].map(
+			(match): Span => ({
+				start: match.index + (match[1]?.length ?? 0),
+				end: match.index + match[0].length,
+			}),
+		),
+	]
+		.filter((span) => span.end > span.start)
+		// A bounded span first among those that start together, so the next step sees it.
+		.sort(
+			(left, right) => left.start - right.start || Number(right.bounded ?? false) - Number(left.bounded ?? false),
+		);
+	// A span that starts inside a quoted value or an object and runs past its end only over punctuation ends with
+	// it, so `{"Authorization": "token ghp_abc"}` keeps its closing `"}`: nothing past the end is a secret.
+	let bound = 0;
+	for (const [index, span] of spans.entries()) {
+		if (span.bounded) {
+			bound = Math.max(bound, span.end);
+		} else if (span.start < bound && span.end > bound && !REVEALING.test(value.slice(bound, span.end))) {
+			spans[index] = { start: span.start, end: bound };
+		}
+	}
 	let result = "";
 	let copied = 0;
-	const others = otherMatches(value);
-	SECRET_VALUE_PATTERN.lastIndex = 0;
-	for (let match = SECRET_VALUE_PATTERN.exec(value); match; match = SECRET_VALUE_PATTERN.exec(value)) {
-		const { bearerPrefix, authorizationPrefix, authorizationSpacePrefix, explicitKeyPrefix, keyPrefix } =
-			match.groups ?? {};
-		let replacement = `${bearerPrefix ?? authorizationPrefix ?? authorizationSpacePrefix ?? keyPrefix ?? ""}[redacted]`;
-		let end = match.index + match[0].length;
-		if (explicitKeyPrefix !== undefined) {
-			const secret = redactExplicitKeyValue(value, end, /authorization/i.test(explicitKeyPrefix), others);
-			if (!secret) {
-				continue;
-			}
-			replacement = `${explicitKeyPrefix}${secret.text}`;
-			end = secret.end;
-			SECRET_VALUE_PATTERN.lastIndex = end;
+	for (let index = 0; index < spans.length; ) {
+		const start = spans[index]?.start ?? 0;
+		let end = start;
+		// Spans that overlap or touch are masked as one.
+		for (; index < spans.length && (spans[index]?.start ?? 0) <= end; index++) {
+			end = Math.max(end, spans[index]?.end ?? 0);
 		}
-		result += value.slice(copied, match.index) + replacement;
+		result += `${value.slice(copied, start)}[redacted]`;
 		copied = end;
 	}
 	return result + value.slice(copied);
