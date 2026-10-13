@@ -62,6 +62,9 @@ const READ_NAME_PATTERN = new RegExp(
 	"i",
 );
 const SECRET_KEY_PATTERN = /token|secret|password|passwd|api[-_]?key|authorization|credential|private/i;
+// An argv element that is a flag named for a secret (`--token`, `--github-token`, `-password`). In argv-style
+// arrays its value is the next element, which carries no key name of its own.
+const SECRET_FLAG_PATTERN = new RegExp(String.raw`^--?[\w-]*(?:${SECRET_KEY_PATTERN.source})$`, "i");
 // Secret key names are also ordinary prose ("token endpoint", "Refresh token expired"). A value is always
 // redacted after a `:` or `=` separator (`token: abc`, `api_key=abc`) or after a command-line flag whose
 // name ends in a key name (`--token abc`, `--github-token abc`). After whitespace alone it is redacted only
@@ -132,7 +135,12 @@ export function sanitizeMcpArguments(value: unknown, depth = 0): unknown {
 		return redactMcpText(value);
 	}
 	if (Array.isArray(value)) {
-		return value.slice(0, 20).map((entry) => sanitizeMcpArguments(entry, depth + 1));
+		return value.slice(0, 20).map((entry, index, entries) => {
+			const previous = entries[index - 1];
+			return typeof previous === "string" && SECRET_FLAG_PATTERN.test(previous)
+				? "[redacted]"
+				: sanitizeMcpArguments(entry, depth + 1);
+		});
 	}
 	if (typeof value !== "object") {
 		return String(value);
