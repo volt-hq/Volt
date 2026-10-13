@@ -268,8 +268,9 @@ describe("issue orchestrator extension", () => {
 			{
 				customType: "issue-orchestrator",
 				display: true,
+				// The workflow's path as the platform writes it: `.volt\WORKFLOW.md` on Windows.
 				content: expect.stringContaining(
-					"Issue orchestrator started for o/r (.volt/WORKFLOW.md): working open issues labeled agent-ready",
+					`Issue orchestrator started for o/r (${join(".volt", "WORKFLOW.md")}): working open issues labeled agent-ready`,
 				),
 			},
 		]);
