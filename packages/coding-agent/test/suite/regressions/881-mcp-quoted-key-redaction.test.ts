@@ -19,8 +19,9 @@ describe("issue #881: MCP redaction covers quoted keys and API key", () => {
 		expect(redactMcpText("{'token': 'abc123', 'user': 'bob'}")).toBe("{'token': '[redacted]', 'user': 'bob'}");
 		expect(redactMcpText('"refresh_token" = "abc123"')).toBe('"refresh_token" = "[redacted]"');
 		expect(redactMcpText('"token": abc123')).toBe('"token": [redacted]');
-		// The value may start on the next line.
+		// The value may start on the next line, and repeated separators are read as one, as after an unquoted key.
 		expect(redactMcpText('{"password":\n"abc123"}')).toBe('{"password":\n"[redacted]"}');
+		expect(redactMcpText('"Authorization":: username=: abc123')).toBe('"Authorization":: [redacted]');
 	});
 
 	it("redacts the value after API key", () => {
