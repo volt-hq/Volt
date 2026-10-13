@@ -1950,9 +1950,14 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 				const terminal = event.message.role === "assistant" && event.message.stopReason !== "toolUse";
 				// Waking input keeps a loop going, which delivers it. A response that failed ends the loop without
 				// delivering it, so the failure settles as any other does: it retries, or ends the turn. A loop that
-				// threw does not: the input pending may be the input that failed to deliver.
+				// threw does not: the input pending may be the input that failed to deliver. Nor does a prompt held
+				// behind a recovery retry: it is delivered once the loop ends (`afterLoop`), instead of the failed
+				// request being retried again.
 				const failed =
-					!run.loopFailed && event.message.role === "assistant" && event.message.stopReason === "error";
+					!run.loopFailed &&
+					event.message.role === "assistant" &&
+					event.message.stopReason === "error" &&
+					!(run.holdPrompts && this.continuation === undefined && this.inbox.hasPending("prompt"));
 				run.terminalSettling = terminal && (failed || !this.hasWakingInput());
 				let message = this.withAbortDiagnostic(event.message, run);
 				const hook = this.policy.messageEnd;
