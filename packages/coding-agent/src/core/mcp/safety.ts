@@ -125,13 +125,13 @@ const KEYED_VALUE = new RegExp(
 // After whitespace alone a key name is usually prose ("token endpoint", "Refresh token expired"), so the value is
 // redacted only when it looks like a credential: at least 6 characters including a digit, `_`, or `-`
 // (`token ghp_abc123`, `x-api-key sk-live-123`, `password hunter2`), also after a known scheme, or when it is a quoted
-// string that starts like one (`password "hunter2 x"`).
+// string that starts like one after any leading whitespace (`password "hunter2 x"`, `password "\nhunter2"`).
 const SPACED_KEY = new RegExp(String.raw`${SECRET_KEY}\s+`, "gi");
 const CREDENTIAL_LIKE = /(?=[^\s,;]{6})(?=[^\s,;]*[\d_-])[^\s,;]+/y;
 // A known scheme stays visible before the credential it introduces (`Bearer abc`, `Basic dXNlcjpwYXNz`, GitHub's
 // `token ghp_abc`). Any other first word cannot be told apart from a credential followed by text, so it is redacted
 // with the rest: after a key other than `Authorization`, a capitalized word and a word that looks like a credential
-// or like Base64 together (`token: Bot MTk4NjIy.Cl2FMQ`, `secret: Negotiate YIIGhgYG`), else the first word alone.
+// or like Base64 together (`token: Bot MTk4NjIy.Cl2FMQ`, `secret: Negotiate "YIIGhgYG"`), else the first word alone.
 const VISIBLE_SCHEME = /(?:bearer|basic|token)\s+/iy;
 const SCHEME_WORD = /[A-Z][A-Za-z0-9-]*[ \t]+/y;
 const BARE_VALUE = /[^\s,;]+/y;
@@ -150,6 +150,12 @@ const BASE64_WORD = /^(?=[A-Za-z0-9+/]{8,}={0,2}$)(?:.*[0-9+/=]|(?=.*[a-z][A-Z])
 // through its last auth-param, or else up to `,`, `;`, a quote, or the end of the line, so the credential after any
 // scheme (`Bot`, `Negotiate`, `DPoP`, `ApiKey`) is covered and text after the auth-params stays readable.
 const HTTP_TOKEN = String.raw`[\w!#$%&*+.^|~-]+`;
+// A Cookie header carries several credentials separated by semicolons, unlike Set-Cookie's one credential and
+// non-secret attributes. Match the whole key so Set-Cookie stays on the ordinary keyed-value path.
+const COOKIE_HEADER = /(?<![\w-])cookie(?:\\?["'][ \t]*[:=]|\s*[:=])[\s:=]*/gi;
+const COOKIE_PAIR_PREFIX = new RegExp(String.raw`${HTTP_TOKEN}[ \t]*=[ \t]*`, "y");
+const COOKIE_PAIR_VALUE = /[^\s,;"'\\]+/y;
+const COOKIE_SEPARATOR = /[ \t]*;[ \t]*/y;
 // JSON-encoded `\"...\"` values are read before raw quoted or unquoted ones, so spaces, commas, and JSON-encoded
 // quoted-pairs (`\\\"` or `\\\\`) cannot end a value before later auth-params.
 const AUTH_PARAM = String.raw`${HTTP_TOKEN}[ \t]*=[ \t]*(?:\\"(?:\\\\\\[\\"]|\\\\|(?!\\")[^\n])*(?:\\")?|"(?:\\.|[^"\\\n])*"?|(?:\\.|[^\s,"\\])*)`;
@@ -176,14 +182,14 @@ const BEARER_TOKEN = /(bearer\s+)[A-Za-z0-9._~+/=-]+/gi;
 /** The rest of a word, after a closing quote or bracket. */
 const WORD_TAIL = /[^\s,;]*/y;
 
-/** Characters of value parsing per character of text before the rest of the text is redacted unread. */
+/** Characters of value parsing per character of text before the whole text is redacted unread. */
 const WORK_PER_CHARACTER = 32;
 
 /** A range of text, from `start` to before `end`. */
 interface Span {
 	readonly start: number;
 	readonly end: number;
-	/** A quoted value's text or an object or array: what ends it is known. */
+	/** A quoted value's text, an object or array, or a cookie list: what ends it is known. */
 	readonly bounded?: boolean;
 }
 
@@ -315,10 +321,15 @@ function keyedValueSpans(text: string, start: number, authorization: boolean): S
 	}
 	if (authorization) return spansOf(stickySpan(AUTHORIZATION_VALUE, text, start));
 	const schemeWord = stickySpan(SCHEME_WORD, text, start);
-	const credential = schemeWord && stickySpan(BARE_VALUE, text, schemeWord.end);
+	const credentialQuotes = schemeWord ? quotedSpans(text, schemeWord.end) : undefined;
+	const credential =
+		credentialQuotes?.find((span) => span.bounded) ?? (schemeWord && stickySpan(BARE_VALUE, text, schemeWord.end));
 	if (credential) {
-		const word = text.slice(credential.start, credential.end);
-		if (CREDENTIAL_WORD.test(word) || BASE64_WORD.test(word)) return [{ start, end: credential.end }];
+		const word = text.slice(credential.start, credential.end).trim();
+		if (CREDENTIAL_WORD.test(word) || BASE64_WORD.test(word)) {
+			const end = schemeWord && credentialQuotes ? skipQuoted(text, schemeWord.end) : credential.end;
+			return [{ start, end }, ...(credentialQuotes ?? [])];
+		}
 	}
 	return spansOf(stickySpan(BARE_VALUE, text, start));
 }
@@ -332,14 +343,36 @@ function spacedValueSpans(text: string, start: number): Span[] {
 	const word = stickySpan(CREDENTIAL_LIKE, text, at);
 	const quoted = quotedSpans(text, at);
 	if (quoted === undefined) return spansOf(word);
+	if (word) return quoted;
 	const content = quoted.find((span) => span.bounded);
-	return word || (content && stickySpan(CREDENTIAL_LIKE, text, content.start)) ? quoted : [];
+	if (!content) return [];
+	const credentialStart = content.end - text.slice(content.start, content.end).trimStart().length;
+	return credentialStart < content.end && stickySpan(CREDENTIAL_LIKE, text, credentialStart) ? quoted : [];
+}
+
+/** The whole semicolon-separated cookie list, stopping before other text or an enclosing quote. */
+function cookieValueSpans(text: string, start: number): Span[] {
+	let at = start;
+	let end = start;
+	while (at < text.length) {
+		const prefix = stickySpan(COOKIE_PAIR_PREFIX, text, at);
+		if (!prefix) break;
+		const first = text[prefix.end];
+		end =
+			first === '"' || first === "'" || text.startsWith('\\"', prefix.end)
+				? skipQuoted(text, prefix.end)
+				: (stickySpan(COOKIE_PAIR_VALUE, text, prefix.end)?.end ?? prefix.end);
+		const separator = stickySpan(COOKIE_SEPARATOR, text, end);
+		if (!separator) break;
+		at = separator.end;
+	}
+	return end > start ? [{ start, end, bounded: true }] : [];
 }
 
 /**
  * The spans of the values after keys, keyed or separated by whitespace alone. Each key is read, also one inside
- * another's value, so no value hides a later one. Past a budget of value parsing (only nested or unterminated
- * values in adversarial text get there), the rest of the text is redacted unread.
+ * another's value, so no value hides a later one. Past a budget of value parsing in adversarial text, the whole
+ * text is redacted: later rules may still need to redact values before the position that exhausted the budget.
  */
 function valueSpans(text: string): Span[] {
 	const spans: Span[] = [];
@@ -348,7 +381,7 @@ function valueSpans(text: string): Span[] {
 		for (const span of found) {
 			budget -= span.end - span.start;
 			if (budget < 0) {
-				spans.push({ start: span.start, end: text.length });
+				spans.push({ start: 0, end: text.length });
 				return false;
 			}
 			spans.push(span);
@@ -360,6 +393,10 @@ function valueSpans(text: string): Span[] {
 		const key = match.groups?.key ?? match.groups?.flag ?? "";
 		const start = match.index + match[0].length;
 		if (start < text.length && !add(keyedValueSpans(text, start, /^authorization$/i.test(key)))) return spans;
+	}
+	COOKIE_HEADER.lastIndex = 0;
+	for (let match = COOKIE_HEADER.exec(text); match; match = COOKIE_HEADER.exec(text)) {
+		if (!add(cookieValueSpans(text, match.index + match[0].length))) return spans;
 	}
 	SPACED_KEY.lastIndex = 0;
 	for (let match = SPACED_KEY.exec(text); match; match = SPACED_KEY.exec(text)) {
@@ -397,7 +434,7 @@ export function redactMcpText(value: string): string {
 		.sort(
 			(left, right) => left.start - right.start || Number(right.bounded ?? false) - Number(left.bounded ?? false),
 		);
-	// A span that starts inside a quoted value or an object and runs past its end only over punctuation ends with
+	// A span that starts inside a bounded value and runs past its end only over punctuation ends with
 	// it, so `{"Authorization": "token ghp_abc"}` keeps its closing `"}`: nothing past the end is a secret.
 	let bound = 0;
 	for (const [index, span] of spans.entries()) {
