@@ -10,9 +10,17 @@ import { VERSION } from "../../config.ts";
 import type { McpOAuthStore } from "./oauth-store.ts";
 import type { McpResolvedServerConfig } from "./types.ts";
 
+const DEFAULT_REDIRECT_URL = "http://127.0.0.1/mcp/oauth/callback";
+
 export interface VoltMcpOAuthProviderOptions {
 	server: McpResolvedServerConfig;
 	store: McpOAuthStore;
+	/**
+	 * Loopback redirect URL of a browser sign-in. A stored client is presented only
+	 * if it was registered for this URL. Without it, the provider presents whichever
+	 * client sign-in stored and reports a default redirect URL, which the SDK needs
+	 * to refresh tokens but no browser redirect completes against.
+	 */
 	redirectUrl?: string | URL;
 	clientName?: string;
 	clientVersion?: string;
@@ -63,13 +71,24 @@ function assertSafeDiscoveryState(state: OAuthDiscoveryState): void {
 	}
 }
 
+/**
+ * Pre-registered credentials carry the configured authorization server as
+ * `issuer`, so the SDK and the device flow never present them to another one.
+ */
 function staticClientInformation(server: McpResolvedServerConfig): OAuthClientInformationMixed | undefined {
 	const clientId = server.auth?.clientId?.trim();
 	if (!clientId) {
 		return undefined;
 	}
+	const issuer = server.auth?.issuer?.trim();
+	if (!issuer) {
+		throw new Error(
+			`MCP OAuth server ${server.id} configures auth.clientId without auth.issuer; set auth.issuer to the authorization server URL the client is registered with`,
+		);
+	}
 	return {
 		client_id: clientId,
+		issuer,
 		...(server.auth?.clientSecret ? { client_secret: server.auth.clientSecret } : {}),
 		...(server.auth?.tokenEndpointAuthMethod
 			? { token_endpoint_auth_method: server.auth.tokenEndpointAuthMethod }
@@ -78,7 +97,7 @@ function staticClientInformation(server: McpResolvedServerConfig): OAuthClientIn
 }
 
 function clientMetadata(options: VoltMcpOAuthProviderOptions): OAuthClientMetadata {
-	const redirectUrl = String(options.redirectUrl ?? "http://127.0.0.1/mcp/oauth/callback");
+	const redirectUrl = String(options.redirectUrl ?? DEFAULT_REDIRECT_URL);
 	const auth = options.server.auth;
 	return {
 		redirect_uris: [redirectUrl],
@@ -100,6 +119,12 @@ export class VoltMcpOAuthProvider implements OAuthClientProvider {
 	private authorizationUrlValue: URL | undefined;
 	private stateValue: string;
 	private onAuthorizationUrl: ((url: URL) => void | Promise<void>) | undefined;
+	/**
+	 * Defined only for dynamically obtained clients. A pre-registered client cannot
+	 * register again, so without this the SDK refuses an authorization server other
+	 * than the configured issuer instead of registering a replacement client there.
+	 */
+	saveClientInformation?: (clientInformation: OAuthClientInformationMixed) => void;
 
 	constructor(options: VoltMcpOAuthProviderOptions) {
 		this.server = options.server;
@@ -108,10 +133,15 @@ export class VoltMcpOAuthProvider implements OAuthClientProvider {
 		this.metadata = clientMetadata(options);
 		this.stateValue = randomState();
 		this.onAuthorizationUrl = options.onAuthorizationUrl;
+		if (!options.server.auth?.clientId?.trim()) {
+			this.saveClientInformation = (clientInformation) => {
+				this.store.patchRecord(this.server, { clientInformation });
+			};
+		}
 	}
 
-	get redirectUrl(): string | URL | undefined {
-		return this.redirectUrlValue;
+	get redirectUrl(): string | URL {
+		return this.redirectUrlValue ?? DEFAULT_REDIRECT_URL;
 	}
 
 	get clientMetadataUrl(): string | undefined {
@@ -139,13 +169,6 @@ export class VoltMcpOAuthProvider implements OAuthClientProvider {
 		return (
 			staticClientInformation(this.server) ?? this.store.getClientInformation(this.server, this.redirectUrlValue)
 		);
-	}
-
-	saveClientInformation(clientInformation: OAuthClientInformationMixed): void {
-		if (staticClientInformation(this.server)) {
-			return;
-		}
-		this.store.patchRecord(this.server, { clientInformation });
 	}
 
 	tokens(): OAuthTokens | undefined {

@@ -232,6 +232,7 @@ describe("protocol client of an in-process host", () => {
 			"includeOptional",
 			"scopeMode",
 			"tools",
+			"setup",
 		]);
 
 		await client.prompt("long running");

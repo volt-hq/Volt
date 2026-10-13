@@ -134,6 +134,9 @@ function asAuthConfig(value: unknown): McpAuthConfig | undefined {
 	if (typeof value.clientSecret === "string") {
 		auth.clientSecret = value.clientSecret;
 	}
+	if (typeof value.issuer === "string") {
+		auth.issuer = value.issuer;
+	}
 	if (typeof value.clientMetadataUrl === "string") {
 		auth.clientMetadataUrl = value.clientMetadataUrl;
 	}

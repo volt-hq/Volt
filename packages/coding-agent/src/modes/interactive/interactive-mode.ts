@@ -8459,14 +8459,20 @@ export class InteractiveMode {
 		return choice === undefined ? undefined : entries.find((entry) => entry.label === choice)?.engine;
 	}
 
-	/** Start a review through the conversation's review intent, with the configured auxiliary tools; resolves its work id. */
+	/**
+	 * Start a review through the conversation's review intent, with the configured auxiliary tools and the setup of
+	 * the checkouts they run in; resolves its work id.
+	 */
 	private async startReview(start: ReviewEngineStart): Promise<string> {
-		// An engine's passes are its own: the conversation's auxiliary tools are for the built-in review.
-		const tools = start.input.engine === undefined ? await this.getReviewToolsForRun() : [];
+		// Every engine gets the configured auxiliary tools, as the built-in review does.
+		const tools = await this.getReviewToolsForRun();
+		// A setup prepares the checkout the tools run in: without tools, there is none.
+		const setup = tools.length === 0 ? undefined : this.settingsManager.getReviewSetup();
 		const accepted = await this.store.client.intent("review", {
 			...start.input,
 			...(start.engineParams === undefined ? {} : { engineParams: start.engineParams }),
 			...(tools.length === 0 ? {} : { tools }),
+			...(setup === undefined ? {} : { setup }),
 		} as IntentInput<"review">);
 		const workId = accepted.result?.workId;
 		if (workId === undefined) throw new Error("The review did not start");

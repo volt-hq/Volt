@@ -1030,7 +1030,13 @@ describe("MCP support", () => {
 		const config = createTestConfig(tempDir, {
 			transport: "streamable-http",
 			url: "https://api.example/mcp",
-			auth: { type: "oauth", flow: "device", clientId: "volt-test", scope: "repo" },
+			auth: {
+				type: "oauth",
+				flow: "device",
+				clientId: "volt-test",
+				issuer: "https://auth.example",
+				scope: "repo",
+			},
 		});
 		const server = config.servers.fake;
 		const oauthStore = McpOAuthStore.fromStorage(new InMemoryAuthStorageBackend());
@@ -1225,7 +1231,7 @@ describe("MCP support", () => {
 		const server = createTestConfig(tempDir, {
 			transport: "streamable-http",
 			url: "https://api.example/mcp",
-			auth: { type: "oauth", flow: "device", clientId: "volt-test" },
+			auth: { type: "oauth", flow: "device", clientId: "volt-test", issuer: "https://auth.example" },
 		}).servers.fake;
 		const fetchFn = async (input: string | URL | Request): Promise<Response> => {
 			const url = String(input);

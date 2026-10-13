@@ -65,8 +65,17 @@ const SECRET_KEY_PATTERN = /token|secret|password|passwd|api[-_]?key|authorizati
 // An argv element that is a flag named for a secret (`--token`, `--github-token`, `-password`). In argv-style
 // arrays its value is the next element, which carries no key name of its own.
 const SECRET_FLAG_PATTERN = new RegExp(String.raw`^--?[\w-]*(?:${SECRET_KEY_PATTERN.source})$`, "i");
-const SECRET_VALUE_PATTERN =
-	/(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:token|secret|password|passwd|api[-_]?key|authorization|credential|private)[\s:=]+)[^\s,;]+/gi;
+// Secret key names are also ordinary prose ("token endpoint", "Refresh token expired"). A value is always
+// redacted after a `:` or `=` separator (`token: abc`, `api_key=abc`) or after a command-line flag whose
+// name ends in a key name (`--token abc`, `--github-token abc`). After whitespace alone it is redacted only
+// when it looks like a credential: at least 6 characters including a digit, `_`, or `-`
+// (`token ghp_abc123`, `x-api-key sk-live-123`, `password hunter2`).
+const SECRET_KEY = `(?:${SECRET_KEY_PATTERN.source})`;
+const CREDENTIAL_LIKE_VALUE = String.raw`(?=[^\s,;]{6})(?=[^\s,;]*[\d_-])`;
+const SECRET_VALUE_PATTERN = new RegExp(
+	String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+|(${SECRET_KEY}\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?${SECRET_KEY}\s+|${SECRET_KEY}\s+${CREDENTIAL_LIKE_VALUE})[^\s,;]+`,
+	"gi",
+);
 
 function tokenizeRiskText(value: string): string {
 	return value

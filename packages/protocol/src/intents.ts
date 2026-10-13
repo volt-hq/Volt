@@ -67,6 +67,10 @@ export const INTENT_OUTCOME_WINDOW = 256;
 export const REVIEW_TOOLS_MAX = 64;
 /** Longest tool name a review start names, in characters. */
 export const REVIEW_TOOL_NAME_MAX_CHARS = 128;
+/** Longest shell command a review's checkout setup runs, in characters. */
+export const REVIEW_SETUP_COMMAND_MAX_CHARS = 10_000;
+/** Longest a review's checkout setup may run, in milliseconds. */
+export const REVIEW_SETUP_TIMEOUT_MAX_MS = 3_600_000;
 
 /** Longest intent name, in characters. */
 export const INTENT_NAME_MAX_CHARS = 160;
@@ -227,6 +231,22 @@ const reviewOptions = {
 			maxItems: REVIEW_TOOLS_MAX,
 			uniqueItems: true,
 		}),
+	),
+	/**
+	 * A shell command the host runs, with the user's shell, in the root of
+	 * each disposable checkout the review's auxiliary tools run in before the
+	 * review uses it, such as installing dependencies: a fresh checkout has
+	 * none. It runs for at most `timeoutMs` (ten minutes by default). It
+	 * applies with `tools` (local clients only).
+	 */
+	setup: Type.Optional(
+		Type.Object(
+			{
+				command: Type.String({ minLength: 1, maxLength: REVIEW_SETUP_COMMAND_MAX_CHARS }),
+				timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: REVIEW_SETUP_TIMEOUT_MAX_MS })),
+			},
+			closed,
+		),
 	),
 };
 
