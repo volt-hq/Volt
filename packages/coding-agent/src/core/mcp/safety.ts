@@ -67,13 +67,20 @@ const SECRET_KEY_PATTERN = /token|secret|password|passwd|api[-_]?key|authorizati
 // name ends in a key name (`--token abc`, `--github-token abc`). After whitespace alone it is redacted only
 // when it looks like a credential: at least 6 characters including a digit, `_`, or `-`
 // (`token ghp_abc123`, `x-api-key sk-live-123`, `password hunter2`).
-// A secret value may start with an authorization scheme (`Authorization: Bearer abc`, `Basic dXNlcjpwYXNz`,
-// GitHub's `token ghp_abc`). The scheme stays visible and the credential after it is redacted.
+// A secret value may start with an authorization scheme, optionally quoted (`token: Bearer abc`,
+// `Basic dXNlcjpwYXNz`, GitHub's `token ghp_abc`, `"Bearer abc"`). The scheme stays visible and the
+// credential after it is redacted.
+// An `Authorization` value after `:`, `=`, or a flag is redacted up to `,`, `;`, a quote, or the end of
+// the line, so the credential after any scheme (`Bot`, `Negotiate`, `DPoP`, `ApiKey`) is covered. Only the
+// schemes above stay visible: an unknown first word cannot be told apart from a credential followed by text.
 const SECRET_KEY = `(?:${SECRET_KEY_PATTERN.source})`;
-const AUTHORIZATION_SCHEME = String.raw`(?:(?:bearer|basic|token)\s+)?`;
+const AUTHORIZATION_SCHEME = String.raw`(?:bearer|basic|token)\s+`;
+const AUTHORIZATION_PREFIX = String.raw`(?:authorization\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?authorization\s+)["']?(?:${AUTHORIZATION_SCHEME})?`;
+const AUTHORIZATION_VALUE = String.raw`[^\s,;"']+(?:[ \t]+[^\s,;"']+)*`;
+const SECRET_PREFIX = String.raw`(?:${SECRET_KEY}\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?${SECRET_KEY}\s+)(?:["']?${AUTHORIZATION_SCHEME})?`;
 const CREDENTIAL_LIKE_VALUE = String.raw`(?=[^\s,;]{6})(?=[^\s,;]*[\d_-])`;
 const SECRET_VALUE_PATTERN = new RegExp(
-	String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:${SECRET_KEY}\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?${SECRET_KEY}\s+)${AUTHORIZATION_SCHEME}|${SECRET_KEY}\s+${AUTHORIZATION_SCHEME}${CREDENTIAL_LIKE_VALUE})[^\s,;]+`,
+	String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+|(${AUTHORIZATION_PREFIX})${AUTHORIZATION_VALUE}|(${SECRET_PREFIX}|${SECRET_KEY}\s+(?:${AUTHORIZATION_SCHEME})?${CREDENTIAL_LIKE_VALUE})[^\s,;]+`,
 	"gi",
 );
 
@@ -112,9 +119,17 @@ export function isMcpToolTrustedReadCandidate(tool: Pick<SdkTool, "name" | "desc
 export function redactMcpText(value: string): string {
 	return value.replace(
 		SECRET_VALUE_PATTERN,
-		(_match, bearerPrefix: string | undefined, keyPrefix: string | undefined) => {
+		(
+			_match,
+			bearerPrefix: string | undefined,
+			authorizationPrefix: string | undefined,
+			keyPrefix: string | undefined,
+		) => {
 			if (bearerPrefix) {
 				return `${bearerPrefix}[redacted]`;
+			}
+			if (authorizationPrefix) {
+				return `${authorizationPrefix}[redacted]`;
 			}
 			if (keyPrefix) {
 				return `${keyPrefix}[redacted]`;
