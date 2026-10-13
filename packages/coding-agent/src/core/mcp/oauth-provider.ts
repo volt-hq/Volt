@@ -10,9 +10,17 @@ import { VERSION } from "../../config.ts";
 import type { McpOAuthStore } from "./oauth-store.ts";
 import type { McpResolvedServerConfig } from "./types.ts";
 
+const DEFAULT_REDIRECT_URL = "http://127.0.0.1/mcp/oauth/callback";
+
 export interface VoltMcpOAuthProviderOptions {
 	server: McpResolvedServerConfig;
 	store: McpOAuthStore;
+	/**
+	 * Loopback redirect URL of a browser sign-in. A stored client is presented only
+	 * if it was registered for this URL. Without it, the provider presents whichever
+	 * client sign-in stored and reports a default redirect URL, which the SDK needs
+	 * to refresh tokens but no browser redirect completes against.
+	 */
 	redirectUrl?: string | URL;
 	clientName?: string;
 	clientVersion?: string;
@@ -89,7 +97,7 @@ function staticClientInformation(server: McpResolvedServerConfig): OAuthClientIn
 }
 
 function clientMetadata(options: VoltMcpOAuthProviderOptions): OAuthClientMetadata {
-	const redirectUrl = String(options.redirectUrl ?? "http://127.0.0.1/mcp/oauth/callback");
+	const redirectUrl = String(options.redirectUrl ?? DEFAULT_REDIRECT_URL);
 	const auth = options.server.auth;
 	return {
 		redirect_uris: [redirectUrl],
@@ -132,8 +140,8 @@ export class VoltMcpOAuthProvider implements OAuthClientProvider {
 		}
 	}
 
-	get redirectUrl(): string | URL | undefined {
-		return this.redirectUrlValue;
+	get redirectUrl(): string | URL {
+		return this.redirectUrlValue ?? DEFAULT_REDIRECT_URL;
 	}
 
 	get clientMetadataUrl(): string | undefined {
