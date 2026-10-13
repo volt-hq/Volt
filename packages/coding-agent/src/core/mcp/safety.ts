@@ -79,18 +79,24 @@ const SECRET_FLAG_PATTERN = new RegExp(String.raw`^--?[\w-]*(?:${SECRET_KEY_PATT
 // or a flag, optionally inside quotes, it is redacted through its last auth-param, or else up to `,`, `;`, a
 // quote, or the end of the line, so the credential after any scheme (`Bot`, `Negotiate`, `DPoP`, `ApiKey`) is
 // covered. Only the schemes above stay visible: an unknown first word cannot be told apart from a credential
-// followed by text. After whitespace alone it is redacted when the second word is an auth-param or looks like
-// a credential (`Authorization Bot MTk4NjIy`).
+// followed by text. After whitespace alone `authorization` is usually prose (`authorization server
+// https://auth-a.example`), so only a scheme followed by `name=` auth-params or by one whole token68 word that
+// looks like a credential is redacted (`Authorization Bot MTk4NjIy`), and the text after it stays. The visible
+// schemes are left to the key path below.
 const SECRET_KEY = `(?:${SECRET_KEY_PATTERN.source})`;
 const AUTHORIZATION_SCHEME = String.raw`(?:bearer|basic|token)\s+`;
 const SECRET_PREFIX = String.raw`(?:${SECRET_KEY}\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?${SECRET_KEY}\s+)(?:["']?${AUTHORIZATION_SCHEME})?`;
 const CREDENTIAL_LIKE_VALUE = String.raw`(?=[^\s,;]{6})(?=[^\s,;]*[\d_-])`;
 const HTTP_TOKEN = String.raw`[\w!#$%&*+.^|~-]+`;
 const AUTH_PARAM = String.raw`${HTTP_TOKEN}[ \t]*=[ \t]*(?:"(?:\\.|[^"\\\n])*"?|(?:\\.|[^\s,"\\])*)`;
-const AUTHORIZATION_PREFIX = String.raw`(?:(?:authorization\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?authorization\s+)["']?|authorization[ \t]+(?=${HTTP_TOKEN}[ \t]+(?:${HTTP_TOKEN}=|${CREDENTIAL_LIKE_VALUE})))(?:${AUTHORIZATION_SCHEME})?`;
-const AUTHORIZATION_VALUE = String.raw`[^\s,;"']+(?:[ \t]+(?:${AUTH_PARAM}(?:[ \t]*,[ \t]*${AUTH_PARAM})*|[^\s,;"']+(?:[ \t]+[^\s,;"']+)*))?`;
+const AUTH_PARAMS = String.raw`${AUTH_PARAM}(?:[ \t]*,[ \t]*${AUTH_PARAM})*`;
+const TOKEN68_CREDENTIAL = String.raw`${CREDENTIAL_LIKE_VALUE}[\w.~+/-]+=*(?=[\s,;"')\]}>]|$)`;
+const AUTHORIZATION_PREFIX = String.raw`(?:authorization\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?authorization\s+)["']?(?:${AUTHORIZATION_SCHEME})?`;
+const AUTHORIZATION_VALUE = String.raw`[^\s,;"']+(?:[ \t]+(?:${AUTH_PARAMS}|[^\s,;"']+(?:[ \t]+[^\s,;"']+)*))?`;
+const AUTHORIZATION_SPACE_PREFIX = String.raw`(?<![a-z0-9])authorization[ \t]+(?!${AUTHORIZATION_SCHEME})`;
+const AUTHORIZATION_SPACE_VALUE = String.raw`${HTTP_TOKEN}[ \t]+(?:(?=${HTTP_TOKEN}=)${AUTH_PARAMS}|${TOKEN68_CREDENTIAL})`;
 const SECRET_VALUE_PATTERN = new RegExp(
-	String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+|(${AUTHORIZATION_PREFIX})${AUTHORIZATION_VALUE}|(${SECRET_PREFIX}|${SECRET_KEY}\s+(?:${AUTHORIZATION_SCHEME})?${CREDENTIAL_LIKE_VALUE})[^\s,;]+`,
+	String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+|(${AUTHORIZATION_PREFIX})${AUTHORIZATION_VALUE}|(${AUTHORIZATION_SPACE_PREFIX})${AUTHORIZATION_SPACE_VALUE}|(${SECRET_PREFIX}|${SECRET_KEY}\s+(?:${AUTHORIZATION_SCHEME})?${CREDENTIAL_LIKE_VALUE})[^\s,;]+`,
 	"gi",
 );
 
@@ -133,6 +139,7 @@ export function redactMcpText(value: string): string {
 			_match,
 			bearerPrefix: string | undefined,
 			authorizationPrefix: string | undefined,
+			authorizationSpacePrefix: string | undefined,
 			keyPrefix: string | undefined,
 		) => {
 			if (bearerPrefix) {
@@ -140,6 +147,9 @@ export function redactMcpText(value: string): string {
 			}
 			if (authorizationPrefix) {
 				return `${authorizationPrefix}[redacted]`;
+			}
+			if (authorizationSpacePrefix) {
+				return `${authorizationSpacePrefix}[redacted]`;
 			}
 			if (keyPrefix) {
 				return `${keyPrefix}[redacted]`;

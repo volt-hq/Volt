@@ -70,11 +70,19 @@ describe("issue #900: MCP redaction of Authorization values with auth-params", (
 	it("redacts an Authorization value after whitespace when it has a scheme and a credential", () => {
 		expect(redactMcpText("Authorization Bot MTk4NjIy.Cl2FMQ.ZnCjm1XV")).toBe("Authorization [redacted]");
 		expect(redactMcpText(`Authorization ${DIGEST}`)).toBe("Authorization [redacted]");
+		expect(redactMcpText("Authorization Bot MTk4NjIy.Cl2FMQ.ZnCjm1XV was rejected")).toBe(
+			"Authorization [redacted] was rejected",
+		);
+		expect(redactMcpText('Authorization Digest username="u", response="abc123" was rejected')).toBe(
+			"Authorization [redacted] was rejected",
+		);
 		for (const message of [
 			"Existing OAuth client information is required when exchanging an authorization code",
 			"MCP OAuth device authorization failed: invalid_grant (400)",
 			"Device authorization expired after 900 seconds",
 			"authorization_pending",
+			"MCP OAuth client information is bound to authorization server https://auth-a.example and is not presented to https://auth-b.example",
+			"authorization endpoint https://auth-a.example/authorize returned 503",
 		]) {
 			expect(redactMcpText(message)).toBe(message);
 		}
