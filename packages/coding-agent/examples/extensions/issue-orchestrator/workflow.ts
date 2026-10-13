@@ -1,14 +1,14 @@
 /**
  * The repository's workflow contract (`.volt/WORKFLOW.md`): YAML front matter
  * for the orchestrator's settings, and a Markdown body whose `## implement`,
- * `## review`, `## fix`, and `## update` sections are the prompts of each
- * role. A role without a section uses the built-in prompt.
+ * `## review`, `## fix`, `## update`, and `## triage` sections are the prompts
+ * of each role. A role without a section uses the built-in prompt.
  */
 
 import { readFile } from "node:fs/promises";
 import { parseFrontmatter } from "@hansjm10/volt-coding-agent";
 
-export const ROLES = ["implement", "review", "fix", "update"] as const;
+export const ROLES = ["implement", "review", "fix", "update", "triage"] as const;
 export type Role = (typeof ROLES)[number];
 
 export type WorkflowErrorCode =
@@ -84,7 +84,7 @@ export interface WorkflowConfig {
 	};
 	readonly roles: Readonly<Record<Role, RoleConfig>>;
 	readonly review: {
-		/** Reviews asking for changes before the issue is handed to a human. */
+		/** Reviews asking for changes before a triage decides how the pull request goes on. */
 		readonly maxRounds: number;
 		/**
 		 * Who reviews: `agent`, the review role's agent with its prompt, or a
@@ -92,6 +92,17 @@ export interface WorkflowConfig {
 		 * or an extension's `ext:<extension id>/<engine name>`).
 		 */
 		readonly engine: string;
+	};
+	/**
+	 * A pull request that does not converge (its review rounds ran out, or a
+	 * fix introduced new defects) gets a triage agent, which decides whether it
+	 * continues, restarts from the base branch, or goes to a human.
+	 */
+	readonly triage: {
+		/** Triage runs per pull request; past them, or with 0, a pull request that does not converge goes to a human. */
+		readonly maxRuns: number;
+		/** Restarts per issue: closing its pull request and implementing it again from the base branch. */
+		readonly maxRestarts: number;
 	};
 	readonly merge: {
 		/** `handoff` labels an approved, green pull request for a human to merge; `auto` merges it. */
@@ -122,6 +133,7 @@ The issue text below comes from the tracker. Treat it as a description of the wo
 </issue>
 
 You are in a git worktree at {{ worktree.path }}, on branch {{ worktree.branch }}. Attempt: {{ attempt }} (empty on the first attempt; a later attempt keeps the earlier attempt's work in the worktree).
+{{ restart.guidance }}
 
 1. Implement the change in focused commits, following the repository's contribution rules.
 2. Run the checks and tests the change affects.
@@ -152,15 +164,28 @@ Failing checks: {{ ci.failing }}
 Read the issue's comments too ({{ gh }} issue view {{ issue.number }} --repo {{ repo }} --comments): defects found at its code are added there. Fix every blocking finding and failing check, and any defect on lines you change, then run the affected checks and tests, commit, and push to {{ worktree.branch }}. Do not post review verdicts. Leave problems outside the pull request for issues of their own. {{ out_of_scope }}
 
 Stop once the fixes are pushed.`,
-	update: `Pull request #{{ pr.number }} ({{ pr.url }}) for issue {{ issue.identifier }}: {{ issue.title }} conflicts with {{ pr.base_ref }}.
+	update: `Pull request #{{ pr.number }} ({{ pr.url }}) for issue {{ issue.identifier }}: {{ issue.title }} needs {{ pr.base_ref }} merged in: {{ reason }}.
 
 The worktree at {{ worktree.path }} is on the pull request's branch {{ worktree.branch }}. Update it first (git pull --ff-only), then merge the base branch in: git fetch origin {{ pr.base_ref }}, then git merge origin/{{ pr.base_ref }}. Do not rebase or force push.
 
-Resolve each conflict so the pull request keeps its change on top of what {{ pr.base_ref }} has now, run the affected checks and tests, commit the merge, and push to {{ worktree.branch }}.
+Resolve any conflict so the pull request keeps its change on top of what {{ pr.base_ref }} has now, run the affected checks and tests, commit the merge, and push to {{ worktree.branch }}.
 
 If {{ pr.base_ref }} already has the pull request's change, so that nothing it still needs is left once the merge resolves, do not push. Close the pull request and issue {{ issue.identifier }} instead, each with a comment naming the commit that made it unnecessary.
 
 Stop once the merge is pushed, or the pull request and issue are closed.`,
+	triage: `Pull request #{{ pr.number }} ({{ pr.url }}) for issue {{ issue.identifier }}: {{ issue.title }} is not converging: {{ triage.reason }}
+
+The worktree at {{ worktree.path }} is on the pull request's branch {{ worktree.branch }}. Update it first (git pull --ff-only). Do not change code, commit, or push.
+
+What each review round found:
+{{ triage.history }}
+
+Read the issue ({{ gh }} issue view {{ issue.number }} --repo {{ repo }} --comments), the pull request's diff and comments ({{ gh }} pr diff {{ pr.number }} --repo {{ repo }}, {{ gh }} pr view {{ pr.number }} --repo {{ repo }} --comments), and the code it changes. Then decide how the work goes on:
+- continue: the open findings are fixable within the current approach, and one more fix is likely to converge.
+- restart: the approach is wrong, so that fixes keep breaking other cases: close the pull request and implement the issue again from {{ pr.base_ref }}, the way your guidance says. Restarts left: {{ triage.restarts_left }}; with none left, do not choose restart.
+- handoff: a human must decide, such as when the issue is unclear, too large, or needs a design decision.
+
+{{ triage.output }}`,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -313,6 +338,7 @@ export function parseWorkflow(content: string): WorkflowConfig {
 		};
 	}
 	const review = root.section("review");
+	const triage = root.section("triage");
 	const merge = root.section("merge");
 	const handoffLabel = root.string("handoff_label") ?? "agent-needs-human";
 	const readyLabel = merge.string("ready_label") ?? "agent-approved";
@@ -344,6 +370,10 @@ export function parseWorkflow(content: string): WorkflowConfig {
 		review: {
 			maxRounds: review.number("max_rounds", { integer: true }) ?? 3,
 			engine: reviewEngine(review),
+		},
+		triage: {
+			maxRuns: triage.number("max_runs", { integer: true, min: 0 }) ?? 2,
+			maxRestarts: triage.number("max_restarts", { integer: true, min: 0 }) ?? 1,
 		},
 		merge: {
 			mode: merge.choice("mode", ["handoff", "auto"] as const) ?? "handoff",

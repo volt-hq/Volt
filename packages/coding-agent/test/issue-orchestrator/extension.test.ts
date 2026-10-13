@@ -98,6 +98,8 @@ function exec(calls: Array<{ command: string; args: string[]; cwd?: string }>, r
 			return ok(JSON.stringify({ comments: [], reviews: posted }));
 		}
 		if (line.startsWith("api repos/o/r/commits/")) return ok("1\n");
+		// The base branch changed nothing since the pull request branched.
+		if (line.startsWith("api repos/o/r/compare/")) return ok(JSON.stringify({ files: [] }));
 		return { stdout: "", stderr: `unexpected gh ${line}`, code: 1, killed: false };
 	};
 }
@@ -542,7 +544,7 @@ describe("releasing an issue's worktree", () => {
 
 	it("drops ignored build output, then removes a checkout without other changes", async () => {
 		const { path, removed, worktrees } = checkout();
-		expect(await releaseWorktree(worktrees, runGit, 12)).toBe("released");
+		expect(await releaseWorktree(worktrees, runGit, "issue-12")).toBe("released");
 		expect(existsSync(join(path, "node_modules"))).toBe(false);
 		expect(removed).toEqual(["issue-12"]);
 	});
@@ -552,28 +554,32 @@ describe("releasing an issue's worktree", () => {
 			const { path, removed, worktrees } = checkout();
 			if (change === "tracked") writeFileSync(join(path, "README.md"), "edited\n");
 			else writeFileSync(join(path, "notes.txt"), "wip\n");
-			expect(await releaseWorktree(worktrees, runGit, 12)).toBe("kept");
+			expect(await releaseWorktree(worktrees, runGit, "issue-12")).toBe("kept");
 			expect(existsSync(join(path, "node_modules", "dep", "index.js"))).toBe(true);
 			expect(removed).toEqual([]);
 		}
 	});
 
 	it("tries a held checkout again, rejects a removal that fails, and treats a gone or archived one as released", async () => {
-		expect(await releaseWorktree(checkout({ removeError: "worktree_busy" }).worktrees, runGit, 12)).toBe("retry");
+		expect(await releaseWorktree(checkout({ removeError: "worktree_busy" }).worktrees, runGit, "issue-12")).toBe(
+			"retry",
+		);
 		// For the orchestrator to try again: such as while the daemon has no room to set the checkout aside.
 		await expect(
-			releaseWorktree(checkout({ removeError: "git_failed: recovery quota is full" }).worktrees, runGit, 12),
+			releaseWorktree(checkout({ removeError: "git_failed: recovery quota is full" }).worktrees, runGit, "issue-12"),
 		).rejects.toThrow("git_failed: recovery quota is full");
-		expect(await releaseWorktree(checkout({ removeError: "worktree_dirty: changes" }).worktrees, runGit, 12)).toBe(
-			"kept",
-		);
-		expect(await releaseWorktree(checkout({ removeError: "worktree_not_found" }).worktrees, runGit, 12)).toBe(
+		expect(
+			await releaseWorktree(checkout({ removeError: "worktree_dirty: changes" }).worktrees, runGit, "issue-12"),
+		).toBe("kept");
+		expect(await releaseWorktree(checkout({ removeError: "worktree_not_found" }).worktrees, runGit, "issue-12")).toBe(
 			"released",
 		);
-		expect(await releaseWorktree({ list: async () => [], remove: async () => {} }, runGit, 12)).toBe("released");
+		expect(await releaseWorktree({ list: async () => [], remove: async () => {} }, runGit, "issue-12")).toBe(
+			"released",
+		);
 		// An archived worktree has no checkout to clean.
 		const archived = checkout({ available: false });
-		expect(await releaseWorktree(archived.worktrees, runGit, 12)).toBe("released");
+		expect(await releaseWorktree(archived.worktrees, runGit, "issue-12")).toBe("released");
 		expect(archived.removed).toEqual(["issue-12"]);
 	});
 });

@@ -39,6 +39,7 @@ const DOING_TO_PR: Readonly<Record<Exclude<Role, "implement">, string>> = {
 	review: "reviewing",
 	fix: "fixing",
 	update: "updating",
+	triage: "triaging",
 };
 
 const DOING: Readonly<Record<Role, string>> = {
@@ -46,6 +47,7 @@ const DOING: Readonly<Record<Role, string>> = {
 	review: "reviewing",
 	fix: "fixing",
 	update: "updating",
+	triage: "triaging",
 };
 
 interface Row {

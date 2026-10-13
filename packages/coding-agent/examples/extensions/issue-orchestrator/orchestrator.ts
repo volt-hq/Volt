@@ -6,22 +6,46 @@
  * phase's role in the issue's worktree, or a review of the pull request on a
  * review engine (`review.engine`), merges, or hands the issue to a human.
  * The orchestrator posts an engine's complete review with its verdict, and
- * files the review's follow-ups as issues. A run that ends wakes the loop at
- * once. An approved issue stays watched: once its pull request conflicts with
- * its base branch (another one merged), the approval is taken back and the
- * pull request updated.
+ * files the review's follow-ups as issues. From the second round on, findings
+ * the review marked pre-existing do not block a clean verdict; the human the
+ * pull request goes to gets them listed. A review that finds new defects on
+ * the lines the last fix changed marks the verdict regressed. A pull request
+ * that regressed or ran out of rounds gets a triage agent, whose decision
+ * (continue, restart from the base branch, or hand off) the orchestrator
+ * posts and carries out. An implementation waits while another issue's
+ * pull request changes the code its issue names. A run that ends wakes the
+ * loop at once. An approved issue stays watched: once its pull request
+ * conflicts with its base branch (another one merged), the approval is taken
+ * back and the pull request updated.
  *
  * Its state is in memory only. GitHub is the source of truth: after a
  * restart the next tick finds each issue's phase again, and the checkouts of
  * the issues it is done with. Bounded by:
  * concurrency limits, `agent.max_attempts` runs of one phase of one head
- * commit, exponential backoff after a failed run, and `review.max_rounds`.
+ * commit, exponential backoff after a failed run, `review.max_rounds`, and
+ * `triage.max_runs` and `triage.max_restarts`.
  */
 
 import { createHash } from "node:crypto";
-import type { Issue, PullRequest, ReviewVerdict, Tracker } from "./github.ts";
-import { reviewMarker } from "./github.ts";
-import { inspectIssue, isRoutable, issueBranch, type Phase } from "./phase.ts";
+import type {
+	ChangedLines,
+	Issue,
+	OpenPullRequest,
+	PullRequest,
+	ReviewVerdict,
+	Tracker,
+	TriageDecision,
+} from "./github.ts";
+import { restartMarker, reviewMarker, triageMarker } from "./github.ts";
+import {
+	branchCount,
+	inspectIssue,
+	isRoutable,
+	issueBranch,
+	type Phase,
+	verdictsByHead,
+	type Waived,
+} from "./phase.ts";
 import {
 	type Role,
 	type RoleLimits,
@@ -51,6 +75,10 @@ export interface Agents {
 
 /** A finding of a review, as a fixer reads it. */
 export interface ReviewFinding {
+	/** The same for the same finding in each round that keeps it open. */
+	readonly id?: string;
+	/** Whether the change introduced it: false for a defect that predates the change; unknown when undefined. */
+	readonly introduced?: boolean;
 	readonly title: string;
 	readonly body: string;
 	/** 0 (most urgent) to 3. */
@@ -72,6 +100,8 @@ export interface ReviewResult {
 	readonly error?: string;
 	/** A complete review's verdict on the head commit it reviewed; an incomplete review has none. */
 	readonly verdict?: { readonly value: ReviewVerdict; readonly headSha: string };
+	/** A complete review's open findings. */
+	readonly findings?: readonly ReviewFinding[];
 	readonly followUps: readonly ReviewFollowUp[];
 	readonly usage: { readonly tokens: number; readonly cost: number };
 }
@@ -114,9 +144,15 @@ export type ReleaseOutcome = "released" | "retry" | "kept";
 
 /** Prepares the checkout an issue's agents work in, and releases it once the orchestrator is done with the issue. */
 export interface Workspaces {
-	/** Rejects with an error whose message starts with `worktree_limit_reached` while the workspace has no room for it. */
-	prepare(issue: Issue, config: WorkflowConfig): Promise<Workspace>;
-	/** Release issue `number`'s checkout, keeping its branch; a checkout with changes is `kept`, one that fails tried again. */
+	/**
+	 * The checkout of `issue` on `branch`, its own or a restart's. Rejects with an error whose message starts
+	 * with `worktree_limit_reached` while the workspace has no room for it.
+	 */
+	prepare(issue: Issue, config: WorkflowConfig, branch: string): Promise<Workspace>;
+	/**
+	 * Release issue `number`'s checkouts, a restart's too, keeping their branches; a checkout with changes is
+	 * `kept`, one that fails tried again.
+	 */
 	release(number: number): Promise<ReleaseOutcome>;
 	/** The issues whose checkouts take room in the workspace now. */
 	checkouts(): Promise<number[]>;
@@ -300,13 +336,17 @@ function followUpComment(followUp: ReviewFollowUp, found: string): string {
 	].join("\n");
 }
 
-/** The body of a follow-up's issue: the defect, where it is, where it was found (`found`), and its fingerprint. */
-function followUpBody(followUp: ReviewFollowUp, found: string): string {
+/**
+ * The body of a follow-up's issue: the defect, where it is, where it was found (`found`), and its fingerprint.
+ * `triage` says how a human has the orchestrator work it, for one filed without the workflow's labels.
+ */
+function followUpBody(followUp: ReviewFollowUp, found: string, triage?: string): string {
 	return [
 		followUp.body,
 		"",
 		`Location: \`${location(followUp)}\` (priority P${followUp.priority}).`,
 		found,
+		...(triage === undefined ? [] : ["", triage]),
 		"",
 		`Follow-up fingerprint: ${followUp.fingerprint}`,
 		"",
@@ -324,8 +364,79 @@ const MAX_REPORTED_PROBLEMS = 10;
  */
 export const OUT_OF_SCOPE_INSTRUCTIONS = `Do not file issues yourself. End your final reply with each problem you found outside this work's scope (unrelated bugs, tech debt, wrong docs) as a JSON array between <out-of-scope> and </out-of-scope>, one object per problem: {"title": "...", "body": "what is wrong, and why it matters", "path": "repository-relative/file.ts", "startLine": 10, "endLine": 12, "priority": 2}, priority 0 (most urgent) to 3, at most ${MAX_REPORTED_PROBLEMS}. The orchestrator files each once, or adds it to the open issue already about that code. Leave the block out when there are none.`;
 
+/**
+ * How a triage agent reports its decision (`{{ triage.output }}` in its
+ * prompt), for the orchestrator to post and carry out.
+ */
+export const TRIAGE_INSTRUCTIONS =
+	'End your final reply with your decision as a JSON object between <triage> and </triage>: {"decision": "continue" | "restart" | "handoff", "diagnosis": "why the pull request is not converging, citing the findings", "guidance": "for restart, the approach the next implementation takes and what it avoids; else empty"}. The orchestrator posts it on the pull request and carries it out.';
+
+/** What a triage agent decided, as its final reply says. */
+export interface TriageReport {
+	readonly decision: TriageDecision;
+	readonly diagnosis: string;
+	/** For a restart: how the next implementation goes about the issue. */
+	readonly guidance: string;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The decision `output`, a triage agent's final reply, gives in its last `<triage>` block; else why there is none. */
+export function triageReport(output: string): TriageReport | { readonly error: string } {
+	const block = [...output.matchAll(/<triage>([\s\S]*?)<\/triage>/g)].at(-1)?.[1];
+	if (block === undefined) return { error: "the triage reply has no <triage> block" };
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(
+			block
+				.trim()
+				.replace(/^```(?:json)?\s*/, "")
+				.replace(/\s*```$/, ""),
+		);
+	} catch {
+		return { error: "the <triage> block is not JSON" };
+	}
+	const decision = isRecord(parsed) ? parsed.decision : undefined;
+	const diagnosis = isRecord(parsed) && typeof parsed.diagnosis === "string" ? parsed.diagnosis.trim() : "";
+	const guidance = isRecord(parsed) && typeof parsed.guidance === "string" ? parsed.guidance.trim() : "";
+	if (decision !== "continue" && decision !== "restart" && decision !== "handoff") {
+		return { error: "the <triage> block's decision is not continue, restart, or handoff" };
+	}
+	if (diagnosis.length === 0 || diagnosis.length > 4_000) {
+		return { error: "the <triage> block needs a diagnosis of at most 4000 characters" };
+	}
+	if (guidance.length > 4_000) return { error: "the <triage> block's guidance exceeds 4000 characters" };
+	if (decision === "restart" && guidance.length === 0) return { error: "a restart needs guidance" };
+	return { decision, diagnosis, guidance };
+}
+
+/** The comment a triage's decision is posted as, on the pull request at head commit `headSha`. */
+function triageComment(report: TriageReport, headSha: string): string {
+	return [
+		`**Triage: ${report.decision}.** ${report.diagnosis}`,
+		...(report.guidance.length === 0 ? [] : ["", `Guidance for the next implementation: ${report.guidance}`]),
+		"",
+		"_Volt issue orchestrator_",
+		triageMarker(headSha, report.decision),
+	].join("\n");
+}
+
+/** `count noun`, with the noun plural unless the count is one. */
+function counted(count: number, noun: string): string {
+	return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+/** Whether two paths name the same file, either by its base name or a tail of its path. */
+function samePath(left: string, right: string): boolean {
+	return left === right || left.endsWith(`/${right}`) || right.endsWith(`/${left}`);
+}
+
+/** The issue whose work branch `headRef` is, by the orchestrator's branch names; undefined for any other branch. */
+function branchIssue(headRef: string): number | undefined {
+	const number = /^volt\/issue-(\d+)(?:-\d+)?$/.exec(headRef)?.[1];
+	return number === undefined ? undefined : Number(number);
 }
 
 /**
@@ -389,7 +500,7 @@ export function outOfScopeProblems(output: string): { problems: ReviewFollowUp[]
 /** Where problems found by an agent of `phase` on `issue` come from, as the issues and comments say. */
 function foundBy(phase: Extract<Phase, { kind: Role }>, issue: Issue): string {
 	if (!("pr" in phase)) return `Found outside the issue's scope while working on ${issue.identifier}.`;
-	const doing = { review: "reviewing", fix: "fixing", update: "updating" }[phase.kind];
+	const doing = { review: "reviewing", fix: "fixing", update: "updating", triage: "triaging" }[phase.kind];
 	return `Found outside the change while ${doing} ${phase.pr.url} for ${issue.identifier}.`;
 }
 
@@ -422,6 +533,8 @@ export class Orchestrator {
 	private readonly filedFollowUps = new Set<string>();
 	/** Recording follow-ups, one run's at a time: two runs that end together would file the same site twice. */
 	private filing: Promise<void> = Promise.resolve();
+	/** The repository's open pull requests, read once a tick when an implementation is due. */
+	private openPullRequests: Promise<OpenPullRequest[]> | undefined;
 	private readonly finished: NotedIssue[] = [];
 	private totals = { runs: 0, tokens: 0, cost: 0 };
 	private signal: AbortSignal | undefined;
@@ -487,6 +600,7 @@ export class Orchestrator {
 	async tick(): Promise<void> {
 		this.lastTickAt = this.now();
 		this.woken = false;
+		this.openPullRequests = undefined;
 		const previous = this.error;
 		const fail = (message: string): void => {
 			this.error = message;
@@ -590,14 +704,30 @@ export class Orchestrator {
 			case "wait":
 				note(phase.reason);
 				return;
-			case "handoff":
-				await this.handOff(tracker, config, issue, phase.label, phase.reason, phase.pr);
+			case "handoff": {
+				const waived = phase.waived === undefined ? "" : await this.waivedText(phase.waived);
+				await this.handOff(tracker, config, issue, phase.label, `${phase.reason}${waived}`, phase.pr);
+				return;
+			}
+			case "restart":
+				await this.restart(tracker, config, issue, phase, note);
 				return;
 			case "merge":
 				try {
 					await tracker.merge(phase.pr.number, config.merge.method);
 					this.log(`#${issue.number}: merged pull request #${phase.pr.number}`);
 					this.finish(issue, `merged pull request #${phase.pr.number}`);
+					if (phase.waived !== undefined) {
+						const waived = await this.waivedText(phase.waived);
+						await tracker
+							.comment(
+								issue.number,
+								`Merged pull request #${phase.pr.number}.${waived}\n\n_Volt issue orchestrator_`,
+							)
+							.catch((error: unknown) =>
+								this.log(`#${issue.number}: listing the waived findings failed: ${errorText(error)}`),
+							);
+					}
 				} catch (error) {
 					await this.handOff(
 						tracker,
@@ -610,7 +740,8 @@ export class Orchestrator {
 				}
 				return;
 			default: {
-				const key = `${issue.number}:${phase.kind}:${"pr" in phase ? phase.pr.headSha : "-"}`;
+				// An implementation is attempted per branch: a restart's starts its own count.
+				const key = `${issue.number}:${phase.kind}:${"pr" in phase ? phase.pr.headSha : phase.branch}`;
 				const attempts = this.attempts.get(key) ?? 0;
 				if (attempts >= config.agent.maxAttempts) {
 					await this.handOff(
@@ -631,6 +762,10 @@ export class Orchestrator {
 					busy.filter((entry) => entry.role === phase.kind).length >= role.maxConcurrent
 				) {
 					return note(`waiting for a free ${phase.kind} slot`);
+				}
+				if (phase.kind === "implement") {
+					const blocker = await this.sameCode(tracker, issue);
+					if (blocker !== undefined) return note(blocker);
 				}
 				this.dispatch(tracker, config, issue, phase, key, attempts);
 			}
@@ -706,19 +841,23 @@ export class Orchestrator {
 		entry: RunningEntry,
 	): Promise<AgentRun> {
 		const role = config.roles[phase.kind];
+		const branch = "pr" in phase ? phase.pr.headRef : phase.branch;
 		let workspace: Workspace;
 		try {
-			workspace = await this.options.workspaces.prepare(issue, config);
+			workspace = await this.options.workspaces.prepare(issue, config, branch);
 		} catch (error) {
 			// The workspace may be full of checkouts of issues done with that this orchestrator does not know of.
 			if (errorText(error).startsWith("worktree_limit_reached")) this.sweepDue = true;
 			throw new Error(`setting up the checkout failed: ${errorText(error)}`);
 		}
 		const findings =
-			phase.kind === "fix" && phase.runId !== undefined ? await this.findingsText(phase.runId) : undefined;
+			phase.kind === "fix" && phase.runId !== undefined
+				? await this.findingsText(phase.runId, phase.round)
+				: undefined;
+		const history = phase.kind === "triage" ? await this.triageHistory(tracker, phase.pr) : undefined;
 		const task = renderTemplate(
 			role.prompt,
-			this.variables(tracker, config, issue, phase, workspace, attempts, findings),
+			this.variables(tracker, config, issue, phase, workspace, attempts, findings, history),
 		);
 		if (entry.cancelled) throw new Error("stopped before it started");
 		const run = await this.options.agents.start({
@@ -733,7 +872,11 @@ export class Orchestrator {
 		};
 	}
 
-	/** Record the problems a finished agent reports outside its work, as a review's follow-ups are. */
+	/**
+	 * Record the problems a finished agent reports outside its work, as a
+	 * review's follow-ups are. A triage's decision is posted on the pull request
+	 * for the next tick to carry out; a triage that gives none failed.
+	 */
 	private async concludeAgent(
 		tracker: Tracker,
 		config: WorkflowConfig,
@@ -741,7 +884,21 @@ export class Orchestrator {
 		phase: Extract<Phase, { kind: Role }>,
 		result: AgentResult,
 	): Promise<AgentResult> {
-		if (result.status !== "completed" || result.output === undefined) return result;
+		if (result.status !== "completed" || result.output === undefined) {
+			return phase.kind === "triage" && result.status === "completed"
+				? { ...result, status: "failed", error: "the triage gave no reply" }
+				: result;
+		}
+		if (phase.kind === "triage") {
+			const decision = triageReport(result.output);
+			if ("error" in decision) return { ...result, status: "failed", error: decision.error };
+			try {
+				await tracker.comment(phase.pr.number, triageComment(decision, phase.pr.headSha));
+			} catch (error) {
+				return { ...result, status: "failed", error: `posting the triage failed: ${errorText(error)}` };
+			}
+			this.log(`#${issue.number}: triage decided ${decision.decision} for pull request #${phase.pr.number}`);
+		}
 		const report = outOfScopeProblems(result.output);
 		for (const error of report.errors) this.log(`#${issue.number}: the ${phase.kind} agent's report: ${error}`);
 		await this.recordFollowUps(tracker, config, issue, foundBy(phase, issue), report.problems);
@@ -772,7 +929,7 @@ export class Orchestrator {
 		});
 		return {
 			id: run.id,
-			ended: run.ended.then((result) => this.concludeReview(tracker, config, issue, phase.pr, run.id, result)),
+			ended: run.ended.then((result) => this.concludeReview(tracker, config, issue, phase, run.id, result)),
 		};
 	}
 
@@ -780,15 +937,23 @@ export class Orchestrator {
 	 * Post a complete review to its pull request, ending with the verdict the
 	 * next tick reads, then file its follow-ups. An incomplete review gives no
 	 * verdict: the run failed, and is tried again.
+	 *
+	 * From the second round on, a review whose open findings (P0 to P2) all
+	 * predate the change is posted clean: the first round's fix had its chance
+	 * at them, and they are listed for the human the pull request goes to. A
+	 * review that still asks for changes counts the new findings the change
+	 * introduced on lines the last fix changed: the fix made it worse, which
+	 * sends the pull request to a triage.
 	 */
 	private async concludeReview(
 		tracker: Tracker,
 		config: WorkflowConfig,
 		issue: Issue,
-		pr: PullRequest,
+		phase: Extract<Phase, { kind: "review" }>,
 		runId: string,
 		result: ReviewResult,
 	): Promise<AgentResult> {
+		const pr = phase.pr;
 		const usage = result.usage;
 		if (result.status !== "completed") {
 			return { status: result.status, ...(result.error === undefined ? {} : { error: result.error }), usage };
@@ -801,16 +966,45 @@ export class Orchestrator {
 				usage,
 			};
 		}
+		const open = (result.findings ?? []).filter((finding) => finding.priority <= 2);
+		const waived =
+			verdict.value === "changes" && phase.round > 1 && open.length > 0 && open.every((f) => f.introduced === false)
+				? open.length
+				: 0;
+		const value: ReviewVerdict = waived > 0 ? "clean" : verdict.value;
+		const regressed =
+			value === "changes" && phase.previousRunId !== undefined && phase.previousHeadSha !== undefined
+				? await this.regressions(tracker, issue, phase.previousRunId, phase.previousHeadSha, verdict.headSha, open)
+				: 0;
+		const notes = [
+			...(waived > 0
+				? [
+						`The issue orchestrator does not block on this review's ${counted(waived, "finding")}: each predates the change, and round ${phase.round - 1} had its chance at them. They are listed for the maintainer.`,
+					]
+				: []),
+			...(regressed > 0
+				? [
+						`${counted(regressed, "finding")} of this review ${regressed === 1 ? "is a new defect" : "are new defects"} on lines the last fix changed.`,
+					]
+				: []),
+		];
+		const marker = reviewMarker(verdict.headSha, value, runId, { waived, regressed });
 		try {
 			await this.options.reviews.publish(runId, {
-				trailer: reviewMarker(verdict.headSha, verdict.value, runId),
+				trailer: notes.length === 0 ? marker : `${notes.join("\n\n")}\n\n${marker}`,
 				command: config.ghCommand,
 			});
 		} catch (error) {
 			// Such as when the pull request moved on since: its new head is reviewed next.
 			return { status: "failed", error: `posting the review failed: ${errorText(error)}`, usage };
 		}
-		this.log(`#${issue.number}: posted the review (${verdict.value}) on pull request #${pr.number}`);
+		const counts = [
+			...(waived > 0 ? [`${waived} pre-existing waived`] : []),
+			...(regressed > 0 ? [`${regressed} regressed`] : []),
+		];
+		this.log(
+			`#${issue.number}: posted the review (${value}${counts.length === 0 ? "" : `, ${counts.join(", ")}`}) on pull request #${pr.number}`,
+		);
 		const found = `Found outside the change while reviewing ${pr.url} for ${issue.identifier}.`;
 		await this.recordFollowUps(tracker, config, issue, found, result.followUps);
 		return { status: "completed", usage };
@@ -837,8 +1031,10 @@ export class Orchestrator {
 	 * the code of an open issue the workflow works, other than `issue` (whose
 	 * pull request closes it), is added to that issue as a comment, for its
 	 * agents to address with it. Anything else is filed as an issue of its
-	 * own, labeled `tracker.filed_label` besides the workflow's labels. One
-	 * that fails is logged; a later run may report it again.
+	 * own, labeled `tracker.filed_label` besides the workflow's labels; but one
+	 * found while working an issue an agent filed gets only `tracker.filed_label`,
+	 * so a human decides whether the chain goes on. One that fails is logged; a
+	 * later run may report it again.
 	 */
 	private async fileFollowUps(
 		tracker: Tracker,
@@ -848,6 +1044,10 @@ export class Orchestrator {
 		followUps: readonly ReviewFollowUp[],
 	): Promise<void> {
 		let sites: IssueSite[] | undefined;
+		const chained = issue.labels.includes(config.tracker.filedLabel.toLowerCase());
+		const triage = chained
+			? `Filed without ${config.tracker.labels.map((label) => `\`${label}\``).join(" and ")}: it was found while working an issue an agent filed, so a human decides whether to have it worked by adding ${config.tracker.labels.length === 1 ? "that label" : "those labels"}.`
+			: undefined;
 		for (const followUp of followUps) {
 			if (this.filedFollowUps.has(followUp.fingerprint)) continue;
 			try {
@@ -864,8 +1064,10 @@ export class Orchestrator {
 					} else {
 						const filed = await tracker.fileIssue({
 							title: followUp.title,
-							body: followUpBody(followUp, found),
-							labels: [...config.tracker.labels, config.tracker.filedLabel],
+							body: followUpBody(followUp, found, triage),
+							labels: chained
+								? [config.tracker.filedLabel]
+								: [...config.tracker.labels, config.tracker.filedLabel],
 						});
 						sites.push({
 							issue: filed.number,
@@ -883,8 +1085,12 @@ export class Orchestrator {
 		}
 	}
 
-	/** The open findings of review `runId`, for a fixer's prompt; undefined when there are none to give. */
-	private async findingsText(runId: string): Promise<string | undefined> {
+	/**
+	 * The open findings of review `runId`, for the fixer of round `round`'s
+	 * prompt; undefined when there are none to give. From the second round on,
+	 * the ones that predate the change no longer block it.
+	 */
+	private async findingsText(runId: string, round: number): Promise<string | undefined> {
 		let findings: ReviewFinding[] | undefined;
 		try {
 			findings = await this.options.reviews.findings(runId);
@@ -893,15 +1099,186 @@ export class Orchestrator {
 			return undefined;
 		}
 		if (findings === undefined || findings.length === 0) return undefined;
+		const optional = round > 1 && findings.some((finding) => finding.introduced === false);
 		return [
 			"The review's open findings:",
 			...findings.map((finding) =>
 				[
-					`- [P${finding.priority}] ${finding.title} (${location(finding)})`,
+					`- [P${finding.priority}] ${finding.title} (${location(finding)})${finding.introduced === false ? " (pre-existing)" : ""}`,
 					...finding.body.split("\n").map((line) => (line.length === 0 ? "" : `  ${line}`)),
 				].join("\n"),
 			),
+			...(optional
+				? [
+						"",
+						"Findings marked pre-existing predate the change and no longer block it: fix them only where that is small and safe, and never at the cost of the others.",
+					]
+				: []),
 		].join("\n");
+	}
+
+	/**
+	 * How many of `findings`, the open ones of a review that asked for changes,
+	 * are new defects the change introduced on lines the fix since
+	 * `previousHeadSha` (which review `previousRunId` reviewed) changed. Zero
+	 * when that review's findings or the diff cannot be read.
+	 */
+	private async regressions(
+		tracker: Tracker,
+		issue: Issue,
+		previousRunId: string,
+		previousHeadSha: string,
+		headSha: string,
+		findings: readonly ReviewFinding[],
+	): Promise<number> {
+		try {
+			const previous = await this.options.reviews.findings(previousRunId);
+			// The conversation no longer holds the previous round: what is new cannot be told.
+			if (previous === undefined) return 0;
+			const known = new Set(previous.flatMap((finding) => (finding.id === undefined ? [] : [finding.id])));
+			const fresh = findings.filter(
+				(finding) => finding.introduced !== false && finding.id !== undefined && !known.has(finding.id),
+			);
+			if (fresh.length === 0) return 0;
+			const changed: ChangedLines = await tracker.changedLines(previousHeadSha, headSha);
+			return fresh.filter((finding) =>
+				[...changed].some(
+					([path, ranges]) =>
+						samePath(path, finding.path) &&
+						ranges.some((range) => range.startLine <= finding.endLine && finding.startLine <= range.endLine),
+				),
+			).length;
+		} catch (error) {
+			this.log(`#${issue.number}: telling the review's new defects from the fix's failed: ${errorText(error)}`);
+			return 0;
+		}
+	}
+
+	/** Each review round of pull request `pr`, with its verdict and the findings the conversation still holds, for a triage. */
+	private async triageHistory(tracker: Tracker, pr: PullRequest): Promise<string> {
+		const lines: string[] = [];
+		let round = 0;
+		for (const verdict of verdictsByHead((await tracker.markers(pr.number)).verdicts)) {
+			const merge = await tracker.isMergeCommit(verdict.headSha);
+			const counts = [
+				...(verdict.waived ? [`${verdict.waived} pre-existing, not blocking`] : []),
+				...(verdict.regressed ? [`${verdict.regressed} new on lines the fix before it changed`] : []),
+			];
+			lines.push(
+				`- ${merge ? "After merging the base branch in" : `Round ${++round}`} (head ${verdict.headSha.slice(0, 12)}): ${verdict.verdict}${counts.length === 0 ? "" : ` (${counts.join("; ")})`}`,
+			);
+			if (verdict.runId === undefined) continue;
+			const findings = await this.options.reviews.findings(verdict.runId).catch(() => undefined);
+			for (const finding of findings ?? []) {
+				lines.push(
+					`  - [P${finding.priority}] ${finding.title} (${location(finding)})${finding.introduced === false ? ", pre-existing" : ""}`,
+				);
+			}
+		}
+		return lines.length === 0 ? "No review verdicts." : lines.join("\n");
+	}
+
+	/** The pre-existing findings a clean verdict did not block on, listed for the human the pull request goes to. */
+	private async waivedText(waived: Waived): Promise<string> {
+		const findings =
+			waived.runId === undefined
+				? undefined
+				: await this.options.reviews.findings(waived.runId).catch(() => undefined);
+		const listed = (findings ?? []).filter((finding) => finding.introduced === false);
+		const lead = `\n\nThe review did not block on ${counted(waived.count, "finding")} that predate${waived.count === 1 ? "s" : ""} the change`;
+		if (listed.length === 0) return `${lead}; the review on the pull request lists them.`;
+		return `${lead}:\n${listed.map((finding) => `- [P${finding.priority}] ${finding.title} (${location(finding)})`).join("\n")}`;
+	}
+
+	/**
+	 * Carry out a triage's restart of `issue`: record it on the issue, with the
+	 * triage's guidance and the branch the next implementation takes, then
+	 * close the pull request and release its checkout. A restart already
+	 * recorded for the pull request (closing it failed) only closes it. Past
+	 * `triage.max_restarts`, the issue goes to a human instead.
+	 */
+	private async restart(
+		tracker: Tracker,
+		config: WorkflowConfig,
+		issue: Issue,
+		phase: Extract<Phase, { kind: "restart" }>,
+		note: (reason: string) => void,
+	): Promise<void> {
+		const pr = phase.pr;
+		const base = pr.baseRef || "the base branch";
+		try {
+			const restarts = await tracker.restarts(issue.number);
+			if (!restarts.some((restart) => restart.pr === pr.number)) {
+				if (restarts.length >= config.triage.maxRestarts) {
+					await this.handOff(
+						tracker,
+						config,
+						issue,
+						config.handoffLabel,
+						`A triage asked to restart pull request #${pr.number}, but the issue was restarted ${counted(restarts.length, "time")} already (triage.max_restarts).\n\n${phase.triage.text}`,
+						pr,
+					);
+					return;
+				}
+				const branch = issueBranch(issue.number, branchCount(issue.number, pr.headRef) + 1);
+				await tracker.comment(
+					issue.number,
+					[
+						`Restarting this issue from ${base} on \`${branch}\`: a triage closed pull request #${pr.number}.`,
+						"",
+						phase.triage.text,
+						"",
+						restartMarker(branch, pr.number),
+					].join("\n"),
+				);
+			}
+			await tracker.closePullRequest(
+				pr.number,
+				`A triage restarts ${issue.identifier} from ${base} on a new branch: ${issue.url}\n\n_Volt issue orchestrator_`,
+			);
+		} catch (error) {
+			note(`restarting failed, trying again: ${errorText(error)}`);
+			this.log(`#${issue.number}: restarting failed: ${errorText(error)}`);
+			return;
+		}
+		this.log(`#${issue.number}: closed pull request #${pr.number} and restarted the issue from ${base}`);
+		// The closed pull request's checkout is done with; the next implementation gets one of its own.
+		this.pendingReleases.set(issue.number, { title: issue.title });
+		this.wake();
+	}
+
+	/**
+	 * Why `issue`'s implementation waits, when another issue's work changes the
+	 * code `issue` names (`path:line` sites in its text): an implementation of
+	 * it running now, or its open pull request. Undefined when nothing does, or
+	 * when the open pull requests cannot be read.
+	 */
+	private async sameCode(tracker: Tracker, issue: Issue): Promise<string | undefined> {
+		const paths = [...new Set(issueSites(issue.number, issue.body).map((site) => site.path))];
+		if (paths.length === 0) return undefined;
+		const named = (path: string): boolean => paths.some((site) => samePath(site, path));
+		for (const entry of this.running.values()) {
+			if (entry.issue.number === issue.number || entry.role !== "implement") continue;
+			const site = issueSites(entry.issue.number, entry.issue.body).find((other) => named(other.path));
+			if (site !== undefined) return `waiting for #${entry.issue.number}, whose implementation changes ${site.path}`;
+		}
+		let open: OpenPullRequest[];
+		try {
+			this.openPullRequests ??= tracker.openPullRequests();
+			open = await this.openPullRequests;
+		} catch (error) {
+			// Said once a tick: the issues after this one go ahead too.
+			this.openPullRequests = Promise.resolve([]);
+			this.log(`listing the open pull requests failed: ${errorText(error)}`);
+			return undefined;
+		}
+		for (const pr of open) {
+			const other = branchIssue(pr.headRef);
+			if (other === undefined || other === issue.number) continue;
+			const file = pr.files.find(named);
+			if (file !== undefined) return `waiting for #${other}, whose pull request #${pr.number} changes ${file}`;
+		}
+		return undefined;
 	}
 
 	private ended(entry: RunningEntry, result: AgentResult, config: WorkflowConfig): void {
@@ -1124,8 +1501,11 @@ export class Orchestrator {
 		workspace: Workspace,
 		attempts: number,
 		findings: string | undefined,
+		history: string | undefined,
 	): Record<string, TemplateValue> {
 		const pr = "pr" in phase ? phase.pr : undefined;
+		const restart = phase.kind === "implement" ? phase.restart : undefined;
+		const restartsLeft = Math.max(0, config.triage.maxRestarts - (branchCount(issue.number, workspace.branch) - 1));
 		return {
 			issue: {
 				number: issue.number,
@@ -1156,6 +1536,19 @@ export class Orchestrator {
 				findings: findings ?? null,
 			},
 			ci: { failing: "failing" in phase ? [...phase.failing] : [] },
+			restart: {
+				previous_pr: restart?.previousPr ?? null,
+				guidance:
+					restart === undefined
+						? null
+						: `This is a fresh start from the base branch: a triage closed the previous attempt, pull request #${restart.previousPr}, because its approach did not converge. Take the approach the triage gives instead of repeating that one:\n\n${restart.guidance}`,
+			},
+			triage: {
+				reason: phase.kind === "triage" ? phase.reason : null,
+				history: history ?? null,
+				output: TRIAGE_INSTRUCTIONS,
+				restarts_left: restartsLeft,
+			},
 		};
 	}
 

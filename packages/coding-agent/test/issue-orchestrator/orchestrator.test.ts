@@ -7,14 +7,22 @@
 
 import { describe, expect, it, vi } from "vitest";
 import {
+	type ChangedLines,
 	type ChecksState,
 	type FiledIssue,
 	type Issue,
+	type OpenPullRequest,
 	type PullRequest,
+	type PullRequestMarkers,
+	parseRestartMarkers,
 	parseReviewMarkers,
+	parseTriageMarkers,
+	type RestartMarker,
 	type ReviewMarker,
 	reviewMarker,
 	type Tracker,
+	type TriageMarker,
+	triageMarker,
 } from "../../examples/extensions/issue-orchestrator/github.ts";
 import {
 	type AgentResult,
@@ -26,9 +34,16 @@ import {
 	type ReviewFinding,
 	type ReviewResult,
 	type Reviews,
+	triageReport,
 	type Workspaces,
 } from "../../examples/extensions/issue-orchestrator/orchestrator.ts";
-import { decidePhase, issueBranch } from "../../examples/extensions/issue-orchestrator/phase.ts";
+import {
+	branchCount,
+	decidePhase,
+	type IssueState,
+	issueBranch,
+	issueWorktree,
+} from "../../examples/extensions/issue-orchestrator/phase.ts";
 import { parseWorkflow, type WorkflowConfig } from "../../examples/extensions/issue-orchestrator/workflow.ts";
 
 const LABEL = "agent-ready";
@@ -64,6 +79,17 @@ class FakeGitHub implements Tracker {
 	readonly issues = new Map<number, Issue>();
 	readonly prs = new Map<string, PullRequest>();
 	readonly verdicts = new Map<number, ReviewMarker[]>();
+	/** Triage decisions posted on each pull request. */
+	readonly triages = new Map<number, TriageMarker[]>();
+	/** Restarts recorded on each issue. */
+	readonly restartsOf = new Map<number, RestartMarker[]>();
+	/** The lines a fix changed, by `<from>..<to>`. */
+	readonly diffs = new Map<string, ChangedLines>();
+	/** The files the base branch changed under each pull request. */
+	readonly stale = new Map<number, string[]>();
+	/** The files each pull request changes. */
+	readonly files = new Map<number, string[]>();
+	readonly closed: Array<{ pr: number; comment: string }> = [];
 	readonly checkStates = new Map<number, ChecksState>();
 	readonly merged: number[] = [];
 	readonly handoffs: Array<{ issue: number; label: string; comment: string }> = [];
@@ -104,16 +130,19 @@ class FakeGitHub implements Tracker {
 	 * opening its pull request first. An updater pushes a `merge` of the base
 	 * branch, which resolves the conflict.
 	 */
-	push(number: number, options: { merge?: boolean } = {}): PullRequest {
-		const branch = issueBranch(number);
+	push(number: number, options: { merge?: boolean; branch?: string } = {}): PullRequest {
+		const branch = options.branch ?? issueBranch(number);
 		const existing = this.prs.get(branch);
 		this.commits += 1;
+		// A restart's pull request is numbered past the first's.
+		const prNumber = 100 * branchCount(number, branch) + number;
 		const pr: PullRequest = existing
 			? { ...existing, headSha: sha(this.commits), mergeable: "mergeable" }
 			: {
-					number: 100 + number,
-					url: `https://github.com/o/r/pull/${100 + number}`,
+					number: prNumber,
+					url: `https://github.com/o/r/pull/${prNumber}`,
 					state: "open",
+					headRef: branch,
 					headSha: sha(this.commits),
 					draft: false,
 					baseRef: "main",
@@ -157,8 +186,26 @@ class FakeGitHub implements Tracker {
 	async pullRequest(branch: string): Promise<PullRequest | undefined> {
 		return this.prs.get(branch);
 	}
-	async reviews(number: number): Promise<ReviewMarker[]> {
-		return this.verdicts.get(number) ?? [];
+	async markers(number: number): Promise<PullRequestMarkers> {
+		return { verdicts: this.verdicts.get(number) ?? [], triages: this.triages.get(number) ?? [] };
+	}
+	async restarts(number: number): Promise<RestartMarker[]> {
+		return this.restartsOf.get(number) ?? [];
+	}
+	async changedLines(from: string, to: string): Promise<ChangedLines> {
+		return this.diffs.get(`${from}..${to}`) ?? new Map();
+	}
+	async staleFiles(pr: PullRequest): Promise<string[]> {
+		return this.stale.get(pr.number) ?? [];
+	}
+	async openPullRequests(): Promise<OpenPullRequest[]> {
+		return [...this.prs.values()]
+			.filter((pr) => pr.state === "open")
+			.map((pr) => ({ number: pr.number, headRef: pr.headRef, files: this.files.get(pr.number) ?? [] }));
+	}
+	async closePullRequest(number: number, comment: string): Promise<void> {
+		this.closed.push({ pr: number, comment });
+		for (const [branch, pr] of this.prs) if (pr.number === number) this.prs.set(branch, { ...pr, state: "closed" });
 	}
 	async checks(number: number): Promise<ChecksState> {
 		return this.checkStates.get(number) ?? { state: "passing" };
@@ -177,8 +224,14 @@ class FakeGitHub implements Tracker {
 		if (current) this.setLabels(issue, [...current.labels, label]);
 		return true;
 	}
+	/** A comment on an issue or a pull request; the markers in it count, as the review author posted them. */
 	async comment(issue: number, body: string): Promise<void> {
 		this.comments.push({ issue, body });
+		const at = `c${this.comments.length}`;
+		const triages = parseTriageMarkers(body, at);
+		if (triages.length > 0) this.triages.set(issue, [...(this.triages.get(issue) ?? []), ...triages]);
+		const restarts = parseRestartMarkers(body, at);
+		if (restarts.length > 0) this.restartsOf.set(issue, [...(this.restartsOf.get(issue) ?? []), ...restarts]);
 	}
 	async fileIssue(issue: { title: string; body: string; labels: readonly string[] }): Promise<FiledIssue> {
 		this.filed.push(issue);
@@ -314,14 +367,14 @@ function fakeWorkspaces(): Workspaces & {
 		failPrepare: undefined as string | undefined,
 		failRelease: undefined as string | undefined,
 		outcomes: [] as ReleaseOutcome[],
-		prepare: async (issue: Issue) => {
+		prepare: async (issue: Issue, _config: WorkflowConfig, branch: string) => {
 			if (workspaces.failPrepare !== undefined) throw new Error(workspaces.failPrepare);
 			if (!workspaces.held.has(issue.number) && workspaces.held.size >= workspaces.capacity) {
 				throw new Error("worktree_limit_reached");
 			}
 			workspaces.prepared.push(issue.number);
 			workspaces.held.add(issue.number);
-			return { path: `/worktrees/issue-${issue.number}`, branch: issueBranch(issue.number) };
+			return { path: `/worktrees/${issueWorktree(issue.number, branchCount(issue.number, branch))}`, branch };
 		},
 		release: async (number: number): Promise<ReleaseOutcome> => {
 			workspaces.releases.push(number);
@@ -475,7 +528,10 @@ describe("issue orchestrator", () => {
 	});
 
 	it("fixes failing checks, waits for running ones, and stops after the review rounds", async () => {
-		const { github, orchestrator, runs, finish, agents, announced } = setup(workflow("review:\n  max_rounds: 2"));
+		// Without triage, a pull request that ran out of rounds goes straight to a human.
+		const { github, orchestrator, runs, finish, agents, announced } = setup(
+			workflow("review:\n  max_rounds: 2\ntriage:\n  max_runs: 0"),
+		);
 		github.addIssue(12);
 		const pr = github.push(12);
 		github.review(12, "clean");
@@ -1165,6 +1221,7 @@ describe("issue orchestrator", () => {
 			number: 7,
 			url: "u",
 			state: "open",
+			headRef: "volt/issue-12",
 			headSha: sha(2),
 			draft: false,
 			baseRef: "main",
@@ -1175,59 +1232,59 @@ describe("issue orchestrator", () => {
 			verdict: value,
 			createdAt: String(head),
 		});
-		expect(decidePhase(config, { ...issue, open: false }, pr, [], undefined)).toMatchObject({ kind: "done" });
-		expect(decidePhase(config, issue, undefined, [], undefined)).toEqual({ kind: "implement" });
-		expect(decidePhase(config, issue, { ...pr, state: "merged" }, [], undefined)).toMatchObject({ kind: "done" });
-		expect(decidePhase(config, issue, { ...pr, state: "closed" }, [], undefined)).toMatchObject({ kind: "wait" });
-		expect(decidePhase(config, issue, pr, [verdict(1, "changes")], undefined)).toEqual({
-			kind: "review",
-			pr,
-			round: 2,
-		});
-		expect(decidePhase(config, issue, pr, [verdict(2, "clean")], { state: "passing" })).toEqual({
-			kind: "merge",
-			pr,
-		});
-		expect(
-			decidePhase(config, issue, { ...pr, draft: true }, [verdict(2, "clean")], { state: "passing" }),
-		).toMatchObject({
+		const decide = (
+			at: PullRequest | undefined,
+			verdicts: ReviewMarker[],
+			checks?: ChecksState,
+			extra: Partial<IssueState> = {},
+			on: Issue = issue,
+		) =>
+			decidePhase(config, on, {
+				branch: "volt/issue-12",
+				verdicts,
+				triages: [],
+				...(at === undefined ? {} : { pr: at }),
+				...(checks === undefined ? {} : { checks }),
+				...extra,
+			});
+		expect(decide(pr, [], undefined, {}, { ...issue, open: false })).toMatchObject({ kind: "done" });
+		expect(decide(undefined, [])).toEqual({ kind: "implement", branch: "volt/issue-12" });
+		expect(decide({ ...pr, state: "merged" }, [])).toMatchObject({ kind: "done" });
+		expect(decide({ ...pr, state: "closed" }, [])).toMatchObject({ kind: "wait" });
+		expect(decide(pr, [verdict(1, "changes")])).toEqual({ kind: "review", pr, round: 2 });
+		expect(decide(pr, [verdict(2, "clean")], { state: "passing" })).toEqual({ kind: "merge", pr });
+		expect(decide({ ...pr, draft: true }, [verdict(2, "clean")], { state: "passing" })).toMatchObject({
 			kind: "handoff",
 			reason: "Pull request #7 is a draft.",
 		});
-		expect(decidePhase(config, issue, pr, [verdict(2, "clean")], { state: "none" })).toMatchObject({
+		expect(decide(pr, [verdict(2, "clean")], { state: "none" })).toMatchObject({
 			kind: "handoff",
 			reason: "Pull request #7 was approved, but no CI checks ran on it.",
 		});
 		// A conflict comes first; a review of a head that merged the base in is not a round.
-		expect(decidePhase(config, issue, { ...pr, mergeable: "conflicting" }, [verdict(2, "clean")], undefined)).toEqual(
-			{
-				kind: "update",
-				pr: { ...pr, mergeable: "conflicting" },
-				reason: "pull request #7 conflicts with main",
-			},
-		);
-		expect(decidePhase(config, issue, pr, [verdict(1, "changes"), verdict(2, "changes")], undefined)).toMatchObject({
-			kind: "fix",
-			round: 2,
+		expect(decide({ ...pr, mergeable: "conflicting" }, [verdict(2, "clean")])).toEqual({
+			kind: "update",
+			pr: { ...pr, mergeable: "conflicting" },
+			reason: "pull request #7 conflicts with main",
 		});
+		expect(decide(pr, [verdict(1, "changes"), verdict(2, "changes")])).toMatchObject({ kind: "fix", round: 2 });
 		expect(
-			decidePhase(config, issue, pr, [verdict(1, "changes"), verdict(2, "changes")], undefined, new Set([sha(2)])),
+			decide(pr, [verdict(1, "changes"), verdict(2, "changes")], undefined, { updates: new Set([sha(2)]) }),
 		).toMatchObject({ kind: "fix", round: 1 });
 		// Approved and green, but GitHub has yet to say it merges cleanly.
-		expect(
-			decidePhase(config, issue, { ...pr, mergeable: "unknown" }, [verdict(2, "clean")], { state: "passing" }),
-		).toEqual({ kind: "wait", reason: "GitHub is still checking whether pull request #7 merges cleanly" });
-		// A review follows the latest round a review engine gave; a fix gets the review that asked for it.
-		expect(
-			decidePhase(
-				config,
-				issue,
-				pr,
-				[{ ...verdict(0, "changes"), runId: "review-1" }, verdict(1, "changes")],
-				undefined,
-			),
-		).toEqual({ kind: "review", pr, round: 3, previousRunId: "review-1" });
-		expect(decidePhase(config, issue, pr, [{ ...verdict(2, "changes"), runId: "review-2" }], undefined)).toEqual({
+		expect(decide({ ...pr, mergeable: "unknown" }, [verdict(2, "clean")], { state: "passing" })).toEqual({
+			kind: "wait",
+			reason: "GitHub is still checking whether pull request #7 merges cleanly",
+		});
+		// A review follows the latest round a review engine gave, and knows the head it reviewed; a fix gets the review that asked for it.
+		expect(decide(pr, [{ ...verdict(0, "changes"), runId: "review-1" }, verdict(1, "changes")])).toEqual({
+			kind: "review",
+			pr,
+			round: 3,
+			previousRunId: "review-1",
+			previousHeadSha: sha(0),
+		});
+		expect(decide(pr, [{ ...verdict(2, "changes"), runId: "review-2" }])).toEqual({
 			kind: "fix",
 			pr,
 			round: 1,
@@ -1236,8 +1293,400 @@ describe("issue orchestrator", () => {
 			runId: "review-2",
 		});
 		// A short head in a verdict matches the full head.
+		expect(decide(pr, [{ ...verdict(2, "changes"), headSha: sha(2).slice(0, 12) }])).toMatchObject({
+			kind: "fix",
+			round: 1,
+		});
+	});
+
+	it("sends a pull request that does not converge to a triage, and carries out its decision", () => {
+		const config = workflow("review:\n  max_rounds: 2");
+		const issue = new FakeGitHub().addIssue(12);
+		const pr: PullRequest = {
+			number: 7,
+			url: "u",
+			state: "open",
+			headRef: "volt/issue-12",
+			headSha: sha(2),
+			draft: false,
+			baseRef: "main",
+			mergeable: "mergeable",
+		};
+		const changes = (head: number, regressed?: number): ReviewMarker => ({
+			headSha: sha(head),
+			verdict: "changes",
+			createdAt: String(head),
+			...(regressed === undefined ? {} : { regressed }),
+		});
+		const triage = (head: number, decision: TriageMarker["decision"]): TriageMarker => ({
+			headSha: sha(head),
+			decision,
+			createdAt: `t${head}`,
+			text: `**Triage: ${decision}.** Why.`,
+		});
+		const decide = (verdicts: ReviewMarker[], triages: TriageMarker[] = [], extra: Partial<IssueState> = {}) =>
+			decidePhase(config, issue, { branch: "volt/issue-12", pr, verdicts, triages, ...extra });
+
+		// A fix that introduced new defects goes to a triage at once, whatever the rounds left.
+		expect(decide([changes(1), changes(2, 1)])).toEqual({
+			kind: "triage",
+			pr,
+			round: 2,
+			reason: "the last fix introduced 1 new defect on the lines it changed, which the review found",
+		});
+		// So does a pull request that ran out of rounds.
+		expect(decide([changes(0), changes(1), changes(2)])).toMatchObject({
+			kind: "triage",
+			reason: "the pull request did not converge after 3 review rounds (last: the review asked for changes)",
+		});
+		// A triage that lets it continue grants this head its fix; the next head that does not converge is triaged again.
+		expect(decide([changes(1), changes(2, 1)], [triage(2, "continue")])).toMatchObject({ kind: "fix", round: 2 });
+		expect(decide([changes(0), changes(1), changes(2)], [triage(1, "continue")])).toMatchObject({ kind: "triage" });
+		// Past `triage.max_runs` (2), a human.
+		expect(decide([changes(0), changes(1), changes(2)], [triage(0, "continue"), triage(1, "continue")])).toEqual({
+			kind: "handoff",
+			label: "agent-needs-human",
+			reason:
+				"The pull request did not converge after 3 review rounds (last: the review asked for changes). It was triaged 2 times already.",
+			pr,
+		});
+		const noTriage = workflow("review:\n  max_rounds: 2\ntriage:\n  max_runs: 0");
 		expect(
-			decidePhase(config, issue, pr, [{ ...verdict(2, "changes"), headSha: sha(2).slice(0, 12) }], undefined),
-		).toMatchObject({ kind: "fix", round: 1 });
+			decidePhase(noTriage, issue, {
+				branch: "volt/issue-12",
+				pr,
+				verdicts: [changes(1), changes(2, 1)],
+				triages: [],
+			}),
+		).toMatchObject({
+			kind: "handoff",
+			reason: "The last fix introduced 1 new defect on the lines it changed, which the review found.",
+		});
+		// A restart or a handoff decided for this head is carried out before anything else.
+		expect(decide([changes(2)], [triage(2, "restart")])).toEqual({
+			kind: "restart",
+			pr,
+			triage: triage(2, "restart"),
+		});
+		expect(decide([changes(2)], [triage(2, "handoff")])).toEqual({
+			kind: "handoff",
+			label: "agent-needs-human",
+			reason: "A triage of pull request #7 handed it to a human.\n\n**Triage: handoff.** Why.",
+			pr,
+		});
+		// A restart's branch without a pull request is implemented, with the restart.
+		const restart = { count: 2, previousPr: 7, guidance: "Use a parser." };
+		expect(decidePhase(config, issue, { branch: "volt/issue-12-2", restart, verdicts: [], triages: [] })).toEqual({
+			kind: "implement",
+			branch: "volt/issue-12-2",
+			restart,
+		});
+	});
+
+	it("updates a pull request whose base changed its files before a review or a fix, and names waived findings on approval", () => {
+		const config = workflow();
+		const issue = new FakeGitHub().addIssue(12);
+		const pr: PullRequest = {
+			number: 7,
+			url: "u",
+			state: "open",
+			headRef: "volt/issue-12",
+			headSha: sha(2),
+			draft: false,
+			baseRef: "main",
+			mergeable: "mergeable",
+		};
+		const state = { branch: "volt/issue-12", pr, triages: [], staleFiles: ["src/a.ts", "src/b.ts"] };
+		const update = {
+			kind: "update",
+			pr,
+			reason: "main changed src/a.ts, src/b.ts since pull request #7 branched from it",
+		};
+		expect(decidePhase(config, issue, { ...state, verdicts: [] })).toEqual(update);
+		expect(
+			decidePhase(config, issue, {
+				...state,
+				verdicts: [{ headSha: sha(2), verdict: "changes", createdAt: "1" }],
+			}),
+		).toEqual(update);
+		// An approved pull request needs no update for it, and its waived findings go to the human.
+		const clean: ReviewMarker = { headSha: sha(2), verdict: "clean", createdAt: "1", runId: "review-3", waived: 2 };
+		expect(decidePhase(config, issue, { ...state, verdicts: [clean], checks: { state: "passing" } })).toMatchObject({
+			kind: "handoff",
+			label: "agent-approved",
+			waived: { count: 2, runId: "review-3" },
+		});
+	});
+
+	it("reads a triage's decision from its last block, and refuses one it cannot carry out", () => {
+		const block = (value: unknown) => `Thinking.\n<triage>${JSON.stringify(value)}</triage>`;
+		expect(triageReport(block({ decision: "continue", diagnosis: "One finding left.", guidance: "" }))).toEqual({
+			decision: "continue",
+			diagnosis: "One finding left.",
+			guidance: "",
+		});
+		expect(
+			triageReport(
+				`${block({ decision: "handoff", diagnosis: "Old." })}\n<triage>\n\`\`\`json\n{"decision": "restart", "diagnosis": "The regex fights the input.", "guidance": "Parse instead."}\n\`\`\`\n</triage>`,
+			),
+		).toEqual({ decision: "restart", diagnosis: "The regex fights the input.", guidance: "Parse instead." });
+		expect(triageReport("no block")).toEqual({ error: "the triage reply has no <triage> block" });
+		expect(triageReport("<triage>{</triage>")).toEqual({ error: "the <triage> block is not JSON" });
+		expect(triageReport(block({ decision: "merge", diagnosis: "x" }))).toMatchObject({
+			error: expect.stringContaining("not continue, restart, or handoff"),
+		});
+		expect(triageReport(block({ decision: "handoff", diagnosis: "" }))).toMatchObject({
+			error: expect.stringContaining("needs a diagnosis"),
+		});
+		expect(triageReport(block({ decision: "restart", diagnosis: "Wrong approach." }))).toEqual({
+			error: "a restart needs guidance",
+		});
+		expect(triageMarker(sha(1), "continue")).toBe(
+			`<!-- volt-orchestrator triage head=${sha(1)} decision=continue -->`,
+		);
+	});
+});
+
+describe("issue orchestrator loop control", () => {
+	const finding = (id: string, introduced: boolean, startLine: number, title = `Finding ${id}`): ReviewFinding => ({
+		id,
+		introduced,
+		title,
+		body: `${title} body.`,
+		priority: 2,
+		path: "src/a.ts",
+		startLine,
+		endLine: startLine,
+	});
+
+	it("stops blocking on pre-existing findings from the second round, and lists them for the human", async () => {
+		const { github, orchestrator, reviews, runs, finish, reviewRuns, finishReview, log } = setup(
+			workflow("review:\n  engine: standard", "Fix #{{ pr.number }}:\n{{ review.findings }}"),
+		);
+		github.addIssue(12);
+		const first = github.push(12);
+		const old = finding("f-old", false, 5, "Old leak");
+
+		// Round 1: a pre-existing defect on a changed line is the change's own, and blocks.
+		await orchestrator.tick();
+		const review = await reviewRuns(1);
+		reviews.findingsOf.set("review-1", [old]);
+		await finishReview(review, { verdict: { value: "changes", headSha: first.headSha }, findings: [old] });
+		expect(reviews.published.at(-1)?.trailer).toBe(reviewMarker(first.headSha, "changes", "review-1"));
+		await orchestrator.tick();
+		const fix = await runs(1);
+		expect(fix.task).toContain("- [P2] Old leak (src/a.ts:5) (pre-existing)");
+		expect(fix.task).not.toContain("no longer block");
+
+		// Round 2: the fix left it, and it no longer blocks; the review is posted clean.
+		const second = github.push(12);
+		await finish(fix);
+		await orchestrator.tick();
+		const again = await reviewRuns(2);
+		reviews.findingsOf.set("review-2", [old]);
+		await finishReview(again, { verdict: { value: "changes", headSha: second.headSha }, findings: [old] });
+		const trailer = reviews.published.at(-1)?.trailer ?? "";
+		expect(trailer).toContain("does not block on this review's 1 finding: each predates the change");
+		expect(trailer.endsWith(reviewMarker(second.headSha, "clean", "review-2", { waived: 1 }))).toBe(true);
+		expect(log).toContain("#12: posted the review (clean, 1 pre-existing waived) on pull request #112");
+
+		await orchestrator.tick();
+		expect(github.handoffs).toEqual([
+			{
+				issue: 12,
+				label: "agent-approved",
+				comment: expect.stringContaining(
+					"The review did not block on 1 finding that predates the change:\n- [P2] Old leak (src/a.ts:5)",
+				),
+			},
+		]);
+	});
+
+	it("sends a fix that introduced new defects to a triage, posts its decision, and fixes on when it continues", async () => {
+		let clock = 0;
+		const { github, orchestrator, reviews, runs, finish, reviewRuns, finishReview } = setup(
+			workflow("review:\n  engine: standard"),
+			{ now: () => clock },
+		);
+		github.addIssue(12);
+		const first = github.push(12);
+		const a = finding("f-a", true, 3);
+		await orchestrator.tick();
+		reviews.findingsOf.set("review-1", [a]);
+		await finishReview(await reviewRuns(1), { verdict: { value: "changes", headSha: first.headSha }, findings: [a] });
+		await orchestrator.tick();
+		const fix = await runs(1);
+		const second = github.push(12);
+		await finish(fix);
+
+		// The fix changed lines 18-22, where the review finds a new defect; the one it left is not new.
+		github.diffs.set(
+			`${first.headSha}..${second.headSha}`,
+			new Map([["src/a.ts", [{ startLine: 18, endLine: 22 }]]]),
+		);
+		const b = finding("f-b", true, 20, "New break");
+		await orchestrator.tick();
+		const again = await reviewRuns(2);
+		expect(again).toMatchObject({ previousRunId: "review-1" });
+		reviews.findingsOf.set("review-2", [a, b]);
+		await finishReview(again, { verdict: { value: "changes", headSha: second.headSha }, findings: [a, b] });
+		expect(reviews.published.at(-1)?.trailer).toBe(
+			`1 finding of this review is a new defect on lines the last fix changed.\n\n${reviewMarker(second.headSha, "changes", "review-2", { regressed: 1 })}`,
+		);
+
+		await orchestrator.tick();
+		const triage = await runs(2);
+		expect(triage.task).toContain(
+			"is not converging: the last fix introduced 1 new defect on the lines it changed, which the review found",
+		);
+		expect(triage.task).toContain(
+			`- Round 1 (head ${first.headSha.slice(0, 12)}): changes\n  - [P2] Finding f-a (src/a.ts:3)`,
+		);
+		expect(triage.task).toContain(
+			`- Round 2 (head ${second.headSha.slice(0, 12)}): changes (1 new on lines the fix before it changed)`,
+		);
+		expect(triage.task).toContain("Restarts left: 1");
+		expect(orchestrator.snapshot().running).toMatchObject([{ issue: 12, role: "triage" }]);
+
+		// A reply without a decision is a failed run, tried again.
+		await finish(triage, { output: "I am not sure." });
+		expect(orchestrator.snapshot().retrying).toMatchObject([
+			{ issue: 12, error: "the triage reply has no <triage> block" },
+		]);
+		clock += 60_000;
+		await orchestrator.tick();
+		const retried = await runs(3);
+		await finish(retried, {
+			output: '<triage>{"decision": "continue", "diagnosis": "The new break is one line.", "guidance": ""}</triage>',
+		});
+		expect(github.comments.at(-1)).toEqual({
+			issue: 112,
+			body: `**Triage: continue.** The new break is one line.\n\n_Volt issue orchestrator_\n${triageMarker(second.headSha, "continue")}`,
+		});
+		await orchestrator.tick();
+		const fixAgain = await runs(4);
+		expect(fixAgain.task).toContain("Fix #112");
+	});
+
+	it("restarts an issue a triage restarts, from the base branch on a new branch with its guidance, as often as allowed", async () => {
+		const config = parseWorkflow(`---
+tracker:
+  repo: o/r
+  labels: [${LABEL}]
+review:
+  max_rounds: 1
+---
+## implement
+Implement on {{ worktree.branch }} in {{ worktree.path }}. {{ restart.guidance }}
+`);
+		const { github, orchestrator, workspaces, runs, finish, log } = setup(config);
+		github.addIssue(12);
+		const first = github.push(12);
+		github.review(12, "changes");
+
+		await orchestrator.tick();
+		const triage = await runs(1);
+		expect(triage.cwd).toBe("/worktrees/issue-12");
+		await finish(triage, {
+			output:
+				'<triage>{"decision": "restart", "diagnosis": "Every fix widens the regex.", "guidance": "Parse the header instead."}</triage>',
+		});
+		await orchestrator.tick();
+		// Recorded on the issue, then the pull request closed and its checkout released.
+		expect(github.restartsOf.get(12)).toMatchObject([{ branch: "volt/issue-12-2", pr: 112 }]);
+		expect(github.comments.at(-1)?.body).toContain(
+			"Restarting this issue from main on `volt/issue-12-2`: a triage closed pull request #112.",
+		);
+		expect(github.closed).toEqual([
+			{ pr: 112, comment: expect.stringContaining("A triage restarts o/r#12 from main") },
+		]);
+		expect(log).toContain("#12: closed pull request #112 and restarted the issue from main");
+
+		await orchestrator.tick();
+		expect(workspaces.releases).toContain(12);
+		const implement = await runs(2);
+		expect(implement.cwd).toBe("/worktrees/issue-12-2");
+		expect(implement.task).toContain("Implement on volt/issue-12-2 in /worktrees/issue-12-2.");
+		expect(implement.task).toContain("a triage closed the previous attempt, pull request #112");
+		expect(implement.task).toContain("Guidance for the next implementation: Parse the header instead.");
+		expect(first.number).toBe(112);
+
+		// The restart's pull request does not converge either, and its triage restarts it again: past
+		// `triage.max_restarts` (1), the issue goes to a human.
+		const restarted = github.push(12, { branch: "volt/issue-12-2" });
+		await finish(implement);
+		expect(restarted.number).toBe(212);
+		github.review(12, "changes");
+		github.post(212, reviewMarker(restarted.headSha, "changes"));
+		await orchestrator.tick();
+		const again = await runs(3);
+		expect(again.cwd).toBe("/worktrees/issue-12-2");
+		await finish(again, {
+			output: '<triage>{"decision": "restart", "diagnosis": "Still wrong.", "guidance": "Try again."}</triage>',
+		});
+		await orchestrator.tick();
+		expect(github.closed).toHaveLength(1);
+		expect(github.handoffs).toEqual([
+			{
+				issue: 12,
+				label: "agent-needs-human",
+				comment: expect.stringContaining("the issue was restarted 1 time already (triage.max_restarts)"),
+			},
+		]);
+	});
+
+	it("holds an implementation while another issue's work changes the code it names", async () => {
+		const { github, orchestrator, runs } = setup(workflow("agent:\n  max_concurrent: 4"));
+		// Issue 12 is out of the workflow, but its pull request is open and changes safety.ts.
+		github.addIssue(12, ["other"]);
+		const pr = github.push(12);
+		github.files.set(pr.number, ["packages/core/src/mcp/safety.ts"]);
+		github.addIssue(13, [LABEL], "Digest params leak at `mcp/safety.ts:80`.");
+		github.addIssue(14, [LABEL], "The cache at `src/cache.ts:9` is stale.");
+		github.addIssue(15, [LABEL], "Off by one in `src/z.ts:3`.");
+		github.addIssue(16, [LABEL], "Overflow in `src/z.ts:40`.");
+		github.addIssue(17, [LABEL], "No location named.");
+
+		await orchestrator.tick();
+		await runs(3);
+		expect(orchestrator.snapshot().running.map((entry) => entry.issue)).toEqual([14, 15, 17]);
+		expect(orchestrator.snapshot().waiting).toEqual([
+			{
+				issue: 13,
+				title: "Issue 13",
+				reason: "waiting for #12, whose pull request #112 changes packages/core/src/mcp/safety.ts",
+			},
+			{ issue: 16, title: "Issue 16", reason: "waiting for #15, whose implementation changes src/z.ts" },
+		]);
+	});
+
+	it("updates a pull request whose base branch changed its files before reviewing it", async () => {
+		const { github, orchestrator, runs } = setup();
+		github.addIssue(12);
+		const pr = github.push(12);
+		github.stale.set(pr.number, ["src/a.ts"]);
+		await orchestrator.tick();
+		const update = await runs(1);
+		expect(update.task).toBe("Update #112 from main: main changed src/a.ts since pull request #112 branched from it");
+	});
+
+	it("files a follow-up found while working an agent-filed issue without the workflow's labels", async () => {
+		const { github, orchestrator, reviewRuns, finishReview } = setup(workflow("review:\n  engine: standard"));
+		github.addIssue(12, [LABEL, "agent-filed"]);
+		const first = github.push(12);
+		await orchestrator.tick();
+		await finishReview(await reviewRuns(1), {
+			verdict: { value: "clean", headSha: first.headSha },
+			followUps: [{ ...finding("x", true, 9, "Stale cache"), path: "src/cache.ts", fingerprint: "fp-chain" }],
+		});
+		expect(github.filed).toEqual([
+			{
+				title: "Stale cache",
+				labels: ["agent-filed"],
+				body: expect.stringContaining(
+					"Filed without `agent-ready`: it was found while working an issue an agent filed, so a human decides whether to have it worked by adding that label.",
+				),
+			},
+		]);
 	});
 });

@@ -35,19 +35,22 @@ Each tick (every `polling.interval_ms`, and whenever an agent finishes) the orch
 
 | GitHub state | Next |
 |---|---|
-| No pull request from `volt/issue-<n>` | `implement` agent |
+| No pull request from the issue's branch (`volt/issue-<n>`, or a restart's) | `implement` agent, unless another issue's work changes the code this one names |
 | Open pull request that conflicts with its base branch | `update` agent, before anything else |
-| Open pull request, no verdict on its head commit | `review` agent, or a review on `review.engine` |
-| Verdict `changes` | `fix` agent, while fewer than `review.max_rounds` heads were reviewed; else a human |
+| A triage decided `restart` or `handoff` for the head commit | carry it out |
+| Open pull request, no verdict on its head commit | `update` agent when the base branch changed files the pull request changes, else `review` agent or a review on `review.engine` |
+| Verdict `changes` | `fix` agent (after an update, as above), while fewer than `review.max_rounds` heads were reviewed and the last fix introduced no new defects; else `triage` agent while `triage.max_runs` allows; else a human |
 | Verdict `clean`, checks running | wait |
-| Verdict `clean`, checks failing | `fix` agent, under the same round limit |
+| Verdict `clean`, checks failing | `fix` agent, under the same limits |
 | Verdict `clean`, checks passing, GitHub still checking mergeability | wait |
 | Verdict `clean`, checks passing, mergeable | merge (`merge.mode: auto`), or the `merge.ready_label` for a human |
 | Pull request merged, or issue closed | done |
 
-The updater merges the base branch into the pull request's branch (never a rebase or force push) and pushes the merge, which the reviewer then reviews like any head commit. Such a review is not a round toward `review.max_rounds`, since a conflict is not the pull request's fault. When the base branch already has the change, the updater closes the pull request and the issue instead. An issue labeled `merge.ready_label` stays watched: when its pull request comes to conflict with the base branch (say, after another one merged), the orchestrator removes the label with a comment and updates the pull request.
+The updater merges the base branch into the pull request's branch (never a rebase or force push) and pushes the merge, which the reviewer then reviews like any head commit. It runs when the pull request conflicts, and before a review or a fix when the base branch changed a file the pull request changes since it branched, so neither works on code the base has moved past. Such a review is not a round toward `review.max_rounds`, since the base moving is not the pull request's fault. When the base branch already has the change, the updater closes the pull request and the issue instead. An issue labeled `merge.ready_label` stays watched: when its pull request comes to conflict with the base branch (say, after another one merged), the orchestrator removes the label with a comment and updates the pull request.
 
-A verdict is the last line of a pull request comment or review by `tracker.review_author`: `<!-- volt-orchestrator review head=<sha> verdict=clean|changes -->`, which a review engine's review ends with ` run=<id>`. Comments and reviews by anyone else do not count, so a stranger cannot approve a pull request.
+A verdict is the last line of a pull request comment or review by `tracker.review_author`: `<!-- volt-orchestrator review head=<sha> verdict=clean|changes -->`, which a review engine's review ends with ` run=<id>`, and ` waived=<n>` or ` regressed=<n>` as below. A triage's decision is a comment's last line, `<!-- volt-orchestrator triage head=<sha> decision=continue|restart|handoff -->`, and a restart is recorded on the issue as `<!-- volt-orchestrator restart branch=<branch> pr=<n> -->`. Comments and reviews by anyone else do not count, so a stranger cannot approve a pull request or steer one.
+
+Same code: an issue's implementation waits while another issue's work changes a file this issue names (a `path:line` in its text): an implementation of that issue running now, or its open pull request. Oldest issues go first, so two issues about one function do not race each other into conflicting pull requests. An issue that names no file is never held.
 
 When the orchestrator stops working an issue it comments why and adds `handoff_label` (`agent-needs-human`). Removing the label hands the issue back. Create the labels in the repository first (yours, `agent-filed`, `agent-needs-human`, and `agent-approved`): `gh issue create` refuses a label the repository does not have, and a handoff without its label is only the comment.
 
@@ -60,11 +63,27 @@ Scope: what an issue's agents find in scope is fixed in its pull request: anythi
   3. anything else is filed as an issue with the `tracker.labels` labels, so the orchestrator works it, plus `tracker.filed_label` (`agent-filed`), and a `Location:` line the next check reads.
 
   Recording is one run's at a time, so two runs that end together do not file the same site twice. The check compares places in the code, not wording: the same defect reported in another file is not caught, and two defects within a few lines go to one issue, the second as a comment.
+- A problem found while working an issue an agent filed is filed with `tracker.filed_label` only, without `tracker.labels`: the orchestrator does not work it until a human adds them. A chain of agent-filed issues is one link deep unless a human extends it.
 - To have a human vet filed issues first instead, add `agent-filed` to `tracker.exclude_labels`.
 
 Checkouts: a workspace holds at most 16 managed worktrees, so the orchestrator releases an issue's worktree (keeping its branch) once it hands the issue off, approved or not, finishes it, or the issue closes or loses its label. It deletes the checkout's ignored files first (dependencies and build output: the daemon never removes a checkout that holds any), unless the checkout has changes to tracked or untracked files, in which case it stays for the human. A release the daemon refuses for another reason is tried again each tick, its error logged once. If the issue comes back, its worktree is created again on its branch, and the setup hook runs again. A checkout that cannot be set up, such as while the workspace is full, is retried with backoff and does not count as an attempt. When it starts, and whenever the workspace is full, the orchestrator also releases the checkout of every issue GitHub shows it is done with (closed, approved, handed off, or out of the workflow), including issues an earlier run worked.
 
-Limits: `agent.max_concurrent` agents at once (and a role's `max_concurrent`), `agent.max_attempts` started agent runs per phase of one head commit, exponential backoff after a failed run (10 s doubling, at most `agent.max_retry_backoff_ms`), and each role's `max_turns`, `max_tokens`, `max_cost_usd`, and `max_duration_ms`.
+Limits: `agent.max_concurrent` agents at once (and a role's `max_concurrent`), `agent.max_attempts` started agent runs per phase of one head commit (of one branch, for an implementation), exponential backoff after a failed run (10 s doubling, at most `agent.max_retry_backoff_ms`), each role's `max_turns`, `max_tokens`, `max_cost_usd`, and `max_duration_ms`, `triage.max_runs` triages per pull request, and `triage.max_restarts` restarts per issue.
+
+## When a pull request does not converge
+
+A review engine's finding says whether the change introduced it (`introduced`), or the defect predates the change on a line the change touches. The orchestrator uses that in two ways:
+
+- Pre-existing findings: in round 1 they block like any other, since a defect on a changed line is the change's own and the fixer gets one chance at it. From round 2 on, a review whose open findings (P0 to P2) all predate the change is posted `clean`, with ` waived=<n>` on its verdict and a line saying so. The fixer's list marks them, and the human the pull request goes to gets them listed in the approval comment (or, with `merge.mode: auto`, in a comment on the issue once it merges).
+- Regressions: a review that asks for changes counts its findings that are new this round (not open in the previous round's review), introduced by the change, and on lines the last fix changed (the diff from the previous reviewed head). Those are defects the fix made, so ` regressed=<n>` goes on its verdict.
+
+A pull request whose last fix regressed, or that ran out of `review.max_rounds`, gets a `triage` agent, while `triage.max_runs` triages of it ran (2 by default; 0 turns triage off, and such a pull request goes to a human). The triage reads the issue, the pull request, and each round's verdict and findings (`{{ triage.history }}`), and ends its reply with a decision, which the orchestrator posts on the pull request:
+
+- `continue`: this head gets one more fix, past the round limit. A later head that does not converge is triaged again.
+- `restart`: the approach is wrong. The orchestrator records the restart on the issue, with the triage's diagnosis and guidance, closes the pull request, and releases its checkout. The issue is implemented again from the base branch on `volt/issue-<n>-<count>` (worktree `issue-<n>-<count>`), and the implementer's prompt gets the guidance as `{{ restart.guidance }}`. Past `triage.max_restarts` restarts (1 by default), the issue goes to a human instead.
+- `handoff`: a human decides, with the triage's diagnosis in the handoff comment.
+
+A triage whose reply has no decision failed, and is tried again like any run. Every decision is read back from GitHub, so a restarted orchestrator carries out one it posted before. The agent review engine (`review.engine: agent`) gives no findings, so it neither waives nor finds regressions; its pull requests are triaged once they run out of rounds.
 
 State lives in memory. After a restart, `/orchestrate start` again: the next tick finds each issue's phase on GitHub, and releases the checkouts of the issues done with.
 
@@ -89,7 +108,7 @@ State lives in memory. After a restart, `/orchestrate start` again: the next tic
 
 ## Workflow file
 
-The front matter configures the orchestrator; `## implement`, `## review`, `## fix`, and `## update` sections of the body replace the built-in prompt of that role. Templates take `{{ issue.number }}`, `issue.identifier`, `issue.title`, `issue.body`, `issue.url`, `issue.labels`, `repo`, `gh`, `tracker.labels`, `out_of_scope` (how an agent reports problems outside its work), `worktree.path`, `worktree.branch`, `attempt`, `round`, `reason`, `pr.number`, `pr.url`, `pr.head_sha`, `pr.base_ref`, `review.max_rounds`, `review.clean_marker`, `review.changes_marker`, `review.findings` (the open findings of the review engine's review that asked for changes, empty otherwise), and `ci.failing`. An unknown variable fails the run.
+The front matter configures the orchestrator; `## implement`, `## review`, `## fix`, `## update`, and `## triage` sections of the body replace the built-in prompt of that role. Templates take `{{ issue.number }}`, `issue.identifier`, `issue.title`, `issue.body`, `issue.url`, `issue.labels`, `repo`, `gh`, `tracker.labels`, `out_of_scope` (how an agent reports problems outside its work), `worktree.path`, `worktree.branch`, `attempt`, `round`, `reason`, `pr.number`, `pr.url`, `pr.head_sha`, `pr.base_ref`, `review.max_rounds`, `review.clean_marker`, `review.changes_marker`, `review.findings` (the open findings of the review engine's review that asked for changes, empty otherwise), `ci.failing`, `restart.guidance` and `restart.previous_pr` (for a restarted issue's implementer, empty otherwise), and `triage.reason`, `triage.history`, `triage.output` (how a triage reports its decision; a `## triage` prompt must include it), and `triage.restarts_left`. An unknown variable fails the run.
 
 ```markdown
 ---
@@ -117,9 +136,13 @@ roles:
   review:    { agent: reviewer, max_concurrent: 1 }
   fix:       { agent: general }
   update:    { agent: general }
+  triage:    { agent: reviewer }
 review:
   max_rounds: 3
   engine: agent                     # or standard, or ext:<extension id>/<engine name>
+triage:
+  max_runs: 2                       # per pull request; 0 hands a pull request that does not converge to a human
+  max_restarts: 1                   # per issue
 merge:
   mode: handoff                     # or auto
   method: squash                    # merge, rebase

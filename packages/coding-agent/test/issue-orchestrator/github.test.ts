@@ -3,9 +3,14 @@ import {
 	type GhResult,
 	type GhRunner,
 	GitHubTracker,
+	parseRestartMarkers,
 	parseReviewMarkers,
+	parseTriageMarkers,
+	patchLines,
+	restartMarker,
 	reviewMarker,
 	sameLogin,
+	triageMarker,
 } from "../../examples/extensions/issue-orchestrator/github.ts";
 
 const SHA = "a".repeat(40);
@@ -85,6 +90,7 @@ describe("issue orchestrator GitHub tracker", () => {
 			number: 2,
 			url: "u2",
 			state: "open",
+			headRef: "volt/issue-12",
 			headSha: SHA,
 			draft: false,
 			baseRef: "main",
@@ -112,13 +118,128 @@ describe("issue orchestrator GitHub tracker", () => {
 		];
 		const gh = scriptedGh({ "pr view 7 --repo o/r --json comments,reviews": JSON.stringify({ comments, reviews }) });
 		const tracker = new GitHubTracker(gh.run, "o/r", "volt-agent[bot]");
-		expect(await tracker.reviews(7)).toEqual([
+		expect((await tracker.markers(7)).verdicts).toEqual([
 			{ headSha: "b".repeat(40), verdict: "clean", createdAt: "2026-10-02" },
 			{ headSha: SHA, verdict: "changes", createdAt: "2026-10-03", runId: "review:1" },
 		]);
 		expect(reviewMarker(SHA, "clean", "review:1")).toBe(
 			`<!-- volt-orchestrator review head=${SHA} verdict=clean run=review:1 -->`,
 		);
+	});
+
+	it("reads the review author's triage decisions and restarts, with the text before each marker", async () => {
+		const comments = [
+			{
+				author: { login: "bot" },
+				body: `**Triage: restart.** Each fix broke another case.\n\n${triageMarker(SHA, "restart")}`,
+				createdAt: "2026-10-03",
+			},
+			{ author: { login: "stranger" }, body: triageMarker(SHA, "handoff"), createdAt: "2026-10-04" },
+			{
+				author: { login: "bot" },
+				body: `Review\n${reviewMarker(SHA, "changes", "review:2", { waived: 0, regressed: 2 })}`,
+				createdAt: "2026-10-02",
+			},
+		];
+		const issueComments = [
+			{ author: { login: "bot" }, body: `Restarting.\n\n${restartMarker("volt/issue-12-2", 7)}`, createdAt: "t2" },
+			{ author: { login: "stranger" }, body: restartMarker("volt/issue-12-9", 8), createdAt: "t3" },
+		];
+		const tracker = new GitHubTracker(
+			scriptedGh({
+				"pr view 7": JSON.stringify({ comments }),
+				"issue view 12 --repo o/r --json comments": JSON.stringify({ comments: issueComments }),
+			}).run,
+			"o/r",
+			"bot",
+		);
+		expect(await tracker.markers(7)).toEqual({
+			verdicts: [{ headSha: SHA, verdict: "changes", createdAt: "2026-10-02", runId: "review:2", regressed: 2 }],
+			triages: [
+				{
+					headSha: SHA,
+					decision: "restart",
+					createdAt: "2026-10-03",
+					text: "**Triage: restart.** Each fix broke another case.",
+				},
+			],
+		});
+		expect(await tracker.restarts(12)).toEqual([
+			{ branch: "volt/issue-12-2", pr: 7, createdAt: "t2", text: "Restarting." },
+		]);
+		// The counts round-trip; a count of zero is left out of the marker.
+		expect(reviewMarker(SHA, "clean", "review:3", { waived: 3 })).toBe(
+			`<!-- volt-orchestrator review head=${SHA} verdict=clean run=review:3 waived=3 -->`,
+		);
+		expect(parseReviewMarkers(reviewMarker(SHA, "clean", undefined, { waived: 1, regressed: 0 }), "t")).toEqual([
+			{ headSha: SHA, verdict: "clean", createdAt: "t", waived: 1 },
+		]);
+		expect(parseTriageMarkers("<!-- volt-orchestrator triage head=abc decision=continue -->", "t")).toEqual([]);
+		expect(parseRestartMarkers("<!-- volt-orchestrator restart branch=x pr=y -->", "t")).toEqual([]);
+	});
+
+	it("reads the lines a fix changed, the files the base branch changed under a pull request, and the open pull requests", async () => {
+		const patch = [
+			"@@ -10,4 +10,5 @@ function a() {",
+			" keep",
+			"-old",
+			"+new",
+			"+added",
+			" keep",
+			"@@ -40,3 +41,2 @@",
+			" keep",
+			"-removed",
+			" keep",
+			"\\ No newline at end of file",
+		].join("\n");
+		expect(patchLines(patch)).toEqual([
+			{ startLine: 11, endLine: 12 },
+			{ startLine: 42, endLine: 42 },
+		]);
+		const gh = scriptedGh({
+			[`api repos/o/r/compare/${SHA}...${"b".repeat(40)}`]: JSON.stringify({
+				files: [{ filename: "src/a.ts", patch }, { filename: "bin.png" }],
+			}),
+			[`api repos/o/r/compare/${SHA}...main`]: JSON.stringify({
+				files: [{ filename: "src/a.ts" }, { filename: "src/other.ts" }],
+			}),
+			"pr view 7 --repo o/r --json files": JSON.stringify({ files: [{ path: "src/a.ts" }, { path: "src/b.ts" }] }),
+			"pr list --repo o/r --state open": JSON.stringify([
+				{ number: 7, headRefName: "volt/issue-12", files: [{ path: "src/a.ts" }] },
+			]),
+			"pr close 7": "",
+		});
+		const tracker = new GitHubTracker(gh.run, "o/r", "bot");
+		expect(await tracker.changedLines(SHA, "b".repeat(40))).toEqual(
+			new Map([
+				[
+					"src/a.ts",
+					[
+						{ startLine: 11, endLine: 12 },
+						{ startLine: 42, endLine: 42 },
+					],
+				],
+				["bin.png", []],
+			]),
+		);
+		const pr = {
+			number: 7,
+			url: "u",
+			state: "open" as const,
+			headRef: "volt/issue-12",
+			headSha: SHA,
+			draft: false,
+			baseRef: "main",
+			mergeable: "mergeable" as const,
+		};
+		expect(await tracker.staleFiles(pr)).toEqual(["src/a.ts"]);
+		expect(await tracker.openPullRequests()).toEqual([{ number: 7, headRef: "volt/issue-12", files: ["src/a.ts"] }]);
+		await tracker.closePullRequest(7, "Restarted.");
+		expect(gh.calls.at(-1)).toEqual(["pr", "close", "7", "--repo", "o/r", "--comment", "Restarted."]);
+		// A base branch that changed nothing since: the pull request's files are not asked for.
+		const current = scriptedGh({ [`api repos/o/r/compare/${SHA}...main`]: JSON.stringify({ files: [] }) });
+		expect(await new GitHubTracker(current.run, "o/r", "bot").staleFiles(pr)).toEqual([]);
+		expect(current.calls).toHaveLength(1);
 	});
 
 	it("files an issue, comments on one, and searches every issue's body and comments for a fingerprint", async () => {
@@ -174,7 +295,7 @@ describe("issue orchestrator GitHub tracker", () => {
 			{ author: { login: "bot" }, body: reviewMarker("b".repeat(40), "clean"), createdAt: "2026-10-01" },
 		];
 		const tracker = new GitHubTracker(scriptedGh({ "pr view 7": JSON.stringify({ comments }) }).run, "o/r", "bot");
-		expect(await tracker.reviews(7)).toEqual([
+		expect((await tracker.markers(7)).verdicts).toEqual([
 			{ headSha: "b".repeat(40), verdict: "clean", createdAt: "2026-10-01" },
 			{ headSha: SHA, verdict: "changes", createdAt: "2026-10-02" },
 		]);
@@ -187,7 +308,7 @@ describe("issue orchestrator GitHub tracker", () => {
 			"o/r",
 			"volt-agent[bot]",
 		);
-		expect(await asBot.reviews(8)).toEqual([{ headSha: SHA, verdict: "clean", createdAt: "2026-10-05" }]);
+		expect((await asBot.markers(8)).verdicts).toEqual([{ headSha: SHA, verdict: "clean", createdAt: "2026-10-05" }]);
 		expect(sameLogin("app/volt-agent", "Volt-Agent[bot]")).toBe(true);
 		expect(sameLogin("volt-agent", "volt-agent-two")).toBe(false);
 	});

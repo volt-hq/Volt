@@ -33,7 +33,7 @@ import {
 	type ReviewResult,
 	type Workspaces,
 } from "./orchestrator.ts";
-import { issueBranch, issueWorktree } from "./phase.ts";
+import { branchCount, issueWorktree } from "./phase.ts";
 import { issueSteps, logLine, noteText, panel } from "./views.ts";
 import { loadWorkflow, type WorkflowConfig } from "./workflow.ts";
 
@@ -182,8 +182,9 @@ async function start(
 			return await volt.exec(command, [...prefix, ...args], { cwd: ctx.cwd, timeout: 120_000 });
 		};
 	const workspaces: Workspaces = {
-		prepare: async (issue, config) => {
-			const name = issueWorktree(issue.number);
+		prepare: async (issue, config, branch) => {
+			// Each branch has a checkout of its own: a restart's does not wait for the closed pull request's to go.
+			const name = issueWorktree(issue.number, branchCount(issue.number, branch));
 			const existing = (await ctx.worktrees.list()).find((worktree) => worktree.id === name);
 			if (existing !== undefined && !existing.available) {
 				throw new Error(`Worktree ${name} is archived; restore or remove it`);
@@ -193,7 +194,7 @@ async function start(
 				existing ??
 				(await ctx.worktrees.create({
 					name,
-					branch: issueBranch(issue.number),
+					branch,
 					reuseBranch: true,
 					...(config.workspace.baseRef === undefined ? {} : { baseRef: config.workspace.baseRef }),
 				}));
@@ -214,17 +215,28 @@ async function start(
 			return { path: worktree.path, branch: worktree.branch };
 		},
 		release: async (number) => {
-			// Releasing drops the checkout's ignored files, the hook's dependencies among them: should the
-			// issue come back while the checkout is still there, the hook runs again.
-			hooked.delete(issueWorktree(number));
-			return await releaseWorktree(ctx.worktrees, (args, cwd) => volt.exec("git", args, { cwd }), number);
+			const names = (await ctx.worktrees.list())
+				.map((worktree) => worktree.id)
+				.filter((id) => worktreeIssue(id) === number);
+			const outcomes: ReleaseOutcome[] = [];
+			for (const name of names) {
+				// Releasing drops the checkout's ignored files, the hook's dependencies among them: should the
+				// issue come back while the checkout is still there, the hook runs again.
+				hooked.delete(name);
+				outcomes.push(await releaseWorktree(ctx.worktrees, (args, cwd) => volt.exec("git", args, { cwd }), name));
+			}
+			if (outcomes.includes("retry")) return "retry";
+			return outcomes.includes("kept") ? "kept" : "released";
 		},
-		checkouts: async () =>
-			(await ctx.worktrees.list()).flatMap((worktree) => {
-				const number = /^issue-(\d+)$/.exec(worktree.id)?.[1];
-				// An archived worktree has no checkout taking room.
-				return number !== undefined && worktree.available ? [Number(number)] : [];
-			}),
+		checkouts: async () => [
+			...new Set(
+				(await ctx.worktrees.list()).flatMap((worktree) => {
+					const number = worktreeIssue(worktree.id);
+					// An archived worktree has no checkout taking room.
+					return number !== undefined && worktree.available ? [number] : [];
+				}),
+			),
+		],
 	};
 	const orchestrator = new Orchestrator({
 		loadWorkflow: () => loadWorkflow(path),
@@ -281,10 +293,7 @@ async function start(
 			publish: async (id, options) => {
 				await ctx.reviews.publish(id, options);
 			},
-			findings: async (id) =>
-				(await ctx.reviews.result(id))?.findings
-					?.filter((finding) => finding.status !== "fixed" && finding.status !== "dismissed")
-					.map((finding) => reviewNote(finding, finding.changeLocation)),
+			findings: async (id) => openFindings(await ctx.reviews.result(id)),
 		},
 		workspaces,
 		onChange: (snapshot) => {
@@ -335,21 +344,26 @@ async function start(
 	return { controller, orchestrator };
 }
 
+/** The issue whose checkout worktree `id` is: `issue-<n>`, or a restart's `issue-<n>-<count>`. */
+function worktreeIssue(id: string): number | undefined {
+	const number = /^issue-(\d+)(?:-\d+)?$/.exec(id)?.[1];
+	return number === undefined ? undefined : Number(number);
+}
+
 /**
- * Release issue `number`'s worktree, keeping its branch. The daemon never
- * removes a checkout holding ignored files, and the setup hook and agents
- * leave dependencies and build output there, so a checkout whose only
- * changes are ignored files loses those first. One with changes to tracked
- * or untracked files is kept for a human; one a conversation still holds is
- * tried again. Rejects when the daemon refuses the removal for another reason,
- * for the orchestrator to try again later.
+ * Release the worktree `name`, an issue's checkout, keeping its branch. The
+ * daemon never removes a checkout holding ignored files, and the setup hook
+ * and agents leave dependencies and build output there, so a checkout whose
+ * only changes are ignored files loses those first. One with changes to
+ * tracked or untracked files is kept for a human; one a conversation still
+ * holds is tried again. Rejects when the daemon refuses the removal for
+ * another reason, for the orchestrator to try again later.
  */
 export async function releaseWorktree(
 	worktrees: Pick<ExtensionCommandContext["worktrees"], "list" | "remove">,
 	git: (args: string[], cwd: string) => Promise<{ code: number; stdout: string }>,
-	number: number,
+	name: string,
 ): Promise<ReleaseOutcome> {
-	const name = issueWorktree(number);
 	const worktree = (await worktrees.list()).find((candidate) => candidate.id === name);
 	if (worktree === undefined) return "released";
 	if (worktree.available) {
@@ -366,6 +380,17 @@ export async function releaseWorktree(
 		if (!message.startsWith("worktree_not_found")) throw error;
 	}
 	return "released";
+}
+
+/** The open findings of review `run`, which a fixer addresses; undefined when the conversation does not hold it. */
+function openFindings(run: ExtensionReviewResult | undefined): ReviewFinding[] | undefined {
+	return run?.findings
+		?.filter((finding) => finding.status !== "fixed" && finding.status !== "dismissed")
+		.map((finding) => ({
+			id: finding.id,
+			...(finding.introduced === undefined ? {} : { introduced: finding.introduced }),
+			...reviewNote(finding, finding.changeLocation),
+		}));
 }
 
 /** A review's finding or follow-up as the orchestrator reads it. */
@@ -418,6 +443,7 @@ function reviewResult(end: ExtensionReviewEnd): ReviewResult {
 	return {
 		status: "completed",
 		verdict: { value: run.overallCorrectness === "correct" ? "clean" : "changes", headSha },
+		findings: openFindings(run) ?? [],
 		followUps: (run.followUps ?? []).map((followUp) => ({
 			...reviewNote(followUp, followUp.location),
 			fingerprint: followUp.fingerprint,
