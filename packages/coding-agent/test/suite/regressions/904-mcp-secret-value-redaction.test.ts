@@ -66,11 +66,41 @@ describe("issue #904: MCP redaction covers the whole value of a secret key", () 
 		expect(redactMcpText("token: Bearer abc123 rejected")).toBe("token: Bearer [redacted] rejected");
 	});
 
+	it("redacts a letters-only credential after an unknown scheme", () => {
+		expect(redactMcpText("token: Negotiate YIIGhgYGKwYBBQUC")).toBe("token: [redacted]");
+		expect(redactMcpText("deploy --token Negotiate YIIGhgYGKwYBBQUC --verbose")).toBe(
+			"deploy --token [redacted] --verbose",
+		);
+		expect(redactMcpText("api_key=ApiKey abcdefGHIJ, status 401")).toBe("api_key=[redacted], status 401");
+		expect(redactMcpText("secret: Bot abc.def+ghi/jk==")).toBe("secret: [redacted]");
+	});
+
+	it("leaves a following key to its own match", () => {
+		expect(redactMcpText("password: expired x-api-key sk-live-123")).toBe(
+			"password: [redacted] x-api-key [redacted]",
+		);
+		expect(redactMcpText("password: expired password hunter2 now")).toBe(
+			"password: [redacted] password [redacted] now",
+		);
+		expect(redactMcpText('token: Bot "api_key": sk-live-123')).toBe('token: [redacted] "api_key": [redacted]');
+	});
+
+	it("redacts the value of a key at the end of an Authorization line", () => {
+		expect(redactMcpText("Authorization: Digest token=\nabc123")).toBe("Authorization: [redacted]");
+		expect(redactMcpText("Authorization: Digest realm=x, token=\nabc123 rejected")).toBe(
+			"Authorization: [redacted], token=\n[redacted] rejected",
+		);
+		expect(redactMcpText("Authorization: Bearer abc=\nContent-Type: application/json")).toBe(
+			"Authorization: Bearer [redacted]\nContent-Type: application/json",
+		);
+	});
+
 	it("keeps the text after a single-word value", () => {
 		expect(redactMcpText("token:abc123 rejected")).toBe("token:[redacted] rejected");
 		expect(redactMcpText("token=abc123 request_id=req-42")).toBe("token=[redacted] request_id=req-42");
 		expect(redactMcpText("deploy --token abc123 --verbose")).toBe("deploy --token [redacted] --verbose");
 		expect(redactMcpText("password: expired for user 42")).toBe("password: [redacted] for user 42");
+		expect(redactMcpText("token: invalid or expired")).toBe("token: [redacted] or expired");
 	});
 
 	it("keeps whole quoted and scheme values out of the MCP audit log", async () => {
@@ -84,16 +114,16 @@ describe("issue #904: MCP redaction covers the whole value of a secret key", () 
 			risk: "write",
 			status: "failed",
 			arguments: { command: "db connect --password 'arg horse battery'" },
-			error: 'upstream rejected token: Bot error-secret-456; password: "error horse battery"',
+			error: 'upstream rejected token: Bot error-secret-456; password: "error horse battery"; api_key=ApiKey abcdefGHIJ',
 		});
 
 		const log = readFileSync(join(agentDir, "mcp", "audit.jsonl"), "utf-8");
-		for (const secret of ["horse", "battery", "error-secret-456"]) {
+		for (const secret of ["horse", "battery", "error-secret-456", "abcdefGHIJ"]) {
 			expect(log).not.toContain(secret);
 		}
 		const entry = JSON.parse(log.trim()) as { arguments: unknown; error: string };
 		expect(entry.arguments).toEqual({ command: "db connect --password '[redacted]'" });
-		expect(entry.error).toBe('upstream rejected token: [redacted]; password: "[redacted]"');
+		expect(entry.error).toBe('upstream rejected token: [redacted]; password: "[redacted]"; api_key=[redacted]');
 		expect(sanitizeMcpArguments(['api_key="sk;live123"'])).toEqual(['api_key="[redacted]"']);
 	});
 });

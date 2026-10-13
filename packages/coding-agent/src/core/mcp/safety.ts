@@ -82,22 +82,30 @@ const SECRET_FLAG_PATTERN = new RegExp(String.raw`^--?[\w-]*(?:${SECRET_KEY_PATT
 // After a separator or flag, a quoted value is redacted up to its closing quote, or the end of the line when
 // the quote is not closed (`password: "correct horse battery"`, `--password 'a b c'`, `api_key="sk;live123"`).
 // An unquoted value is redacted up to whitespace, `,`, or `;`. When it is a word of letters followed by a
-// credential-like word, the redaction runs through that word, so the credential after an unknown scheme is
-// covered (`token: Bot MTk4NjIy`).
+// credential-like word or a word of at least 8 token characters (letters, digits, `-._~+/=`), the redaction
+// runs through that word, so the credential after an unknown scheme is covered (`token: Bot MTk4NjIy`,
+// `token: Negotiate YIIGhgYGKwYBBQUC`, `api_key=ApiKey abcdefGHIJ`). Shorter words without a digit, `_`, or
+// `-` stay visible, so prose such as `password: expired for user 42` keeps its text, and a shorter
+// letters-only credential after an unknown scheme is not covered. A following word that is itself a key with
+// a redacted value (`password: expired api-key sk-live-123`) is left to its own match.
 // An `Authorization` value after `:`, `=`, or a flag is redacted up to `,`, `;`, a quote, or the end of
 // the line, so the credential after any scheme (`Bot`, `Negotiate`, `DPoP`, `ApiKey`) is covered. Only the
 // schemes above stay visible: an unknown first word cannot be told apart from a credential followed by text.
+// A line break right after a key name and its separator (`Digest token=` at a line end) does not end the
+// value, so the key's value on the next line is redacted too.
 const SECRET_KEY = `(?:${SECRET_KEY_PATTERN.source})`;
 const AUTHORIZATION_SCHEME = String.raw`(?:bearer|basic|token)\s+`;
 const AUTHORIZATION_PREFIX = String.raw`(?:authorization["']?\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?authorization\s+)["']?(?:${AUTHORIZATION_SCHEME})?`;
-const AUTHORIZATION_VALUE = String.raw`[^\s,;"']+(?:[ \t]+[^\s,;"']+)*`;
+const AUTHORIZATION_VALUE = String.raw`[^\s,;"']+(?:(?:[ \t]+|(?<=${SECRET_KEY}[:=])\s+)[^\s,;"']+)*`;
 const SECRET_KEY_PREFIX = String.raw`(?:${SECRET_KEY}["']?\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?${SECRET_KEY}\s+)`;
 const CREDENTIAL_LIKE_VALUE = String.raw`(?=[^\s,;]{6})(?=[^\s,;]*[\d_-])`;
 const BASE64_CREDENTIAL_VALUE =
 	"(?=[A-Za-z0-9+/=]{8})(?=(?:[A-Za-z0-9+/]{4})+(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![A-Za-z0-9+/=]))";
-const SECRET_VALUE = String.raw`(?:[A-Za-z]+[ \t]+(?!-)${CREDENTIAL_LIKE_VALUE})?[^\s,;]+`;
+const CREDENTIAL_AFTER_WHITESPACE = String.raw`\s+(?:basic\s+${BASE64_CREDENTIAL_VALUE}|(?:${AUTHORIZATION_SCHEME})?${CREDENTIAL_LIKE_VALUE})`;
+const TOKEN_VALUE = String.raw`(?=[A-Za-z0-9._~+/=-]{8,}(?![^\s,;]))`;
+const SECRET_VALUE = String.raw`(?:[A-Za-z]+[ \t]+(?!-)(?!["']?[\w-]*${SECRET_KEY}(?:["']?\s*[:=]|${CREDENTIAL_AFTER_WHITESPACE}))(?:${CREDENTIAL_LIKE_VALUE}|${TOKEN_VALUE}))?[^\s,;]+`;
 const SECRET_VALUE_PATTERN = new RegExp(
-	String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+|(${AUTHORIZATION_PREFIX})${AUTHORIZATION_VALUE}|(${SECRET_KEY_PREFIX}"(?:${AUTHORIZATION_SCHEME})?)(?:\\.|[^"\\\n])*|(${SECRET_KEY_PREFIX}'(?:${AUTHORIZATION_SCHEME})?)(?:\\.|[^'\\\n])*|(${SECRET_KEY_PREFIX}(?:${AUTHORIZATION_SCHEME})?|${SECRET_KEY}\s+(?:basic\s+${BASE64_CREDENTIAL_VALUE}|(?:${AUTHORIZATION_SCHEME})?${CREDENTIAL_LIKE_VALUE}))${SECRET_VALUE}`,
+	String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+|(${AUTHORIZATION_PREFIX})${AUTHORIZATION_VALUE}|(${SECRET_KEY_PREFIX}"(?:${AUTHORIZATION_SCHEME})?)(?:\\.|[^"\\\n])*|(${SECRET_KEY_PREFIX}'(?:${AUTHORIZATION_SCHEME})?)(?:\\.|[^'\\\n])*|(${SECRET_KEY_PREFIX}(?:${AUTHORIZATION_SCHEME})?|${SECRET_KEY}${CREDENTIAL_AFTER_WHITESPACE})${SECRET_VALUE}`,
 	"gi",
 );
 
