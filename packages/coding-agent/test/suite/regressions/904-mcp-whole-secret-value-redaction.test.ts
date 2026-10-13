@@ -72,6 +72,24 @@ describe("issue #904: MCP redaction of whole secret values after any key", () =>
 
 	it.each([
 		{ input: 'password "\nhunter2"', expected: 'password "[redacted]"', secret: "hunter2" },
+		{ input: 'password " Basic Abcd1234"', expected: 'password " Basic [redacted]"', secret: "Abcd1234" },
+		{ input: 'password "\nBasic Abcd1234"', expected: 'password "\nBasic [redacted]"', secret: "Abcd1234" },
+		{ input: 'password "Basic dXNlcjpwYXNz"', expected: 'password "Basic [redacted]"', secret: "dXNlcjpwYXNz" },
+		{ input: 'password " Basic dXNlcjpwYXNz"', expected: 'password " Basic [redacted]"', secret: "dXNlcjpwYXNz" },
+		{ input: "password Basic dXNlcjpwYXNz", expected: "password Basic [redacted]", secret: "dXNlcjpwYXNz" },
+		{
+			input: 'password " Bearer abc123 extra-secret"',
+			expected: 'password " Bearer [redacted]"',
+			secret: "extra-secret",
+		},
+		{
+			input: 'password " token abc123 extra-secret"',
+			expected: 'password " token [redacted]"',
+			secret: "extra-secret",
+		},
+		{ input: "Cookie: sid=abc123; stray; refresh=def456", expected: "Cookie: [redacted]", secret: "def456" },
+		{ input: "Cookie: sid=abc123; ; refresh=def456", expected: "Cookie: [redacted]", secret: "def456" },
+		{ input: "Cookie: flag; refresh=def456", expected: "Cookie: [redacted]", secret: "def456" },
 		{ input: "Cookie: sid=abc123; refresh=def456", expected: "Cookie: [redacted]", secret: "def456" },
 		{
 			input: "Request failed: Cookie: sid=abc123; session=def456",

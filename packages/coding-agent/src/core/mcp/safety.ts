@@ -126,6 +126,7 @@ const KEYED_VALUE = new RegExp(
 // redacted only when it looks like a credential: at least 6 characters including a digit, `_`, or `-`
 // (`token ghp_abc123`, `x-api-key sk-live-123`, `password hunter2`), also after a known scheme, or when it is a quoted
 // string that starts like one after any leading whitespace (`password "hunter2 x"`, `password "\nhunter2"`).
+// After `Basic`, a Base64-like word also counts, even without a digit (`password "Basic dXNlcjpwYXNz"`).
 const SPACED_KEY = new RegExp(String.raw`${SECRET_KEY}\s+`, "gi");
 const CREDENTIAL_LIKE = /(?=[^\s,;]{6})(?=[^\s,;]*[\d_-])[^\s,;]+/y;
 // A known scheme stays visible before the credential it introduces (`Bearer abc`, `Basic dXNlcjpwYXNz`, GitHub's
@@ -142,6 +143,7 @@ const CREDENTIAL_WORD = /^(?=.{6})[^\s,;]*[\d_.-]/;
  * `=`, or with two capital letters and one right after a small letter (`dXNlcjpwYXNz`, `YIIGhgYG`; not `Yesterday`).
  */
 const BASE64_WORD = /^(?=[A-Za-z0-9+/]{8,}={0,2}$)(?:.*[0-9+/=]|(?=.*[a-z][A-Z])(?=(?:.*[A-Z]){2}))/;
+const BASE64_CREDENTIAL = /[A-Za-z0-9+/]+={0,2}(?=\\"|[\s,;"')\]}>]|$)/y;
 // An `Authorization` value is a scheme followed by a single credential or by auth-params separated by commas or, in
 // some logs, by spaces, whose values may be quoted and contain spaces or commas, including JSON-encoded quoted
 // strings with escaped quotes and backslashes (RFC 9110 section 11.4: `Bearer abc`, `Digest username="u",
@@ -155,6 +157,8 @@ const HTTP_TOKEN = String.raw`[\w!#$%&*+.^|~-]+`;
 const COOKIE_HEADER = /(?<![\w-])cookie(?:\\?["'][ \t]*[:=]|\s*[:=])[\s:=]*/gi;
 const COOKIE_PAIR_PREFIX = new RegExp(String.raw`${HTTP_TOKEN}[ \t]*=[ \t]*`, "y");
 const COOKIE_PAIR_VALUE = /[^\s,;"'\\]+/y;
+// An empty or valueless segment may precede more pairs; stop at quotes, lines, or another header's colon.
+const COOKIE_SEGMENT = /(?:\\(?!["'])|[^,;:\r\n"'\\])*/y;
 const COOKIE_SEPARATOR = /[ \t]*;[ \t]*/y;
 // JSON-encoded `\"...\"` values are read before raw quoted or unquoted ones, so spaces, commas, and JSON-encoded
 // quoted-pairs (`\\\"` or `\\\\`) cannot end a value before later auth-params.
@@ -334,20 +338,38 @@ function keyedValueSpans(text: string, start: number, authorization: boolean): S
 	return spansOf(stickySpan(BARE_VALUE, text, start));
 }
 
+/** A credential-like word after whitespace alone; after Basic, also a Base64-like word. */
+function spacedCredentialSpan(text: string, start: number, basic: boolean): Span | undefined {
+	const credential = stickySpan(CREDENTIAL_LIKE, text, start);
+	if (credential || !basic) return credential;
+	const base64 = stickySpan(BASE64_CREDENTIAL, text, start);
+	return base64 && BASE64_WORD.test(text.slice(base64.start, base64.end)) ? base64 : undefined;
+}
+
 /**
  * The spans of a credential-like value at `start`, after a key name and whitespace alone. A quoted value is redacted
  * whole when it, or the word its opening quote starts, looks like a credential.
  */
 function spacedValueSpans(text: string, start: number): Span[] {
 	const at = start + visibleScheme(text, start);
-	const word = stickySpan(CREDENTIAL_LIKE, text, at);
+	const basic = /^basic\s/i.test(text.slice(start, at));
+	const word = spacedCredentialSpan(text, at, basic);
 	const quoted = quotedSpans(text, at);
 	if (quoted === undefined) return spansOf(word);
 	if (word) return quoted;
 	const content = quoted.find((span) => span.bounded);
 	if (!content) return [];
-	const credentialStart = content.end - text.slice(content.start, content.end).trimStart().length;
-	return credentialStart < content.end && stickySpan(CREDENTIAL_LIKE, text, credentialStart) ? quoted : [];
+	const contentStart = at + (text.startsWith('\\"', at) ? 2 : 1);
+	const trimmedStart = content.end - text.slice(contentStart, content.end).trimStart().length;
+	const scheme = visibleScheme(text, trimmedStart);
+	const credentialStart = trimmedStart + scheme;
+	if (
+		credentialStart >= content.end ||
+		!spacedCredentialSpan(text, credentialStart, basic || /^basic\s/i.test(text.slice(trimmedStart, credentialStart)))
+	) {
+		return [];
+	}
+	return quoted.map((span) => (span === content && scheme > 0 ? { ...span, start: credentialStart } : span));
 }
 
 /** The whole semicolon-separated cookie list, stopping before other text or an enclosing quote. */
@@ -356,7 +378,13 @@ function cookieValueSpans(text: string, start: number): Span[] {
 	let end = start;
 	while (at < text.length) {
 		const prefix = stickySpan(COOKIE_PAIR_PREFIX, text, at);
-		if (!prefix) break;
+		if (!prefix) {
+			const segmentEnd = stickySpan(COOKIE_SEGMENT, text, at)?.end ?? at;
+			const separator = stickySpan(COOKIE_SEPARATOR, text, segmentEnd);
+			if (!separator) break;
+			at = separator.end;
+			continue;
+		}
 		const first = text[prefix.end];
 		end =
 			first === '"' || first === "'" || text.startsWith('\\"', prefix.end)

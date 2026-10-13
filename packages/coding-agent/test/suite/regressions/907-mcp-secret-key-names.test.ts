@@ -30,6 +30,49 @@ describe("issue #907: MCP redaction knows more credential key names", () => {
 		}
 	});
 
+	it.each([
+		["Cookie: sid=abc123; stray; refresh=def456", "Cookie: [redacted]"],
+		["Cookie: sid=abc123; ; refresh=def456", "Cookie: [redacted]"],
+		["Cookie: flag; refresh=def456", "Cookie: [redacted]"],
+		["Cookie: ; refresh=def456", "Cookie: [redacted]"],
+		["Cookie: sid=abc123;;\tstray; ; refresh=def456", "Cookie: [redacted]"],
+		["Cookie: sid=abc123; stray text; refresh=def456", "Cookie: [redacted]"],
+		[String.raw`Cookie: sid=abc123; stray\flag; refresh=def456`, "Cookie: [redacted]"],
+		['Cookie: flag; refresh="def456"', "Cookie: [redacted]"],
+		['curl -H "Cookie: sid=abc123; stray; refresh=def456" --verbose', 'curl -H "Cookie: [redacted]" --verbose'],
+		[String.raw`{"header":"Cookie: sid=\"abc123\"; stray; refresh=def456"}`, '{"header":"Cookie: [redacted]"}'],
+		["Cookie: sid=abc123; stray; refresh=def456; retry later", "Cookie: [redacted]; retry later"],
+	])("continues redacting cookie pairs after empty or valueless segments: %s", (input, expected) => {
+		expect(redactMcpText(input)).toBe(expected);
+		expect(sanitizeMcpArguments({ header: input })).toEqual({ header: expected });
+		expect(redactMcpText(expected)).toBe(expected);
+	});
+
+	it("does not scan past a cookie list into other text when skipping a valueless segment", () => {
+		for (const [input, expected] of [
+			["Cookie: sid=abc123; stray\r\nrefresh=visible123", "Cookie: [redacted]; stray\r\nrefresh=visible123"],
+			["Cookie: sid=abc123; ;\nrefresh=visible123", "Cookie: [redacted]; ;\nrefresh=visible123"],
+			[
+				"Cookie: sid=abc123; Accept: visible; refresh=visible123",
+				"Cookie: [redacted]; Accept: visible; refresh=visible123",
+			],
+			[
+				'curl -H "Cookie: sid=abc123; stray" --refresh=visible123; next=visible456',
+				'curl -H "Cookie: [redacted]; stray" --refresh=visible123; next=visible456',
+			],
+			[
+				String.raw`{"header":"Cookie: sid=abc123; stray\"; refresh=visible123"}`,
+				String.raw`{"header":"Cookie: [redacted]; stray\"; refresh=visible123"}`,
+			],
+			[
+				"Cookie: sid=abc123; stray, refresh=visible123; next=visible456",
+				"Cookie: [redacted]; stray, refresh=visible123; next=visible456",
+			],
+		]) {
+			expect(redactMcpText(input)).toBe(expected);
+		}
+	});
+
 	it("keeps Set-Cookie attributes readable", () => {
 		expect(redactMcpText("Set-Cookie: sid=abc123; Path=/; Domain=example.com; SameSite=Lax; Secure")).toBe(
 			"Set-Cookie: [redacted]; Path=/; Domain=example.com; SameSite=Lax; Secure",
