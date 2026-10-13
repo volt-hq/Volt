@@ -79,15 +79,34 @@ const SECRET_FLAG_PATTERN = new RegExp(String.raw`^--?[\w-]*(?:${SECRET_KEY_PATT
 // An `Authorization` value after `:`, `=`, or a flag is redacted up to `,`, `;`, a quote, or the end of
 // the line, so the credential after any scheme (`Bot`, `Negotiate`, `DPoP`, `ApiKey`) is covered. Only the
 // schemes above stay visible: an unknown first word cannot be told apart from a credential followed by text.
+// A key may also be quoted, as in JSON, YAML, or a Python dict (`"access_token": "abc"`, `'token': 'abc'`), also
+// inside a JSON-encoded string (`\"token\": \"abc\"`), or be the two words `API key`. Such a key needs an explicit
+// `:` or `=`, so a quoted value or prose that ends in a key name (`"grant_type": "refresh_token"`) is never taken
+// for one. The value after it is redacted whole: a quoted string through its closing quote, keeping the quotes and
+// a leading scheme above (`"Bearer [redacted]"`); an object or array through its closing bracket, whatever its
+// keys; any other value like the value of an unquoted key, or up to where a rule above that reads past it starts in
+// it, which then applies (`API key: private sk-abc`).
 const SECRET_KEY = `(?:${SECRET_KEY_PATTERN.source})`;
 const AUTHORIZATION_SCHEME = String.raw`(?:bearer|basic|token)\s+`;
 const AUTHORIZATION_PREFIX = String.raw`(?:authorization\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?authorization\s+)["']?(?:${AUTHORIZATION_SCHEME})?`;
 const AUTHORIZATION_VALUE = String.raw`[^\s,;"']+(?:[ \t]+[^\s,;"']+)*`;
 const SECRET_PREFIX = String.raw`(?:${SECRET_KEY}\s*[:=][\s:=]*|(?<![\w-])--?[\w-]*?${SECRET_KEY}\s+)(?:["']?${AUTHORIZATION_SCHEME})?`;
 const CREDENTIAL_LIKE_VALUE = String.raw`(?=[^\s,;]{6})(?=[^\s,;]*[\d_-])`;
+const EXPLICIT_KEY_PREFIX = String.raw`(?:${SECRET_KEY}\\?["']|api[ \t]+key(?:\\?["'])?)[ \t]*[:=][ \t]*`;
+const BEARER_VALUE = String.raw`(?<bearerPrefix>bearer\s+)[A-Za-z0-9._~+/=-]+`;
+const AUTHORIZATION_KEY_VALUE = String.raw`(?<authorizationPrefix>${AUTHORIZATION_PREFIX})${AUTHORIZATION_VALUE}`;
+const KEY_VALUE = String.raw`(?<keyPrefix>${SECRET_PREFIX}|${SECRET_KEY}\s+(?:${AUTHORIZATION_SCHEME})?${CREDENTIAL_LIKE_VALUE})[^\s,;]+`;
 const SECRET_VALUE_PATTERN = new RegExp(
-	String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+|(${AUTHORIZATION_PREFIX})${AUTHORIZATION_VALUE}|(${SECRET_PREFIX}|${SECRET_KEY}\s+(?:${AUTHORIZATION_SCHEME})?${CREDENTIAL_LIKE_VALUE})[^\s,;]+`,
+	`${BEARER_VALUE}|${AUTHORIZATION_KEY_VALUE}|(?<explicitKeyPrefix>${EXPLICIT_KEY_PREFIX})|${KEY_VALUE}`,
 	"gi",
+);
+const OTHER_VALUE_PATTERN = new RegExp(`${BEARER_VALUE}|${AUTHORIZATION_KEY_VALUE}|${KEY_VALUE}`, "gi");
+const VISIBLE_SCHEME = new RegExp(AUTHORIZATION_SCHEME, "iy");
+const QUOTED_VALUE_END = /[\s,;:)\]}\\"']/;
+const BARE_VALUE = new RegExp(String.raw`(?<scheme>${AUTHORIZATION_SCHEME})?[^\s,;]+`, "iy");
+const BARE_AUTHORIZATION_VALUE = new RegExp(
+	String.raw`(?<scheme>${AUTHORIZATION_SCHEME})?${AUTHORIZATION_VALUE}`,
+	"iy",
 );
 
 function tokenizeRiskText(value: string): string {
@@ -122,27 +141,129 @@ export function isMcpToolTrustedReadCandidate(tool: Pick<SdkTool, "name" | "desc
 	return tool.annotations?.readOnlyHint === true && classifyMcpToolRisk(tool) === "read";
 }
 
+/**
+ * The index after the string that starts at `start`, quoted with `"`, `'`, or, inside a JSON-encoded string, `\"`.
+ * An unterminated string ends at the end of its line.
+ */
+function skipQuoted(text: string, start: number): number {
+	if (text.startsWith('\\"', start)) {
+		// One level of JSON escaping: `\\` is a backslash of the string and `\"` its quote, so `\\\"` is an escaped
+		// quote inside it. A bare `"` ends the enclosing string.
+		let escaped = false;
+		let index = start + 2;
+		while (index < text.length && text[index] !== '"' && text[index] !== "\n") {
+			const decoded = text[index] === "\\" ? text[index + 1] : text[index];
+			index += text[index] === "\\" ? 2 : 1;
+			if (escaped) {
+				escaped = false;
+			} else if (decoded === "\\") {
+				escaped = true;
+			} else if (decoded === '"') {
+				return index;
+			}
+		}
+		return Math.min(index, text.length);
+	}
+	const quote = text[start];
+	for (let index = start + 1; index < text.length; index++) {
+		if (text[index] === "\\") {
+			index++;
+		} else if (text[index] === quote) {
+			return index + 1;
+		} else if (text[index] === "\n") {
+			return index;
+		}
+	}
+	return text.length;
+}
+
+/** The index after the object or array that starts at `start`, or the end of `text` when it does not close. */
+function skipContainer(text: string, start: number): number {
+	let depth = 0;
+	let index = start;
+	while (index < text.length) {
+		const char = text[index];
+		if (char === '"' || char === "'" || text.startsWith('\\"', index)) {
+			index = skipQuoted(text, index);
+			continue;
+		}
+		if (char === "{" || char === "[") {
+			depth++;
+		} else if ((char === "}" || char === "]") && --depth === 0) {
+			return index + 1;
+		}
+		index++;
+	}
+	return text.length;
+}
+
+/**
+ * The redacted form of the value at `start` after a quoted key or `API key`, and the index after the value. A bare
+ * value after an `authorization` key is redacted like one after `Authorization:`.
+ */
+function redactExplicitKeyValue(
+	text: string,
+	start: number,
+	authorization: boolean,
+): { text: string; end: number } | undefined {
+	const first = text[start];
+	if (first === "{" || first === "[") {
+		return { text: "[redacted]", end: skipContainer(text, start) };
+	}
+	const quote = text.startsWith('\\"', start) ? '\\"' : first === '"' || first === "'" ? first : undefined;
+	const end = quote === undefined ? 0 : skipQuoted(text, start);
+	const closed = quote !== undefined && end - quote.length > start && text.startsWith(quote, end - quote.length);
+	// A closing quote that more of a word follows (`"Bearer "abc`) does not end the value, which is then read as bare.
+	if (quote !== undefined && (!closed || end === text.length || QUOTED_VALUE_END.test(text[end]))) {
+		const contentStart = start + quote.length;
+		if ((closed ? end - quote.length : end) <= contentStart) {
+			return undefined;
+		}
+		VISIBLE_SCHEME.lastIndex = contentStart;
+		const scheme = VISIBLE_SCHEME.exec(text)?.[0] ?? "";
+		return { text: `${quote}${scheme}[redacted]${closed ? quote : ""}`, end };
+	}
+	const barePattern = authorization ? BARE_AUTHORIZATION_VALUE : BARE_VALUE;
+	barePattern.lastIndex = start;
+	const bare = barePattern.exec(text);
+	if (!bare) {
+		return undefined;
+	}
+	const bareEnd = start + bare[0].length;
+	OTHER_VALUE_PATTERN.lastIndex = start;
+	for (
+		let other = OTHER_VALUE_PATTERN.exec(text);
+		other && other.index < bareEnd;
+		other = OTHER_VALUE_PATTERN.exec(text)
+	) {
+		if (other.index + other[0].length > bareEnd) {
+			return other.index > start ? { text: "[redacted]", end: other.index } : undefined;
+		}
+	}
+	return { text: `${bare.groups?.scheme ?? ""}[redacted]`, end: bareEnd };
+}
+
 export function redactMcpText(value: string): string {
-	return value.replace(
-		SECRET_VALUE_PATTERN,
-		(
-			_match,
-			bearerPrefix: string | undefined,
-			authorizationPrefix: string | undefined,
-			keyPrefix: string | undefined,
-		) => {
-			if (bearerPrefix) {
-				return `${bearerPrefix}[redacted]`;
+	let result = "";
+	let copied = 0;
+	SECRET_VALUE_PATTERN.lastIndex = 0;
+	for (let match = SECRET_VALUE_PATTERN.exec(value); match; match = SECRET_VALUE_PATTERN.exec(value)) {
+		const { bearerPrefix, authorizationPrefix, explicitKeyPrefix, keyPrefix } = match.groups ?? {};
+		let replacement = `${bearerPrefix ?? authorizationPrefix ?? keyPrefix ?? ""}[redacted]`;
+		let end = match.index + match[0].length;
+		if (explicitKeyPrefix !== undefined) {
+			const secret = redactExplicitKeyValue(value, end, /authorization/i.test(explicitKeyPrefix));
+			if (!secret) {
+				continue;
 			}
-			if (authorizationPrefix) {
-				return `${authorizationPrefix}[redacted]`;
-			}
-			if (keyPrefix) {
-				return `${keyPrefix}[redacted]`;
-			}
-			return "[redacted]";
-		},
-	);
+			replacement = `${explicitKeyPrefix}${secret.text}`;
+			end = secret.end;
+			SECRET_VALUE_PATTERN.lastIndex = end;
+		}
+		result += value.slice(copied, match.index) + replacement;
+		copied = end;
+	}
+	return result + value.slice(copied);
 }
 
 export function sanitizeMcpArguments(value: unknown, depth = 0): unknown {
