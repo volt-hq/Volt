@@ -456,7 +456,10 @@ export class AgentSession {
 	/** The review engines this session can run besides the built-in pipeline. */
 	readonly reviewEngines = new ReviewEngineRegistry();
 	/** The work kinds the extensions declare, registered while their runner generation is current. */
-	private readonly _extensionKinds = new ExtensionKinds(() => this._work);
+	private readonly _extensionKinds = new ExtensionKinds(
+		() => this._work,
+		(extensionId, workId) => this._extensions.ownsWork(extensionId, workId),
+	);
 	/** The review engines the extensions register, kept in {@link reviewEngines} while their runner generation is current. */
 	private readonly _extensionReviewEngines = new ExtensionReviewEngines(this.reviewEngines, () => this._work);
 	/**

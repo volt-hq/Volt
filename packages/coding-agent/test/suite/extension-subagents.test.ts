@@ -11,7 +11,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type FauxResponseStep, fauxAssistantMessage, type Usage } from "@hansjm10/volt-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../../src/core/agent-session-services.ts";
 import type {
 	ExtensionCommandContext,
@@ -22,7 +22,11 @@ import type {
 import type { ConversationFactory } from "../../src/core/host/hosted-conversation.ts";
 import type { ResourceLoader } from "../../src/core/resource-loader.ts";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.ts";
-import { type SubagentDefinition, SubagentManager } from "../../src/core/subagents/index.ts";
+import {
+	type SubagentDefinition,
+	SubagentManager,
+	type SubagentManagerOptions,
+} from "../../src/core/subagents/index.ts";
 import { getWorktreesRoot } from "../../src/daemon/worktree-manager.ts";
 import type { CreateTestExtensionsResultInput } from "../utilities.ts";
 import { createTestResourceLoader } from "../utilities.ts";
@@ -101,6 +105,7 @@ async function setup(
 	childResponses: FauxResponseStep[] = [fauxAssistantMessage("issue worked", { usage })],
 	agentDir?: string,
 	retainRuntimeOnDispose = false,
+	onRuntimeCreated?: SubagentManagerOptions["onRuntimeCreated"],
 ): Promise<Setup> {
 	const childCwds: string[] = [];
 	const children: Harness[] = [];
@@ -141,6 +146,7 @@ async function setup(
 		agentDir: tmpdir(),
 		resourceLoader: resourceLoader(),
 		retainRuntimeOnDispose,
+		...(onRuntimeCreated === undefined ? {} : { onRuntimeCreated }),
 	});
 	const parent = await createHarness({
 		...(agentDir === undefined ? {} : { agentDir }),
@@ -253,6 +259,125 @@ describe("extension subagents", () => {
 		]);
 		expect((await delegator.runs[0]?.ended)?.status).toBe("completed");
 		expect(childCwds).toEqual([realpathSync.native(ours)]);
+	});
+
+	it("starts in a managed worktree from an ordinary linked checkout of the same repository", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "volt-linked-subagents-agent-"));
+		const primary = mkdtempSync(join(tmpdir(), "volt-linked-subagents-primary-"));
+		cleanups.push(() => {
+			rmSync(agentDir, { recursive: true, force: true });
+			rmSync(primary, { recursive: true, force: true });
+		});
+		let cwd = "";
+		const delegator = delegating(() => ({ agent: "worker", task: "Work issue 12", cwd }));
+		const { parent, childCwds } = await setup([delegator.extension], undefined, agentDir);
+		commitRepository(primary);
+		// The conversation's directory is a linked checkout outside the managed root.
+		git(primary, "worktree", "add", "-b", "workspace", parent.tempDir);
+		const managed = join(getWorktreesRoot(agentDir), "ws", "issue-12");
+		git(parent.tempDir, "worktree", "add", "-b", "volt/issue-12", managed);
+		cwd = join(managed, "src");
+		mkdirSync(cwd);
+
+		await parent.session.prompt("/delegate");
+		expect(delegator.errors).toEqual([]);
+		expect((await delegator.runs[0]?.ended)?.status).toBe("completed");
+		expect(childCwds).toEqual([realpathSync.native(cwd)]);
+	});
+
+	it.each(["preparation", "prompt acceptance"] as const)(
+		"cancels a child whose extension was disabled during %s",
+		async (stage) => {
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const delegator = delegating(() => ({ agent: "worker", task: "Work issue 12" }));
+			const { parent, manager } = await setup(
+				[delegator.extension],
+				[heldUntilAborted],
+				undefined,
+				false,
+				async ({ conversation }) => {
+					if (stage === "preparation") {
+						entered.resolve();
+						await release.promise;
+					} else {
+						const prompt = conversation.session.prompt.bind(conversation.session);
+						vi.spyOn(conversation.session, "prompt").mockImplementation(async (...args) => {
+							entered.resolve();
+							await release.promise;
+							return prompt(...args);
+						});
+					}
+				},
+			);
+			const prompt = parent.session.prompt("/delegate");
+			try {
+				await entered.promise;
+				parent.settingsManager.setExtensionEnabled("delegator", "global", false);
+				await parent.session.extensionRegistry.settled();
+				expect(parent.session.extensionRegistry.stopped("delegator")).toBe(true);
+			} finally {
+				release.resolve();
+			}
+			await prompt;
+			// The pending start rejects rather than handing a retired instance a live child.
+			expect(delegator.runs).toEqual([]);
+			expect(delegator.errors).toEqual(["Extension delegator was disabled"]);
+			await parent.session.work.waitForIdle();
+			expect(parent.session.work.list()).toContainEqual(
+				expect.objectContaining({ kind: "subagent", outcome: "cancelled" }),
+			);
+			expect(manager.listActivities()).toContainEqual(expect.objectContaining({ status: "cancelled" }));
+		},
+	);
+
+	it("keeps only its own child actions in work details, as it does in panels", async () => {
+		const delegator = delegating(() => ({ agent: "worker", task: "Work issue 12" }));
+		let ownId = "";
+		let otherId = "";
+		const detailDone = Promise.withResolvers<void>();
+		let workId = "";
+		const extension: CreateTestExtensionsResultInput = {
+			id: "orchestrator",
+			permissions: ["exec"],
+			factory: (volt) => {
+				const actions = () =>
+					[ownId, otherId].flatMap((id) => [
+						{ id: `open:${id}`, label: "Open", intent: { type: "open_work", input: { workId: id } } },
+						{ id: `cancel:${id}`, label: "Cancel", intent: { type: "cancel_work", input: { workId: id } } },
+					]);
+				volt.registerWorkKind("loop", { detail: () => ({ type: "actions", actions: actions() }) });
+				volt.registerCommand("orchestrate", {
+					handler: async (_args, ctx) => {
+						const child = await ctx.subagents.start({ agent: "worker", task: "Work issue 13" });
+						ownId = child.id;
+						ctx.ui.setPanel("children", { node: { type: "actions", actions: actions() } });
+						({ workId } = await ctx.startWork("loop", { title: "Children" }, async () => {
+							await detailDone.promise;
+							return { outcome: "completed" };
+						}));
+					},
+				});
+			},
+		};
+		const { parent } = await setup([delegator.extension, extension], [heldUntilAborted]);
+		await parent.session.attachExtensionClient({ id: "test", mode: "rpc" }).ready;
+		cleanups.push(() => detailDone.resolve());
+		await parent.session.prompt("/delegate");
+		otherId = delegator.runs[0]?.id ?? "";
+		await parent.session.prompt("/orchestrate");
+		const expected = {
+			type: "actions",
+			actions: [
+				{ id: `open:${ownId}`, label: "Open", intent: { type: "open_work", input: { workId: ownId } } },
+				{ id: `cancel:${ownId}`, label: "Cancel", intent: { type: "cancel_work", input: { workId: ownId } } },
+			],
+		};
+		expect(parent.session.liveState.get("ext_panel/orchestrator/children")).toMatchObject({ node: expected });
+		await vi.waitFor(() =>
+			expect(parent.session.liveState.get(`work/${workId}`)).toMatchObject({ detail: expected }),
+		);
+		detailDone.resolve();
 	});
 
 	it("closes a run's conversation once it ended, also where the host keeps children open", async () => {

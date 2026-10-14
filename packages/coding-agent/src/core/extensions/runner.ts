@@ -1428,7 +1428,15 @@ export class ExtensionRunner {
 				assertRunning();
 				const id = requireOwner("ctx.subagents.start");
 				requirePermission(this.permissionHolder(id), "exec", "ctx.subagents.start");
-				return await this.subagentsHandler.start(id, options);
+				const run = await this.subagentsHandler.start(id, options);
+				try {
+					// The owning instance may have stopped while child creation or prompt admission awaited.
+					assertRunning();
+				} catch (error) {
+					await this.subagentsHandler.cancel(id, run.id);
+					throw error;
+				}
+				return run;
 			},
 			cancel: async (runId) => {
 				assertRunning();

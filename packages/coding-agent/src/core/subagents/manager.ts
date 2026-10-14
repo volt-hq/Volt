@@ -245,7 +245,7 @@ export interface SubagentRunEnd {
 export interface SubagentRun {
 	readonly workId: string;
 	readonly conversation: string;
-	/** Resolves once the run ended and its conversation closed (waiting at most 10 seconds for that); never rejects. */
+	/** Resolves once the run ended and its conversation and host registration closed (waiting at most 10 seconds for cleanup); never rejects. */
 	readonly ended: Promise<SubagentRunEnd>;
 }
 
@@ -287,7 +287,7 @@ const VALID_THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low"
 const MAX_RETAINED_ACTIVITIES = 50;
 const MAX_RETAINED_ACTIVITY_EVENTS = 2_000;
 const DELEGATION_SNAPSHOT_MAX_RECORDS = 25;
-/** Longest a started run's `ended` waits, after the run ended, for its conversation to close. */
+/** Longest a started run's `ended` waits, after the run ended, for conversation and host cleanup. */
 const RUN_CLOSE_WAIT_MS = 10_000;
 
 interface SubagentCallerBatchReservation {
@@ -999,12 +999,11 @@ export class SubagentManager {
 				}),
 			)
 			.then(async (end) => {
-				// The run's conversation closes as its work ends: wait for it, so what the child held
-				// (such as its checkout) is free once `ended` resolves. Bounded: a close that hangs
-				// does not hold the caller.
+				// Join both local closure and the host's registration release, so the daemon's
+				// checkout claim is gone before `ended` resolves. Both share one bounded wait.
 				let timer: ReturnType<typeof setTimeout> | undefined;
 				await Promise.race([
-					handle.conversation.whenClosed(),
+					Promise.all([handle.dispose().catch(() => undefined), handle.conversation.whenClosed()]),
 					new Promise<void>((resolve) => {
 						timer = setTimeout(resolve, RUN_CLOSE_WAIT_MS);
 						timer.unref?.();
@@ -1652,7 +1651,8 @@ export class SubagentManager {
 		let rollbackRuntimeRegistrationPromise: Promise<void> | undefined;
 		let rollbackRuntimeRegistrationErrorReported = false;
 		const rollbackRuntimeRegistration = async (): Promise<void> => {
-			if (published) return;
+			// Detached runs own their registration through disposal; retained tool children do not.
+			if (published && !control.detached) return;
 			if (!rollbackRuntimeRegistrationPromise) {
 				const registration = runtimeRegistration;
 				runtimeRegistration = undefined;
@@ -1811,7 +1811,7 @@ export class SubagentManager {
 			const publish = (message: string): void => {
 				if (published) return;
 				runtimeRegistration?.commit();
-				runtimeRegistration = undefined;
+				if (!control.detached) runtimeRegistration = undefined;
 				published = true;
 				// A resumed run took its record back when it was prepared.
 				if (!control.resume) {

@@ -60,11 +60,11 @@ import {
 	registerReplacedSessionContext,
 } from "../extensions/runner.ts";
 import type { Extension } from "../extensions/types.ts";
+import { discoverGitWorktree } from "../git-repository.ts";
 import { ClientScope } from "../host/client-scope.ts";
 import { type HostRequestOptions, hostRequestTimeout, type LiveState } from "../host/live-state.ts";
 import type { CustomMessageInput } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import { projectTrustPath } from "../project-trust.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "../resource-loader.ts";
 import type { ReviewTarget } from "../review.ts";
 import type { ReviewEngineRegistry } from "../review-engine.ts";
@@ -357,11 +357,7 @@ export class SessionExtensionBinding {
 	private readonly uiHost: ExtensionUiHost = {
 		// Read when a call runs: the routers are built before the binding's host is set.
 		live: () => this.host.liveState,
-		ownsWork: (extensionId, workId) =>
-			this.host.extensionKinds().owns(extensionId, workId) ||
-			this.host.extensionReviewEngines().owns(extensionId, workId) ||
-			this.subagentRuns.get(extensionId)?.has(workId) === true ||
-			this.reviews.owns(extensionId, workId),
+		ownsWork: (extensionId, workId) => this.ownsWork(extensionId, workId),
 		droppedIntent: (extensionId, intent) =>
 			this.extensionRunner.emitError({
 				extensionId,
@@ -392,6 +388,16 @@ export class SessionExtensionBinding {
 			startReview: (target, review) => host.startReview(target, review),
 		});
 		this.registry = new ExtensionRegistry(this.createRegistryHost());
+	}
+
+	/** Shared action ownership for an extension's UI and work detail, including the children it started. */
+	ownsWork(extensionId: string, workId: string): boolean {
+		return (
+			this.host.extensionKinds().owns(extensionId, workId) ||
+			this.host.extensionReviewEngines().owns(extensionId, workId) ||
+			this.subagentRuns.get(extensionId)?.has(workId) === true ||
+			this.reviews.owns(extensionId, workId)
+		);
 	}
 
 	/** What the registry starts and stops extensions through. */
@@ -560,8 +566,8 @@ export class SessionExtensionBinding {
 
 	/**
 	 * The directory an extension's subagent runs in, canonical: inside the
-	 * conversation's working directory, or inside a managed worktree whose
-	 * parent checkout holds the conversation's project.
+	 * conversation's working directory, or inside a managed worktree of the
+	 * same Git repository, including when the conversation is in a linked checkout.
 	 */
 	private subagentCwd(cwd: unknown): string {
 		if (typeof cwd !== "string" || !isAbsolute(cwd)) {
@@ -577,8 +583,13 @@ export class SessionExtensionBinding {
 		if (!directory) throw new Error(`ctx.subagents.start: cwd ${JSON.stringify(cwd)} is not a directory`);
 		if (isPathInside(canonicalizePath(this.host.cwd), resolved)) return resolved;
 		const parent = resolveWorktreeParentCheckout(this.host.agentDir, resolved);
-		const project = projectTrustPath(this.host.agentDir, this.host.cwd);
-		if (parent !== undefined && project !== undefined && isPathInside(canonicalizePath(parent), project)) {
+		const project = discoverGitWorktree(this.host.cwd);
+		const worktree = parent === undefined ? null : discoverGitWorktree(resolved);
+		if (
+			project !== null &&
+			worktree !== null &&
+			canonicalizePath(project.commonGitDir) === canonicalizePath(worktree.commonGitDir)
+		) {
 			return resolved;
 		}
 		throw new Error(
