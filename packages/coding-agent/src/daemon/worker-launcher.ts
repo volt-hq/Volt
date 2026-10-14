@@ -17,11 +17,19 @@
  * environment, and are never logged; what it opens follows its hello over
  * the socket. Its environment's values are never logged either: the worker
  * logs their names.
+ *
+ * It also runs extension inventories (`volt daemon extension-inventory`):
+ * one-shot processes, started the same way in the root they evaluate, with
+ * the daemon's environment. The request travels on stdin and the result comes
+ * back as one JSON line on fd 3, so nothing an extension prints to stdout can
+ * corrupt it; stdout and stderr go to `inventory-<id>.log` beside the
+ * workers' logs.
  */
 
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { closeSync, constants, lstatSync, openSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import type { Readable } from "node:stream";
 import { ENV_AGENT_DIR } from "../config.ts";
 import { ensurePrivateDirectorySync } from "../utils/private-files.ts";
 import { getWorkerLogDirectory } from "./paths.ts";
@@ -66,8 +74,45 @@ export interface LaunchedWorker {
 	kill(): void;
 }
 
+/** What an extension inventory process evaluates; written to its stdin as one JSON line. */
+export interface ExtensionInventoryProbeRequest {
+	/** The root a conversation there loads its project resources from: the workspace, or a worktree checkout. */
+	readonly root: string;
+	/** The daemon's trust decision for the workspace. */
+	readonly projectTrusted: boolean;
+	readonly profile?: string;
+}
+
+export interface ExtensionInventoryLaunchRequest extends ExtensionInventoryProbeRequest {
+	/** Names its log. */
+	readonly id: string;
+	readonly agentDir: string;
+}
+
+/** Largest result an extension inventory process may write, in bytes. */
+export const EXTENSION_INVENTORY_MAX_OUTPUT_BYTES = 1024 * 1024;
+
+export interface LaunchedExtensionInventory {
+	/**
+	 * The JSON line the process wrote on fd 3, parsed; rejects when it wrote none (it exited, crashed, or was
+	 * killed first), wrote more than {@link EXTENSION_INVENTORY_MAX_OUTPUT_BYTES}, or wrote something else.
+	 */
+	readonly result: Promise<unknown>;
+	/**
+	 * Stop the process and what it started: SIGTERM to its process group, so it ends the detached process trees
+	 * its extensions started, then SIGKILL to the group if it has not exited
+	 * {@link EXTENSION_INVENTORY_KILL_GRACE_MS} later.
+	 */
+	kill(): void;
+}
+
+/** How long a stopped extension inventory process has to exit before its process group is killed. */
+export const EXTENSION_INVENTORY_KILL_GRACE_MS = 2_000;
+
 export interface WorkerLauncher {
 	launch(request: WorkerLaunchRequest): LaunchedWorker;
+	/** Run an extension inventory; a launcher without it cannot (tests of the control plane). */
+	launchExtensionInventory?(request: ExtensionInventoryLaunchRequest): LaunchedExtensionInventory;
 }
 
 /** What a worker process reads from its stdin, as one JSON line, before anything else. */
@@ -94,6 +139,41 @@ export function workerExitFromCode(code: number | null, signal: NodeJS.Signals |
 	return { reason: "crashed", error: signal === null ? `exit code ${code}` : `signal ${signal}` };
 }
 
+/** Kill `child`'s process group (it and the children it did not detach), else `child` itself, unless it exited. */
+function killGroup(child: ChildProcess): void {
+	if (child.exitCode !== null || child.signalCode !== null) return;
+	if (process.platform !== "win32" && child.pid !== undefined) {
+		try {
+			process.kill(-child.pid, "SIGKILL");
+			return;
+		} catch {
+			// Fall back to the process itself.
+		}
+	}
+	child.kill("SIGKILL");
+}
+
+/**
+ * Ask `child`'s process group to stop (SIGTERM), so `child` can end what it started outside the group, and kill
+ * the group if `child` has not exited `graceMs` later. On Windows, kill `child` outright.
+ */
+function terminateGroup(child: ChildProcess, graceMs: number): void {
+	if (child.exitCode !== null || child.signalCode !== null) return;
+	if (process.platform === "win32" || child.pid === undefined) {
+		killGroup(child);
+		return;
+	}
+	try {
+		process.kill(-child.pid, "SIGTERM");
+	} catch {
+		killGroup(child);
+		return;
+	}
+	const escalation = setTimeout(() => killGroup(child), graceMs);
+	escalation.unref();
+	child.once("exit", () => clearTimeout(escalation));
+}
+
 /** Worker logs kept beyond those of running workers; older ones are removed as workers start. */
 const MAX_WORKER_LOGS = 50;
 
@@ -114,17 +194,7 @@ export class ProcessWorkerLauncher implements WorkerLauncher {
 	private readonly running = new Set<string>();
 
 	launch(request: WorkerLaunchRequest): LaunchedWorker {
-		const directory = getWorkerLogDirectory(request.agentDir);
-		ensurePrivateDirectorySync(directory);
-		this.pruneLogs(directory);
-		const logPath = join(directory, `${request.workerId}.log`);
-		// A new file of its own: never one planted at its path, and never through a link.
-		const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
-		const logFd = openSync(
-			logPath,
-			constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_APPEND | noFollow,
-			0o600,
-		);
+		const { logPath, logFd } = this.openLog(request.agentDir, request.workerId);
 		let child: ReturnType<typeof spawn>;
 		try {
 			const invocation = resolveDaemonCliInvocation();
@@ -165,20 +235,96 @@ export class ProcessWorkerLauncher implements WorkerLauncher {
 			pid: child.pid ?? 0,
 			logPath,
 			exited,
-			kill: () => {
-				if (child.exitCode !== null || child.signalCode !== null) return;
-				// Its process group: the worker and the children it did not detach (language and MCP servers).
-				if (process.platform !== "win32" && child.pid !== undefined) {
-					try {
-						process.kill(-child.pid, "SIGKILL");
-						return;
-					} catch {
-						// Fall back to the worker itself.
-					}
-				}
-				child.kill("SIGKILL");
-			},
+			kill: () => killGroup(child),
 		};
+	}
+
+	launchExtensionInventory(request: ExtensionInventoryLaunchRequest): LaunchedExtensionInventory {
+		const name = `inventory-${request.id}`;
+		const { logFd } = this.openLog(request.agentDir, name);
+		let child: ReturnType<typeof spawn>;
+		try {
+			const invocation = resolveDaemonCliInvocation();
+			child = spawn(invocation.command, [...invocation.entryArgs, "daemon", "extension-inventory"], {
+				cwd: request.root,
+				detached: true,
+				windowsHide: true,
+				stdio: ["pipe", logFd, logFd, "pipe"],
+				env: workerEnvironment(request.agentDir),
+			});
+		} finally {
+			closeSync(logFd);
+		}
+		this.running.add(name);
+		const exited = new Promise<WorkerExit>((resolve) => {
+			const settle = (exit: WorkerExit) => {
+				this.running.delete(name);
+				resolve(exit);
+			};
+			child.once("exit", (code, signal) => settle(workerExitFromCode(code, signal)));
+			child.once("error", (error) => {
+				if (child.pid === undefined) settle({ reason: "failed", error: error.message });
+			});
+		});
+		const output = child.stdio[3] as Readable | null | undefined;
+		const written = new Promise<string>((resolve, reject) => {
+			if (!output) {
+				reject(new Error("The extension inventory process has no result pipe"));
+				return;
+			}
+			const chunks: Buffer[] = [];
+			let size = 0;
+			output.on("data", (chunk: Buffer) => {
+				size += chunk.length;
+				if (size > EXTENSION_INVENTORY_MAX_OUTPUT_BYTES) {
+					output.destroy();
+					terminateGroup(child, EXTENSION_INVENTORY_KILL_GRACE_MS);
+					reject(new Error("The extension inventory result is too large"));
+					return;
+				}
+				chunks.push(chunk);
+			});
+			output.once("error", () => undefined);
+			output.once("close", () => resolve(Buffer.concat(chunks).toString("utf8")));
+		});
+		const bytes = `${JSON.stringify({
+			root: request.root,
+			projectTrusted: request.projectTrusted,
+			...(request.profile === undefined ? {} : { profile: request.profile }),
+		} satisfies ExtensionInventoryProbeRequest)}\n`;
+		child.stdin?.on("error", () => undefined);
+		child.stdin?.end(bytes);
+		child.unref();
+		const result = (async (): Promise<unknown> => {
+			const [text, exit] = await Promise.all([written, exited]);
+			const newline = text.indexOf("\n");
+			if (newline === -1) {
+				throw new Error(
+					`The extension inventory process wrote no result (${exit.reason}${exit.error === undefined ? "" : `: ${exit.error}`})`,
+				);
+			}
+			try {
+				return JSON.parse(text.slice(0, newline)) as unknown;
+			} catch {
+				throw new Error("The extension inventory result is not JSON");
+			}
+		})();
+		return { result, kill: () => terminateGroup(child, EXTENSION_INVENTORY_KILL_GRACE_MS) };
+	}
+
+	/** A new log file of its own for `name`, in the agent's worker log directory: never one planted at its path, never through a link. */
+	private openLog(agentDir: string, name: string): { logPath: string; logFd: number } {
+		const directory = getWorkerLogDirectory(agentDir);
+		ensurePrivateDirectorySync(directory);
+		this.pruneLogs(directory);
+		const logPath = join(directory, `${name}.log`);
+		const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+		const logFd = openSync(
+			logPath,
+			constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_APPEND | noFollow,
+			0o600,
+		);
+		return { logPath, logFd };
 	}
 
 	/**

@@ -338,6 +338,36 @@ conversation, and `volt daemon status` prints each worker's log path. The
 daemon keeps the logs of running workers and the 49 most recent others. A
 worker logs the names of its environment variables, never their values.
 
+### Extension inventories
+
+A paired device can ask what a new conversation in a workspace, or in one of
+its worktree checkouts, would load before it opens one: its extensions and
+the review engines they register (the `extension_inventory` query on a
+`workspaceDiscovery: extensions` stream; see the
+[wire contract](iroh-remote-protocol.md)). The app uses it to offer review
+engines before it creates a review conversation.
+
+The daemon itself runs no extension code. It evaluates an inventory in a
+short-lived `volt daemon extension-inventory` process, started like a worker
+from the daemon's installation, in the root the conversation would run in,
+with the daemon's environment (less its credentials). That process reads the
+settings with the trust and profile a phone conversation there would have,
+loads the extensions as such a conversation would, which runs their factories,
+answers, and exits. It shows no prompt, runs no migration, and does not install
+a configured package that is missing: the answer leaves it out until the
+package is installed. Its output goes to
+`~/.volt/agent/daemon/workers/inventory-<id>.log`, kept like the workers'
+logs.
+
+An inventory is a prediction. The daemon keeps each answer for a minute and
+gives it again meanwhile, so an answer can be up to a minute old; starting a
+review still checks the engine against the conversation it starts in. It lists
+the review engines extensions register as their factories run: an engine an
+extension registers later, such as in `session_start`, is offered only once a
+conversation is open. At most two evaluations run at once. An evaluation stops
+itself after 15 seconds, ending any process its extensions started, and the
+daemon kills one still running after 20 seconds.
+
 ## Daemon environment
 
 A conversation a TUI opened runs with that TUI's environment, except the

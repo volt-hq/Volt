@@ -321,7 +321,7 @@ This pattern makes the fetched models available during normal startup and to `vo
 
 ### Long-lived resources and shutdown
 
-Extension factories may run in invocations that never start a session. Do not start background resources such as processes, sockets, file watchers, or timers from the factory.
+Extension factories may run in invocations that never start a session. Do not start background resources such as processes, sockets, file watchers, or timers from the factory. For example, the daemon runs a workspace's factories in a short-lived process to tell paired devices which review engines a new conversation there would offer ([daemon.md](daemon.md#extension-inventories)); that process exits right after the factories return.
 
 Defer background resource startup until `session_start` or the command/tool/event that needs the resource. Register an idempotent `session_shutdown` handler to close any session-scoped resources you start.
 
@@ -1912,6 +1912,8 @@ volt.registerReviewEngine("swarm", {
   },
 });
 ```
+
+Register engines in the factory. A paired device can learn which engines a workspace offers before it opens a conversation there ([daemon.md](daemon.md#extension-inventories)), but only those registered as the factory runs: an engine registered later, such as in `session_start`, is offered to it only once a conversation is open.
 
 The engine's id is `ext:<id>/<name>`, where `<id>` is the extension's manifest id; clients and run records name it so. `name` is at most 64 lowercase letters, digits, `-`, and `_`, starting with a letter or digit. An extension registers at most 8 engines. Registering throws what you must fix: the name, the declaration, or a parameter.
 

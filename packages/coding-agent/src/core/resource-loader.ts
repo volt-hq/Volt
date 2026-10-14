@@ -23,7 +23,12 @@ import type {
 	ExtensionRuntime,
 	LoadExtensionsResult,
 } from "./extensions/types.ts";
-import { DefaultPackageManager, type PathMetadata, type ResolvedResource } from "./package-manager.ts";
+import {
+	DefaultPackageManager,
+	type PathMetadata,
+	type ResolvedPaths,
+	type ResolvedResource,
+} from "./package-manager.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import { loadPromptTemplates } from "./prompt-templates.ts";
 import { SettingsManager } from "./settings-manager.ts";
@@ -162,6 +167,11 @@ export interface DefaultResourceLoaderOptions {
 	noPromptTemplates?: boolean;
 	noThemes?: boolean;
 	noContextFiles?: boolean;
+	/**
+	 * Leave configured packages that are not installed (or not at their configured version) out instead of
+	 * installing them. For reads that must not change the installation, such as the extension inventory.
+	 */
+	skipMissingPackages?: boolean;
 	systemPrompt?: string;
 	appendSystemPrompt?: string[];
 	extensionsOverride?: (base: LoadExtensionsResult) => LoadExtensionsResult;
@@ -200,6 +210,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private noPromptTemplates: boolean;
 	private noThemes: boolean;
 	private noContextFiles: boolean;
+	private skipMissingPackages: boolean;
 	private systemPromptSource?: string;
 	private appendSystemPromptSource?: string[];
 	private extensionsOverride?: (base: LoadExtensionsResult) => LoadExtensionsResult;
@@ -260,6 +271,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.noPromptTemplates = options.noPromptTemplates ?? false;
 		this.noThemes = options.noThemes ?? false;
 		this.noContextFiles = options.noContextFiles ?? false;
+		this.skipMissingPackages = options.skipMissingPackages ?? false;
 		this.systemPromptSource = options.systemPrompt;
 		this.appendSystemPromptSource = options.appendSystemPrompt;
 		this.extensionsOverride = options.extensionsOverride;
@@ -379,7 +391,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 		// reload() preserves SettingsManager.projectTrusted and reloads settings for that trust state.
 		await this.settingsManager.reload();
-		const resolvedPaths = await this.packageManager.resolve();
+		const resolvedPaths = await this.resolvePackages();
 		const cliExtensionPaths = await this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {
 			temporary: true,
 		});
@@ -529,7 +541,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		present: ReadonlySet<string>;
 		errors: LoadExtensionsResult["errors"];
 	}> {
-		const resolvedPaths = await this.packageManager.resolve();
+		const resolvedPaths = await this.resolvePackages();
 		const cliExtensionPaths = await this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {
 			temporary: true,
 		});
@@ -557,8 +569,14 @@ export class DefaultResourceLoader implements ResourceLoader {
 		return { declarations, present, errors };
 	}
 
+	/** The configured packages' resources: missing ones installed, or with `skipMissingPackages` left out. */
+	private resolvePackages(): Promise<ResolvedPaths> {
+		if (!this.skipMissingPackages) return this.packageManager.resolve();
+		return this.packageManager.resolve(async () => "skip");
+	}
+
 	private async loadCurrentExtensionSet(): Promise<LoadExtensionsResult> {
-		const resolvedPaths = await this.packageManager.resolve();
+		const resolvedPaths = await this.resolvePackages();
 		const cliExtensionPaths = await this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {
 			temporary: true,
 		});

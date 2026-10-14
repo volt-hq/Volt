@@ -14,6 +14,7 @@ export * from "./client-fold.ts";
 export * from "./contract.ts";
 export * from "./daemon-control.ts";
 export * from "./entries.ts";
+export * from "./extension-inventory.ts";
 export * from "./extensions.ts";
 export * from "./frames.ts";
 export * from "./git-context.ts";
