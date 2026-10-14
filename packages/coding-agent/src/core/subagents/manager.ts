@@ -221,11 +221,12 @@ export interface SubagentRunOptions {
 	/** The child's working directory: the manager's by default. */
 	readonly cwd?: string;
 	/**
-	 * Limits of the run's own delegation tree, over the manager's. A manager of a
-	 * subagent runtime runs its children in its own tree, whose limits stay.
+	 * Limits of the run and its descendants. They only tighten the limits the run
+	 * runs within: the manager's, or in a subagent runtime those of its
+	 * delegation tree, which still apply.
 	 */
 	readonly limits?: SubagentDelegationScopeLimits;
-	/** Turn limits of the child, under the same rule. */
+	/** Turn limits of the child and its descendants, under the same rule. */
 	readonly turnLimits?: SubagentTurnLimits;
 	/** The work the run belongs to in the conversation's log. */
 	readonly parentWorkId?: string;
@@ -957,13 +958,7 @@ export class SubagentManager {
 		if (signal?.aborted) throw new Error("Operation aborted");
 		// Clamped to the conversation's tool policy, as a tool's start and a resume are.
 		const allowedTools = this.workBinding.allowedTools();
-		const scope =
-			this.subagentContext !== undefined || (options.limits === undefined && options.turnLimits === undefined)
-				? undefined
-				: new SubagentDelegationScope({
-						limits: { ...this.delegationLimits, ...options.limits },
-						turnLimits: { ...this.turnLimits, ...options.turnLimits },
-					});
+		const scope = this.createRunScope(options);
 		let handle: LocalSubagentHandle;
 		try {
 			handle = await this.startNamed(
@@ -971,7 +966,7 @@ export class SubagentManager {
 				{
 					...(allowedTools === undefined ? {} : { allowedTools }),
 					...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-					...(scope === undefined ? {} : { delegationScope: scope }),
+					...(scope === undefined ? {} : { delegationScope: scope.scope }),
 				},
 				{ detached: true, ...(options.parentWorkId === undefined ? {} : { parentWorkId: options.parentWorkId }) },
 			);
@@ -1047,6 +1042,40 @@ export class SubagentManager {
 			void ended.then(() => signal.removeEventListener("abort", cancel));
 		}
 		return { workId: handle.id, conversation: handle.sessionId, ended };
+	}
+
+	/**
+	 * The delegation scope of a run that asks for its own limits: within the
+	 * scope it would otherwise run in (its subagent runtime's tree, or a tree
+	 * under the manager's limits), so each requested limit applies only where
+	 * it is stricter. `dispose` frees both once the run ended.
+	 */
+	private createRunScope(
+		options: SubagentRunOptions,
+	): { scope: SubagentDelegationScope; dispose(): void } | undefined {
+		if (options.limits === undefined && options.turnLimits === undefined) return undefined;
+		const tree = this.createDelegationScope();
+		const disposeTree = (): void => {
+			if (tree.owned) tree.scope.dispose();
+		};
+		let scope: SubagentDelegationScope;
+		try {
+			scope = new SubagentDelegationScope({
+				parent: tree.scope,
+				...(options.limits === undefined ? {} : { limits: options.limits }),
+				...(options.turnLimits === undefined ? {} : { turnLimits: options.turnLimits }),
+			});
+		} catch (error) {
+			disposeTree();
+			throw error;
+		}
+		return {
+			scope,
+			dispose: () => {
+				scope.dispose();
+				disposeTree();
+			},
+		};
 	}
 
 	/** Cancel a subagent run that is work of the manager's conversation. */
@@ -1568,8 +1597,14 @@ export class SubagentManager {
 
 	private resolveDelegationScope(requested: SubagentDelegationScope | undefined): SubagentDelegationScopeLease {
 		const inherited = this.subagentContext?.delegationScope;
+		if (requested) {
+			// A subagent runtime's children stay in its delegation tree: a scope outside it would lift the tree's limits.
+			if (inherited && !requested.isWithin(inherited)) {
+				throw new Error("Cannot start subagent: the delegation scope is outside this subagent's delegation tree.");
+			}
+			return { scope: requested, owned: false };
+		}
 		if (inherited) return { scope: inherited, owned: false };
-		if (requested) return { scope: requested, owned: false };
 		return {
 			scope: new SubagentDelegationScope({ limits: this.delegationLimits, turnLimits: this.turnLimits }),
 			owned: true,

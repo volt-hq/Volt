@@ -398,7 +398,11 @@ export interface ExtensionSubagentDefinition {
 	readonly description: string;
 }
 
-/** Limits of one subagent run. Each is a positive number; omitted ones keep the host's. */
+/**
+ * Limits of one subagent run. Each is a positive number. They only tighten the
+ * limits the run runs within: the host's, and inside a subagent's conversation
+ * that subagent's too. Omitted ones keep those.
+ */
 export interface ExtensionSubagentLimits {
 	/** Assistant turns before the child must give a tool-free final report. */
 	readonly maxTurns?: number;

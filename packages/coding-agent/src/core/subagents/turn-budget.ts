@@ -29,9 +29,16 @@ export interface SubagentTurnBudgetEvent {
  *   silently never firing.
  * - `warnAtTurns === maxTurns` is legal: the warning merges into the
  *   final-report turn because `recordTurn` checks `maxTurns` first.
+ *
+ * With a `ceiling` (resolved limits the result runs within), omitted overrides
+ * keep the ceiling's and each given one applies only where it is stricter; a
+ * warning above the tightened `maxTurns` merges into the final-report turn.
  */
-export function resolveSubagentTurnLimits(overrides: SubagentTurnLimits | undefined): Required<SubagentTurnLimits> {
-	const limits: Required<SubagentTurnLimits> = { ...DEFAULT_SUBAGENT_TURN_LIMITS };
+export function resolveSubagentTurnLimits(
+	overrides: SubagentTurnLimits | undefined,
+	ceiling?: Required<SubagentTurnLimits>,
+): Required<SubagentTurnLimits> {
+	const limits: Required<SubagentTurnLimits> = { ...(ceiling ?? DEFAULT_SUBAGENT_TURN_LIMITS) };
 	for (const key of Object.keys(limits) as Array<keyof SubagentTurnLimits>) {
 		const value = overrides?.[key];
 		if (value === undefined) {
@@ -40,7 +47,15 @@ export function resolveSubagentTurnLimits(overrides: SubagentTurnLimits | undefi
 		if (value !== Number.POSITIVE_INFINITY && (!Number.isSafeInteger(value) || value <= 0)) {
 			throw new Error(`Subagent turn limit ${key} must be a positive safe integer or Infinity`);
 		}
-		limits[key] = value;
+		limits[key] = ceiling ? Math.min(value, ceiling[key]) : value;
+	}
+	if (ceiling) {
+		const { warnAtTurns, maxTurns } = overrides ?? {};
+		if (warnAtTurns !== undefined && maxTurns !== undefined && warnAtTurns > maxTurns) {
+			throw new Error(`Subagent turn limit warnAtTurns (${warnAtTurns}) must not exceed maxTurns (${maxTurns})`);
+		}
+		limits.warnAtTurns = Math.min(limits.warnAtTurns, limits.maxTurns);
+		return limits;
 	}
 	if (overrides?.warnAtTurns === undefined) {
 		// The default maxTurns is finite, so an infinite maxTurns is always an

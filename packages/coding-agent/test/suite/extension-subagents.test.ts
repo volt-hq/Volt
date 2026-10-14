@@ -19,10 +19,16 @@ import type {
 	ExtensionSubagentRun,
 	ExtensionSubagentStartOptions,
 } from "../../src/core/extensions/index.ts";
-import type { ConversationFactory } from "../../src/core/host/hosted-conversation.ts";
+import type { ConversationFactory, SubagentRuntimeContext } from "../../src/core/host/hosted-conversation.ts";
 import type { ResourceLoader } from "../../src/core/resource-loader.ts";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.ts";
-import { type SubagentDefinition, SubagentManager } from "../../src/core/subagents/index.ts";
+import {
+	type SubagentDefinition,
+	SubagentDelegationScope,
+	SubagentManager,
+	type SubagentManagerOptions,
+	SubagentRegistry,
+} from "../../src/core/subagents/index.ts";
 import { getWorktreesRoot } from "../../src/daemon/worktree-manager.ts";
 import type { CreateTestExtensionsResultInput } from "../utilities.ts";
 import { createTestResourceLoader } from "../utilities.ts";
@@ -105,6 +111,7 @@ async function setup(
 	retainRuntimeOnDispose = false,
 	/** Runs as each child runtime is being created, before it exists. */
 	creatingRuntime?: () => Promise<void>,
+	managerOptions: Pick<SubagentManagerOptions, "delegationLimits" | "subagentContext"> = {},
 ): Promise<Setup> {
 	const childCwds: string[] = [];
 	const children: Harness[] = [];
@@ -146,6 +153,7 @@ async function setup(
 		agentDir: tmpdir(),
 		resourceLoader: resourceLoader(),
 		retainRuntimeOnDispose,
+		...managerOptions,
 	});
 	const parent = await createHarness({
 		...(agentDir === undefined ? {} : { agentDir }),
@@ -159,6 +167,19 @@ async function setup(
 		for (const child of children) await child.cleanupAsync().catch(() => undefined);
 	});
 	return { parent, manager, childCwds, children };
+}
+
+/** The context of a subagent conversation that may start `worker`, in delegation tree `tree`. */
+function subagentContext(tree: SubagentDelegationScope): SubagentRuntimeContext {
+	return {
+		depth: 1,
+		agentName: "coordinator",
+		subagentId: "sa_coordinator",
+		path: ["coordinator"],
+		delegationScope: tree,
+		registry: new SubagentRegistry(),
+		allowedSubagents: ["worker"],
+	};
 }
 
 /** An extension whose `/delegate` command starts a run with the options `options` gives, keeping the run or the error. */
@@ -280,6 +301,38 @@ describe("extension subagents", () => {
 		await parent.session.prompt("/delegate");
 		const [run] = delegator.runs;
 		expect((await run?.ended)?.status).toBe("cancelled");
+	});
+
+	it("stops a run at its limits inside a subagent's conversation, counting it in the subagent's tree", async () => {
+		const tree = new SubagentDelegationScope();
+		cleanups.push(() => tree.dispose());
+		const delegator = delegating(() => ({ agent: "worker", task: "Work issue 12", limits: { maxDurationMs: 50 } }));
+		const { parent } = await setup([delegator.extension], [heldUntilAborted], undefined, false, undefined, {
+			subagentContext: subagentContext(tree),
+		});
+
+		await parent.session.prompt("/delegate");
+		const [run] = delegator.runs;
+		if (!run) throw new Error(`no run: ${delegator.errors.join("; ")}`);
+		expect((await run.ended).status).toBe("cancelled");
+		// The run's limit stopped it alone: the subagent's tree counted it and keeps running.
+		expect(tree.snapshot()).toMatchObject({ startsUsed: 1, activeDescendants: 0, aborted: false });
+	});
+
+	it("keeps a run within the host's limits when it asks for looser ones", async () => {
+		const delegator = delegating(() => ({
+			agent: "worker",
+			task: "Work issue 12",
+			limits: { maxDurationMs: 3_600_000 },
+		}));
+		const { parent } = await setup([delegator.extension], [heldUntilAborted], undefined, false, undefined, {
+			delegationLimits: { maxDurationMs: 50 },
+		});
+
+		await parent.session.prompt("/delegate");
+		const [run] = delegator.runs;
+		if (!run) throw new Error(`no run: ${delegator.errors.join("; ")}`);
+		expect((await run.ended).status).toBe("cancelled");
 	});
 
 	it("needs the exec permission", async () => {
