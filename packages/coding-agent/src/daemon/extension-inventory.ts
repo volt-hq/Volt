@@ -56,6 +56,12 @@ export const EXTENSION_INVENTORY_MAX_AGE_MS = 10 * 60_000;
 export const EXTENSION_INVENTORY_MAX_ENTRIES = 32;
 /** Most evaluation processes at once; more wait their turn. */
 export const EXTENSION_INVENTORY_MAX_CONCURRENT = 2;
+/**
+ * How long before an evaluation starts a change to one of its inputs still counts as made during it. File
+ * timestamps are coarse (a few milliseconds behind the clock on Linux, whole seconds on some file systems), so a
+ * change made as the evaluation began can carry an earlier time.
+ */
+export const EXTENSION_INVENTORY_SETTLE_MS = 2_000;
 
 /** What an inventory is evaluated for: a conversation opened in `root` with this trust and profile. */
 export interface ExtensionInventoryTarget {
@@ -77,6 +83,7 @@ export interface ExtensionInventoryServiceOptions {
 	readonly maxAgeMs?: number;
 	readonly maxEntries?: number;
 	readonly maxConcurrent?: number;
+	readonly settleMs?: number;
 }
 
 /** A failed evaluation; its message is for the host's log, not a device. */
@@ -205,7 +212,8 @@ export class ExtensionInventoryService {
 				reviewEngines: output.reviewEngines,
 			};
 			// An input that changed as it was read may not be what it read: not kept, the next request evaluates again.
-			const unsettled = output.inputs.some((path) => (changedAtMs(path) ?? 0) >= startedAt);
+			const settledBefore = startedAt - (this.options.settleMs ?? EXTENSION_INVENTORY_SETTLE_MS);
+			const unsettled = output.inputs.some((path) => (changedAtMs(path) ?? 0) >= settledBefore);
 			if (output.cacheable && !unsettled && !this.disposed) {
 				this.kept.set(key, {
 					inventory,

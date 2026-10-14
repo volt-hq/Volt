@@ -116,8 +116,8 @@ async function settle(): Promise<void> {
 }
 
 /** Let the clock move past the files' change times, so an evaluation starting now sees them settled. */
-async function pastChanges(): Promise<void> {
-	await new Promise((resolve) => setTimeout(resolve, 20));
+async function pastChanges(ms = 20): Promise<void> {
+	await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 describe("ExtensionInventoryService", () => {
@@ -133,6 +133,8 @@ describe("ExtensionInventoryService", () => {
 			agentDir: join(tempDir, "agent"),
 			launch: launcher.launch,
 			now: () => clock,
+			// A change made before an evaluation is settled at once, unless a test says otherwise.
+			settleMs: 0,
 			...options,
 		});
 		return created;
@@ -211,7 +213,7 @@ describe("ExtensionInventoryService", () => {
 		inventories.dispose();
 	});
 
-	test("does not keep an evaluation that left out a package, or one an input changed during", async () => {
+	test("does not keep an evaluation that left out a package", async () => {
 		const inventories = service();
 		const skipped = inventories.get(target);
 		await settle();
@@ -220,11 +222,26 @@ describe("ExtensionInventoryService", () => {
 		pending(inventories.get(target));
 		await settle();
 		expect(launcher.launches).toHaveLength(2);
+		inventories.dispose();
+	});
 
+	test("does not keep an evaluation an input changed during, even when file times lag the clock", async () => {
+		const inventories = service({ settleMs: 300 });
+		await pastChanges(400);
+		const settled = inventories.get(target);
+		await settle();
+		launcher.succeed(0, [settings]);
+		await settled;
+		await inventories.get(target);
+		expect(launcher.launches).toHaveLength(1);
+
+		const untrusted = { ...target, projectTrusted: false };
+		const during = inventories.get(untrusted);
+		await settle();
 		writeFileSync(settings, '{"changed":true}');
 		launcher.succeed(1, [settings]);
-		await settle();
-		pending(inventories.get(target));
+		await during;
+		pending(inventories.get(untrusted));
 		await settle();
 		expect(launcher.launches).toHaveLength(3);
 		inventories.dispose();
