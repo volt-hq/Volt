@@ -82,7 +82,7 @@ Fields:
 | `protocol` | yes | Must be `volt/1`. |
 | `workspace` | yes | Registered workspace name requested by the client. |
 | `conversation` | one mode required | Conversation stream target: `{ "target": "last" }`, `{ "target": "new", "sessionId": "..." }`, or `{ "target": "session", "sessionId": "..." }`. A `new` target may include a `worktreeId` on `worktrees.v1` hosts and/or `workingDirectory` on `working_directories.v1` hosts. |
-| `workspaceDiscovery` | one mode required | Utility stream target: `{ "purpose": "list_sessions" }`, `{ "purpose": "session_contexts" }`, `{ "purpose": "review" }`, or, on `agent_options.v1` hosts, `{ "purpose": "agent_options" }`. |
+| `workspaceDiscovery` | one mode required | Utility stream target: `{ "purpose": "list_sessions" }`, `{ "purpose": "session_contexts" }`, `{ "purpose": "review" }`, `{ "purpose": "extensions" }`, or, on `agent_options.v1` hosts, `{ "purpose": "agent_options" }`. |
 | `workspaceManagement` | one mode required | Utility stream target. Payloads are `{ "purpose": "unregister_workspace" }`, `{ "purpose": "list_workspace_directories" }`, or, on `worktrees.v1` hosts, `{ "purpose": "manage_worktrees" }`. |
 | `secret` | no | Pairing secret when completing a pairing ticket. Omitted for already-paired clients. |
 | `clientLabel` | no | Human-readable client label requested during pairing. |
@@ -258,7 +258,7 @@ Every stream a paired device opens is served on the remote profile, chosen by th
 
 | Capability | Intents | Queries |
 |---|---|---|
-| `conversation.observe.v1` | | `intents`, `intent_completions`, `history`, `content`, `sessions`, `settings`, `extensions`, `host_status`, `work_output`, `session_contexts`, `worktrees`, `workspace_directories`, `pr_review`, `review.discussions`, `review.discussion_source`, `review.general`, `review.result`, `review.runs` |
+| `conversation.observe.v1` | | `intents`, `intent_completions`, `history`, `content`, `sessions`, `settings`, `extensions`, `host_status`, `work_output`, `session_contexts`, `worktrees`, `workspace_directories`, `pr_review`, `extension_inventory`, `review.discussions`, `review.discussion_source`, `review.general`, `review.result`, `review.runs` |
 | `conversation.control.v1` | `prompt`, `steer`, `follow_up`, `abort`, `set_fast_mode`, `set_agent_mode`, `plan_execute`, `plan_change`, `plan_discard`, `discard_client_input`, `new_session`, `switch_session`, `cancel_work`, `set_auto_compaction`, `set_compaction_threshold`, `review`, `review_rerun`, `review_open_session`, `open_work`, `resume_work`, `review_acknowledge`, `review_record_finding_outcome`, `review_publish`, `review_start_discussions`, `review_reset_discussion`, and the dynamic `extension.command.*` (only commands registered `remoteSafe: true`), `extension.intent.*` (only intents registered `remote: true`, with the capabilities they `require`), `prompt.template.*`, and `skill.*` intents | `editor_completions` (only completion providers registered `remote: true`) |
 | `model.select.v1` | `set_model`, `set_thinking_level` (the bound session only) | `models`, `agent_options` |
 | `model.select.v1` + `host.manage.v1` | `set_default_model`, `set_default_thinking_level` (host defaults) | |
@@ -295,11 +295,14 @@ A workspace stream (hello `workspaceDiscovery` or `workspaceManagement`) is a pr
 | `workspaceDiscovery: agent_options` | `agent_options` query (`agent_options.v1`) |
 | `workspaceDiscovery: session_contexts` | `session_contexts{sessionIds}` query |
 | `workspaceDiscovery: review` | `pr_review` query |
+| `workspaceDiscovery: extensions` | `extension_inventory{worktreeId?}` query |
 | `workspaceManagement: unregister_workspace` | `unregister_workspace{workspaceName}` intent |
 | `workspaceManagement: list_workspace_directories` | `workspace_directories{path?}` query |
 | `workspaceManagement: manage_worktrees` | `create_worktree`, `remove_worktree`, `prepare_pr_review` intents and the `worktrees` query (`worktrees.v1`) |
 
 Discovery streams open no conversation and do not update last-session state. Inbound host-local filesystem paths are always rejected; answers carry workspace-relative paths only.
+
+`extension_inventory` answers what a new conversation in the stream's workspace, or in its worktree checkout `worktreeId`, would load, before one exists: `{workspaceName, worktreeId?, projectTrusted, extensions, reviewEngines}`, with each extension as the `extensions` query lists it (no `fingerprint`) and each review engine as `review.engines` lists it to a remote client (only `remoteSafe` engines, without their local-only parameters). The daemon evaluates it with the trust and profile a phone conversation there would have, and keeps the answer until a settings file, the permission acknowledgments, an extension directory, or an extension's source changes. It is a prediction: starting a review still checks the engine against the created conversation's own engines. An unknown worktree fails with `worktree_not_found`, any other failure with `extension_inventory_failed`.
 
 Conversation streams also serve the workspace operations a phone uses beside a conversation: the `sessions` and `worktrees` queries and the `create_worktree`, `unregister_workspace`, `upload_device_logs`, `register_push_target`, `set_keep_awake`, and `set_web_search_key` intents, with the `host_status` and `web_search_status` queries.
 

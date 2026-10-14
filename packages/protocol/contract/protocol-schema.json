@@ -7881,6 +7881,9 @@
 					"$ref": "#/$defs/Frame.query.pr_review"
 				},
 				{
+					"$ref": "#/$defs/Frame.query.extension_inventory"
+				},
+				{
 					"$ref": "#/$defs/Frame.query.mcp.capabilities"
 				},
 				{
@@ -8108,6 +8111,36 @@
 				},
 				"params": {
 					"$ref": "#/$defs/QueryParams.editor_completions"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.extension_inventory": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "extension_inventory"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.extension_inventory"
 				}
 			},
 			"additionalProperties": false
@@ -16627,6 +16660,7 @@
 				"worktrees",
 				"workspace_directories",
 				"pr_review",
+				"extension_inventory",
 				"mcp.capabilities",
 				"mcp.servers",
 				"mcp.server",
@@ -16694,6 +16728,15 @@
 				"cursor": {
 					"type": "integer",
 					"minimum": 0
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.extension_inventory": {
+			"type": "object",
+			"properties": {
+				"worktreeId": {
+					"$ref": "#/$defs/RemoteHandshake.WorktreeId"
 				}
 			},
 			"additionalProperties": false
@@ -17220,6 +17263,40 @@
 						"$ref": "#/$defs/EditorCompletionItem"
 					},
 					"maxItems": 50
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryResult.extension_inventory": {
+			"type": "object",
+			"required": [
+				"workspaceName",
+				"projectTrusted",
+				"extensions",
+				"reviewEngines"
+			],
+			"properties": {
+				"workspaceName": {
+					"$ref": "#/$defs/IrohRemoteWorkspaceName"
+				},
+				"worktreeId": {
+					"$ref": "#/$defs/RemoteHandshake.WorktreeId"
+				},
+				"projectTrusted": {
+					"type": "boolean"
+				},
+				"extensions": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ExtensionSummary"
+					}
+				},
+				"reviewEngines": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcReviewEngine"
+					},
+					"maxItems": 128
 				}
 			},
 			"additionalProperties": false
@@ -18631,7 +18708,8 @@
 						"list_sessions",
 						"agent_options",
 						"session_contexts",
-						"review"
+						"review",
+						"extensions"
 					]
 				}
 			},

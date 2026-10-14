@@ -321,7 +321,7 @@ This pattern makes the fetched models available during normal startup and to `vo
 
 ### Long-lived resources and shutdown
 
-Extension factories may run in invocations that never start a session. Do not start background resources such as processes, sockets, file watchers, or timers from the factory.
+Extension factories may run in invocations that never start a session. Do not start background resources such as processes, sockets, file watchers, or timers from the factory. For example, the daemon runs a workspace's factories in a short-lived process to tell paired devices which review engines a new conversation there would offer ([daemon.md](daemon.md#extension-inventories)); that process exits right after the factories return.
 
 Defer background resource startup until `session_start` or the command/tool/event that needs the resource. Register an idempotent `session_shutdown` handler to close any session-scoped resources you start.
 

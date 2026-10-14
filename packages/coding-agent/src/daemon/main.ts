@@ -59,6 +59,7 @@ import {
 	type DaemonLock,
 	type DaemonLockOwner,
 } from "./daemon-lock.ts";
+import { ExtensionInventoryService } from "./extension-inventory.ts";
 import { KeepAwakeController, type KeepAwakeControllerOptions } from "./keep-awake.ts";
 import type { DaemonLogger } from "./log.ts";
 import { createDaemonLogger } from "./log.ts";
@@ -191,6 +192,8 @@ export interface VoltdRuntimeServices {
 	controlServer: ControlServer;
 	/** The conversation workers the daemon supervises. */
 	workers: WorkerRegistry;
+	/** What a new conversation in a workspace root would load; absent when the daemon runs no workers. */
+	extensionInventory?: ExtensionInventoryService;
 	/** Which workspace owns each stored session. */
 	workspaceSessions: WorkspaceSessions;
 	keepAwake: KeepAwakeController;
@@ -527,6 +530,15 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		audit: (event) => void auditLogger.log(event).catch(() => {}),
 		log: (level, message, details) => logger.log(level, "workers", message, details),
 	});
+	const launchExtensionInventory = config.workerLauncher?.launchExtensionInventory?.bind(config.workerLauncher);
+	const extensionInventory =
+		launchExtensionInventory === undefined
+			? undefined
+			: new ExtensionInventoryService({
+					agentDir,
+					launch: launchExtensionInventory,
+					log: (message) => logger.log("info", "extension-inventory", message),
+				});
 	// The conversations TUIs open in workers, and the streams that reach them.
 	const tuiConversations = new TuiConversations({
 		agentDir,
@@ -626,6 +638,8 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				);
 			}
 		}
+		// No device waits for an inventory now: its processes go.
+		extensionInventory?.dispose();
 		// Each worker finishes its turn (60 s cap), tells its TUIs it shuts down, closes its conversations, and exits.
 		await workers.stopAll();
 		tuiConversations.close();
@@ -1227,6 +1241,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		auditLogger,
 		controlServer,
 		workers,
+		...(extensionInventory === undefined ? {} : { extensionInventory }),
 		workspaceSessions,
 		keepAwake,
 		webSearchKey,

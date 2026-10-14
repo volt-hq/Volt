@@ -1204,6 +1204,7 @@ describe("remoteStreamAllows", () => {
 			{ scope: { kind: "discovery", purpose: "agent_options" }, intents: [], queries: ["agent_options"] },
 			{ scope: { kind: "discovery", purpose: "session_contexts" }, intents: [], queries: ["session_contexts"] },
 			{ scope: { kind: "discovery", purpose: "review" }, intents: [], queries: ["pr_review"] },
+			{ scope: { kind: "discovery", purpose: "extensions" }, intents: [], queries: ["extension_inventory"] },
 			{
 				scope: { kind: "management", purpose: "unregister_workspace" },
 				intents: ["unregister_workspace"],

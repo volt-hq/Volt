@@ -25,6 +25,7 @@ import {
 	waitForDaemonExit,
 } from "./spawn.ts";
 import { inspectVoltdStateFiles, regenerateInvalidVoltdState } from "./state.ts";
+import { runExtensionInventoryProcess } from "./worker/extension-inventory-process.ts";
 import { runWorkerProcess } from "./worker/process.ts";
 import { ProcessWorkerLauncher } from "./worker-launcher.ts";
 
@@ -656,6 +657,14 @@ export async function handleDaemonCommand(args: string[], options: DaemonCommand
 			const code = await runWorkerProcess(agentDir);
 			// Language servers, watchers, and pools may outlive the conversations; the worker is done,
 			// and so are the detached process trees its tools started.
+			killTrackedDetachedChildren();
+			process.exit(code);
+			return true;
+		}
+		case "extension-inventory": {
+			// Internal and unlisted: the daemon starts one per extension inventory it evaluates.
+			const code = await runExtensionInventoryProcess(agentDir);
+			// Extension factories may leave handles and child processes; the inventory is written.
 			killTrackedDetachedChildren();
 			process.exit(code);
 			return true;

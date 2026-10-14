@@ -7,6 +7,7 @@ import { join, relative, sep } from "node:path";
 import type { ControlRelayFrame, ControlRelayOutcome } from "@hansjm10/volt-protocol";
 import { isStandaloneBinary } from "../config.ts";
 import { AuthStorage } from "../core/auth-storage.ts";
+import type { ExtensionInventory } from "../core/extensions/inventory.ts";
 import { discoverGitWorktree } from "../core/git-repository.ts";
 import { ModelRegistry } from "../core/model-registry.ts";
 import { intentRegistry } from "../core/protocol/intents/index.ts";
@@ -1512,6 +1513,15 @@ class IrohDaemonService {
 			sessionContexts: (authorization) => this.createSessionContextsRpcBackend(authorization),
 			prReviews: (authorization, signal) =>
 				this.createPrReviewRpcBackend(authorization, signal ?? new AbortController().signal),
+			...(this.services.extensionInventory === undefined
+				? {}
+				: {
+						extensionInventory: (
+							authorization: IrohRemoteClientAuthorizationSuccess,
+							worktreeId: string | undefined,
+							signal?: AbortSignal,
+						) => this.getExtensionInventory(authorization, worktreeId, signal),
+					}),
 			listRuntimeStates: (workspaceName) => this.workers.runtimeStates(workspaceName),
 			getChangeContext: (workspaceName, workspaceGeneration, sessionId) =>
 				this.services.changes.getChangeContext(workspaceName, workspaceGeneration, sessionId),
@@ -3334,6 +3344,42 @@ class IrohDaemonService {
 		const authStorage = AuthStorage.create(join(this.services.agentDir, "auth.json"));
 		const modelRegistry = ModelRegistry.create(authStorage, join(this.services.agentDir, "models.json"));
 		return createIrohRemoteAgentOptions(workspace.name, { modelRegistry, settingsManager }, signal);
+	}
+
+	/**
+	 * What a phone conversation in the device's workspace, or its worktree checkout `worktreeId`, would load:
+	 * evaluated in the root such a conversation runs in, with the trust and profile it would run with.
+	 */
+	private async getExtensionInventory(
+		authorization: IrohRemoteClientAuthorizationSuccess,
+		worktreeId: string | undefined,
+		signal?: AbortSignal,
+	): Promise<ExtensionInventory> {
+		const inventories = this.services.extensionInventory;
+		if (!inventories) throw new Error("This daemon evaluates no extension inventories");
+		const admission = this.admission.tryAcquire();
+		if (!admission) throw new Error("host is shutting down");
+		try {
+			const workspace = authorization.workspace;
+			let root = workspace.path;
+			if (worktreeId !== undefined) {
+				const worktree = await this.worktrees.findWorktree(workspace.name, worktreeId);
+				if (!worktree || !existsSync(worktree.path)) throw new WorkspaceIntentError("worktree_not_found");
+				root = worktree.path;
+			}
+			return await inventories.get(
+				{
+					workspaceName: workspace.name,
+					workspaceGeneration: authorization.workspaceGeneration ?? 0,
+					root,
+					projectTrusted: resolveIrohRemoteWorkspaceProjectTrusted(workspace, { trustStore: this.trustStore }),
+					...(this.profile === undefined ? {} : { profile: this.profile }),
+				},
+				signal === undefined ? admission.signal : AbortSignal.any([admission.signal, signal]),
+			);
+		} finally {
+			admission.release();
+		}
 	}
 
 	private prReviewAuthority(

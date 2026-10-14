@@ -9,6 +9,7 @@ import {
 	type RemoteCapability,
 	type RpcSessionListItem,
 } from "@hansjm10/volt-protocol";
+import { remoteReviewEngineView, reviewEngineView } from "../../extensions/inventory.ts";
 import type { ExtensionRunner } from "../../extensions/runner.ts";
 import { getMcpRpcCapabilities, listMcpRpcServers } from "../../mcp/rpc.ts";
 import type { McpGatewayExecutionContext } from "../../mcp/types.ts";
@@ -474,6 +475,15 @@ export const prReviewQuery = defineQuery({
 	run: (ctx, params) => workspaceService(ctx, "resolvePrReview").operation(params),
 });
 
+/** What a new conversation in the workspace would load, on hosts that evaluate it without one (the daemon). */
+export const extensionInventoryQuery = defineQuery({
+	name: "extension_inventory",
+	scope: "host",
+	remote: "safe",
+	requires: observe,
+	run: (ctx, params) => workspaceService(ctx, "extensionInventory").operation(params.worktreeId),
+});
+
 // ============================================================================
 // MCP
 // ============================================================================
@@ -588,48 +598,17 @@ export const reviewDiscussionSourceQuery = defineQuery({
 });
 
 /**
- * The review engines the conversation's extensions registered that this client may start. A remote client is
- * told of the engines marked `remoteSafe`, with the parameters it may set: a local-only parameter is not hidden
- * from it by being refused, it is not mentioned.
+ * The review engines the conversation's extensions registered that this client may start: their local view, or
+ * for a remote client their remote view (core/extensions/inventory.ts).
  */
 export const reviewEnginesQuery = defineQuery({
 	...review,
 	name: "review.engines",
 	async run(ctx) {
-		const remote = ctx.profile.name === "remote";
-		const engines = targetOf(ctx)
-			.session.reviewEngines.list()
-			.filter((engine) => !remote || engine.remoteSafe);
+		const views = targetOf(ctx).session.reviewEngines.list().map(reviewEngineView);
 		return {
-			engines: engines.map((engine) => {
-				const hidden = new Set(remote ? (engine.localOnly ?? []) : []);
-				const properties = Object.entries(engine.parameters?.properties ?? {}).filter(
-					([name]) => !hidden.has(name),
-				);
-				const required = (engine.parameters?.required ?? []).filter((name) => !hidden.has(name));
-				const [, extension = "", name = ""] = /^ext:([^/]+)\/(.+)$/.exec(engine.id) ?? [];
-				return {
-					id: engine.id,
-					name,
-					extension,
-					label: engine.label,
-					description: engine.description,
-					...(engine.cost === undefined ? {} : { cost: engine.cost }),
-					targets: [...engine.targets],
-					remoteSafe: engine.remoteSafe,
-					...(engine.parameters === undefined
-						? {}
-						: {
-								parameters: {
-									type: "object" as const,
-									properties: Object.fromEntries(properties),
-									...(required.length === 0 ? {} : { required }),
-								},
-							}),
-					...(remote || engine.localOnly === undefined ? {} : { localOnly: [...engine.localOnly] }),
-				};
-			}),
-		} as QueryResult<"review.engines">;
+			engines: ctx.profile.name === "remote" ? views.flatMap((view) => remoteReviewEngineView(view) ?? []) : views,
+		};
 	},
 });
 
@@ -692,6 +671,7 @@ export const BUILTIN_QUERIES = {
 	worktrees: worktreesQuery,
 	workspace_directories: workspaceDirectoriesQuery,
 	pr_review: prReviewQuery,
+	extension_inventory: extensionInventoryQuery,
 	"mcp.capabilities": mcpCapabilitiesQuery,
 	"mcp.servers": mcpServersQuery,
 	"mcp.server": mcpServerQuery,
