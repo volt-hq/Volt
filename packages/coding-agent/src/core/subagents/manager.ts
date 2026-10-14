@@ -229,6 +229,11 @@ export interface SubagentRunOptions {
 	readonly turnLimits?: SubagentTurnLimits;
 	/** The work the run belongs to in the conversation's log. */
 	readonly parentWorkId?: string;
+	/**
+	 * Aborting it stops the run: a start under way rejects, its child taking no task or its work cancelled once the
+	 * child took it, and a started run's work is cancelled.
+	 */
+	readonly signal?: AbortSignal;
 }
 
 /** How a subagent run ended. */
@@ -948,6 +953,8 @@ export class SubagentManager {
 	 */
 	async startRun(agentName: string, task: string, options: SubagentRunOptions = {}): Promise<SubagentRun> {
 		if (!this.workBinding) throw new Error("Subagents start as work only in a conversation");
+		const { signal } = options;
+		if (signal?.aborted) throw new Error("Operation aborted");
 		// Clamped to the conversation's tool policy, as a tool's start and a resume are.
 		const allowedTools = this.workBinding.allowedTools();
 		const scope =
@@ -1014,8 +1021,31 @@ export class SubagentManager {
 				return end;
 			})
 			.finally(() => scope?.dispose());
-		// A rejected prompt disposes the handle; its work, if recorded, ends failed.
-		await handle.prompt(task);
+		// An abort while the child starts or takes its task refuses its prompt, before its work is recorded or at
+		// admission at the latest, so it requests nothing of its model.
+		const refuse = (): void => {
+			void handle.abort().catch(() => undefined);
+		};
+		signal?.addEventListener("abort", refuse, { once: true });
+		if (signal?.aborted) refuse();
+		try {
+			// A rejected prompt disposes the handle; its work, if recorded, ends failed (cancelled when aborted).
+			await handle.prompt(task);
+		} finally {
+			signal?.removeEventListener("abort", refuse);
+		}
+		if (signal) {
+			const cancel = (): void => {
+				void this.cancelRun(handle.id).catch(() => undefined);
+			};
+			if (signal.aborted) {
+				// Aborted as the child took its task.
+				cancel();
+				throw new Error("Operation aborted");
+			}
+			signal.addEventListener("abort", cancel, { once: true });
+			void ended.then(() => signal.removeEventListener("abort", cancel));
+		}
 		return { workId: handle.id, conversation: handle.sessionId, ended };
 	}
 

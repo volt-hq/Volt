@@ -1361,7 +1361,7 @@ export class ExtensionRunner {
 			},
 			get subagents() {
 				assertActive();
-				return runner.subagentsFor(owner, assertActive, assertRunning);
+				return runner.subagentsFor(owner, assertActive, assertRunning, lifetime?.stopSignal);
 			},
 			get worktrees() {
 				assertActive();
@@ -1408,11 +1408,15 @@ export class ExtensionRunner {
 		};
 	}
 
-	/** `ctx.subagents` of the extension `owner`: starting one needs `exec`, and it cancels only its own runs. */
+	/**
+	 * `ctx.subagents` of the extension `owner`: starting one needs `exec`, and it cancels only its own runs. Its runs
+	 * stop when its instance stops (`stopSignal`).
+	 */
 	private subagentsFor(
 		owner: string | undefined,
 		assertActive: () => void,
 		assertRunning: () => void,
+		stopSignal: AbortSignal | undefined,
 	): ExtensionSubagents {
 		const requireOwner = (use: string): string => {
 			if (owner === undefined)
@@ -1428,7 +1432,7 @@ export class ExtensionRunner {
 				assertRunning();
 				const id = requireOwner("ctx.subagents.start");
 				requirePermission(this.permissionHolder(id), "exec", "ctx.subagents.start");
-				return await this.subagentsHandler.start(id, options);
+				return await this.subagentsHandler.start(id, options, stopSignal);
 			},
 			cancel: async (runId) => {
 				assertRunning();

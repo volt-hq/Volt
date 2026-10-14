@@ -463,7 +463,8 @@ export interface ExtensionSubagents {
 /** How the session runs an extension's subagents: `owner` is the extension's manifest id. */
 export interface ExtensionSubagentsHandler {
 	definitions(): ExtensionSubagentDefinition[];
-	start(owner: string, options: ExtensionSubagentStartOptions): Promise<ExtensionSubagentRun>;
+	/** `signal` aborts once the extension's instance stopped: the run stops with it, and a start under way rejects. */
+	start(owner: string, options: ExtensionSubagentStartOptions, signal?: AbortSignal): Promise<ExtensionSubagentRun>;
 	cancel(owner: string, id: string): Promise<void>;
 }
 
@@ -2326,6 +2327,7 @@ export class ExtensionLifetime {
 	private message: string | undefined;
 	private stoppedMessage: string | undefined;
 	private readonly cleanups = new Set<() => void>();
+	private readonly stopping = new AbortController();
 
 	get retired(): boolean {
 		return this.message !== undefined;
@@ -2347,9 +2349,18 @@ export class ExtensionLifetime {
 		if (this.stoppedMessage !== undefined) throw new Error(this.stoppedMessage);
 	}
 
+	/**
+	 * Aborted once the instance stopped (it was disabled), with the stop's message: what it started that may not
+	 * outlive it, such as its subagent runs, stops with it. Retiring it without a stop (a reload) does not abort it.
+	 */
+	get stopSignal(): AbortSignal {
+		return this.stopping.signal;
+	}
+
 	/** Stop the instance: registering or changing anything throws `message` from now on. Later calls do nothing. */
 	stop(message: string): void {
 		this.stoppedMessage ??= message;
+		this.stopping.abort(new Error(this.stoppedMessage));
 	}
 
 	/** Run `cleanup` when the instance retires (at once if it has). Returns a function that cancels it. */

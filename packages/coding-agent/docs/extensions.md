@@ -1264,7 +1264,7 @@ volt.registerCommand("fix-issue", {
   - `parentWorkId` names running work of the extension's own kind: clients show the run under it.
 - `cancel(id)` cancels a run the extension started (another extension's is not found); its `ended` resolves `cancelled`. A run that already ended is left as it is.
 
-A panel or work detail of the extension may open or cancel the runs it started (`open_work`, `cancel_work`). Runs are work: a restart leaves an unfinished one suspended, as it does a model's subagent, and its `ended` is gone with the process.
+A panel or work detail of the extension may open or cancel the runs it started (`open_work`, `cancel_work`). Disabling the extension cancels its runs, those still starting included: such a `start` rejects, and a child that had not taken its task yet never does. Runs are work: a restart leaves an unfinished one suspended, as it does a model's subagent, and its `ended` is gone with the process.
 
 ### ctx.worktrees
 

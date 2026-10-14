@@ -11,7 +11,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type FauxResponseStep, fauxAssistantMessage, type Usage } from "@hansjm10/volt-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../../src/core/agent-session-services.ts";
 import type {
 	ExtensionCommandContext,
@@ -93,6 +93,8 @@ interface Setup {
 	readonly manager: SubagentManager;
 	/** The working directory each child runtime was created in. */
 	readonly childCwds: string[];
+	/** The harness of each child runtime, in creation order. */
+	readonly children: Harness[];
 }
 
 /** A parent conversation whose subagent manager runs `worker` children that answer `childResponses`. */
@@ -101,6 +103,8 @@ async function setup(
 	childResponses: FauxResponseStep[] = [fauxAssistantMessage("issue worked", { usage })],
 	agentDir?: string,
 	retainRuntimeOnDispose = false,
+	/** Runs as each child runtime is being created, before it exists. */
+	creatingRuntime?: () => Promise<void>,
 ): Promise<Setup> {
 	const childCwds: string[] = [];
 	const children: Harness[] = [];
@@ -110,6 +114,7 @@ async function setup(
 	});
 	const createRuntime: ConversationFactory = async ({ cwd, sessionManager }) => {
 		childCwds.push(cwd);
+		await creatingRuntime?.();
 		const child = await createHarness();
 		children.push(child);
 		child.setResponses(childResponses);
@@ -153,7 +158,7 @@ async function setup(
 		await manager.dispose().catch(() => undefined);
 		for (const child of children) await child.cleanupAsync().catch(() => undefined);
 	});
-	return { parent, manager, childCwds };
+	return { parent, manager, childCwds, children };
 }
 
 /** An extension whose `/delegate` command starts a run with the options `options` gives, keeping the run or the error. */
@@ -362,6 +367,56 @@ describe("extension subagents", () => {
 		expect(parent.session.work.get(run.id)?.outcome).toBe("cancelled");
 		// A run that ended cancels as nothing.
 		await delegator.ctx().subagents.cancel(run.id);
+	});
+
+	it("cancels its runs when it is disabled", async () => {
+		const delegator = delegating(() => ({ agent: "worker", task: "Work issue 12" }));
+		const { parent } = await setup([delegator.extension], [heldUntilAborted]);
+
+		await parent.session.prompt("/delegate");
+		const [run] = delegator.runs;
+		if (!run) throw new Error(`no run: ${delegator.errors.join("; ")}`);
+		parent.session.settingsManager.setExtensionEnabled("delegator", "global", false);
+		expect((await run.ended).status).toBe("cancelled");
+		await parent.session.extensionRegistry.settled();
+		await parent.session.work.waitForIdle();
+		expect(parent.session.work.get(run.id)?.outcome).toBe("cancelled");
+	});
+
+	it("stops a run still starting when it is disabled: the child takes no task", async () => {
+		const delegator = delegating(() => ({ agent: "worker", task: "Work issue 12" }));
+		const creating = Promise.withResolvers<void>();
+		const created = Promise.withResolvers<void>();
+		const { parent, childCwds, children } = await setup(
+			[delegator.extension],
+			undefined,
+			undefined,
+			false,
+			async () => {
+				creating.resolve();
+				await created.promise;
+			},
+		);
+		const instance = parent.session.extensionRegistry.instance("delegator");
+		if (!instance) throw new Error("The delegator does not run");
+
+		// The extension is disabled while its child's runtime is still being created.
+		const delegated = parent.session.prompt("/delegate");
+		await creating.promise;
+		parent.session.settingsManager.setExtensionEnabled("delegator", "global", false);
+		await vi.waitFor(() => expect(instance.lifetime.stopped).toBe(true));
+		created.resolve();
+		await delegated;
+
+		expect(delegator.errors).toEqual([
+			"ctx.subagents.start: extension delegator was disabled while the run started; it was cancelled",
+		]);
+		expect(delegator.runs).toEqual([]);
+		expect(childCwds).toHaveLength(1);
+		// No work was recorded, and the child's model was never asked.
+		expect(parent.session.work.list().filter((item) => item.kind === "subagent")).toEqual([]);
+		expect(children.map((child) => child.faux.state.callCount)).toEqual([0]);
+		await parent.session.extensionRegistry.settled();
 	});
 
 	it("starts a run as a child of the extension's own work", async () => {

@@ -445,11 +445,19 @@ export class SessionExtensionBinding {
 					name: definition.name,
 					description: definition.description,
 				})),
-			start: async (owner, options) => {
+			start: async (owner, options, signal) => {
 				const { agent, task, run } = this.subagentStart(owner, options);
 				const manager = this.host.tools().getSubagentToolManager();
 				if (manager?.startRun === undefined) throw new Error("Subagents are not available in this session");
-				const started = await manager.startRun(agent, task, run);
+				// The run stops with the extension's instance, also while it starts: no run outlives a disabled extension.
+				const started = await manager
+					.startRun(agent, task, { ...run, ...(signal === undefined ? {} : { signal }) })
+					.catch((error: unknown) => {
+						if (!signal?.aborted) throw error;
+						throw new Error(
+							`ctx.subagents.start: extension ${owner} was disabled while the run started; it was cancelled`,
+						);
+					});
 				let owned = this.subagentRuns.get(owner);
 				if (!owned) {
 					owned = new Set();
