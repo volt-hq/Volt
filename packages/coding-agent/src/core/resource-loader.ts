@@ -169,8 +169,7 @@ export interface DefaultResourceLoaderOptions {
 	noContextFiles?: boolean;
 	/**
 	 * Leave configured packages that are not installed (or not at their configured version) out instead of
-	 * installing them; {@link DefaultResourceLoader.getSkippedPackages} lists them. For reads that must not
-	 * change the installation, such as the extension inventory.
+	 * installing them. For reads that must not change the installation, such as the extension inventory.
 	 */
 	skipMissingPackages?: boolean;
 	systemPrompt?: string;
@@ -212,8 +211,6 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private noThemes: boolean;
 	private noContextFiles: boolean;
 	private skipMissingPackages: boolean;
-	/** The configured packages the last reload left out because they are not installed. */
-	private skippedPackages = new Set<string>();
 	private systemPromptSource?: string;
 	private appendSystemPromptSource?: string[];
 	private extensionsOverride?: (base: LoadExtensionsResult) => LoadExtensionsResult;
@@ -312,11 +309,6 @@ export class DefaultResourceLoader implements ResourceLoader {
 		return { skills: this.skills, diagnostics: this.skillDiagnostics };
 	}
 
-	/** The configured packages the last reload left out because they are not installed (`skipMissingPackages`). */
-	getSkippedPackages(): readonly string[] {
-		return [...this.skippedPackages];
-	}
-
 	getPrompts(): { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] } {
 		return { prompts: this.prompts, diagnostics: this.promptDiagnostics };
 	}
@@ -390,7 +382,6 @@ export class DefaultResourceLoader implements ResourceLoader {
 	}
 
 	async reload(options?: ResourceLoaderReloadOptions): Promise<void> {
-		this.skippedPackages = new Set();
 		let preTrustExtensions: LoadExtensionsResult | undefined;
 		if (options?.resolveProjectTrust) {
 			preTrustExtensions = await this.loadProjectTrustExtensions();
@@ -578,13 +569,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 		return { declarations, present, errors };
 	}
 
-	/** The configured packages' resources: missing ones installed, or with `skipMissingPackages` left out and noted. */
+	/** The configured packages' resources: missing ones installed, or with `skipMissingPackages` left out. */
 	private resolvePackages(): Promise<ResolvedPaths> {
 		if (!this.skipMissingPackages) return this.packageManager.resolve();
-		return this.packageManager.resolve(async (source) => {
-			this.skippedPackages.add(source);
-			return "skip";
-		});
+		return this.packageManager.resolve(async () => "skip");
 	}
 
 	private async loadCurrentExtensionSet(): Promise<LoadExtensionsResult> {

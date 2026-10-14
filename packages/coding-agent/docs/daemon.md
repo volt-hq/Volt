@@ -354,16 +354,19 @@ with the daemon's environment (less its credentials). That process reads the
 settings with the trust and profile a phone conversation there would have,
 loads the extensions as such a conversation would, which runs their factories,
 answers, and exits. It shows no prompt, runs no migration, and does not install
-a configured package that is missing: the answer leaves it out. Its output goes
-to `~/.volt/agent/daemon/workers/inventory-<id>.log`, kept like the workers'
+a configured package that is missing: the answer leaves it out until the
+package is installed. Its output goes to
+`~/.volt/agent/daemon/workers/inventory-<id>.log`, kept like the workers'
 logs.
 
-The daemon keeps each answer and gives it again until something it read
-changes: the global or project `settings.json`, `extension-permissions.json`,
-the global or project `extensions` directory, or an extension's source. It
-evaluates again after 10 minutes in any case, and never keeps an answer that
-left out a missing package. At most two evaluations run at once, and one that
-takes longer than 20 seconds is stopped.
+An inventory is a prediction. The daemon keeps each answer for a minute and
+gives it again meanwhile, so an answer can be up to a minute old; starting a
+review still checks the engine against the conversation it starts in. It lists
+the review engines extensions register as their factories run: an engine an
+extension registers later, such as in `session_start`, is offered only once a
+conversation is open. At most two evaluations run at once. An evaluation stops
+itself after 15 seconds, ending any process its extensions started, and the
+daemon kills one still running after 20 seconds.
 
 ## Daemon environment
 

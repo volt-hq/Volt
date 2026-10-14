@@ -98,9 +98,16 @@ export interface LaunchedExtensionInventory {
 	 * killed first), wrote more than {@link EXTENSION_INVENTORY_MAX_OUTPUT_BYTES}, or wrote something else.
 	 */
 	readonly result: Promise<unknown>;
-	/** Kill the process and what it started. */
+	/**
+	 * Stop the process and what it started: SIGTERM to its process group, so it ends the detached process trees
+	 * its extensions started, then SIGKILL to the group if it has not exited
+	 * {@link EXTENSION_INVENTORY_KILL_GRACE_MS} later.
+	 */
 	kill(): void;
 }
+
+/** How long a stopped extension inventory process has to exit before its process group is killed. */
+export const EXTENSION_INVENTORY_KILL_GRACE_MS = 2_000;
 
 export interface WorkerLauncher {
 	launch(request: WorkerLaunchRequest): LaunchedWorker;
@@ -144,6 +151,27 @@ function killGroup(child: ChildProcess): void {
 		}
 	}
 	child.kill("SIGKILL");
+}
+
+/**
+ * Ask `child`'s process group to stop (SIGTERM), so `child` can end what it started outside the group, and kill
+ * the group if `child` has not exited `graceMs` later. On Windows, kill `child` outright.
+ */
+function terminateGroup(child: ChildProcess, graceMs: number): void {
+	if (child.exitCode !== null || child.signalCode !== null) return;
+	if (process.platform === "win32" || child.pid === undefined) {
+		killGroup(child);
+		return;
+	}
+	try {
+		process.kill(-child.pid, "SIGTERM");
+	} catch {
+		killGroup(child);
+		return;
+	}
+	const escalation = setTimeout(() => killGroup(child), graceMs);
+	escalation.unref();
+	child.once("exit", () => clearTimeout(escalation));
 }
 
 /** Worker logs kept beyond those of running workers; older ones are removed as workers start. */
@@ -250,7 +278,7 @@ export class ProcessWorkerLauncher implements WorkerLauncher {
 				size += chunk.length;
 				if (size > EXTENSION_INVENTORY_MAX_OUTPUT_BYTES) {
 					output.destroy();
-					killGroup(child);
+					terminateGroup(child, EXTENSION_INVENTORY_KILL_GRACE_MS);
 					reject(new Error("The extension inventory result is too large"));
 					return;
 				}
@@ -281,7 +309,7 @@ export class ProcessWorkerLauncher implements WorkerLauncher {
 				throw new Error("The extension inventory result is not JSON");
 			}
 		})();
-		return { result, kill: () => killGroup(child) };
+		return { result, kill: () => terminateGroup(child, EXTENSION_INVENTORY_KILL_GRACE_MS) };
 	}
 
 	/** A new log file of its own for `name`, in the agent's worker log directory: never one planted at its path, never through a link. */

@@ -1,6 +1,7 @@
 /**
- * The daemon's extension inventories: evaluations are shared, kept while nothing they read changed, bounded in
- * time and number, and answered on an `extensions` workspace discovery stream in their remote view.
+ * The daemon's extension inventories: evaluations are shared, kept for a minute as a prediction, bounded in time
+ * and number, and answered on an `extensions` workspace discovery stream in their remote view, with the stream's
+ * roots (the managed worktrees root among them) redacted.
  */
 
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -26,9 +27,15 @@ import {
 	type ExtensionInventoryServiceOptions,
 	type ExtensionInventoryTarget,
 } from "../src/daemon/extension-inventory.ts";
-import { type RemoteIntentHost, remoteIntentServices, remoteStreamAllows } from "../src/daemon/remote-intents.ts";
+import {
+	type RemoteIntentHost,
+	remoteIntentServices,
+	remoteStreamAllows,
+	workspaceStreamRedaction,
+} from "../src/daemon/remote-intents.ts";
 import type { ExtensionInventoryLaunchRequest } from "../src/daemon/worker-launcher.ts";
 import { WorkspaceSessions } from "../src/daemon/workspace-sessions.ts";
+import { getWorktreesRoot } from "../src/daemon/worktree-manager.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
 import { connectRemotePhone, type RemotePhone } from "./utilities/remote-phone.ts";
 
@@ -69,6 +76,13 @@ const deskEngine: RpcReviewEngine = {
 	remoteSafe: false,
 };
 
+/** 128 engines only a client at the host may start: more than a remote answer may carry, were they all sent. */
+const hostOnlyEngines: RpcReviewEngine[] = Array.from({ length: 128 }, (_, index) => ({
+	...deskEngine,
+	id: `ext:engines/desk-${index}`,
+	name: `desk-${index}`,
+}));
+
 /** A launcher whose evaluations the test settles. */
 class FakeLauncher {
 	readonly launches: Array<{
@@ -91,15 +105,13 @@ class FakeLauncher {
 		};
 	};
 
-	/** Settle the `index`th launch with a successful evaluation reading `inputs`. */
-	succeed(index: number, inputs: string[], cacheable = true): void {
+	/** Settle the `index`th launch with a successful evaluation. */
+	succeed(index: number, reviewEngines: RpcReviewEngine[] = [phoneEngine, deskEngine]): void {
 		const output: ExtensionInventoryProbeOutput = {
 			ok: true,
 			projectTrusted: true,
 			extensions: [summary],
-			reviewEngines: [phoneEngine, deskEngine],
-			inputs,
-			cacheable,
+			reviewEngines,
 		};
 		this.launches[index]?.resolve(output);
 	}
@@ -115,11 +127,6 @@ async function settle(): Promise<void> {
 	for (let turn = 0; turn < 5; turn++) await new Promise((resolve) => setImmediate(resolve));
 }
 
-/** Let the clock move past the files' change times, so an evaluation starting now sees them settled. */
-async function pastChanges(ms = 20): Promise<void> {
-	await new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 describe("ExtensionInventoryService", () => {
 	let tempDir: string;
 	let root: string;
@@ -133,14 +140,12 @@ describe("ExtensionInventoryService", () => {
 			agentDir: join(tempDir, "agent"),
 			launch: launcher.launch,
 			now: () => clock,
-			// A change made before an evaluation is settled at once, unless a test says otherwise.
-			settleMs: 0,
 			...options,
 		});
 		return created;
 	}
 
-	beforeEach(async () => {
+	beforeEach(() => {
 		tempDir = realpathSync(mkdtempSync(join(tmpdir(), "volt-daemon-extension-inventory-")));
 		root = join(tempDir, "workspace");
 		mkdirSync(join(root, ".volt"), { recursive: true });
@@ -149,21 +154,20 @@ describe("ExtensionInventoryService", () => {
 		launcher = new FakeLauncher();
 		clock = 1_000;
 		target = { workspaceName: "volt", workspaceGeneration: 1, root, projectTrusted: true };
-		await pastChanges();
 	});
 
 	afterEach(() => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	test("shares one evaluation between concurrent requests and keeps it while nothing it read changed", async () => {
+	test("shares one evaluation between concurrent requests and keeps it", async () => {
 		const inventories = service();
 		const first = inventories.get(target);
 		const second = inventories.get(target);
 		await settle();
 		expect(launcher.launches).toHaveLength(1);
 		expect(launcher.launches[0]?.request).toMatchObject({ root, projectTrusted: true });
-		launcher.succeed(0, [settings, join(root, ".volt", "extensions")]);
+		launcher.succeed(0);
 		const [one, two] = await Promise.all([first, second]);
 		expect(one).toEqual(two);
 		expect(one.reviewEngines.map((engine) => engine.id)).toEqual(["ext:engines/phone", "ext:engines/desk"]);
@@ -179,71 +183,33 @@ describe("ExtensionInventoryService", () => {
 		inventories.dispose();
 	});
 
-	test("evaluates again once an input changes, appears, or the kept evaluation is too old", async () => {
-		const inventories = service({ maxAgeMs: 60_000 });
-		const extensions = join(root, ".volt", "extensions");
+	test("answers with a kept evaluation for a minute, whatever changed meanwhile, then evaluates again", async () => {
+		const inventories = service();
 		const first = inventories.get(target);
 		await settle();
-		launcher.succeed(0, [settings, extensions]);
-		await first;
+		launcher.succeed(0);
+		const kept = await first;
 
+		// A prediction: what changed is not tracked, so the kept answer stands until it is a minute old.
 		writeFileSync(settings, JSON.stringify({ extensions: { engines: { enabled: false } } }));
-		await pastChanges();
-		const edited = inventories.get(target);
-		await settle();
-		expect(launcher.launches).toHaveLength(2);
-		launcher.succeed(1, [settings, extensions]);
-		await edited;
-
-		// The project's extension directory did not exist: adding it is a change.
-		mkdirSync(extensions);
-		await pastChanges();
-		const added = inventories.get(target);
-		await settle();
-		expect(launcher.launches).toHaveLength(3);
-		launcher.succeed(2, [settings, extensions]);
-		await added;
-
-		expect(await inventories.get(target)).toBeDefined();
-		expect(launcher.launches).toHaveLength(3);
-		clock += 60_000;
-		pending(inventories.get(target));
-		await settle();
-		expect(launcher.launches).toHaveLength(4);
-		inventories.dispose();
-	});
-
-	test("does not keep an evaluation that left out a package", async () => {
-		const inventories = service();
-		const skipped = inventories.get(target);
-		await settle();
-		launcher.succeed(0, [settings], false);
-		await skipped;
-		pending(inventories.get(target));
-		await settle();
-		expect(launcher.launches).toHaveLength(2);
-		inventories.dispose();
-	});
-
-	test("does not keep an evaluation an input changed during, even when file times lag the clock", async () => {
-		const inventories = service({ settleMs: 300 });
-		await pastChanges(400);
-		const settled = inventories.get(target);
-		await settle();
-		launcher.succeed(0, [settings]);
-		await settled;
-		await inventories.get(target);
+		mkdirSync(join(root, ".volt", "extensions"));
+		clock += 59_999;
+		expect(await inventories.get(target)).toBe(kept);
 		expect(launcher.launches).toHaveLength(1);
 
-		const untrusted = { ...target, projectTrusted: false };
-		const during = inventories.get(untrusted);
+		clock += 1;
+		pending(inventories.get(target));
 		await settle();
-		writeFileSync(settings, '{"changed":true}');
-		launcher.succeed(1, [settings]);
-		await during;
-		pending(inventories.get(untrusted));
+		expect(launcher.launches).toHaveLength(2);
+		inventories.dispose();
+	});
+
+	test("accepts every engine an evaluation lists, however many are host-only", async () => {
+		const inventories = service();
+		const evaluated = inventories.get(target);
 		await settle();
-		expect(launcher.launches).toHaveLength(3);
+		launcher.succeed(0, [...hostOnlyEngines, phoneEngine]);
+		expect((await evaluated).reviewEngines).toHaveLength(129);
 		inventories.dispose();
 	});
 
@@ -256,7 +222,7 @@ describe("ExtensionInventoryService", () => {
 		leaving.abort(new Error("stream closed"));
 		await expect(left).rejects.toThrow("stream closed");
 		expect(launcher.launches[0]?.killed).toBe(false);
-		launcher.succeed(0, [settings]);
+		launcher.succeed(0);
 		expect((await staying).extensions).toEqual([summary]);
 		await inventories.get(target);
 		expect(launcher.launches).toHaveLength(1);
@@ -290,12 +256,12 @@ describe("ExtensionInventoryService", () => {
 		const second = inventories.get({ ...target, workspaceName: "other", root: other });
 		await settle();
 		expect(launcher.launches).toHaveLength(1);
-		launcher.succeed(0, [settings]);
+		launcher.succeed(0);
 		await first;
 		await settle();
 		expect(launcher.launches).toHaveLength(2);
 		expect(launcher.launches[1]?.request.root).toBe(other);
-		launcher.succeed(1, [settings]);
+		launcher.succeed(1);
 		await second;
 		inventories.dispose();
 	});
@@ -306,11 +272,11 @@ describe("ExtensionInventoryService", () => {
 		mkdirSync(other);
 		const first = inventories.get(target);
 		await settle();
-		launcher.succeed(0, [settings]);
+		launcher.succeed(0);
 		await first;
 		const second = inventories.get({ ...target, root: other });
 		await settle();
-		launcher.succeed(1, [settings]);
+		launcher.succeed(1);
 		await second;
 		pending(inventories.get(target));
 		await settle();
@@ -355,15 +321,17 @@ const authorization: IrohRemoteClientAuthorizationSuccess = {
 
 type InventoryOf = NonNullable<RemoteIntentHost["extensionInventory"]>;
 
+const AGENT_DIR = "/tmp/volt-agent";
+
 /** The daemon's backends an `extensions` stream reaches; only the inventory is used. */
 function remoteHost(extensionInventory: InventoryOf | undefined): RemoteIntentHost {
 	const unused = (): never => {
 		throw new Error("Not used by an extensions stream");
 	};
 	return {
-		agentDir: "/tmp/volt-agent",
+		agentDir: AGENT_DIR,
 		workspaceSessions: new WorkspaceSessions({
-			agentDir: "/tmp/volt-agent",
+			agentDir: AGENT_DIR,
 			workspaces: () => [],
 			worktrees: async () => [],
 		}),
@@ -394,7 +362,8 @@ describe("extension_inventory on an extensions workspace discovery stream", () =
 		const connection = serveIrohRemoteConnection({
 			stream: pair.host,
 			grant: { schemaVersion: 1, revision: 1, capabilities: [...capabilities] },
-			redaction: { workspacePath: authorization.workspace.path, remoteWorkspacePath: "/workspace" },
+			// What the daemon serves an `extensions` stream with.
+			redaction: workspaceStreamRedaction(scope.purpose, authorization.workspace.path, AGENT_DIR),
 			services: () => remoteIntentServices(remoteHost(extensionInventory), authorization, scope, { keep: {} }),
 			...(remoteStreamAllows(scope) === undefined ? {} : { allows: remoteStreamAllows(scope) }),
 		});
@@ -452,6 +421,31 @@ describe("extension_inventory on an extensions workspace discovery stream", () =
 			reason: { code: "invalid_input" },
 		});
 		expect(requested).toHaveLength(2);
+	});
+
+	test("lists only the engines a paired device may start, however many host-only ones there are", async () => {
+		const device = await phone(async () => ({ ...inventory, reviewEngines: [...hostOnlyEngines, phoneEngine] }));
+		const answer = await device.query("extension_inventory");
+		expect(answer).toMatchObject({ type: "result" });
+		const engines = (answer as { data: { reviewEngines: RpcReviewEngine[] } }).data.reviewEngines;
+		expect(engines.map((engine) => engine.id)).toEqual(["ext:engines/phone"]);
+	});
+
+	test("redacts a worktree checkout's path from an extension's load error", async () => {
+		const checkout = join(getWorktreesRoot(AGENT_DIR), "volt-1234", "fix-login");
+		const broken: ExtensionSummary = {
+			...summary,
+			id: "broken",
+			state: "failed",
+			error: `Extension does not export a valid factory function: ${checkout}/.volt/extensions/broken.ts`,
+		};
+		const device = await phone(async () => ({ ...inventory, extensions: [broken] }));
+		const answer = await device.query("extension_inventory", { worktreeId: "fix-login" });
+		expect(answer).toMatchObject({ type: "result" });
+		const text = JSON.stringify(answer);
+		expect(text).not.toContain(getWorktreesRoot(AGENT_DIR));
+		expect(text).not.toContain(AGENT_DIR);
+		expect(text).toContain("Extension does not export a valid factory function: /workspace");
 	});
 
 	test("reports an unknown worktree, and any other failure, by a stable code", async () => {

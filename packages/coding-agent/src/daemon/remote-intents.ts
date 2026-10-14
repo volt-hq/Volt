@@ -146,6 +146,26 @@ const PURPOSE_FRAMES: Readonly<Record<string, { intents: readonly string[]; quer
 	manage_worktrees: { intents: ["create_worktree", "remove_worktree", "prepare_pr_review"], queries: ["worktrees"] },
 };
 
+/** The purposes whose answers can come from a managed worktree checkout, outside the workspace's own root. */
+const WORKTREE_PURPOSES: ReadonlySet<string> = new Set(["manage_worktrees", "extensions"]);
+
+/**
+ * The roots a workspace stream of `purpose` redacts from every frame: the workspace's, and for a purpose whose
+ * answers can come from a worktree checkout (worktree management; an extension inventory evaluated there, whose
+ * load errors name the checkout), the managed worktrees root too, as a conversation in a worktree redacts it.
+ */
+export function workspaceStreamRedaction(
+	purpose: Extract<RemoteStreamScope, { kind: "discovery" | "management" }>["purpose"],
+	workspacePath: string,
+	agentDir: string,
+): { workspacePath: string; remoteWorkspacePath: string; additionalRedactedPaths?: string[] } {
+	return {
+		workspacePath,
+		remoteWorkspacePath: "/workspace",
+		...(WORKTREE_PURPOSES.has(purpose) ? { additionalRedactedPaths: [getWorktreesRoot(agentDir)] } : {}),
+	};
+}
+
 /** Which intents and queries a stream serves; every remote-safe one on a conversation stream. */
 export function remoteStreamAllows(
 	scope: RemoteStreamScope,

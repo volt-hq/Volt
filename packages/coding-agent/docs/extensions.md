@@ -1913,6 +1913,8 @@ volt.registerReviewEngine("swarm", {
 });
 ```
 
+Register engines in the factory. A paired device can learn which engines a workspace offers before it opens a conversation there ([daemon.md](daemon.md#extension-inventories)), but only those registered as the factory runs: an engine registered later, such as in `session_start`, is offered to it only once a conversation is open.
+
 The engine's id is `ext:<id>/<name>`, where `<id>` is the extension's manifest id; clients and run records name it so. `name` is at most 64 lowercase letters, digits, `-`, and `_`, starting with a letter or digit. An extension registers at most 8 engines. Registering throws what you must fix: the name, the declaration, or a parameter.
 
 The declaration:

@@ -180,7 +180,6 @@ export default function (volt) {
 		const inventory = await evaluateExtensionInventory({ root, agentDir, projectTrusted: true });
 
 		expect(inventory.projectTrusted).toBe(true);
-		expect(inventory.cacheable).toBe(true);
 		const byId = new Map(inventory.extensions.map((extension) => [extension.id, extension]));
 		expect(byId.get("engines")).toMatchObject({
 			state: "active",
@@ -205,18 +204,6 @@ export default function (volt) {
 		const remote = remoteExtensionInventoryView(inventory);
 		expect(remote.reviewEngines.map((engine) => engine.id)).toEqual(["ext:engines/phone", "ext:engines/tuned"]);
 		expect(JSON.stringify(remote)).not.toContain("fingerprint");
-
-		expect(inventory.inputs).toEqual(
-			expect.arrayContaining([
-				join(agentDir, "settings.json"),
-				join(root, ".volt", "settings.json"),
-				join(agentDir, "extension-permissions.json"),
-				join(root, ".volt", "extensions"),
-				join(agentDir, "extensions"),
-			]),
-		);
-		expect(inventory.inputs.some((input) => input.endsWith("engines.ts"))).toBe(true);
-		expect(inventory.inputs.some((input) => input.endsWith("quiet.ts"))).toBe(true);
 	});
 
 	test("leaves an untrusted project's own extensions out", async () => {
@@ -232,7 +219,7 @@ export default function (volt) {
 		expect(trusted.reviewEngines).toHaveLength(3);
 	});
 
-	test("does not install a configured package that is missing, and is not kept", async () => {
+	test("leaves out a configured package that is missing, without installing it", async () => {
 		writeFileSync(
 			join(agentDir, "settings.json"),
 			JSON.stringify({ packages: ["npm:@volt-test/not-installed@1.0.0"] }),
@@ -240,7 +227,6 @@ export default function (volt) {
 
 		const inventory = await evaluateExtensionInventory({ root, agentDir, projectTrusted: true });
 
-		expect(inventory.cacheable).toBe(false);
 		expect(inventory.extensions).toEqual([]);
 		expect(existsSync(join(agentDir, "npm"))).toBe(false);
 		expect(existsSync(join(agentDir, "packages"))).toBe(false);

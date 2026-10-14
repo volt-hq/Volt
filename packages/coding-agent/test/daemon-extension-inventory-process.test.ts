@@ -1,7 +1,8 @@
 /**
  * An extension inventory as a process of its own (`volt daemon extension-inventory`, started from this
  * checkout's source by `ProcessWorkerLauncher`): it loads the root's extensions, writes its result on fd 3
- * whatever the extensions print, and keeps a private log beside the workers'.
+ * whatever the extensions print, keeps a private log beside the workers', and when stopped ends the processes
+ * its extensions started outside its process group.
  */
 
 import {
@@ -17,7 +18,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Compile } from "typebox/compile";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ExtensionInventoryProbeOutputSchema } from "../src/daemon/extension-inventory.ts";
 import { getWorkerLogDirectory } from "../src/daemon/paths.ts";
 import { ProcessWorkerLauncher } from "../src/daemon/worker-launcher.ts";
@@ -64,7 +65,6 @@ export default function (volt) {
 			expect(output).toMatchObject({
 				ok: true,
 				projectTrusted: true,
-				cacheable: true,
 				extensions: [{ id: "noisy", state: "active", scope: "project" }],
 				reviewEngines: [{ id: "ext:noisy/quick", label: "Quick", targets: ["pr"], remoteSafe: true }],
 			});
@@ -95,4 +95,59 @@ export default function (volt) {
 		},
 		PROCESS_TEST_TIMEOUT_MS,
 	);
+
+	it.skipIf(process.platform === "win32")(
+		"ends a detached shell an extension started when it is stopped",
+		async () => {
+			const tempDir = realpathSync(mkdtempSync(join(tmpdir(), "volt-extension-inventory-process-")));
+			tempDirs.push(tempDir);
+			const root = join(tempDir, "workspace");
+			const agentDir = join(tempDir, "agent");
+			const pidFile = join(tempDir, "shell.pid");
+			mkdirSync(join(root, ".volt", "extensions"), { recursive: true });
+			mkdirSync(agentDir, { recursive: true });
+			// The shell runs in a process group of its own (a detached child the process tracks) and outlives a
+			// group kill; the factory never returns, so the evaluation is stopped while it runs.
+			writeFileSync(
+				join(root, ".volt", "extensions", "spawner.ts"),
+				`import { createLocalBashOperations } from "@hansjm10/volt-coding-agent";
+export const manifest = { id: "spawner", displayName: "Spawner" };
+export default async function () {
+	void createLocalBashOperations().exec(${JSON.stringify(`echo $$ > '${pidFile}'; exec sleep 60`)}, ${JSON.stringify(root)}, {
+		onData: () => {},
+	});
+	await new Promise(() => {});
+}
+`,
+			);
+
+			const launched = new ProcessWorkerLauncher().launchExtensionInventory({
+				id: "test-3",
+				agentDir,
+				root,
+				projectTrusted: true,
+			});
+			launched.result.catch(() => undefined);
+			await vi.waitFor(() => expect(readFileSync(pidFile, "utf8").trim()).toMatch(/^\d+$/), {
+				timeout: PROCESS_TEST_TIMEOUT_MS - 20_000,
+				interval: 100,
+			});
+			const shellPid = Number(readFileSync(pidFile, "utf8").trim());
+			expect(processIsAlive(shellPid)).toBe(true);
+
+			launched.kill();
+			await expect(launched.result).rejects.toThrow(/wrote no result/);
+			await vi.waitFor(() => expect(processIsAlive(shellPid)).toBe(false), { timeout: 5_000, interval: 100 });
+		},
+		PROCESS_TEST_TIMEOUT_MS,
+	);
 });
+
+function processIsAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}

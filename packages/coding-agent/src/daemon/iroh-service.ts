@@ -166,6 +166,7 @@ import {
 	remoteIntentServices,
 	remoteStreamAllows,
 	toRemoteKeepAwakeStatus,
+	workspaceStreamRedaction,
 } from "./remote-intents.ts";
 import { resolveWorktreeCleanupPolicy } from "./state.ts";
 import { sanitizeHostThemeTokens } from "./theme-push.ts";
@@ -174,7 +175,6 @@ import { isPathInside, type WorkspaceDirectoryResolution } from "./workspace-dir
 import type { WorkspaceSession } from "./workspace-sessions.ts";
 import {
 	getWorkspaceWorktreesDir,
-	getWorktreesRoot,
 	handleWorktreeControlRequest,
 	isWorktreeControlRequest,
 	WorktreeCapacityError,
@@ -3255,13 +3255,7 @@ class IrohDaemonService {
 				initialInput: handshake.initialInput,
 				grant: parseIrohRemoteRpcGrant(authorization.client.rpcGrant, "client rpcGrant"),
 				clientKey: authorization.client.nodeId,
-				redaction: {
-					workspacePath: authorization.workspace.path,
-					remoteWorkspacePath: "/workspace",
-					...(scope.purpose === "manage_worktrees"
-						? { additionalRedactedPaths: [getWorktreesRoot(this.services.agentDir)] }
-						: {}),
-				},
+				redaction: workspaceStreamRedaction(scope.purpose, authorization.workspace.path, this.services.agentDir),
 				services: () =>
 					remoteIntentServices(this.remoteIntentHost, authorization, scope, {
 						keep: { streamId },

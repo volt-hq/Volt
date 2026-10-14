@@ -55,8 +55,10 @@ import {
 	remoteIntentServices,
 	remoteStreamAllows,
 	toRemoteKeepAwakeStatus,
+	workspaceStreamRedaction,
 } from "../src/daemon/remote-intents.ts";
 import { WorkspaceSessions } from "../src/daemon/workspace-sessions.ts";
+import { getWorktreesRoot } from "../src/daemon/worktree-manager.ts";
 import { createSessionManagerTestOwner, type SessionManagerTestOwner } from "./session-manager-owner.ts";
 import { createHostHarness, type HostHarness } from "./suite/host-harness.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
@@ -1188,6 +1190,29 @@ describe("remote intent services over protocol frames", () => {
 			expect(await phone.query("session_contexts", { sessionIds: ["s-a", "s-b"] })).toMatchObject({
 				type: "query_error",
 				reason: { code: "failed", message: "request_failed" },
+			});
+		}
+	});
+});
+
+describe("workspaceStreamRedaction", () => {
+	it("redacts the managed worktrees root only on streams whose answers can come from a worktree checkout", () => {
+		const agentDir = "/home/user/.volt/agent";
+		const purposes: Array<{ purpose: WorkspaceScope["purpose"]; worktrees: boolean }> = [
+			{ purpose: "list_sessions", worktrees: false },
+			{ purpose: "agent_options", worktrees: false },
+			{ purpose: "session_contexts", worktrees: false },
+			{ purpose: "review", worktrees: false },
+			{ purpose: "extensions", worktrees: true },
+			{ purpose: "unregister_workspace", worktrees: false },
+			{ purpose: "list_workspace_directories", worktrees: false },
+			{ purpose: "manage_worktrees", worktrees: true },
+		];
+		for (const { purpose, worktrees } of purposes) {
+			expect(workspaceStreamRedaction(purpose, "/srv/volt", agentDir), purpose).toEqual({
+				workspacePath: "/srv/volt",
+				remoteWorkspacePath: "/workspace",
+				...(worktrees ? { additionalRedactedPaths: [getWorktreesRoot(agentDir)] } : {}),
 			});
 		}
 	});

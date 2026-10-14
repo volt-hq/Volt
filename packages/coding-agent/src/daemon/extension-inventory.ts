@@ -8,21 +8,20 @@
  * launcher) that loads the root's extensions as a phone conversation there
  * would (`worker/extension-inventory.ts`) and writes the result as JSON.
  *
- * Evaluations are kept per root, trust decision, and profile (and workspace
- * generation, so an unregistered workspace's never answer its successor).
- * Each reports the files and directories it read (settings, permission
- * acknowledgments, the extension directories, each extension's source); a
- * kept one answers while none of them changed (by lstat) and it is younger
- * than {@link EXTENSION_INVENTORY_MAX_AGE_MS}. An evaluation that left out a
- * package that is not installed is not kept: a conversation would install it.
- * Concurrent requests for one key share one process, at most
+ * An inventory is a prediction: what its extensions register depends on code,
+ * which may read anything, so no list of files says when it changed. An
+ * evaluation is kept per root, trust decision, and profile (and workspace
+ * generation, so an unregistered workspace's never answers its successor) for
+ * {@link EXTENSION_INVENTORY_MAX_AGE_MS}, and an answer may be that old. That
+ * is safe: starting a review still checks the engine against the conversation
+ * it starts in. Concurrent requests for one key share one process, at most
  * {@link EXTENSION_INVENTORY_MAX_CONCURRENT} processes run at once, each is
  * killed past {@link EXTENSION_INVENTORY_TIMEOUT_MS}, and a request whose
  * caller leaves stops waiting without stopping the evaluation others share.
  */
 
 import { randomUUID } from "node:crypto";
-import { lstatSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { ExtensionSummarySchema, RpcReviewEngineSchema } from "@hansjm10/volt-protocol";
 import { type Static, Type } from "typebox";
 import { Compile } from "typebox/compile";
@@ -38,9 +37,8 @@ export const ExtensionInventoryProbeOutputSchema = Type.Union([
 			ok: Type.Literal(true),
 			projectTrusted: Type.Boolean(),
 			extensions: Type.Array(ExtensionSummarySchema),
-			reviewEngines: Type.Array(RpcReviewEngineSchema, { maxItems: 128 }),
-			inputs: Type.Array(Type.String({ minLength: 1, maxLength: 4096 }), { maxItems: 512 }),
-			cacheable: Type.Boolean(),
+			// Every engine, local view: a remote answer is filtered (and bounded) after. The output cap bounds this.
+			reviewEngines: Type.Array(RpcReviewEngineSchema),
 		},
 		closed,
 	),
@@ -50,18 +48,12 @@ export type ExtensionInventoryProbeOutput = Static<typeof ExtensionInventoryProb
 
 /** How long an evaluation may run before its process is killed. */
 export const EXTENSION_INVENTORY_TIMEOUT_MS = 20_000;
-/** How long a kept evaluation answers at most, even when nothing it read changed. */
-export const EXTENSION_INVENTORY_MAX_AGE_MS = 10 * 60_000;
+/** How long a kept evaluation answers: the oldest an answer may be. */
+export const EXTENSION_INVENTORY_MAX_AGE_MS = 60_000;
 /** Most evaluations kept; the least recently used goes first. */
 export const EXTENSION_INVENTORY_MAX_ENTRIES = 32;
 /** Most evaluation processes at once; more wait their turn. */
 export const EXTENSION_INVENTORY_MAX_CONCURRENT = 2;
-/**
- * How long before an evaluation starts a change to one of its inputs still counts as made during it. File
- * timestamps are coarse (a few milliseconds behind the clock on Linux, whole seconds on some file systems), so a
- * change made as the evaluation began can carry an earlier time.
- */
-export const EXTENSION_INVENTORY_SETTLE_MS = 2_000;
 
 /** What an inventory is evaluated for: a conversation opened in `root` with this trust and profile. */
 export interface ExtensionInventoryTarget {
@@ -83,7 +75,6 @@ export interface ExtensionInventoryServiceOptions {
 	readonly maxAgeMs?: number;
 	readonly maxEntries?: number;
 	readonly maxConcurrent?: number;
-	readonly settleMs?: number;
 }
 
 /** A failed evaluation; its message is for the host's log, not a device. */
@@ -96,8 +87,6 @@ export class ExtensionInventoryError extends Error {
 
 interface KeptInventory {
 	readonly inventory: ExtensionInventory;
-	/** Each input's lstat stamp when the evaluation finished. */
-	readonly stamps: ReadonlyMap<string, string>;
 	readonly keptAt: number;
 }
 
@@ -105,26 +94,6 @@ function compileProbeOutput() {
 	return Compile(ExtensionInventoryProbeOutputSchema);
 }
 let probeOutputValidator: ReturnType<typeof compileProbeOutput> | undefined;
-
-/** What lstat says of `path`: enough to tell a change, or that it is absent. */
-function stamp(path: string): string {
-	try {
-		const stats = lstatSync(path, { bigint: true });
-		return `${stats.mtimeNs}:${stats.ctimeNs}:${stats.size}:${stats.ino}`;
-	} catch {
-		return "absent";
-	}
-}
-
-/** When `path` last changed, in ms; undefined when absent. */
-function changedAtMs(path: string): number | undefined {
-	try {
-		const stats = lstatSync(path);
-		return Math.max(stats.mtimeMs, stats.ctimeMs);
-	} catch {
-		return undefined;
-	}
-}
 
 export class ExtensionInventoryService {
 	private readonly options: ExtensionInventoryServiceOptions;
@@ -141,8 +110,8 @@ export class ExtensionInventoryService {
 	}
 
 	/**
-	 * The inventory of a conversation opened at `target`: a kept evaluation while nothing it read changed,
-	 * else a new one, shared with concurrent requests for the same target. `signal` stops this caller waiting.
+	 * The inventory of a conversation opened at `target`: a kept evaluation while it is young enough, else a new
+	 * one, shared with concurrent requests for the same target. `signal` stops this caller waiting.
 	 */
 	async get(target: ExtensionInventoryTarget, signal?: AbortSignal): Promise<ExtensionInventory> {
 		signal?.throwIfAborted();
@@ -190,9 +159,7 @@ export class ExtensionInventoryService {
 	}
 
 	private fresh(kept: KeptInventory): boolean {
-		if (this.now() - kept.keptAt >= (this.options.maxAgeMs ?? EXTENSION_INVENTORY_MAX_AGE_MS)) return false;
-		for (const [path, recorded] of kept.stamps) if (stamp(path) !== recorded) return false;
-		return true;
+		return this.now() - kept.keptAt < (this.options.maxAgeMs ?? EXTENSION_INVENTORY_MAX_AGE_MS);
 	}
 
 	private now(): number {
@@ -211,24 +178,15 @@ export class ExtensionInventoryService {
 				extensions: output.extensions,
 				reviewEngines: output.reviewEngines,
 			};
-			// An input that changed as it was read may not be what it read: not kept, the next request evaluates again.
-			const settledBefore = startedAt - (this.options.settleMs ?? EXTENSION_INVENTORY_SETTLE_MS);
-			const unsettled = output.inputs.some((path) => (changedAtMs(path) ?? 0) >= settledBefore);
-			if (output.cacheable && !unsettled && !this.disposed) {
-				this.kept.set(key, {
-					inventory,
-					stamps: new Map(output.inputs.map((path) => [path, stamp(path)])),
-					keptAt: this.now(),
-				});
+			if (!this.disposed) {
+				this.kept.set(key, { inventory, keptAt: this.now() });
 				while (this.kept.size > (this.options.maxEntries ?? EXTENSION_INVENTORY_MAX_ENTRIES)) {
 					const oldest = this.kept.keys().next().value;
 					if (oldest === undefined) break;
 					this.kept.delete(oldest);
 				}
-				outcome = "kept";
-			} else {
-				outcome = "not kept";
 			}
+			outcome = "evaluated";
 			return inventory;
 		} catch (error) {
 			outcome = `failed: ${error instanceof Error ? error.message : String(error)}`;
