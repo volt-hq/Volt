@@ -732,20 +732,27 @@ describe("durable review intents over protocol frames", () => {
 	});
 
 	test("names the engine of each run to clients, and refuses to rerun an engine's run", async () => {
-		const engineRun = { ...durableBranchRecord("review:engine"), endedAt: 3, engine: "ext:swarm-review/swarm" };
+		const engineRun = {
+			...durableBranchRecord("review:engine"),
+			endedAt: 3,
+			engine: "ext:swarm-review/swarm",
+			engineLabel: "Swarm",
+		};
 		const standardRun = { ...durableBranchRecord("review:standard"), endedAt: 2 };
 		const { client } = await setup([standardRun, engineRun]);
 
 		const list = await client.query("review.runs", {});
-		expect(list.runs.map((run) => [run.runId, run.engine])).toEqual([
-			["review:engine", "ext:swarm-review/swarm"],
-			["review:standard", "standard"],
+		expect(list.runs.map((run) => [run.runId, run.engine, run.engineLabel])).toEqual([
+			["review:engine", "ext:swarm-review/swarm", "Swarm"],
+			["review:standard", "standard", "Standard"],
 		]);
 		await expect(client.query("review.result", { runId: "review:engine" })).resolves.toMatchObject({
 			engine: "ext:swarm-review/swarm",
+			engineLabel: "Swarm",
 		});
 		await expect(client.query("review.result", { runId: "review:standard" })).resolves.toMatchObject({
 			engine: "standard",
+			engineLabel: "Standard",
 		});
 
 		await expect(
@@ -753,7 +760,7 @@ describe("durable review intents over protocol frames", () => {
 		).rejects.toMatchObject({
 			reason: {
 				code: "invalid_input",
-				message: "This review ran on the ext:swarm-review/swarm engine and cannot be rerun",
+				message: "This review ran on the Swarm engine and cannot be rerun",
 			},
 		});
 		expect(reviewMocks.prepareReviewWorkflow).not.toHaveBeenCalled();

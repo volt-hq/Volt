@@ -38,6 +38,7 @@ import {
 	type HydratedReviewRunRecord,
 	recordReviewFindingOutcome,
 	STANDARD_REVIEW_ENGINE,
+	STANDARD_REVIEW_ENGINE_LABEL,
 } from "../review-state.ts";
 import type { SessionManager } from "../session-manager.ts";
 import type { SessionWriter } from "../session-writer.ts";
@@ -63,7 +64,7 @@ type ExtensionReviewTarget = ExtensionReviewEngine["targets"][number];
 /** The host's own review, as `ctx.reviews.engines()` lists it. */
 const STANDARD_ENGINE: ExtensionReviewEngine = Object.freeze({
 	id: STANDARD_REVIEW_ENGINE,
-	label: "Standard",
+	label: STANDARD_REVIEW_ENGINE_LABEL,
 	description: "The built-in review: discovery and independent verification passes over a snapshot of the change.",
 	targets: Object.freeze([...TARGET_KINDS]),
 });

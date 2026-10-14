@@ -38,7 +38,6 @@ import type { ProjectTrustContext, SessionStartEvent } from "../../core/extensio
 import { GitContextProviderPool } from "../../core/git-context-provider-pool.ts";
 import { ConversationHost } from "../../core/host/conversation-host.ts";
 import type { ConversationFactory, HostedConversation } from "../../core/host/hosted-conversation.ts";
-import { applyHttpProxySettings, configureHttpDispatcher } from "../../core/http-dispatcher.ts";
 import { LspServerPool } from "../../core/lsp/server-pool.ts";
 import { resolveModelScope } from "../../core/model-resolver.ts";
 import { decideProjectTrust, projectTrustPath, resolveConversationProjectTrust } from "../../core/project-trust.ts";
@@ -48,7 +47,6 @@ import {
 	usesDefaultIrohRemoteAllowTools,
 } from "../../core/remote/iroh/index.ts";
 import { getDefaultSessionDir, type SessionManager, type SessionReference } from "../../core/session-manager.ts";
-import { SettingsManager } from "../../core/settings-manager.ts";
 import {
 	SubagentManager,
 	type SubagentRuntimeCreatedEvent,
@@ -65,6 +63,7 @@ import {
 	resolveIrohRemoteSessionTarget,
 } from "../session-target.ts";
 import type { SessionWorktreeDaemon } from "../session-worktree.ts";
+import { createConversationSettings } from "./conversation-settings.ts";
 
 /** What a TUI opened its worker with: every conversation the worker creates is built from it. */
 export interface WorkerCliOptions {
@@ -240,14 +239,12 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 						decisions,
 						top ? cli.trust.session : undefined,
 					);
-		const settingsManager = SettingsManager.create(settingsCwd, runtimeOptions.agentDir, {
+		const settingsManager = createConversationSettings(settingsCwd, runtimeOptions.agentDir, {
 			profile,
 			projectTrusted: trust.trusted,
 		});
 		const projectTrustDiagnostics: AgentSessionDiagnostic[] = [];
 		const trustPath = trust.resolve;
-		applyHttpProxySettings(settingsManager.getGlobalSettings().httpProxy);
-		configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
 		const services = await createAgentSessionServices({
 			authStorage,
 			cwd: runtimeOptions.cwd,

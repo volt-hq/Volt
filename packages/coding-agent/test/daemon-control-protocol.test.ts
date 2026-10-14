@@ -1028,6 +1028,7 @@ describe("Iroh remote hello admission", () => {
 		{ ...base, conversation: { target: "new", sessionId: "new-session", workingDirectory: "packages/app" } },
 		{ ...base, conversation: { target: "session", sessionId: "abc_123-id" } },
 		{ ...base, workspaceDiscovery: { purpose: "review" } },
+		{ ...base, workspaceDiscovery: { purpose: "extensions" } },
 		{ ...base, workspaceManagement: { purpose: "manage_worktrees" } },
 		null,
 		[],

@@ -137,6 +137,132 @@ function summaryText(text: string, max: number): string {
 	return plain.length > max ? `${plain.slice(0, max - 1)}…` : plain;
 }
 
+/** An extension's place in a generation as loading left it: it runs, settings disable it, or it failed to load. */
+export interface LoadedExtensionState {
+	readonly id: string;
+	readonly declaration: ExtensionDeclaration | undefined;
+	readonly instance: Extension | undefined;
+	readonly state: "active" | "disabled" | "failed";
+	readonly error: string | undefined;
+}
+
+/**
+ * Each extension that owns its manifest id in `result`, in load order, with the state loading left it in: a
+ * declared extension runs (`result.extensions`), is disabled, or failed to load; one given already loaded runs.
+ */
+export function loadedExtensionStates(result: LoadExtensionsResult): LoadedExtensionState[] {
+	const running = new Map(result.extensions.map((extension) => [extension.id, extension]));
+	const states = new Map<string, LoadedExtensionState>();
+	for (const declaration of result.declarations ?? []) {
+		const instance = running.get(declaration.id);
+		states.set(declaration.id, {
+			id: declaration.id,
+			declaration,
+			instance,
+			state: instance ? "active" : declaration.error !== undefined ? "failed" : "disabled",
+			error: instance ? undefined : declaration.error,
+		});
+	}
+	for (const extension of result.extensions) {
+		if (states.has(extension.id)) continue;
+		states.set(extension.id, {
+			id: extension.id,
+			declaration: undefined,
+			instance: extension,
+			state: "active",
+			error: undefined,
+		});
+	}
+	return [...states.values()];
+}
+
+/** What `source` (an extension's instance or declaration) declares, in `state`. */
+function declaredExtensionInfo(
+	id: string,
+	source: Extension | ExtensionDeclaration,
+	state: ExtensionState,
+): DeclaredExtensionInfo {
+	return {
+		id,
+		manifest: source.manifest,
+		version: source.version,
+		scope: source.sourceInfo.scope,
+		fingerprint: source.fingerprint,
+		state,
+	};
+}
+
+/** The user's permission acknowledgments; undefined when they cannot be read, which acknowledges nothing. */
+export function readPermissionAcknowledgments(
+	permissions: ExtensionPermissionStore,
+): ReadonlyMap<string, PermissionAcknowledgment> | undefined {
+	try {
+		return permissions.all();
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * One extension as a client at the host is told of it (the `extensions` query's local view, fingerprint
+ * included; core/extensions/inventory.ts derives the remote one): `enabled` is whether settings enable it, and
+ * `error` why it failed, when it did.
+ */
+export function extensionSummary(
+	info: DeclaredExtensionInfo,
+	enabled: boolean,
+	error: string | undefined,
+	acknowledgments: ReadonlyMap<string, PermissionAcknowledgment> | undefined,
+): ExtensionSummary {
+	const { manifest } = info;
+	const subject = permissionSubject(info);
+	const acknowledged =
+		acknowledgments === undefined
+			? subject.permissions.length === 0
+			: reviewPermissions(subject, acknowledgments.get(info.id)).status === "acknowledged";
+	const version = summaryText(info.version, 256).replace(/\s+/g, " ").trim();
+	return {
+		id: info.id,
+		displayName: manifest.displayName,
+		...(manifest.description === undefined ? {} : { description: manifest.description }),
+		version: version.length > 0 && VERSION_LINE.test(version) ? version : "unknown",
+		scope: info.scope,
+		enabled,
+		state: info.state,
+		permissions: [...(manifest.permissions ?? [])],
+		permissionsAcknowledged: acknowledged,
+		hasSettings: Object.keys(manifest.settings?.properties ?? {}).length > 0,
+		...(info.state === "failed" && error !== undefined
+			? { error: summaryText(error, EXTENSION_ERROR_MAX_CHARS) }
+			: {}),
+		fingerprint: info.fingerprint,
+	};
+}
+
+/**
+ * Every extension of a loaded generation, before any conversation runs it, as a client at the host is told of
+ * them: what a conversation that loaded `result` would list. `enabled` says whether settings enable an id.
+ */
+export function loadedExtensionSummaries(
+	result: LoadExtensionsResult,
+	enabled: (id: string) => boolean,
+	permissions: ExtensionPermissionStore,
+): ExtensionSummary[] {
+	const acknowledgments = readPermissionAcknowledgments(permissions);
+	return loadedExtensionStates(result).flatMap((loaded) => {
+		const source = loaded.instance ?? loaded.declaration;
+		if (!source) return [];
+		return [
+			extensionSummary(
+				declaredExtensionInfo(loaded.id, source, loaded.state),
+				enabled(loaded.id),
+				loaded.error,
+				acknowledgments,
+			),
+		];
+	});
+}
+
 /** A failure's message. */
 function message(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -179,33 +305,9 @@ export class ExtensionRegistry {
 	reset(result: LoadExtensionsResult): void {
 		this.generation++;
 		this.result = result;
-		const running = new Map(result.extensions.map((extension) => [extension.id, extension]));
-		const records = new Map<string, ExtensionRecord>();
-		for (const declaration of result.declarations ?? []) {
-			const instance = running.get(declaration.id);
-			records.set(declaration.id, {
-				id: declaration.id,
-				declaration,
-				instance,
-				state: instance ? "active" : declaration.error !== undefined ? "failed" : "disabled",
-				error: instance ? undefined : declaration.error,
-				retiring: undefined,
-				removed: false,
-			});
-		}
-		for (const extension of result.extensions) {
-			if (records.has(extension.id)) continue;
-			records.set(extension.id, {
-				id: extension.id,
-				declaration: undefined,
-				instance: extension,
-				state: "active",
-				error: undefined,
-				retiring: undefined,
-				removed: false,
-			});
-		}
-		this.records = records;
+		this.records = new Map<string, ExtensionRecord>(
+			loadedExtensionStates(result).map((loaded) => [loaded.id, { ...loaded, retiring: undefined, removed: false }]),
+		);
 	}
 
 	/** Stop taking changes: the conversation closes. */
@@ -239,52 +341,15 @@ export class ExtensionRegistry {
 		const record = this.records.get(id);
 		const source = record?.instance ?? record?.declaration;
 		if (!record || !source) return undefined;
-		return {
-			id,
-			manifest: source.manifest,
-			version: source.version,
-			scope: source.sourceInfo.scope,
-			fingerprint: source.fingerprint,
-			state: record.state,
-		};
+		return declaredExtensionInfo(id, source, record.state);
 	}
 
-	/** Every extension of the conversation as the `extensions` query lists it. */
+	/** Every extension of the conversation as a client at the host is told of it (see {@link extensionSummary}). */
 	summaries(permissions: ExtensionPermissionStore): ExtensionSummary[] {
-		let acknowledgments: ReadonlyMap<string, PermissionAcknowledgment> | undefined;
-		try {
-			acknowledgments = permissions.all();
-		} catch {
-			// An unreadable acknowledgment file acknowledges nothing.
-			acknowledgments = undefined;
-		}
-		return [...this.records.keys()].flatMap((id) => {
-			const info = this.get(id);
-			const record = this.records.get(id);
-			if (!info || !record) return [];
-			const { manifest } = info;
-			const subject = permissionSubject(info);
-			const acknowledged =
-				acknowledgments === undefined
-					? subject.permissions.length === 0
-					: reviewPermissions(subject, acknowledgments.get(id)).status === "acknowledged";
-			const version = summaryText(info.version, 256).replace(/\s+/g, " ").trim();
-			const summary: ExtensionSummary = {
-				id,
-				displayName: manifest.displayName,
-				...(manifest.description === undefined ? {} : { description: manifest.description }),
-				version: version.length > 0 && VERSION_LINE.test(version) ? version : "unknown",
-				scope: info.scope,
-				enabled: this.host.enabled(id),
-				state: info.state,
-				permissions: [...(manifest.permissions ?? [])],
-				permissionsAcknowledged: acknowledged,
-				hasSettings: Object.keys(manifest.settings?.properties ?? {}).length > 0,
-				...(record.state === "failed" && record.error !== undefined
-					? { error: summaryText(record.error, EXTENSION_ERROR_MAX_CHARS) }
-					: {}),
-			};
-			return [summary];
+		const acknowledgments = readPermissionAcknowledgments(permissions);
+		return [...this.records.values()].flatMap((record) => {
+			const info = this.get(record.id);
+			return info ? [extensionSummary(info, this.host.enabled(record.id), record.error, acknowledgments)] : [];
 		});
 	}
 

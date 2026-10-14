@@ -172,7 +172,20 @@ describe("a review engine an extension registers", () => {
 		expect(runs[0]!.params).toEqual({ workers: 4, thinking: "high", exec: true });
 		expect(Object.isFrozen(runs[0]!.params)).toBe(true);
 		const list = await client.query("review.runs", {});
-		expect(list.runs[0]).toMatchObject({ runId: workId, engine: ENGINE, completionStatus: "complete" });
+		expect(list.runs[0]).toMatchObject({
+			runId: workId,
+			engine: ENGINE,
+			engineLabel: "Swarm",
+			completionStatus: "complete",
+		});
+		await expect(client.query("review.result", { runId: workId })).resolves.toMatchObject({
+			engine: ENGINE,
+			engineLabel: "Swarm",
+		});
+		// The host does not rerun an engine's review, and names the engine by its label when it refuses.
+		await expect(client.intent("review_rerun", { runId: workId, mode: "full" })).rejects.toMatchObject({
+			reason: { code: "invalid_input", message: "This review ran on the Swarm engine and cannot be rerun" },
+		});
 
 		// Without options the engine runs on its defaults.
 		const plain = await client.intent("review", { target: "uncommitted", engine: ENGINE });

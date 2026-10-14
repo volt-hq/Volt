@@ -248,7 +248,7 @@ export async function startEngineReview(options: StartEngineReviewOptions): Prom
 			const record = createReviewRunRecord({
 				workflowId: workId,
 				workflowAction: action,
-				engine: engine.id,
+				engine: { id: engine.id, label: engine.label },
 				startedAt,
 				snapshot: resolution,
 				controls,

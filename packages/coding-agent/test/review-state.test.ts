@@ -33,7 +33,9 @@ import {
 	reconcileFindingIdentities,
 	restoreReviewStateFromHandoff,
 	reviewRunEngine,
+	reviewRunEngineLabel,
 	STANDARD_REVIEW_ENGINE,
+	STANDARD_REVIEW_ENGINE_LABEL,
 	settlePreviousFindings,
 } from "../src/core/review-state.ts";
 import { createReviewFileMetadata } from "../src/core/review-target-metadata.ts";
@@ -967,13 +969,15 @@ describe("durable review state", () => {
 		};
 
 		function engineRecord(runId: string, endedAt: number, engine = SWARM): ReviewRunRecord {
-			return { ...record(runId, endedAt), engine };
+			return { ...record(runId, endedAt), engine, engineLabel: "Swarm" };
 		}
 
 		it("names the built-in pipeline when a run records no engine, and writes none for it", () => {
 			expect(reviewRunEngine(record("run-1", 1))).toBe(STANDARD_REVIEW_ENGINE);
 			expect(reviewRunEngine(engineRecord("run-2", 2))).toBe(SWARM);
-			const built = (engine?: string) =>
+			expect(reviewRunEngineLabel(record("run-1", 1))).toBe(STANDARD_REVIEW_ENGINE_LABEL);
+			expect(reviewRunEngineLabel(engineRecord("run-2", 2))).toBe("Swarm");
+			const built = (engine?: { id: string; label: string }) =>
 				createReviewRunRecord({
 					workflowId: "review:engine",
 					workflowAction: "review.branch",
@@ -985,21 +989,43 @@ describe("durable review state", () => {
 					result: result(),
 				});
 			expect(built()).not.toHaveProperty("engine");
-			expect(built(SWARM)).toMatchObject({ engine: SWARM });
+			expect(built()).not.toHaveProperty("engineLabel");
+			expect(built({ id: SWARM, label: "Swarm" })).toMatchObject({ engine: SWARM, engineLabel: "Swarm" });
 			for (const invalid of [STANDARD_REVIEW_ENGINE, "swarm", "ext:swarm-review", "ext:/swarm", "ext:a/b/c", ""]) {
-				expect(() => built(invalid)).toThrow("Invalid review engine");
+				expect(() => built({ id: invalid, label: "Swarm" })).toThrow("Invalid review engine");
+			}
+			for (const blank of ["", "  "]) {
+				expect(() => built({ id: SWARM, label: blank })).toThrow(`Review engine ${SWARM} needs a label`);
 			}
 		});
 
-		it("keeps an engine's runs and drops a record naming a malformed engine", async () => {
+		it("keeps an engine's runs with their label and drops a record naming a malformed engine", async () => {
 			const manager = SessionManager.inMemory("/tmp/review-state");
 			await appendReviewRun(manager.logWriter, engineRecord("run-engine", 2));
 			await appendReviewRun(manager.logWriter, { ...record("run-standard", 1) });
-			await appendReviewRun(manager.logWriter, { ...record("run-forged", 3), engine: "standard" });
-			await appendReviewRun(manager.logWriter, { ...record("run-garbled", 4), engine: "ext:" });
-			expect(listReviewRuns(manager, { limit: 10 }).runs.map((run) => [run.runId, reviewRunEngine(run)])).toEqual([
-				["run-engine", SWARM],
-				["run-standard", STANDARD_REVIEW_ENGINE],
+			await appendReviewRun(manager.logWriter, {
+				...record("run-forged", 3),
+				engine: "standard",
+				engineLabel: "Standard",
+			});
+			await appendReviewRun(manager.logWriter, {
+				...record("run-garbled", 4),
+				engine: "ext:",
+				engineLabel: "Swarm",
+			});
+			// The label goes with the engine: a record with one and not the other is malformed.
+			await appendReviewRun(manager.logWriter, { ...record("run-unlabeled", 5), engine: SWARM });
+			await appendReviewRun(manager.logWriter, { ...record("run-blank", 6), engine: SWARM, engineLabel: " " });
+			await appendReviewRun(manager.logWriter, { ...record("run-label-only", 7), engineLabel: "Swarm" });
+			expect(
+				listReviewRuns(manager, { limit: 10 }).runs.map((run) => [
+					run.runId,
+					reviewRunEngine(run),
+					reviewRunEngineLabel(run),
+				]),
+			).toEqual([
+				["run-engine", SWARM, "Swarm"],
+				["run-standard", STANDARD_REVIEW_ENGINE, STANDARD_REVIEW_ENGINE_LABEL],
 			]);
 		});
 

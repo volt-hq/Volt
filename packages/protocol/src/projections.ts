@@ -199,6 +199,8 @@ const reviewRunProperties = {
 	workflowAction: Type.String(),
 	/** The review engine that produced the run: `standard`, or `ext:<extension id>/<engine name>`. */
 	engine: Type.String(),
+	/** What to call that engine: `Standard`, or the label the extension's engine had when the run started. */
+	engineLabel: Type.String(),
 	status: RpcReviewRunStatusSchema,
 	startedAt: RpcEpochMillisecondsSchema,
 	endedAt: RpcEpochMillisecondsSchema,

@@ -11,6 +11,7 @@
 import { type Static, type TObject, type TSchema, Type } from "typebox";
 import { RpcAgentOptionsSchema } from "./agent-options.ts";
 import { LogEntryIdSchema, LogEntryOrdinalSchema, LogSessionIdSchema } from "./entries.ts";
+import { RpcExtensionInventoryParamsSchema, RpcExtensionInventorySchema } from "./extension-inventory.ts";
 import { ExtensionIdSchema, ExtensionSettingsViewSchema, ExtensionSummarySchema } from "./extensions.ts";
 import { stringEnum } from "./helpers.ts";
 import {
@@ -399,6 +400,11 @@ export const QUERY_SCHEMAS = {
 	},
 	/** The pull request a review would target: by number, or the one for a checkout's branch. */
 	pr_review: { params: RpcPrReviewSourceRequestSchema, result: RpcResolvePrReviewResponseSchema },
+	/**
+	 * What a new conversation in the workspace (or its worktree checkout `worktreeId`) would load: its
+	 * extensions and the review engines they register, predicted without opening a conversation.
+	 */
+	extension_inventory: { params: RpcExtensionInventoryParamsSchema, result: RpcExtensionInventorySchema },
 
 	// MCP
 	"mcp.capabilities": { params: EmptyInputSchema, result: RpcMcpCapabilitiesResponseSchema },

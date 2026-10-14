@@ -3,7 +3,7 @@
  * private body unless the run is shown in full, its options and status, and its result.
  */
 
-import { type HydratedReviewRunRecord, reviewRunEngine } from "./review-state.ts";
+import { type HydratedReviewRunRecord, reviewRunEngine, reviewRunEngineLabel } from "./review-state.ts";
 import { createReviewFileMetadata, createReviewPullRequestMetadata } from "./review-target-metadata.ts";
 import { UNAVAILABLE_REVIEW_USAGE } from "./review-usage.ts";
 
@@ -45,6 +45,7 @@ export function projectReviewRun(record: HydratedReviewRunRecord, includeResult:
 		runId: record.runId,
 		workflowAction: record.workflowAction,
 		engine: reviewRunEngine(record),
+		engineLabel: reviewRunEngineLabel(record),
 		status: record.status,
 		startedAt: record.startedAt,
 		endedAt: record.endedAt,

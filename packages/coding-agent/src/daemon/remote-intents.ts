@@ -9,7 +9,9 @@
  *
  * A stream's purpose decides which of these it serves: a conversation stream
  * serves the conversation's intents and the workspace operations a phone uses
- * beside a conversation; each workspace stream serves its purpose only.
+ * beside a conversation; each workspace stream serves its purpose only. The
+ * workspace's extension inventory (what a new conversation there would load)
+ * is told in its remote view (core/extensions/inventory.ts).
  */
 
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -22,6 +24,7 @@ import type {
 	PrReviewPullRequest,
 	PrReviewResolveResponse,
 	PrReviewSourceRequest,
+	RpcExtensionInventory,
 	RpcKeepAwakeStatus,
 	RpcSessionChangeContextSchema,
 	RpcSessionListItemSchema,
@@ -29,11 +32,13 @@ import type {
 import {
 	DYNAMIC_INTENT_PATTERN,
 	type RejectionReason,
+	RpcExtensionInventorySchema,
 	RpcPreparePrReviewResponseSchema,
 	RpcResolvePrReviewResponseSchema,
 } from "@hansjm10/volt-protocol";
 import type { Static } from "typebox";
 import { Compile } from "typebox/compile";
+import { type ExtensionInventory, remoteExtensionInventoryView } from "../core/extensions/inventory.ts";
 import {
 	type IntentHostTheme,
 	type IntentKeepAwakeService,
@@ -85,6 +90,16 @@ export interface RemoteIntentHost {
 	agentOptions(authorization: IrohRemoteClientAuthorizationSuccess): IrohRemoteAgentOptionsRpcBackend;
 	sessionContexts(authorization: IrohRemoteClientAuthorizationSuccess): IrohRemoteSessionContextsRpcBackend;
 	prReviews(authorization: IrohRemoteClientAuthorizationSuccess, signal?: AbortSignal): IrohRemotePrReviewRpcBackend;
+	/**
+	 * What a new conversation in the device's workspace, or its worktree checkout `worktreeId`, would load (the
+	 * local view); absent when the daemon cannot evaluate one. An unknown worktree throws
+	 * {@link WorkspaceIntentError} `worktree_not_found`.
+	 */
+	extensionInventory?(
+		authorization: IrohRemoteClientAuthorizationSuccess,
+		worktreeId: string | undefined,
+		signal?: AbortSignal,
+	): Promise<ExtensionInventory>;
 	/** Whether a client is on each session a worker of the workspace hosts. */
 	listRuntimeStates?(workspaceName: string): ReadonlyMap<string, RemoteSessionRuntimeState>;
 	/** The daemon's change and pull request association of a session. */
@@ -125,10 +140,31 @@ const PURPOSE_FRAMES: Readonly<Record<string, { intents: readonly string[]; quer
 	agent_options: { intents: [], queries: ["agent_options"] },
 	session_contexts: { intents: [], queries: ["session_contexts"] },
 	review: { intents: [], queries: ["pr_review"] },
+	extensions: { intents: [], queries: ["extension_inventory"] },
 	unregister_workspace: { intents: ["unregister_workspace"], queries: [] },
 	list_workspace_directories: { intents: [], queries: ["workspace_directories"] },
 	manage_worktrees: { intents: ["create_worktree", "remove_worktree", "prepare_pr_review"], queries: ["worktrees"] },
 };
+
+/** The purposes whose answers can come from a managed worktree checkout, outside the workspace's own root. */
+const WORKTREE_PURPOSES: ReadonlySet<string> = new Set(["manage_worktrees", "extensions"]);
+
+/**
+ * The roots a workspace stream of `purpose` redacts from every frame: the workspace's, and for a purpose whose
+ * answers can come from a worktree checkout (worktree management; an extension inventory evaluated there, whose
+ * load errors name the checkout), the managed worktrees root too, as a conversation in a worktree redacts it.
+ */
+export function workspaceStreamRedaction(
+	purpose: Extract<RemoteStreamScope, { kind: "discovery" | "management" }>["purpose"],
+	workspacePath: string,
+	agentDir: string,
+): { workspacePath: string; remoteWorkspacePath: string; additionalRedactedPaths?: string[] } {
+	return {
+		workspacePath,
+		remoteWorkspacePath: "/workspace",
+		...(WORKTREE_PURPOSES.has(purpose) ? { additionalRedactedPaths: [getWorktreesRoot(agentDir)] } : {}),
+	};
+}
 
 /** Which intents and queries a stream serves; every remote-safe one on a conversation stream. */
 export function remoteStreamAllows(
@@ -187,6 +223,7 @@ function pullRequestSummary(pullRequest: PrReviewPullRequest): PrReviewPullReque
 
 const RESOLVE_RESPONSE = Compile(RpcResolvePrReviewResponseSchema);
 const PREPARE_RESPONSE = Compile(RpcPreparePrReviewResponseSchema);
+const INVENTORY_RESPONSE = Compile(RpcExtensionInventorySchema);
 
 /** A review preparation failure as its stable code: backend diagnostics, git output, and paths stay on the host. */
 function reviewFailure(error: unknown): WorkspaceIntentError {
@@ -475,6 +512,31 @@ export function remoteIntentServices(
 		}
 		return answer;
 	};
+	const inventoryOf = host.extensionInventory?.bind(host);
+	const extensionInventory: IntentWorkspaceServices["extensionInventory"] =
+		inventoryOf === undefined
+			? undefined
+			: async (worktreeId) => {
+					let inventory: ExtensionInventory;
+					try {
+						inventory = await inventoryOf(authorization, worktreeId, options.signal);
+					} catch (error) {
+						// The device sees a stable code; what failed is in the host's log.
+						throw error instanceof WorkspaceIntentError
+							? error
+							: new WorkspaceIntentError("extension_inventory_failed");
+					}
+					const remote = remoteExtensionInventoryView(inventory);
+					const answer: RpcExtensionInventory = {
+						workspaceName,
+						...(worktreeId === undefined ? {} : { worktreeId }),
+						projectTrusted: remote.projectTrusted,
+						extensions: [...remote.extensions],
+						reviewEngines: [...remote.reviewEngines],
+					};
+					if (!INVENTORY_RESPONSE.Check(answer)) throw new WorkspaceIntentError("extension_inventory_failed");
+					return answer;
+				};
 	const listDirectories: IntentWorkspaceServices["listDirectories"] = async (path) => {
 		const listed = await listWorkspaceDirectories(authorization.workspace.path, path);
 		if (!listed.ok) throw new WorkspaceIntentError(listed.error);
@@ -519,6 +581,7 @@ export function remoteIntentServices(
 						return contexts;
 					},
 					resolvePrReview,
+					...(extensionInventory === undefined ? {} : { extensionInventory }),
 				},
 			};
 		case "management":

@@ -2,8 +2,8 @@
  * Extension queries (RFC §8.2, §8.3): the extension catalog, one extension's
  * settings, and editor completions from extension completion providers.
  * `extensions` lists every extension of the conversation, running or not,
- * with its state, permissions, and whether the user acknowledged them; a
- * local client also reads each one's fingerprint.
+ * with its state, permissions, and whether the user acknowledged them; only a
+ * local client reads each one's fingerprint (core/extensions/inventory.ts).
  * `extension_settings` returns an extension's settings form and the values
  * stored in each scope, whether it runs or not; remote clients need
  * `host.manage.v1`. Editor completions ask the conversation's completion
@@ -12,6 +12,7 @@
  */
 
 import { completeEditorText } from "../../extensions/completions.ts";
+import { remoteExtensionSummary } from "../../extensions/inventory.ts";
 import { ExtensionPermissionStore } from "../../extensions/permissions.ts";
 import { extensionSettingsView } from "../../extensions/settings.ts";
 import type { IntentTarget } from "../intents/types.ts";
@@ -27,14 +28,7 @@ export const extensionsQuery = defineQuery({
 		if (!target) throw new QueryRejectedError("unavailable", "This query needs a conversation");
 		const permissions = new ExtensionPermissionStore(target.conversation.services.agentDir);
 		const summaries = target.session.extensionRegistry.summaries(permissions);
-		if (ctx.profile.name !== "local") return { extensions: summaries };
-		const registry = target.session.extensionRegistry;
-		return {
-			extensions: summaries.map((summary) => {
-				const fingerprint = registry.get(summary.id)?.fingerprint;
-				return fingerprint === undefined ? summary : { ...summary, fingerprint };
-			}),
-		};
+		return { extensions: ctx.profile.name === "local" ? summaries : summaries.map(remoteExtensionSummary) };
 	},
 });
 

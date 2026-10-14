@@ -27,6 +27,7 @@ import type {
 	RemoteCapability,
 	RemoteGrant,
 	RpcAgentOptionsSchema,
+	RpcExtensionInventory,
 	RpcKeepAwakeStatus,
 	RpcListSubagentsResponse,
 	RpcRegisterPushTargetArgs,
@@ -151,6 +152,8 @@ export interface IntentWorkspaceServices {
 	agentOptions?(): Promise<Static<typeof RpcAgentOptionsSchema>>;
 	sessionContexts?(sessionIds: readonly string[]): Promise<Static<typeof RpcSessionContextSchema>[]>;
 	resolvePrReview?(request: PrReviewSourceRequest): Promise<PrReviewResolveResponse>;
+	/** What a new conversation in the workspace, or its worktree checkout `worktreeId`, would load. */
+	extensionInventory?(worktreeId: string | undefined): Promise<RpcExtensionInventory>;
 	preparePrReview?(request: PrReviewPrepareRequest): Promise<PrReviewPrepareResponse>;
 	uploadDeviceLogs?(request: { fileName?: string; content: string }): Promise<{ path: string; byteCount: number }>;
 	/** The workspace's sessions, newest first, as the host lists them to its remote clients. */

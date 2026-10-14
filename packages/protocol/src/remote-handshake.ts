@@ -157,7 +157,7 @@ export type IrohRemoteConversationTarget = Static<typeof IrohRemoteConversationT
 
 export const IrohRemoteWorkspaceDiscoveryTargetSchema = Type.Object(
 	{
-		purpose: stringEnum(["list_sessions", "agent_options", "session_contexts", "review"], {
+		purpose: stringEnum(["list_sessions", "agent_options", "session_contexts", "review", "extensions"], {
 			"x-volt-expected": "be a supported workspaceDiscovery purpose",
 		}),
 	},
