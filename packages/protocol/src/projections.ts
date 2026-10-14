@@ -111,6 +111,8 @@ export const RpcReviewFindingSchema = Type.Object(
 		confidence: Type.Number({ minimum: 0, maximum: 1 }),
 		changeLocation: RpcReviewLocationSchema,
 		evidenceLocations: Type.Array(RpcReviewLocationSchema),
+		/** Whether the reviewed change introduced the defect: false when it predates the change; absent when unknown. */
+		introduced: Type.Optional(Type.Boolean()),
 		verification: Type.Object(
 			{
 				outcome: Type.Literal("accepted"),

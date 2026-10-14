@@ -8,6 +8,7 @@ import {
 	type ToolArgumentLimits,
 } from "@hansjm10/volt-ai";
 import { getAgentDir } from "../config.ts";
+import type { SessionWorktreeDaemon } from "../daemon/session-worktree.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import { AgentSession, AgentSessionConstructionCleanupError } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
@@ -175,6 +176,8 @@ export interface CreateAgentSessionOptions {
 	 * (e.g. a session and its subagents). Each session starts its own when omitted.
 	 */
 	lspServerPool?: LspServerPool;
+	/** The daemon's managed worktrees, which a daemon-hosted session's extensions create and list. */
+	worktreeDaemon?: SessionWorktreeDaemon;
 	/** Optional manager enabling the native MCP gateway tool when selected. */
 	mcpManager?: McpManager;
 	/**
@@ -728,6 +731,7 @@ async function createAgentSessionWithTrackedResources(
 		sessionStartEvent: options.sessionStartEvent,
 		subagentToolManager: options.subagentToolManager,
 		lspServerPool: options.lspServerPool,
+		...(options.worktreeDaemon === undefined ? {} : { worktreeDaemon: options.worktreeDaemon }),
 		mcpManager,
 		mcpManagerFactory: options.disableMcp || suppliedMcpManager ? undefined : createDefaultMcpManager,
 	});

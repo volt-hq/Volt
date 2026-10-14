@@ -1,6 +1,6 @@
 import { createHash, randomInt } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { mkdir, readdir, realpath, rename, rm } from "node:fs/promises";
+import { mkdir, readdir, realpath, rename, rm, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import type { PrReviewLaunch } from "../core/pr-review-placement.ts";
 import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
@@ -475,14 +475,28 @@ export class WorktreeManager {
 		}
 	}
 
-	private async quarantineCheckout(checkoutPath: string, worktreeId: string): Promise<string> {
+	/**
+	 * Move a checkout aside under recovery/. A full recovery folder first drops
+	 * its oldest checkouts that removal found clean; one that preserves data
+	 * never makes room.
+	 */
+	private async quarantineCheckout(
+		checkoutPath: string,
+		worktreeId: string,
+		records: readonly IrohRemoteWorkspaceWorktree[],
+	): Promise<string> {
 		const recoveryRoot = join(getWorktreesRoot(this.agentDir), "recovery");
 		ensurePrivateDirectorySync(recoveryRoot);
-		const recoveries = await readdir(recoveryRoot, { withFileTypes: true });
-		if (recoveries.filter((entry) => entry.isDirectory()).length >= MAX_RECOVERY_CHECKOUTS) {
-			throw new Error(
-				`worktree recovery quota of ${MAX_RECOVERY_CHECKOUTS} checkouts is full; run worktree prune --purge-recovery`,
-			);
+		const excess = (await this.listRecoveryCheckouts()).length - MAX_RECOVERY_CHECKOUTS + 1;
+		if (excess > 0) {
+			const purgeable = await this.purgeableRecoveryCheckouts(records);
+			if (purgeable.length < excess) {
+				throw new Error(
+					`worktree recovery quota of ${MAX_RECOVERY_CHECKOUTS} checkouts is full of checkouts that preserve data; inspect them under worktrees/recovery`,
+				);
+			}
+			for (const recoveryPath of purgeable.slice(0, excess))
+				await rm(recoveryPath, { recursive: true, force: true });
 		}
 		for (let attempt = 0; attempt < 10; attempt += 1) {
 			const recoveryPath = join(
@@ -509,6 +523,28 @@ export class WorktreeManager {
 			.sort();
 	}
 
+	/** Recovery checkouts that removal found clean and no record owns, of `workspaceName` when given, oldest first. */
+	private async purgeableRecoveryCheckouts(
+		records: readonly IrohRemoteWorkspaceWorktree[],
+		workspaceName?: string,
+	): Promise<string[]> {
+		const ownedPaths = new Set(records.map((record) => resolve(record.path)));
+		const purgeable: Array<{ path: string; markedAt: number }> = [];
+		for (const recoveryPath of await this.listRecoveryCheckouts()) {
+			if (ownedPaths.has(resolve(recoveryPath))) continue;
+			const markerPath = join(recoveryPath, RECOVERY_PURGE_MARKER);
+			try {
+				const marker = JSON.parse(readFileSync(markerPath, "utf8")) as { workspaceName?: unknown };
+				if (typeof marker.workspaceName !== "string") continue;
+				if (workspaceName !== undefined && marker.workspaceName !== workspaceName) continue;
+				purgeable.push({ path: recoveryPath, markedAt: (await stat(markerPath)).mtimeMs });
+			} catch {
+				// Unmarked: the checkout preserves data.
+			}
+		}
+		return purgeable.sort((left, right) => left.markedAt - right.markedAt).map((entry) => entry.path);
+	}
+
 	/** git worktree add; persists the record durably after git succeeds. */
 	private async createExclusive(
 		workspace: IrohRemoteWorkspace,
@@ -520,6 +556,8 @@ export class WorktreeManager {
 			signal?: AbortSignal;
 			prReviewLaunch?: PrReviewLaunch;
 			assertCurrent?: () => void;
+			/** Check out `branch` when it already exists locally, instead of failing; `baseRef` then only records the base. */
+			reuseBranch?: boolean;
 		} = {},
 	): Promise<WorktreeResult<{ worktree: IrohRemoteWorkspaceWorktree }>> {
 		const runGit = options.prReviewLaunch ? runPrReviewGit : this.runGit;
@@ -574,16 +612,30 @@ export class WorktreeManager {
 				options.assertCurrent?.();
 				if (options.prReviewLaunch && options.prReviewLaunch.placement.cwd !== checkoutPath)
 					throw new Error("PR checkout placement changed");
+				const reuse =
+					options.reuseBranch === true &&
+					!options.prReviewLaunch &&
+					(
+						await runGit(
+							["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`],
+							source.source.sourceRootPath,
+							{
+								signal: options.signal,
+							},
+						)
+					).ok;
 				const added = await runGit(
-					[
-						"worktree",
-						"add",
-						...(options.prReviewLaunch ? ["--no-checkout"] : []),
-						checkoutPath,
-						"-b",
-						branch,
-						baseRef,
-					],
+					reuse
+						? ["worktree", "add", checkoutPath, branch]
+						: [
+								"worktree",
+								"add",
+								...(options.prReviewLaunch ? ["--no-checkout"] : []),
+								checkoutPath,
+								"-b",
+								branch,
+								baseRef,
+							],
 					source.source.sourceRootPath,
 					{ signal: options.signal },
 				);
@@ -1092,7 +1144,11 @@ export class WorktreeManager {
 							}
 						} else {
 							try {
-								const recoveryPath = await this.quarantineCheckout(record.path, record.id);
+								const recoveryPath = await this.quarantineCheckout(
+									record.path,
+									record.id,
+									current.allWorktrees,
+								);
 								const finalStatus = await this.runGit(
 									["-C", recoveryPath, "--no-optional-locks", "status", "--porcelain", "--ignored=matching"],
 									sourceRootPath,
@@ -1173,19 +1229,8 @@ export class WorktreeManager {
 			orphanCheckouts: string[];
 		}>(workspace.name, async (current) => {
 			if (options.purgeRecovery) {
-				const ownedPaths = new Set(current.allWorktrees.map((record) => resolve(record.path)));
 				purgedRecoveryCheckouts = [];
-				for (const recoveryPath of await this.listRecoveryCheckouts()) {
-					if (ownedPaths.has(resolve(recoveryPath))) continue;
-					let marker: { workspaceName?: unknown };
-					try {
-						marker = JSON.parse(readFileSync(join(recoveryPath, RECOVERY_PURGE_MARKER), "utf8")) as {
-							workspaceName?: unknown;
-						};
-					} catch {
-						continue;
-					}
-					if (marker.workspaceName !== workspace.name) continue;
+				for (const recoveryPath of await this.purgeableRecoveryCheckouts(current.allWorktrees, workspace.name)) {
 					await rm(recoveryPath, { recursive: true, force: true });
 					purgedRecoveryCheckouts.push(basename(recoveryPath));
 				}
@@ -2109,7 +2154,8 @@ function resolveRequestWorkspaces(
 	return workspace ? { ok: true, workspaces: [workspace] } : { ok: false, missing: workspaceName };
 }
 
-function toControlWorktreeStatus(
+/** A worktree's status as the local control socket carries it, checkout path included. */
+export function toControlWorktreeStatus(
 	worktree: IrohRemoteWorkspaceWorktree & Partial<Pick<WorktreeStatus, "aheadBehind">>,
 	available?: boolean,
 	dirty?: boolean,

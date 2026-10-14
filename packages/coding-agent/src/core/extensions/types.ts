@@ -315,11 +315,156 @@ export interface ExtensionContext {
 	 */
 	startWork(kind: string, options: StartWorkOptions, run: WorkRun): Promise<{ readonly workId: string }>;
 	/**
+	 * Subagents the extension runs as work of the conversation: each shows in
+	 * every client's work list and subagent tree, and runs under the
+	 * conversation's tool policy. Starting one needs the `exec` permission.
+	 */
+	readonly subagents: ExtensionSubagents;
+	/**
+	 * The managed worktrees of the conversation's workspace, in a conversation
+	 * the daemon hosts. Creating one needs the `exec` permission.
+	 */
+	readonly worktrees: ExtensionWorktrees;
+	/**
 	 * Reviews of the conversation: the extension starts one on any engine the
 	 * conversation can run, as `/review` does, and reads how it ended. Starting
 	 * one needs the `exec` permission.
 	 */
 	readonly reviews: ExtensionReviews;
+}
+
+// ============================================================================
+// Worktrees
+// ============================================================================
+
+/** A managed worktree of the conversation's workspace. */
+export interface ExtensionWorktree {
+	readonly id: string;
+	/** Its checkout: a subagent may run there (`ctx.subagents.start({ cwd })`). */
+	readonly path: string;
+	readonly branch: string;
+	readonly baseRef?: string;
+	/** Whether its checkout is on disk: the daemon archives an idle, clean one it may reclaim. */
+	readonly available: boolean;
+	/** Whether its checkout has uncommitted changes, when the daemon checked. */
+	readonly dirty?: boolean;
+}
+
+/** A managed worktree to create; the daemon's defaults apply to what is omitted. */
+export interface ExtensionWorktreeCreateOptions {
+	/** Its id, unique in the workspace: a generated name by default. */
+	readonly name?: string;
+	/** Its branch: `volt/<id>` by default. */
+	readonly branch?: string;
+	/** The ref the branch starts from: the workspace checkout's current branch by default. */
+	readonly baseRef?: string;
+	/** Check out `branch` when it already exists locally, instead of failing; `baseRef` then only records the base. */
+	readonly reuseBranch?: boolean;
+}
+
+/** The managed worktrees an extension reaches (`ctx.worktrees`). */
+export interface ExtensionWorktrees {
+	/** The workspace's managed worktrees. Rejects outside a conversation the daemon hosts. */
+	list(): Promise<ExtensionWorktree[]>;
+	/**
+	 * Create a managed worktree of the workspace. Needs the `exec` permission;
+	 * rejects outside a conversation the daemon hosts, or with the daemon's
+	 * error, whose message starts with its code (`worktree_exists`,
+	 * `worktree_limit_reached`, `worktree_branch_conflict`, ...).
+	 */
+	create(options?: ExtensionWorktreeCreateOptions): Promise<ExtensionWorktree>;
+	/**
+	 * Remove the managed worktree `id`, keeping its branch. Needs the `exec`
+	 * permission. Never forced: rejects with `worktree_dirty` while its
+	 * checkout has changes, and `worktree_busy` while a conversation holds it.
+	 */
+	remove(id: string): Promise<void>;
+}
+
+/** How the session reaches the daemon's worktrees for its extensions. */
+export interface ExtensionWorktreesHandler {
+	list(): Promise<ExtensionWorktree[]>;
+	create(options: ExtensionWorktreeCreateOptions): Promise<ExtensionWorktree>;
+	remove(id: string): Promise<void>;
+}
+
+// ============================================================================
+// Subagents
+// ============================================================================
+
+/** An agent definition the conversation may start. */
+export interface ExtensionSubagentDefinition {
+	readonly name: string;
+	readonly description: string;
+}
+
+/** Limits of one subagent run. Each is a positive number; omitted ones keep the host's. */
+export interface ExtensionSubagentLimits {
+	/** Assistant turns before the child must give a tool-free final report. */
+	readonly maxTurns?: number;
+	/** Tokens the child (and the subagents it starts) may use before the run is stopped. */
+	readonly maxTotalTokens?: number;
+	/** Provider cost in USD the run may reach before it is stopped. */
+	readonly maxTotalCostUsd?: number;
+	/** Wall-clock time the run may take before it is stopped. */
+	readonly maxDurationMs?: number;
+}
+
+/** A subagent run to start (`ctx.subagents.start`). */
+export interface ExtensionSubagentStartOptions {
+	/** The agent definition's name, one of `ctx.subagents.definitions()`. */
+	readonly agent: string;
+	/** The child's first prompt. */
+	readonly task: string;
+	/**
+	 * The child's working directory: an absolute path to a directory inside the
+	 * conversation's working directory, or inside a managed worktree of the
+	 * same repository. The conversation's working directory by default.
+	 */
+	readonly cwd?: string;
+	readonly limits?: ExtensionSubagentLimits;
+	/** Running work of the extension's own kind the run belongs to: clients show the run under it. */
+	readonly parentWorkId?: string;
+}
+
+/** How a subagent run ended. */
+export interface ExtensionSubagentResult {
+	readonly status: "completed" | "failed" | "cancelled";
+	/** The child's final reply, when it gave one. */
+	readonly output?: string;
+	readonly error?: string;
+	/** What the child's replies reported using: their tokens (cache reads and writes included) and cost in USD. */
+	readonly usage: { readonly tokens: number; readonly cost: number };
+}
+
+/** A started subagent run. */
+export interface ExtensionSubagentRun {
+	/** The run's work id: `cancel` takes it, and a panel action may open or cancel it. */
+	readonly id: string;
+	/** The child's conversation. */
+	readonly sessionId: string;
+	/** Resolves once the run ended; never rejects. */
+	readonly ended: Promise<ExtensionSubagentResult>;
+}
+
+/** The subagents an extension runs (`ctx.subagents`). */
+export interface ExtensionSubagents {
+	/** The agent definitions the conversation may start now. */
+	definitions(): ExtensionSubagentDefinition[];
+	/**
+	 * Start agent `agent` on `task`. Resolves once the child accepted the task.
+	 * Needs the `exec` permission: the child runs the conversation's tools.
+	 */
+	start(options: ExtensionSubagentStartOptions): Promise<ExtensionSubagentRun>;
+	/** Cancel a run the extension started; its `ended` resolves `cancelled`. */
+	cancel(id: string): Promise<void>;
+}
+
+/** How the session runs an extension's subagents: `owner` is the extension's manifest id. */
+export interface ExtensionSubagentsHandler {
+	definitions(): ExtensionSubagentDefinition[];
+	start(owner: string, options: ExtensionSubagentStartOptions): Promise<ExtensionSubagentRun>;
+	cancel(owner: string, id: string): Promise<void>;
 }
 
 // ============================================================================
@@ -374,10 +519,12 @@ export interface ExtensionReviewStartOptions {
 	readonly previousRunId?: string;
 	/**
 	 * Also collect follow-ups: defects the review notices outside the change,
-	 * such as pre-existing bugs, each verified like a finding and kept apart
+	 * in code it does not touch, each verified like a finding and kept apart
 	 * from the findings (`followUps` of the result). They never affect the
-	 * verdict; an extension may file them as issues of their own. An engine
-	 * reports the ones it can.
+	 * verdict; an extension may file them as issues of their own. A defect on
+	 * a line the change touches is never one, even when it predates the
+	 * change: such a review reports it as a finding, for the change to fix,
+	 * with `introduced: false`. An engine reports the ones it can.
 	 */
 	readonly followUps?: boolean;
 	/**
@@ -402,7 +549,12 @@ export interface ExtensionReviewStartOptions {
 	readonly parentWorkId?: string;
 }
 
-/** A review run as clients see it (`review.result`): its target, status, and, once it has one, its result. */
+/**
+ * A review run as clients see it (`review.result`): its target, status, and, once it has one, its result. A
+ * finding's `introduced` says whether the reviewed change introduced the defect: `false` when it already existed at
+ * the base revision on a line the change touches, absent when the review did not determine it. It never affects
+ * the verdict.
+ */
 export type ExtensionReviewResult = QueryResult<"review.result"> & {
 	/**
 	 * The follow-ups of a review that collected them: verified defects outside

@@ -379,7 +379,13 @@ export class WorkerConversations {
 				const committed = state === "committed";
 				state = "rolled-back";
 				if (committed) {
-					await event.host.close(event.conversation);
+					// Capture before close: track removes a settled release from the map.
+					const released = this.releases.get(event.sessionId);
+					try {
+						await event.host.close(event.conversation);
+					} finally {
+						await released;
+					}
 					return;
 				}
 				this.pendingClaims.delete(event.sessionId);
