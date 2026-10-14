@@ -1,8 +1,8 @@
 /**
  * Extension worktrees (`ctx.worktrees`): in a conversation the daemon hosts,
- * an extension lists the managed worktrees of the conversation's workspace
- * and, with the `exec` permission, creates one through the daemon. Elsewhere
- * both reject.
+ * an extension lists the managed worktrees of the conversation's repository
+ * and, with the `exec` permission, creates one through the daemon, which
+ * learns the conversation's working directory. Elsewhere they reject.
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -30,10 +30,15 @@ const issue12: ControlWorktreeStatus = {
 	dirty: false,
 };
 
-/** A daemon route that keeps the worktrees it created, beside an archived one. */
-function fakeDaemon(): SessionWorktreeDaemon & { created: SessionWorktreeCreateOptions[]; removed: string[] } {
+/** A daemon route that keeps the worktrees it created, beside an archived one, and the working directories it was asked for. */
+function fakeDaemon(): SessionWorktreeDaemon & {
+	created: SessionWorktreeCreateOptions[];
+	removed: string[];
+	cwds: string[];
+} {
 	const created: SessionWorktreeCreateOptions[] = [];
 	const removed: string[] = [];
+	const cwds: string[] = [];
 	const archived: ControlWorktreeStatus = {
 		id: "issue-3",
 		workspaceName: "volt",
@@ -46,13 +51,19 @@ function fakeDaemon(): SessionWorktreeDaemon & { created: SessionWorktreeCreateO
 	return {
 		created,
 		removed,
+		cwds,
 		restore: vi.fn(),
-		create: async (options) => {
+		create: async (cwd, options) => {
+			cwds.push(cwd);
 			created.push(options);
 			return issue12;
 		},
-		list: async () => [archived, issue12],
-		remove: async (id) => {
+		list: async (cwd) => {
+			cwds.push(cwd);
+			return [archived, issue12];
+		},
+		remove: async (cwd, id) => {
+			cwds.push(cwd);
 			// The daemon refuses a checkout with changes, as the worker connection reports it.
 			if (id === "issue-3") throw Object.assign(new Error("checkout has changes"), { code: "worktree_dirty" });
 			removed.push(id);
@@ -91,7 +102,7 @@ async function setup(
 }
 
 describe("extension worktrees", () => {
-	it("lists and creates the workspace's managed worktrees through the daemon", async () => {
+	it("lists and creates the managed worktrees of the conversation's repository through the daemon", async () => {
 		const daemon = fakeDaemon();
 		const ctx = await setup({ worktreeDaemon: daemon });
 
@@ -115,6 +126,8 @@ describe("extension worktrees", () => {
 			{ name: "issue-12", baseRef: "main" },
 			{ name: "issue-12", branch: "volt/issue-12", reuseBranch: true },
 		]);
+		// The daemon learns which repository from the conversation's working directory.
+		expect(daemon.cwds).toEqual([ctx.cwd, ctx.cwd, ctx.cwd]);
 	});
 
 	it("removes a worktree through the daemon, which says why it refuses", async () => {
@@ -123,6 +136,7 @@ describe("extension worktrees", () => {
 
 		await ctx.worktrees.remove("issue-12");
 		expect(daemon.removed).toEqual(["issue-12"]);
+		expect(daemon.cwds).toEqual([ctx.cwd]);
 		await expect(ctx.worktrees.remove("issue-3")).rejects.toThrow("worktree_dirty: checkout has changes");
 		await expect(ctx.worktrees.remove(" ")).rejects.toThrow("ctx.worktrees.remove: id must name a worktree");
 

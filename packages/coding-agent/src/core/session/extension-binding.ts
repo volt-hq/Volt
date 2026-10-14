@@ -60,11 +60,11 @@ import {
 	registerReplacedSessionContext,
 } from "../extensions/runner.ts";
 import type { Extension } from "../extensions/types.ts";
+import { discoverGitWorktree } from "../git-repository.ts";
 import { ClientScope } from "../host/client-scope.ts";
 import { type HostRequestOptions, hostRequestTimeout, type LiveState } from "../host/live-state.ts";
 import type { CustomMessageInput } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import { projectTrustPath } from "../project-trust.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "../resource-loader.ts";
 import type { ReviewTarget } from "../review.ts";
 import type { ReviewEngineRegistry } from "../review-engine.ts";
@@ -493,7 +493,7 @@ export class SessionExtensionBinding {
 			list: async () => {
 				const daemon = this.host.worktreeDaemon;
 				if (daemon?.list === undefined) throw unavailable();
-				return (await daemonCall(() => daemon.list!())).map(extensionWorktree);
+				return (await daemonCall(() => daemon.list!(this.host.cwd))).map(extensionWorktree);
 			},
 			create: async (options) => {
 				if (!isRecord(options)) throw new TypeError("ctx.worktrees.create takes { name?, branch?, baseRef? }");
@@ -516,7 +516,7 @@ export class SessionExtensionBinding {
 				if (daemon?.create === undefined) throw unavailable();
 				return extensionWorktree(
 					await daemonCall(() =>
-						daemon.create!({
+						daemon.create!(this.host.cwd, {
 							...(name === undefined ? {} : { name }),
 							...(branch === undefined ? {} : { branch }),
 							...(baseRef === undefined ? {} : { baseRef }),
@@ -531,7 +531,7 @@ export class SessionExtensionBinding {
 				}
 				const daemon = this.host.worktreeDaemon;
 				if (daemon?.remove === undefined) throw unavailable();
-				await daemonCall(() => daemon.remove!(id));
+				await daemonCall(() => daemon.remove!(this.host.cwd, id));
 			},
 		};
 	}
@@ -568,8 +568,8 @@ export class SessionExtensionBinding {
 
 	/**
 	 * The directory an extension's subagent runs in, canonical: inside the
-	 * conversation's working directory, or inside a managed worktree whose
-	 * parent checkout holds the conversation's project.
+	 * conversation's working directory, or inside a managed worktree of the
+	 * conversation's repository (the same Git common directory).
 	 */
 	private subagentCwd(cwd: unknown): string {
 		if (typeof cwd !== "string" || !isAbsolute(cwd)) {
@@ -584,9 +584,16 @@ export class SessionExtensionBinding {
 		}
 		if (!directory) throw new Error(`ctx.subagents.start: cwd ${JSON.stringify(cwd)} is not a directory`);
 		if (isPathInside(canonicalizePath(this.host.cwd), resolved)) return resolved;
-		const parent = resolveWorktreeParentCheckout(this.host.agentDir, resolved);
-		const project = projectTrustPath(this.host.agentDir, this.host.cwd);
-		if (parent !== undefined && project !== undefined && isPathInside(canonicalizePath(parent), project)) {
+		const repository = (path: string): string | undefined => {
+			const commonGitDir = discoverGitWorktree(path)?.commonGitDir;
+			return commonGitDir === undefined ? undefined : canonicalizePath(commonGitDir);
+		};
+		const conversationRepository = repository(this.host.cwd);
+		if (
+			conversationRepository !== undefined &&
+			resolveWorktreeParentCheckout(this.host.agentDir, resolved) !== undefined &&
+			repository(resolved) === conversationRepository
+		) {
 			return resolved;
 		}
 		throw new Error(

@@ -112,6 +112,8 @@ async function setup(
 	/** Runs as each child runtime is being created, before it exists. */
 	creatingRuntime?: () => Promise<void>,
 	managerOptions: Pick<SubagentManagerOptions, "delegationLimits" | "subagentContext"> = {},
+	/** The parent conversation's working directory: the harness temp dir by default. */
+	cwd?: string,
 ): Promise<Setup> {
 	const childCwds: string[] = [];
 	const children: Harness[] = [];
@@ -157,6 +159,7 @@ async function setup(
 	});
 	const parent = await createHarness({
 		...(agentDir === undefined ? {} : { agentDir }),
+		...(cwd === undefined ? {} : { cwd }),
 		subagentToolManager: manager,
 		extensionFactories: extensions,
 		settings: { lsp: { enabled: false }, retry: { enabled: false } },
@@ -279,6 +282,81 @@ describe("extension subagents", () => {
 		]);
 		expect((await delegator.runs[0]?.ended)?.status).toBe("completed");
 		expect(childCwds).toEqual([realpathSync.native(ours)]);
+	});
+
+	it("does not start an agent in a managed worktree of a repository enclosing the conversation's", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "volt-extension-subagents-agent-"));
+		const outer = mkdtempSync(join(tmpdir(), "volt-extension-subagents-outer-"));
+		cleanups.push(() => {
+			rmSync(agentDir, { recursive: true, force: true });
+			rmSync(outer, { recursive: true, force: true });
+		});
+		// The conversation runs in `vendor/project`, a repository of its own inside `outer`'s.
+		const nested = join(outer, "vendor", "project");
+		mkdirSync(nested, { recursive: true });
+		commitRepository(outer);
+		commitRepository(nested);
+		const enclosing = join(getWorktreesRoot(agentDir), "ws", "outer-1");
+		const ours = join(getWorktreesRoot(agentDir), "ws", "nested-1");
+		git(outer, "worktree", "add", "-b", "volt/outer-1", enclosing);
+		git(nested, "worktree", "add", "-b", "volt/nested-1", ours);
+		const cwds = [enclosing, ours];
+		const delegator = delegating(() => ({ agent: "worker", task: "Work issue 12", cwd: cwds.shift() ?? "" }));
+		const { parent, childCwds } = await setup(
+			[delegator.extension],
+			undefined,
+			agentDir,
+			false,
+			undefined,
+			{},
+			nested,
+		);
+
+		await parent.session.prompt("/delegate");
+		await parent.session.prompt("/delegate");
+		expect(delegator.errors).toEqual([
+			`ctx.subagents.start: cwd ${JSON.stringify(enclosing)} is outside the conversation's working directory and its repository's managed worktrees`,
+		]);
+		expect((await delegator.runs[0]?.ended)?.status).toBe("completed");
+		expect(childCwds).toEqual([realpathSync.native(ours)]);
+	});
+
+	it("starts an agent in a managed worktree of the repository from a subdirectory or another of its worktrees", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "volt-extension-subagents-agent-"));
+		const repository = mkdtempSync(join(tmpdir(), "volt-extension-subagents-repository-"));
+		cleanups.push(() => {
+			rmSync(agentDir, { recursive: true, force: true });
+			rmSync(repository, { recursive: true, force: true });
+		});
+		commitRepository(repository);
+		const subdirectory = join(repository, "packages", "app");
+		mkdirSync(subdirectory, { recursive: true });
+		const first = join(getWorktreesRoot(agentDir), "ws", "issue-12");
+		const second = join(getWorktreesRoot(agentDir), "ws", "issue-13");
+		git(repository, "worktree", "add", "-b", "volt/issue-12", first);
+		git(repository, "worktree", "add", "-b", "volt/issue-13", second);
+
+		const cases: Array<[conversationCwd: string, target: string]> = [
+			[subdirectory, first],
+			[first, second],
+		];
+		for (const [conversationCwd, target] of cases) {
+			const delegator = delegating(() => ({ agent: "worker", task: "Work issue 12", cwd: target }));
+			const { parent, childCwds } = await setup(
+				[delegator.extension],
+				undefined,
+				agentDir,
+				false,
+				undefined,
+				{},
+				conversationCwd,
+			);
+
+			await parent.session.prompt("/delegate");
+			expect(delegator.errors).toEqual([]);
+			expect((await delegator.runs[0]?.ended)?.status).toBe("completed");
+			expect(childCwds).toEqual([realpathSync.native(target)]);
+		}
 	});
 
 	it("closes a run's conversation once it ended, also where the host keeps children open", async () => {

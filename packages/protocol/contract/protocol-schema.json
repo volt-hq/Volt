@@ -2902,7 +2902,8 @@
 			"type": "object",
 			"required": [
 				"type",
-				"id"
+				"id",
+				"cwd"
 			],
 			"properties": {
 				"type": {
@@ -2911,6 +2912,11 @@
 				},
 				"id": {
 					"type": "string"
+				},
+				"cwd": {
+					"type": "string",
+					"maxLength": 4096,
+					"pattern": "^[\\s\\S]{1,4096}$"
 				},
 				"worktreeName": {
 					"type": "string",
@@ -2934,7 +2940,8 @@
 			"type": "object",
 			"required": [
 				"type",
-				"id"
+				"id",
+				"cwd"
 			],
 			"properties": {
 				"type": {
@@ -2943,6 +2950,11 @@
 				},
 				"id": {
 					"type": "string"
+				},
+				"cwd": {
+					"type": "string",
+					"maxLength": 4096,
+					"pattern": "^[\\s\\S]{1,4096}$"
 				}
 			},
 			"additionalProperties": false
@@ -2974,6 +2986,7 @@
 			"required": [
 				"type",
 				"id",
+				"cwd",
 				"worktreeId"
 			],
 			"properties": {
@@ -2983,6 +2996,11 @@
 				},
 				"id": {
 					"type": "string"
+				},
+				"cwd": {
+					"type": "string",
+					"maxLength": 4096,
+					"pattern": "^[\\s\\S]{1,4096}$"
 				},
 				"worktreeId": {
 					"type": "string",

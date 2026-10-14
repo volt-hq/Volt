@@ -1268,7 +1268,7 @@ A panel or work detail of the extension may open or cancel the runs it started (
 
 ### ctx.worktrees
 
-The [managed worktrees](daemon.md#git-worktrees) of the conversation's workspace, so that each subagent can work in a checkout of its own. Available in a conversation the daemon hosts (every interactive Volt conversation); elsewhere (`volt -p`, `--mode rpc`, the SDK) both methods reject.
+The [managed worktrees](daemon.md#git-worktrees) of the repository the conversation works in, so that each subagent can work in a checkout of its own. That is the Git repository holding the conversation's working directory, or, for a conversation in a managed worktree, the one the worktree was created from: in a workspace that holds several repositories, a conversation sees only its own repository's worktrees. Available in a conversation the daemon hosts (every interactive Volt conversation); elsewhere (`volt -p`, `--mode rpc`, the SDK) both methods reject.
 
 ```typescript
 const existing = (await ctx.worktrees.list()).find((worktree) => worktree.id === "issue-12");
@@ -1276,10 +1276,10 @@ const worktree = existing ?? (await ctx.worktrees.create({ name: "issue-12", bas
 await ctx.subagents.start({ agent: "general", task: "Fix issue #12.", cwd: worktree.path });
 ```
 
-- `list()` resolves with the workspace's worktrees: `id`, checkout `path`, `branch`, `baseRef`, whether the checkout is `available` (the daemon archives an idle, clean checkout it may reclaim; an archived one has no checkout to run in), and whether it is `dirty` when the daemon checked.
-- `create({ name?, branch?, baseRef?, reuseBranch? })` needs the `exec` permission. It creates the worktree `name` (a generated id by default) on a new `branch` (`volt/<name>` by default) from `baseRef` (the workspace checkout's current branch by default). With `reuseBranch: true`, an existing local `branch` is checked out instead, with its commits; `baseRef` then only records the base.
-- `remove(id)` needs the `exec` permission. It removes the worktree's checkout and keeps its branch. It is never forced: a checkout with changes, or one a conversation still has open, stays.
-- Both reject with the daemon's error, whose message starts with its code: `worktree_exists`, `worktree_branch_conflict`, `worktree_limit_reached` (a workspace holds at most 16 checkouts), `worktree_dirty`, `worktree_busy`, `worktree_not_found`, and so on.
+- `list()` resolves with the repository's worktrees: `id`, checkout `path`, `branch`, `baseRef`, whether the checkout is `available` (the daemon archives an idle, clean checkout it may reclaim; an archived one has no checkout to run in), and whether it is `dirty` when the daemon checked.
+- `create({ name?, branch?, baseRef?, reuseBranch? })` needs the `exec` permission. It creates the repository's worktree `name` (a generated id by default; an id is unique in the workspace) on a new `branch` (`volt/<name>` by default) from `baseRef` (the current branch of the repository's checkout by default). With `reuseBranch: true`, an existing local `branch` is checked out instead, with its commits; `baseRef` then only records the base.
+- `remove(id)` needs the `exec` permission. It removes the checkout of the repository's worktree `id` and keeps its branch. It is never forced: a checkout with changes, or one a conversation still has open, stays.
+- They reject with the daemon's error, whose message starts with its code: `not_a_git_repository` (the conversation's directory is in no repository), `worktree_exists`, `worktree_branch_conflict`, `worktree_limit_reached` (a workspace holds at most 16 checkouts), `worktree_dirty`, `worktree_busy`, `worktree_not_found`, and so on.
 
 The daemon's retention and removal rules apply to these worktrees as to any other; merging a branch back stays the extension's or the user's action.
 

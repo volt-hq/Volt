@@ -3,4 +3,4 @@
 "@hansjm10/volt-protocol": patch
 ---
 
-feature(extensions): Extensions in daemon-hosted conversations can list and create the workspace's managed worktrees with ctx.worktrees, and run subagents in them.
+feature(extensions): Extensions in daemon-hosted conversations can list and create the managed worktrees of the conversation's repository with ctx.worktrees, and run subagents in them.

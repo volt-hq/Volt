@@ -906,12 +906,79 @@ export class WorktreeManager {
 		};
 	}
 
-	async list(workspace: IrohRemoteWorkspace): Promise<WorktreeStatus[]> {
+	/**
+	 * The repository a conversation in `cwd` works in, as its source checkout
+	 * in `workspace`: the source of the managed worktree holding `cwd`, else
+	 * the Git repository holding it. `workingDirectory` (workspace-relative,
+	 * the workspace root when undefined) creates worktrees of that repository.
+	 */
+	async resolveConversationRepository(
+		workspace: IrohRemoteWorkspace,
+		cwd: string,
+	): Promise<WorktreeResult<{ sourceRootPath: string; workingDirectory?: string }>> {
+		const cwdReal = await realpathOrResolve(cwd);
+		let record: IrohRemoteWorkspaceWorktree | undefined;
+		let matchedPathLength = -1;
+		for (const worktree of await this.stateManager.listWorktrees(workspace.name)) {
+			const checkoutPath = await realpathOrResolve(worktree.path);
+			if (isPathContained(checkoutPath, cwdReal) && checkoutPath.length > matchedPathLength) {
+				record = worktree;
+				matchedPathLength = checkoutPath.length;
+			}
+		}
+		if (record !== undefined) {
+			const sourceRootPath = await this.resolveRecordSourceRootPath(workspace, record);
+			if (sourceRootPath === undefined) return { ok: false, error: "worktree_source_unregistered" };
+			return {
+				ok: true,
+				sourceRootPath,
+				...(record.sourceRootRelativePath === undefined ? {} : { workingDirectory: record.sourceRootRelativePath }),
+			};
+		}
+		const workingDirectory = getContainedRelativePath(await realpathOrResolve(workspace.path), cwdReal);
+		if (workingDirectory === null) {
+			return {
+				ok: false,
+				error: "invalid_working_directory",
+				detail: "the conversation's directory is outside the workspace",
+			};
+		}
+		const source = await this.resolveCreateSource(workspace, workingDirectory);
+		if (!source.ok) return source;
+		return {
+			ok: true,
+			sourceRootPath: source.source.sourceRootPath,
+			...(source.source.sourceRootRelativePath === undefined
+				? {}
+				: { workingDirectory: source.source.sourceRootRelativePath }),
+		};
+	}
+
+	/** Whether the worktree `worktreeId` of `workspace` is of the repository whose source checkout is `sourceRootPath`. */
+	async isRepositoryWorktree(
+		workspace: IrohRemoteWorkspace,
+		worktreeId: string,
+		sourceRootPath: string,
+	): Promise<boolean> {
+		const record = await this.findWorktree(workspace.name, worktreeId);
+		const recordSourceRootPath =
+			record === undefined ? undefined : await this.resolveRecordSourceRootPath(workspace, record);
+		return recordSourceRootPath !== undefined && isSamePath(recordSourceRootPath, sourceRootPath);
+	}
+
+	/** The worktrees of `workspace`; with `sourceRootPath`, only those of the repository whose source checkout it is. */
+	async list(workspace: IrohRemoteWorkspace, options: { sourceRootPath?: string } = {}): Promise<WorktreeStatus[]> {
 		const records = await this.stateManager.listWorktrees(workspace.name);
 		const gitListBySourceRoot = new Map<string, Set<string> | undefined>();
 		const statuses: WorktreeStatus[] = [];
 		for (const record of records) {
 			const sourceRootPath = await this.resolveRecordSourceRootPath(workspace, record);
+			if (
+				options.sourceRootPath !== undefined &&
+				(sourceRootPath === undefined || !isSamePath(sourceRootPath, options.sourceRootPath))
+			) {
+				continue;
+			}
 			const knownCheckouts =
 				sourceRootPath === undefined
 					? undefined

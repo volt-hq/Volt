@@ -32,14 +32,15 @@ export interface SessionWorktreeCreateOptions {
  * A conversation worker's route to its daemon for managed checkouts, over its
  * own control connection: the daemon restores the archived checkout of a
  * session of the worker's workspace and pins it until the release runs, and
- * creates and lists the workspace's worktrees for the worker's extensions.
+ * creates, lists, and removes for the worker's extensions the worktrees of
+ * the repository a conversation in `cwd` works in.
  */
 export interface SessionWorktreeDaemon {
 	restore(sessionRef: SessionReference, cwd: string): Promise<() => Promise<void>>;
-	create?(options: SessionWorktreeCreateOptions): Promise<ControlWorktreeStatus>;
-	list?(): Promise<ControlWorktreeStatus[]>;
+	create?(cwd: string, options: SessionWorktreeCreateOptions): Promise<ControlWorktreeStatus>;
+	list?(cwd: string): Promise<ControlWorktreeStatus[]>;
 	/** Remove the worktree `id`, keeping its branch; refused while it is dirty or busy. */
-	remove?(id: string): Promise<void>;
+	remove?(cwd: string, id: string): Promise<void>;
 }
 
 interface LocalWorktreeOwnership {

@@ -5157,7 +5157,8 @@ class IrohDaemonService {
 			case "worker_worktree_create":
 			case "worker_worktree_list":
 			case "worker_worktree_remove": {
-				// The worktrees of the workspace the worker serves, for its extensions, while it serves it.
+				// For its extensions, while it serves its workspace: the workspace's worktrees of the repository
+				// the worker's conversation in `cwd` works in.
 				const workerId = this.workers.workerOf(connection.connectionId);
 				const key = workerId === undefined ? undefined : this.workers.keyOf(workerId);
 				if (workerId === undefined || key === undefined || !this.workers.isServing(workerId)) {
@@ -5167,7 +5168,14 @@ class IrohDaemonService {
 					(candidate) => candidate.name === key.workspaceName,
 				);
 				if (!workspace) return refuse("not_found", `no registered workspace named ${key.workspaceName}`);
+				const repository = await this.worktrees.resolveConversationRepository(workspace, request.cwd);
+				if (!repository.ok) return refuse(repository.error, repository.detail ?? repository.error);
 				if (request.type === "worker_worktree_remove") {
+					if (
+						!(await this.worktrees.isRepositoryWorktree(workspace, request.worktreeId, repository.sourceRootPath))
+					) {
+						return refuse("worktree_not_found", "no such worktree of the conversation's repository");
+					}
 					// Never forced: a dirty checkout, or one a conversation still holds, stays.
 					const removed = await this.removeWorkspaceWorktree(workspace, request.worktreeId, false);
 					if (!removed.ok) return refuse(removed.error, removed.detail ?? removed.error);
@@ -5175,7 +5183,7 @@ class IrohDaemonService {
 					return;
 				}
 				if (request.type === "worker_worktree_list") {
-					const worktrees = await this.worktrees.list(workspace);
+					const worktrees = await this.worktrees.list(workspace, { sourceRootPath: repository.sourceRootPath });
 					connection.send({
 						type: "worktrees_result",
 						id: request.id,
@@ -5184,6 +5192,7 @@ class IrohDaemonService {
 					return;
 				}
 				const created = await this.worktrees.create(workspace, {
+					...(repository.workingDirectory === undefined ? {} : { workingDirectory: repository.workingDirectory }),
 					...(request.worktreeName === undefined ? {} : { id: request.worktreeName }),
 					...(request.branch === undefined ? {} : { branch: request.branch }),
 					...(request.baseRef === undefined ? {} : { baseRef: request.baseRef }),

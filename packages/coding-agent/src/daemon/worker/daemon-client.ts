@@ -312,10 +312,11 @@ export class WorkerDaemonClient {
 		};
 	}
 
-	/** Create a managed worktree of the worker's workspace, for its extensions. */
-	async createWorktree(options: SessionWorktreeCreateOptions): Promise<ControlWorktreeStatus> {
+	/** Create a managed worktree of the repository a conversation in `cwd` works in, for its extensions. */
+	async createWorktree(cwd: string, options: SessionWorktreeCreateOptions): Promise<ControlWorktreeStatus> {
 		const response = await this.request({
 			type: "worker_worktree_create",
+			cwd,
 			...(options.name === undefined ? {} : { worktreeName: options.name }),
 			...(options.branch === undefined ? {} : { branch: options.branch }),
 			...(options.baseRef === undefined ? {} : { baseRef: options.baseRef }),
@@ -325,15 +326,15 @@ export class WorkerDaemonClient {
 		return response.worktree;
 	}
 
-	/** Remove a managed worktree of the worker's workspace, for its extensions, keeping its branch. */
-	async removeWorktree(id: string): Promise<void> {
-		const response = await this.request({ type: "worker_worktree_remove", worktreeId: id });
+	/** Remove a managed worktree of the repository a conversation in `cwd` works in, for its extensions, keeping its branch. */
+	async removeWorktree(cwd: string, id: string): Promise<void> {
+		const response = await this.request({ type: "worker_worktree_remove", cwd, worktreeId: id });
 		if (response.type !== "ok") throw new Error(`Unexpected ${response.type}`);
 	}
 
-	/** The managed worktrees of the worker's workspace, for its extensions. */
-	async listWorktrees(): Promise<ControlWorktreeStatus[]> {
-		const response = await this.request({ type: "worker_worktree_list" });
+	/** The managed worktrees of the repository a conversation in `cwd` works in, for its extensions. */
+	async listWorktrees(cwd: string): Promise<ControlWorktreeStatus[]> {
+		const response = await this.request({ type: "worker_worktree_list", cwd });
 		if (response.type !== "worktrees_result") throw new Error(`Unexpected ${response.type}`);
 		return response.worktrees;
 	}

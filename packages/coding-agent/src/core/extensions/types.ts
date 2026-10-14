@@ -356,26 +356,29 @@ export interface ExtensionWorktreeCreateOptions {
 	readonly name?: string;
 	/** Its branch: `volt/<id>` by default. */
 	readonly branch?: string;
-	/** The ref the branch starts from: the workspace checkout's current branch by default. */
+	/** The ref the branch starts from: the current branch of the repository's checkout by default. */
 	readonly baseRef?: string;
 	/** Check out `branch` when it already exists locally, instead of failing; `baseRef` then only records the base. */
 	readonly reuseBranch?: boolean;
 }
 
-/** The managed worktrees an extension reaches (`ctx.worktrees`). */
+/**
+ * The managed worktrees an extension reaches (`ctx.worktrees`): those of the
+ * repository the conversation works in, in its workspace.
+ */
 export interface ExtensionWorktrees {
-	/** The workspace's managed worktrees. Rejects outside a conversation the daemon hosts. */
+	/** The repository's managed worktrees. Rejects outside a conversation the daemon hosts. */
 	list(): Promise<ExtensionWorktree[]>;
 	/**
-	 * Create a managed worktree of the workspace. Needs the `exec` permission;
+	 * Create a managed worktree of the repository. Needs the `exec` permission;
 	 * rejects outside a conversation the daemon hosts, or with the daemon's
 	 * error, whose message starts with its code (`worktree_exists`,
 	 * `worktree_limit_reached`, `worktree_branch_conflict`, ...).
 	 */
 	create(options?: ExtensionWorktreeCreateOptions): Promise<ExtensionWorktree>;
 	/**
-	 * Remove the managed worktree `id`, keeping its branch. Needs the `exec`
-	 * permission. Never forced: rejects with `worktree_dirty` while its
+	 * Remove the repository's managed worktree `id`, keeping its branch. Needs
+	 * the `exec` permission. Never forced: rejects with `worktree_dirty` while its
 	 * checkout has changes, and `worktree_busy` while a conversation holds it.
 	 */
 	remove(id: string): Promise<void>;

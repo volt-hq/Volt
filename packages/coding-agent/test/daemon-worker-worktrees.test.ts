@@ -1,12 +1,15 @@
 /**
  * A worker's extensions reach the managed worktrees of the workspace the
- * worker serves (`worker_worktree_create`, `worker_worktree_list`): the
- * daemon creates and lists them for that workspace only, and only for a
- * worker; a control client uses `worktree_create`.
+ * worker serves (`worker_worktree_create`, `worker_worktree_list`,
+ * `worker_worktree_remove`): the daemon creates, lists, and removes them for
+ * that workspace only, and of the repository the worker's conversation in
+ * `cwd` works in only, and only for a worker; a control client uses
+ * `worktree_create`.
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createDaemonClient, type DaemonClient } from "../src/daemon/control-client.ts";
@@ -24,6 +27,30 @@ afterEach(async () => {
 
 function git(cwd: string, ...args: string[]): string {
 	return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+}
+
+/** Make `directory` a Git repository on `main` with one commit. */
+function commitRepository(directory: string): void {
+	writeFileSync(join(directory, "README.md"), "repository\n");
+	git(directory, "init", "--initial-branch=main");
+	git(directory, "add", ".");
+	git(
+		directory,
+		"-c",
+		"user.name=Test",
+		"-c",
+		"user.email=test@example.test",
+		"-c",
+		"commit.gpgsign=false",
+		"commit",
+		"-m",
+		"base",
+	);
+}
+
+/** The canonical Git common directory of the checkout `path`: which repository it is a checkout of. */
+function commonGitDir(path: string): string {
+	return realpathSync.native(git(path, "rev-parse", "--path-format=absolute", "--git-common-dir"));
 }
 
 /** Workers the test plays over the control socket: each connects with its launch's token and reports its conversation open. */
@@ -69,21 +96,7 @@ async function fixture(): Promise<{ harness: DaemonHarness; worker: DaemonClient
 		extensions: [createIrohDaemonService({ relayMode: "disabled" })],
 	});
 	cleanups.push(() => harness.dispose());
-	writeFileSync(join(harness.workspacePath, "README.md"), "workspace\n");
-	git(harness.workspacePath, "init", "--initial-branch=main");
-	git(harness.workspacePath, "add", ".");
-	git(
-		harness.workspacePath,
-		"-c",
-		"user.name=Test",
-		"-c",
-		"user.email=test@example.test",
-		"-c",
-		"commit.gpgsign=false",
-		"commit",
-		"-m",
-		"base",
-	);
+	commitRepository(harness.workspacePath);
 	const ref = await harness.createSession();
 	await harness.openWorker(ref);
 	const [worker] = launcher.clients;
@@ -94,9 +107,11 @@ async function fixture(): Promise<{ harness: DaemonHarness; worker: DaemonClient
 describe("a worker's managed worktrees", () => {
 	it("creates and lists the worktrees of the workspace the worker serves", async () => {
 		const { harness, worker } = await fixture();
+		const cwd = harness.workspacePath;
 
 		const created = await worker.request({
 			type: "worker_worktree_create",
+			cwd,
 			worktreeName: "issue-12",
 			baseRef: "main",
 		});
@@ -114,20 +129,22 @@ describe("a worker's managed worktrees", () => {
 		expect(created.worktree.path.startsWith(getWorktreesRoot(harness.agentDir))).toBe(true);
 		expect(git(created.worktree.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe("volt/issue-12");
 
-		expect(await worker.request({ type: "worker_worktree_list" })).toMatchObject({
+		expect(await worker.request({ type: "worker_worktree_list", cwd })).toMatchObject({
 			type: "worktrees_result",
 			worktrees: [{ id: "issue-12", path: created.worktree.path, branch: "volt/issue-12", available: true }],
 		});
 		// The daemon's own refusals reach the worker: an id in use is not created twice.
 		expect(
-			await worker.request({ type: "worker_worktree_create", worktreeName: "issue-12", baseRef: "main" }),
+			await worker.request({ type: "worker_worktree_create", cwd, worktreeName: "issue-12", baseRef: "main" }),
 		).toMatchObject({ type: "error" });
 	}, 60_000);
 
 	it("removes a worktree, keeping its branch, and creates it again on that branch", async () => {
 		const { harness, worker } = await fixture();
+		const cwd = harness.workspacePath;
 		const created = await worker.request({
 			type: "worker_worktree_create",
+			cwd,
 			worktreeName: "issue-12",
 			baseRef: "main",
 		});
@@ -151,24 +168,25 @@ describe("a worker's managed worktrees", () => {
 
 		// A dirty checkout stays.
 		writeFileSync(join(path, "scratch.txt"), "wip\n");
-		expect(await worker.request({ type: "worker_worktree_remove", worktreeId: "issue-12" })).toMatchObject({
+		expect(await worker.request({ type: "worker_worktree_remove", cwd, worktreeId: "issue-12" })).toMatchObject({
 			type: "error",
 			code: "worktree_dirty",
 		});
 		rmSync(join(path, "scratch.txt"));
-		expect(await worker.request({ type: "worker_worktree_remove", worktreeId: "issue-12" })).toMatchObject({
+		expect(await worker.request({ type: "worker_worktree_remove", cwd, worktreeId: "issue-12" })).toMatchObject({
 			type: "ok",
 		});
 		expect(existsSync(path)).toBe(false);
-		expect(await worker.request({ type: "worker_worktree_list" })).toMatchObject({ worktrees: [] });
+		expect(await worker.request({ type: "worker_worktree_list", cwd })).toMatchObject({ worktrees: [] });
 		expect(git(harness.workspacePath, "rev-parse", "volt/issue-12")).toBe(head);
 
 		// Created again: without reuseBranch the branch is in the way; with it, its commits come back.
 		expect(
-			await worker.request({ type: "worker_worktree_create", worktreeName: "issue-12", baseRef: "main" }),
+			await worker.request({ type: "worker_worktree_create", cwd, worktreeName: "issue-12", baseRef: "main" }),
 		).toMatchObject({ type: "error", code: "worktree_branch_conflict" });
 		const again = await worker.request({
 			type: "worker_worktree_create",
+			cwd,
 			worktreeName: "issue-12",
 			baseRef: "main",
 			reuseBranch: true,
@@ -179,6 +197,7 @@ describe("a worker's managed worktrees", () => {
 		// reuseBranch for a branch that does not exist creates it from the base.
 		const fresh = await worker.request({
 			type: "worker_worktree_create",
+			cwd,
 			worktreeName: "issue-13",
 			baseRef: "main",
 			reuseBranch: true,
@@ -187,19 +206,73 @@ describe("a worker's managed worktrees", () => {
 		expect(git(fresh.worktree.path, "rev-parse", "HEAD")).toBe(git(harness.workspacePath, "rev-parse", "main"));
 	}, 60_000);
 
+	it("creates, lists, and removes only the worktrees of the repository the conversation works in", async () => {
+		const { harness, worker } = await fixture();
+		const workspace = harness.workspacePath;
+		// A repository of its own inside the workspace's.
+		const nested = join(workspace, "vendor", "project");
+		mkdirSync(nested, { recursive: true });
+		commitRepository(nested);
+
+		const outer = await worker.request({ type: "worker_worktree_create", cwd: workspace, worktreeName: "outer-1" });
+		const inner = await worker.request({ type: "worker_worktree_create", cwd: nested, worktreeName: "nested-1" });
+		if (outer.type !== "worktree_result" || inner.type !== "worktree_result") {
+			throw new Error(`not created: ${JSON.stringify([outer, inner])}`);
+		}
+		expect(commonGitDir(outer.worktree.path)).toBe(commonGitDir(workspace));
+		expect(commonGitDir(inner.worktree.path)).toBe(commonGitDir(nested));
+
+		const listed = async (cwd: string) => {
+			const response = await worker.request({ type: "worker_worktree_list", cwd });
+			if (response.type !== "worktrees_result") throw new Error(`not listed: ${JSON.stringify(response)}`);
+			return response.worktrees.map((worktree) => worktree.id);
+		};
+		expect(await listed(workspace)).toEqual(["outer-1"]);
+		expect(await listed(nested)).toEqual(["nested-1"]);
+		// A conversation in a subdirectory works in the repository holding it.
+		mkdirSync(join(workspace, "packages", "app"), { recursive: true });
+		expect(await listed(join(workspace, "packages", "app"))).toEqual(["outer-1"]);
+		// A conversation in a managed worktree works in the repository the worktree was created from.
+		expect(await listed(inner.worktree.path)).toEqual(["nested-1"]);
+		const sibling = await worker.request({
+			type: "worker_worktree_create",
+			cwd: inner.worktree.path,
+			worktreeName: "nested-2",
+		});
+		if (sibling.type !== "worktree_result") throw new Error(`not created: ${JSON.stringify(sibling)}`);
+		expect(commonGitDir(sibling.worktree.path)).toBe(commonGitDir(nested));
+
+		// Another repository's worktree is not found, and stays.
+		expect(
+			await worker.request({ type: "worker_worktree_remove", cwd: nested, worktreeId: "outer-1" }),
+		).toMatchObject({ type: "error", code: "worktree_not_found" });
+		expect(existsSync(outer.worktree.path)).toBe(true);
+		expect(
+			await worker.request({ type: "worker_worktree_remove", cwd: nested, worktreeId: "nested-1" }),
+		).toMatchObject({ type: "ok" });
+		expect(await listed(nested)).toEqual(["nested-2"]);
+
+		// A directory outside the workspace has no repository of it.
+		expect(await worker.request({ type: "worker_worktree_list", cwd: realpathSync.native(tmpdir()) })).toMatchObject({
+			type: "error",
+			code: "invalid_working_directory",
+		});
+	}, 60_000);
+
 	it("serves the requests only to a worker", async () => {
 		const { harness } = await fixture();
 		const tui = await harness.connect("tui");
+		const cwd = harness.workspacePath;
 
-		expect(await tui.request({ type: "worker_worktree_create", worktreeName: "issue-12" })).toMatchObject({
+		expect(await tui.request({ type: "worker_worktree_create", cwd, worktreeName: "issue-12" })).toMatchObject({
 			type: "error",
 			code: "forbidden",
 		});
-		expect(await harness.control.request({ type: "worker_worktree_list" })).toMatchObject({
+		expect(await harness.control.request({ type: "worker_worktree_list", cwd })).toMatchObject({
 			type: "error",
 			code: "forbidden",
 		});
-		expect(await tui.request({ type: "worker_worktree_remove", worktreeId: "issue-12" })).toMatchObject({
+		expect(await tui.request({ type: "worker_worktree_remove", cwd, worktreeId: "issue-12" })).toMatchObject({
 			type: "error",
 			code: "forbidden",
 		});

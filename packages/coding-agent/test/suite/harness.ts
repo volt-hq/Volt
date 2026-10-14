@@ -110,6 +110,8 @@ export interface HarnessOptions {
 	log?: "memory" | "sqlite" | ConversationLog;
 	/** Entries committed to the log before the session opens; assistant messages name the faux model. */
 	seed?: SeedLogBuild;
+	/** The session's working directory. Defaults to the harness temp dir. */
+	cwd?: string;
 	/** Project root for project-scoped services such as LSP. Defaults to the harness temp dir. */
 	projectCwd?: string;
 	/** Share language servers with other sessions using the same pool. */
@@ -245,7 +247,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		convertToLlm,
 		settingsManager,
 		extensionServicesLimits: options.extensionServicesLimits,
-		cwd: tempDir,
+		cwd: options.cwd ?? tempDir,
 		...(options.projectCwd === undefined ? {} : { projectCwd: options.projectCwd }),
 		agentDir: options.agentDir ?? tempDir,
 		modelRegistry,

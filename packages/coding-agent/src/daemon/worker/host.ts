@@ -277,9 +277,9 @@ async function openConversation(
 		// Managed checkouts are restored by the daemon over the worker's own connection.
 		worktreeDaemon: {
 			restore: (sessionRef, cwd) => client.restoreWorktree(sessionRef, cwd),
-			create: (options) => client.createWorktree(options),
-			list: () => client.listWorktrees(),
-			remove: (id) => client.removeWorktree(id),
+			create: (cwd, options) => client.createWorktree(cwd, options),
+			list: (cwd) => client.listWorktrees(cwd),
+			remove: (cwd, id) => client.removeWorktree(cwd, id),
 		},
 	});
 	return runtime;
