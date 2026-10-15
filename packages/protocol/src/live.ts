@@ -41,7 +41,7 @@ import { RpcGitContextSchema } from "./git-context.ts";
 import { stringEnum } from "./helpers.ts";
 import { IntentAvailabilitySchema } from "./intents.ts";
 import { ToolPresentationPatchSchema, ToolPresentationSchema } from "./presentation.ts";
-import { RpcConversationIdentifierSchema } from "./primitives.ts";
+import { RpcConversationIdentifierSchema, RpcEpochMillisecondsSchema } from "./primitives.ts";
 import {
 	RpcActiveAgentRunSchema,
 	RpcActiveCompactionSchema,
@@ -593,7 +593,8 @@ export const LiveToolPartialSchema = Type.Object(
 /**
  * A tool execution starts, reports progress, or ends; its result entry follows
  * the end. `presentation` replaces the call's presentation; `patch` updates
- * the one the client holds.
+ * the one the client holds. A `start` carries when the host started the call
+ * and an `end` when it ended, so a client times the call by the host's clock.
  */
 export const LiveToolItemSchema = Type.Object(
 	{
@@ -606,6 +607,10 @@ export const LiveToolItemSchema = Type.Object(
 		isError: Type.Optional(Type.Boolean()),
 		presentation: Type.Optional(ToolPresentationSchema),
 		patch: Type.Optional(ToolPresentationPatchSchema),
+		/** On `start`: when the host started the call. */
+		startedAt: Type.Optional(RpcEpochMillisecondsSchema),
+		/** On `end`: when the host ended the call. */
+		endedAt: Type.Optional(RpcEpochMillisecondsSchema),
 	},
 	closed,
 );

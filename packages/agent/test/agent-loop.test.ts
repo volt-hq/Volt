@@ -8,7 +8,7 @@ import {
 	type UserMessage,
 } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { agentLoop, agentLoopContinue, runAgentLoop } from "../src/agent-loop.ts";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.ts";
 
@@ -678,6 +678,105 @@ describe("agentLoop with AgentMessage", () => {
 		expect(toolExecutionEndIds).toEqual(["tool-2", "tool-1"]);
 		expect(toolResultIds).toEqual(["tool-1", "tool-2"]);
 		expect(turnToolResultIds).toEqual(["tool-1", "tool-2"]);
+	});
+
+	describe("tool call durations", () => {
+		afterEach(() => {
+			vi.restoreAllMocks();
+		});
+
+		/** Run one batch of calls to `slow` (advances the clock 5000 ms), `fast` (10 ms), and an unknown tool; durations by call id. */
+		async function durations(toolExecution: "parallel" | "sequential"): Promise<Map<string, number | undefined>> {
+			let clock = 1_000;
+			vi.spyOn(Date, "now").mockImplementation(() => clock);
+			let fastDone: (() => void) | undefined;
+			const fastRan = new Promise<void>((resolve) => {
+				fastDone = resolve;
+			});
+			const toolSchema = Type.Object({});
+			const tool = (name: string, run: () => Promise<void>): AgentTool<typeof toolSchema> => ({
+				name,
+				label: name,
+				description: name,
+				parameters: toolSchema,
+				async execute() {
+					await run();
+					return { content: [{ type: "text", text: name }], details: {} };
+				},
+			});
+			const context: AgentContext = {
+				systemPrompt: "",
+				messages: [],
+				tools: [
+					tool("slow", async () => {
+						// Run in parallel, the slow call ends after the fast one ended.
+						if (toolExecution === "parallel") {
+							await fastRan;
+							await new Promise((resolve) => setTimeout(resolve, 0));
+						}
+						clock += 5_000;
+					}),
+					tool("fast", async () => {
+						clock += 10;
+						fastDone?.();
+					}),
+				],
+			};
+			const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter, toolExecution };
+			let callIndex = 0;
+			const stream = agentLoop([createUserMessage("run")], context, config, undefined, () => {
+				const mockStream = new MockAssistantStream();
+				queueMicrotask(() => {
+					const message =
+						callIndex === 0
+							? createAssistantMessage(
+									[
+										{ type: "toolCall", id: "slow-1", name: "slow", arguments: {} },
+										{ type: "toolCall", id: "fast-1", name: "fast", arguments: {} },
+										{ type: "toolCall", id: "missing-1", name: "missing", arguments: {} },
+									],
+									"toolUse",
+								)
+							: createAssistantMessage([{ type: "text", text: "done" }]);
+					mockStream.push({ type: "done", seq: 1, reason: callIndex === 0 ? "toolUse" : "stop", message });
+					callIndex++;
+				});
+				return mockStream;
+			});
+			const found = new Map<string, number | undefined>();
+			const turnResults: (number | undefined)[] = [];
+			for await (const event of stream) {
+				if (event.type === "message_end" && event.message.role === "toolResult") {
+					found.set(event.message.toolCallId, event.message.durationMs);
+				}
+				if (event.type === "turn_end") turnResults.push(...event.toolResults.map((result) => result.durationMs));
+			}
+			// The turn carries the same results.
+			expect(turnResults).toEqual([...found.values()]);
+			return found;
+		}
+
+		it("times each parallel call from its start to its own end", async () => {
+			expect(await durations("parallel")).toEqual(
+				new Map([
+					// The slow call started before the fast one ran and ended after it.
+					["slow-1", 5_010],
+					["fast-1", 10],
+					// A call that fails before it runs ends where it started.
+					["missing-1", 0],
+				]),
+			);
+		});
+
+		it("times each sequential call from its own start", async () => {
+			expect(await durations("sequential")).toEqual(
+				new Map([
+					["slow-1", 5_000],
+					["fast-1", 10],
+					["missing-1", 0],
+				]),
+			);
+		});
 	});
 
 	it("should inject queued messages after all tool calls complete", async () => {

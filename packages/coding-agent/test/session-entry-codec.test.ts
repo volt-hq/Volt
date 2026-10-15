@@ -391,6 +391,7 @@ describe("session entry codec", () => {
 				details: { lines: 1 },
 				isError: false,
 				timestamp: 2,
+				durationMs: 1_250,
 			},
 			{
 				role: "bashExecution",
@@ -442,6 +443,17 @@ describe("session entry codec", () => {
 				},
 			}),
 		).toThrow("must not be empty");
+		for (const durationMs of [-1, 1.5, "5"]) {
+			expect(() =>
+				parseSessionEntryForAdmission({
+					type: "message",
+					id: "bad-duration",
+					parentId: null,
+					timestamp: ENTRY_TIMESTAMP,
+					message: { ...messages[2], durationMs },
+				}),
+			).toThrow("$.message.durationMs: expected a non-negative safe integer");
+		}
 	});
 
 	it("stores a client input identity beside the user message, never inside it", () => {

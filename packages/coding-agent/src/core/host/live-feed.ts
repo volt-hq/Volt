@@ -8,7 +8,8 @@
  * call, which no entry commits, when it ends). A running call carries its
  * presentation, which changes at most every 100 ms as patches of the one the
  * live state holds (presentation-state.ts); a call whose arguments still
- * stream is presented as they stand, as often.
+ * stream is presented as they stand, as often. A call's start and end carry
+ * the host's time, so clients time it by the host's clock.
  *
  * The feed also raises the host's own notices (source `host`): a compaction
  * cancelled or failed, retries that gave up, and an Anthropic subscription
@@ -229,7 +230,7 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 			return;
 		}
 		const change = presentations.end(toolCallId, toolName, held.args, { ...result, isError });
-		stream([{ type: "tool", op: "end", toolCallId, toolName, isError, ...change }]);
+		stream([{ type: "tool", op: "end", toolCallId, toolName, isError, ...change, endedAt: Date.now() }]);
 	};
 
 	const onEvent = (event: DeepReadonly<AgentSessionEvent>): void => {
@@ -274,6 +275,7 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 						toolName: event.toolName,
 						...(args === undefined ? {} : { args }),
 						presentation: presentations.start(event.toolCallId, event.toolName, args ?? {}),
+						startedAt: Date.now(),
 					},
 				]);
 				return;
@@ -345,6 +347,7 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 						toolName: "mcp",
 						args,
 						presentation: presentations.start(toolCallId, "mcp", args),
+						startedAt: Date.now(),
 					},
 				]);
 				return;

@@ -13251,6 +13251,12 @@
 				},
 				"patch": {
 					"$ref": "#/$defs/ToolPresentationPatch"
+				},
+				"startedAt": {
+					"$ref": "#/$defs/RpcEpochMilliseconds"
+				},
+				"endedAt": {
+					"$ref": "#/$defs/RpcEpochMilliseconds"
 				}
 			},
 			"additionalProperties": false
@@ -23802,6 +23808,10 @@
 				},
 				"timestamp": {
 					"type": "number"
+				},
+				"durationMs": {
+					"type": "integer",
+					"minimum": 0
 				}
 			},
 			"additionalProperties": false
@@ -23920,6 +23930,9 @@
 						"completed",
 						"failed"
 					]
+				},
+				"durationMs": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
 				},
 				"parts": {
 					"type": "array",

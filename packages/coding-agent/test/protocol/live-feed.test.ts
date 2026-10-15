@@ -5,7 +5,7 @@
 
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@hansjm10/volt-ai";
 import type { LiveItem } from "@hansjm10/volt-protocol";
-import { emptyLiveFold, foldLiveItems, HOST_NOTICE_SOURCE } from "@hansjm10/volt-protocol";
+import { emptyLiveFold, foldLiveItems, HOST_NOTICE_SOURCE, liveStreamingItems } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSessionEvent } from "../../src/core/agent-session.ts";
 import { feedLiveState } from "../../src/core/host/live-feed.ts";
@@ -159,6 +159,43 @@ describe("live feed", () => {
 				)
 			: undefined;
 		expect(committed && "view" in committed ? committed.view?.presentation : undefined).toEqual(live);
+	});
+
+	it("times a call by the host's clock, live and committed", async () => {
+		const { harness, items } = await feedHarness({ initialActiveToolNames: ["bash"] });
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("bash", { command: "sleep 0.2" })], { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+		const before = Date.now();
+		await harness.session.prompt("wait");
+		await harness.session.waitForIdle();
+		const after = Date.now();
+
+		const tools = items().filter((item): item is Extract<LiveItem, { type: "tool" }> => item.type === "tool");
+		const startedAt = tools.find((item) => item.op === "start")?.startedAt ?? 0;
+		const endedAt = tools.find((item) => item.op === "end")?.endedAt ?? 0;
+		expect(startedAt).toBeGreaterThanOrEqual(before);
+		expect(endedAt - startedAt).toBeGreaterThanOrEqual(150);
+		expect(endedAt).toBeLessThanOrEqual(after);
+		// A client that joins while the call streams receives the same times.
+		const replayed = liveStreamingItems(foldLiveItems(emptyLiveFold(), tools));
+		expect(replayed).toContainEqual(expect.objectContaining({ op: "start", startedAt }));
+		expect(replayed).toContainEqual(expect.objectContaining({ op: "end", endedAt }));
+		// The committed view carries how long the call took, as the agent loop measured it.
+		const result = harness.sessionManager
+			.getEntries()
+			.find((entry) => entry.type === "message" && entry.message.role === "toolResult");
+		const committed = result
+			? projectEntry(
+					harness.sessionManager.getCommittedEntry(result.id)!,
+					conversationProjectionSource(harness.session),
+					localProfile,
+				)
+			: undefined;
+		const durationMs = committed && "view" in committed ? committed.view?.durationMs : undefined;
+		expect(durationMs).toBeGreaterThanOrEqual(150);
+		expect(Math.abs((durationMs ?? 0) - (endedAt - startedAt))).toBeLessThan(50);
 	});
 
 	it("presents a call as its arguments stream, before it runs, and the presentations leave with the message", async () => {

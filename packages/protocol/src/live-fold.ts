@@ -54,6 +54,10 @@ export interface LiveStreamingTool {
 	readonly presentation?: ToolPresentation;
 	readonly ended: boolean;
 	readonly isError?: boolean;
+	/** When the host started the call, in Unix epoch milliseconds. */
+	readonly startedAt?: number;
+	/** When the host ended the call, in Unix epoch milliseconds. */
+	readonly endedAt?: number;
 }
 
 export interface LiveFoldState {
@@ -290,10 +294,17 @@ export function liveStreamingItems(state: LiveFoldState): LiveItem[] {
 			op: "start",
 			...(tool.args === undefined ? {} : { args: tool.args }),
 			...(tool.presentation === undefined ? {} : { presentation: tool.presentation }),
+			...(tool.startedAt === undefined ? {} : { startedAt: tool.startedAt }),
 		});
 		if (tool.partial !== undefined) items.push({ ...base, op: "update", partial: tool.partial });
-		if (tool.ended)
-			items.push({ ...base, op: "end", ...(tool.isError === undefined ? {} : { isError: tool.isError }) });
+		if (tool.ended) {
+			items.push({
+				...base,
+				op: "end",
+				...(tool.isError === undefined ? {} : { isError: tool.isError }),
+				...(tool.endedAt === undefined ? {} : { endedAt: tool.endedAt }),
+			});
+		}
 	}
 	return items;
 }
@@ -323,6 +334,7 @@ function applyToolItem(existing: LiveStreamingTool | undefined, item: LiveToolIt
 				...(item.args === undefined ? {} : { args: item.args }),
 				...(presentation === undefined ? {} : { presentation }),
 				ended: false,
+				...(item.startedAt === undefined ? {} : { startedAt: item.startedAt }),
 			};
 		}
 		case "update": {
@@ -336,6 +348,8 @@ function applyToolItem(existing: LiveStreamingTool | undefined, item: LiveToolIt
 				...(presentation === undefined ? {} : { presentation }),
 				ended: existing?.ended ?? false,
 				...(existing?.isError === undefined ? {} : { isError: existing.isError }),
+				...(existing?.startedAt === undefined ? {} : { startedAt: existing.startedAt }),
+				...(existing?.endedAt === undefined ? {} : { endedAt: existing.endedAt }),
 			};
 		}
 		case "end": {
@@ -343,6 +357,7 @@ function applyToolItem(existing: LiveStreamingTool | undefined, item: LiveToolIt
 			const partial = item.partial ?? existing?.partial;
 			const presentation = presentationAfter(existing?.presentation, item);
 			const isError = item.isError ?? existing?.isError;
+			const endedAt = item.endedAt ?? existing?.endedAt;
 			return {
 				toolName: item.toolName,
 				...(args === undefined ? {} : { args }),
@@ -350,6 +365,8 @@ function applyToolItem(existing: LiveStreamingTool | undefined, item: LiveToolIt
 				...(presentation === undefined ? {} : { presentation }),
 				ended: true,
 				...(isError === undefined ? {} : { isError }),
+				...(existing?.startedAt === undefined ? {} : { startedAt: existing.startedAt }),
+				...(endedAt === undefined ? {} : { endedAt }),
 			};
 		}
 	}
