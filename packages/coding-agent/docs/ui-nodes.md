@@ -125,7 +125,7 @@ What extension UI may send is restricted. An extension's panels, dialog bodies, 
 
 - its own commands: `extension.command.<id>.<command>`;
 - its own intents: `extension.intent.<id>.<name>`;
-- `open_work` and `cancel_work` whose `input.workId` is work the extension's own kinds run.
+- `open_work` and `cancel_work` whose `input.workId` is work the extension's own kinds run; panels, dialog bodies, and work details may also target subagent runs the extension started.
 
 `<id>` is the extension's manifest id. The host removes every other action, and every form whose `submit` it may not send (a `cancel` it may not send is removed from the form), before any client sees the data; a node left empty is removed. Host code (built-in tools, and the detail of the host's own work kinds) may bind any intent.
 

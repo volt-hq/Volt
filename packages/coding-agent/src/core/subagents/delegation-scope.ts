@@ -32,9 +32,12 @@ export interface SubagentDelegationScopeLimits {
 	maxTotalTokens?: number;
 	/** Finite total provider cost in USD allowed across all descendants before the tree aborts. */
 	maxTotalCostUsd?: number;
-	/** Finite wall-clock lifetime of the tree before it aborts. */
+	/** Wall-clock lifetime before the tree aborts: at most MAX_SUBAGENT_DURATION_MS, or Infinity. */
 	maxDurationMs?: number;
 }
+
+/** Largest finite deadline Node's timers accept without overflowing to 1ms. */
+export const MAX_SUBAGENT_DURATION_MS = 2_147_483_647;
 
 export const DEFAULT_SUBAGENT_DELEGATION_LIMITS: Required<SubagentDelegationScopeLimits> = {
 	maxDepth: 5,
@@ -122,6 +125,11 @@ function resolveLimits(
 		}
 		if (typeof value !== "number" || Number.isNaN(value) || value <= 0) {
 			throw new Error(`Subagent delegation limit ${key} must be a positive number or Infinity`);
+		}
+		if (key === "maxDurationMs" && Number.isFinite(value) && value > MAX_SUBAGENT_DURATION_MS) {
+			throw new Error(
+				`Subagent delegation limit maxDurationMs must be at most ${MAX_SUBAGENT_DURATION_MS}ms or Infinity`,
+			);
 		}
 		limits[key] = ceiling ? Math.min(value, ceiling[key]) : value;
 	}

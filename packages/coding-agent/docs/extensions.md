@@ -1260,7 +1260,7 @@ volt.registerCommand("fix-issue", {
 - `definitions()` lists the agent definitions the conversation may start now (`name`, `description`).
 - `start({ agent, task, cwd?, limits?, parentWorkId? })` resolves once the child accepted `task`, with the run's `id` (its work id), the child's `sessionId`, and `ended`, which resolves once the run ended and its conversation closed (so what the child held, such as its checkout, is free; it waits at most 10 seconds for the close) and never rejects: `status` (`completed`, `failed`, or `cancelled`), the child's final reply as `output`, an `error`, and the `usage` its replies reported (tokens, cache reads and writes included, and cost in USD).
   - `cwd` is an absolute path to a directory inside the conversation's working directory, or inside a [managed worktree](daemon.md#git-worktrees) of the same repository; the conversation's working directory by default.
-  - `limits` stop the run: `maxTurns` (assistant turns before the child must give a final report without tools), `maxTotalTokens`, `maxTotalCostUsd`, and `maxDurationMs` (the child and the subagents it starts). Each only tightens the host's limit, which still applies (by default 120 turns and no token, cost, or time limit); omitted ones keep the host's. A run started inside a subagent's conversation also stays within that subagent's limits.
+  - `limits` stop the run: `maxTurns` (assistant turns before the child must give a final report without tools), `maxTotalTokens`, `maxTotalCostUsd`, and `maxDurationMs` (the child and the subagents it starts). Each only tightens the host's limit, which still applies (by default 120 turns and no token, cost, or time limit); omitted ones keep the host's. A run started inside a subagent's conversation also stays within that subagent's limits. `maxDurationMs` must be at most 2,147,483,647 ms (about 24.9 days); larger values reject before a run starts.
   - `parentWorkId` names running work of the extension's own kind: clients show the run under it.
 - `cancel(id)` cancels a run the extension started (another extension's is not found); its `ended` resolves `cancelled`. A run that already ended is left as it is.
 
@@ -2936,7 +2936,7 @@ Actions `{ id, label, token?, disabled?, destructive?, intent: { type, input? } 
 
 - its own commands, `extension.command.<id>.<command>`;
 - its own intents, `extension.intent.<id>.<name>`, which [`volt.registerIntent()`](#voltregisterintentname-options) returns;
-- `open_work` and `cancel_work` with an `input.workId` of work its own kinds run.
+- `open_work` and `cancel_work` with an `input.workId` of work its own kinds run; panels, dialog bodies, and work details may also target subagent runs the extension started.
 
 The host leaves out every other action, and a form whose `submit` it may not send, before any client sees them; in panels and dialogs it also reports an extension error.
 

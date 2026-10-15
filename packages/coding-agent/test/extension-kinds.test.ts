@@ -55,7 +55,11 @@ async function setup(): Promise<{
 		turnId: () => undefined,
 	});
 	await registry.reconcile();
-	return { conversation, registry, kinds: new ExtensionKinds(() => registry), live };
+	const kinds: ExtensionKinds = new ExtensionKinds(
+		() => registry,
+		(extensionId, workId) => kinds.owns(extensionId, workId),
+	);
+	return { conversation, registry, kinds, live };
 }
 
 const SWARM = "swarm-review";

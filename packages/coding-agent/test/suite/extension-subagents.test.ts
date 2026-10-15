@@ -372,6 +372,33 @@ describe("extension subagents", () => {
 		expect(manager.childConversation(run.sessionId)).toBeUndefined();
 	});
 
+	it.each([2_147_483_648, 2_592_000_000])(
+		"rejects an overflowing duration of %s before starting a child",
+		async (maxDurationMs) => {
+			const delegator = delegating(() => ({ agent: "worker", task: "Work issue 12", limits: { maxDurationMs } }));
+			const { parent, childCwds } = await setup([delegator.extension]);
+
+			await parent.session.prompt("/delegate");
+			expect(delegator.errors).toEqual(["ctx.subagents.start: limits.maxDurationMs must be at most 2147483647ms"]);
+			expect(delegator.runs).toEqual([]);
+			expect(childCwds).toEqual([]);
+			expect(parent.session.work.list()).toEqual([]);
+		},
+	);
+
+	it("accepts the maximum finite duration", async () => {
+		const delegator = delegating(() => ({
+			agent: "worker",
+			task: "Work issue 12",
+			limits: { maxDurationMs: 2_147_483_647 },
+		}));
+		const { parent } = await setup([delegator.extension]);
+
+		await parent.session.prompt("/delegate");
+		expect(delegator.errors).toEqual([]);
+		expect((await delegator.runs[0]?.ended)?.status).toBe("completed");
+	});
+
 	it("stops a run at its limits", async () => {
 		const delegator = delegating(() => ({ agent: "worker", task: "Work issue 12", limits: { maxDurationMs: 50 } }));
 		const { parent } = await setup([delegator.extension], [heldUntilAborted]);
@@ -548,6 +575,87 @@ describe("extension subagents", () => {
 		expect(parent.session.work.list().filter((item) => item.kind === "subagent")).toEqual([]);
 		expect(children.map((child) => child.faux.state.callCount)).toEqual([0]);
 		await parent.session.extensionRegistry.settled();
+	});
+
+	it("keeps work-detail actions for its own subagents, but not other extensions' or unowned runs", async () => {
+		const foreign = delegating(() => ({ agent: "worker", task: "Another extension's task" }));
+		const runs: ExtensionSubagentRun[] = [];
+		let parentWorkId = "";
+		let context: ExtensionCommandContext | undefined;
+		const orchestrator: CreateTestExtensionsResultInput = {
+			id: "orchestrator",
+			permissions: ["exec"],
+			factory: (volt) => {
+				volt.registerWorkKind("loop", {
+					cancelOnAbort: false,
+					detail: (work) => ({
+						type: "card",
+						title: work.title,
+						actions: [work.workId, work.progress?.text, ...(Array.isArray(work.input) ? work.input : [])]
+							.filter((id): id is string => typeof id === "string")
+							.flatMap((workId) =>
+								["open_work", "cancel_work"].map((type) => ({
+									id: `${type}-${workId}`,
+									label: type,
+									intent: { type, input: { workId } },
+								})),
+							),
+					}),
+				});
+				volt.registerCommand("orchestrate", {
+					handler: async (args, ctx) => {
+						context = ctx;
+						await ctx.startWork("loop", { title: "Orchestrate issues", input: args.split(" ") }, async (work) => {
+							parentWorkId = work.workId;
+							const run = await ctx.subagents.start({
+								agent: "worker",
+								task: "Work issue 12",
+								parentWorkId: work.workId,
+							});
+							runs.push(run);
+							work.progress({ text: run.id });
+							await run.ended;
+							return { outcome: "completed" };
+						});
+					},
+				});
+			},
+		};
+		const { parent, manager } = await setup([foreign.extension, orchestrator], [heldUntilAborted]);
+		await parent.session.prompt("/delegate");
+		const foreignRun = foreign.runs[0];
+		if (!foreignRun) throw new Error(`no foreign run: ${foreign.errors.join("; ")}`);
+		const unowned = await manager.startRun("worker", "Host task");
+
+		await parent.session.prompt(`/orchestrate ${foreignRun.id} ${unowned.workId} not-mine`);
+		await vi.waitFor(() => expect(runs).toHaveLength(1));
+		const run = runs[0];
+		if (!run || !context) throw new Error("The orchestrator did not start its run");
+		await vi.waitFor(() =>
+			expect(parent.session.liveState.get(`work/${parentWorkId}`)).toMatchObject({
+				kind: "work",
+				detail: {
+					type: "card",
+					actions: [parentWorkId, run.id].flatMap((workId) =>
+						["open_work", "cancel_work"].map((type) => ({
+							id: `${type}-${workId}`,
+							label: type,
+							intent: { type, input: { workId } },
+						})),
+					),
+				},
+			}),
+		);
+		// UI ownership does not make a subagent work of an extension's own kind.
+		await expect(
+			context.subagents.start({ agent: "worker", task: "Invalid parent", parentWorkId: run.id }),
+		).rejects.toThrow("parentWorkId must be work of the extension's own kinds");
+
+		await context.subagents.cancel(run.id);
+		expect((await run.ended).status).toBe("cancelled");
+		await foreign.ctx().subagents.cancel(foreignRun.id);
+		await manager.cancelRun(unowned.workId);
+		await parent.session.work.waitForIdle();
 	});
 
 	it("starts a run as a child of the extension's own work", async () => {

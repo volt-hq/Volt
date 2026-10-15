@@ -80,6 +80,7 @@ import {
 } from "../session-writer.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
+import { MAX_SUBAGENT_DURATION_MS } from "../subagents/delegation-scope.ts";
 import type { SubagentRunOptions } from "../subagents/index.ts";
 import { getAvailableThemesWithPaths } from "../theme/discovery.ts";
 import type { Theme } from "../theme/theme.ts";
@@ -169,6 +170,9 @@ function subagentLimits(limits: unknown): Pick<SubagentRunOptions, "limits" | "t
 	const maxTotalTokens = read("maxTotalTokens", false);
 	const maxTotalCostUsd = read("maxTotalCostUsd", false);
 	const maxDurationMs = read("maxDurationMs", false);
+	if (maxDurationMs !== undefined && maxDurationMs > MAX_SUBAGENT_DURATION_MS) {
+		throw new TypeError(`ctx.subagents.start: limits.maxDurationMs must be at most ${MAX_SUBAGENT_DURATION_MS}ms`);
+	}
 	const tree = {
 		...(maxTotalTokens === undefined ? {} : { maxTotalTokens }),
 		...(maxTotalCostUsd === undefined ? {} : { maxTotalCostUsd }),
@@ -357,11 +361,7 @@ export class SessionExtensionBinding {
 	private readonly uiHost: ExtensionUiHost = {
 		// Read when a call runs: the routers are built before the binding's host is set.
 		live: () => this.host.liveState,
-		ownsWork: (extensionId, workId) =>
-			this.host.extensionKinds().owns(extensionId, workId) ||
-			this.host.extensionReviewEngines().owns(extensionId, workId) ||
-			this.subagentRuns.get(extensionId)?.has(workId) === true ||
-			this.reviews.owns(extensionId, workId),
+		ownsWork: (extensionId, workId) => this.ownsUiWork(extensionId, workId),
 		droppedIntent: (extensionId, intent) =>
 			this.extensionRunner.emitError({
 				extensionId,
@@ -392,6 +392,16 @@ export class SessionExtensionBinding {
 			startReview: (target, review) => host.startReview(target, review),
 		});
 		this.registry = new ExtensionRegistry(this.createRegistryHost());
+	}
+
+	/** Whether the extension's UI may open or cancel this work, beyond just work of its own kinds. */
+	ownsUiWork(extensionId: string, workId: string): boolean {
+		return (
+			this.host.extensionKinds().owns(extensionId, workId) ||
+			this.host.extensionReviewEngines().owns(extensionId, workId) ||
+			this.subagentRuns.get(extensionId)?.has(workId) === true ||
+			this.reviews.owns(extensionId, workId)
+		);
 	}
 
 	/** What the registry starts and stops extensions through. */
