@@ -37,6 +37,7 @@ import { createHarness, type Harness } from "./harness.ts";
 const cleanups: Array<() => Promise<void> | void> = [];
 
 afterEach(async () => {
+	vi.useRealTimers();
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
@@ -402,10 +403,17 @@ describe("extension subagents", () => {
 	it("stops a run at its limits", async () => {
 		const delegator = delegating(() => ({ agent: "worker", task: "Work issue 12", limits: { maxDurationMs: 50 } }));
 		const { parent } = await setup([delegator.extension], [heldUntilAborted]);
+		// Task admission may take longer than the deadline on a busy host; advance it only after admission.
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 
 		await parent.session.prompt("/delegate");
+		expect(delegator.errors).toEqual([]);
 		const [run] = delegator.runs;
-		expect((await run?.ended)?.status).toBe("cancelled");
+		if (!run) throw new Error("The delegator did not start its run");
+		await vi.advanceTimersByTimeAsync(49);
+		expect(parent.session.work.get(run.id)?.outcome).toBeUndefined();
+		await vi.advanceTimersByTimeAsync(1);
+		expect((await run.ended).status).toBe("cancelled");
 	});
 
 	it("stops a run at its limits inside a subagent's conversation, counting it in the subagent's tree", async () => {
@@ -415,10 +423,15 @@ describe("extension subagents", () => {
 		const { parent } = await setup([delegator.extension], [heldUntilAborted], undefined, false, undefined, {
 			subagentContext: subagentContext(tree),
 		});
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 
 		await parent.session.prompt("/delegate");
+		expect(delegator.errors).toEqual([]);
 		const [run] = delegator.runs;
-		if (!run) throw new Error(`no run: ${delegator.errors.join("; ")}`);
+		if (!run) throw new Error("The delegator did not start its run");
+		await vi.advanceTimersByTimeAsync(49);
+		expect(tree.snapshot()).toMatchObject({ startsUsed: 1, activeDescendants: 1, aborted: false });
+		await vi.advanceTimersByTimeAsync(1);
 		expect((await run.ended).status).toBe("cancelled");
 		// The run's limit stopped it alone: the subagent's tree counted it and keeps running.
 		expect(tree.snapshot()).toMatchObject({ startsUsed: 1, activeDescendants: 0, aborted: false });
@@ -433,10 +446,15 @@ describe("extension subagents", () => {
 		const { parent } = await setup([delegator.extension], [heldUntilAborted], undefined, false, undefined, {
 			delegationLimits: { maxDurationMs: 50 },
 		});
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 
 		await parent.session.prompt("/delegate");
+		expect(delegator.errors).toEqual([]);
 		const [run] = delegator.runs;
-		if (!run) throw new Error(`no run: ${delegator.errors.join("; ")}`);
+		if (!run) throw new Error("The delegator did not start its run");
+		await vi.advanceTimersByTimeAsync(49);
+		expect(parent.session.work.get(run.id)?.outcome).toBeUndefined();
+		await vi.advanceTimersByTimeAsync(1);
 		expect((await run.ended).status).toBe("cancelled");
 	});
 
