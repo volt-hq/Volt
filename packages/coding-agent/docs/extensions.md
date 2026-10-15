@@ -1272,6 +1272,9 @@ The [managed worktrees](daemon.md#git-worktrees) of the repository the conversat
 
 ```typescript
 const existing = (await ctx.worktrees.list()).find((worktree) => worktree.id === "issue-12");
+if (existing && !existing.available) {
+  throw new Error("issue-12 is archived; resume its session to restore it, or choose a new worktree name.");
+}
 const worktree = existing ?? (await ctx.worktrees.create({ name: "issue-12", baseRef: "main" }));
 await ctx.subagents.start({ agent: "general", task: "Fix issue #12.", cwd: worktree.path });
 ```
@@ -1280,6 +1283,8 @@ await ctx.subagents.start({ agent: "general", task: "Fix issue #12.", cwd: workt
 - `create({ name?, branch?, baseRef?, reuseBranch? })` needs the `exec` permission. It creates the repository's worktree `name` (a generated id by default; an id is unique in the workspace) on a new `branch` (`volt/<name>` by default) from `baseRef` (the current branch of the repository's checkout by default). With `reuseBranch: true`, an existing local `branch` is checked out instead, with its commits; `baseRef` then only records the base.
 - `remove(id)` needs the `exec` permission. It removes the checkout of the repository's worktree `id` and keeps its branch. It is never forced: a checkout with changes, or one a conversation still has open, stays.
 - They reject with the daemon's error, whose message starts with its code: `not_a_git_repository` (the conversation's directory is in no repository), `worktree_exists`, `worktree_branch_conflict`, `worktree_limit_reached` (a workspace holds at most 16 checkouts), `worktree_dirty`, `worktree_busy`, `worktree_not_found`, and so on.
+
+An archived worktree still reserves its id. `ctx.worktrees` cannot restore it: resume a session bound to it through Volt, or create a worktree with a different name (omit `name` for a generated id). A repository nested inside a managed checkout is unsupported: these methods reject with `nested_git_repository_unsupported` rather than operating on the enclosing repository.
 
 The daemon's retention and removal rules apply to these worktrees as to any other; merging a branch back stays the extension's or the user's action.
 

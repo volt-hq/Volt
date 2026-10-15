@@ -2,6 +2,7 @@ import { createHash, randomInt } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { mkdir, readdir, realpath, rename, rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
+import { discoverGitWorktree } from "../core/git-repository.ts";
 import type { PrReviewLaunch } from "../core/pr-review-placement.ts";
 import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import { IROH_REMOTE_WORKTREE_ID_PATTERN } from "../core/remote/iroh/protocol.ts";
@@ -909,8 +910,10 @@ export class WorktreeManager {
 	/**
 	 * The repository a conversation in `cwd` works in, as its source checkout
 	 * in `workspace`: the source of the managed worktree holding `cwd`, else
-	 * the Git repository holding it. `workingDirectory` (workspace-relative,
-	 * the workspace root when undefined) creates worktrees of that repository.
+	 * the Git repository holding it. A nested repository inside a managed
+	 * checkout is unsupported, never attributed to the enclosing repository.
+	 * `workingDirectory` (workspace-relative, the workspace root when undefined)
+	 * creates worktrees of that repository.
 	 */
 	async resolveConversationRepository(
 		workspace: IrohRemoteWorkspace,
@@ -927,6 +930,15 @@ export class WorktreeManager {
 			}
 		}
 		if (record !== undefined) {
+			const repository = discoverGitWorktree(cwdReal);
+			if (repository === null) return { ok: false, error: "not_a_git_repository" };
+			if (!isSamePath(repository.worktreeRoot, await realpathOrResolve(record.path))) {
+				return {
+					ok: false,
+					error: "nested_git_repository_unsupported",
+					detail: "nested repositories inside managed worktree checkouts are not supported",
+				};
+			}
 			const sourceRootPath = await this.resolveRecordSourceRootPath(workspace, record);
 			if (sourceRootPath === undefined) return { ok: false, error: "worktree_source_unregistered" };
 			return {

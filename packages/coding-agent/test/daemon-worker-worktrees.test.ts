@@ -259,6 +259,69 @@ describe("a worker's managed worktrees", () => {
 		});
 	}, 60_000);
 
+	it.each(["repository", "submodule"] as const)(
+		"rejects a nested %s inside a managed checkout instead of managing its enclosing repository",
+		async (kind) => {
+			const { harness, worker } = await fixture();
+			const cwd = harness.workspacePath;
+			const outer = await worker.request({ type: "worker_worktree_create", cwd, worktreeName: "outer-1" });
+			if (outer.type !== "worktree_result") throw new Error(`not created: ${JSON.stringify(outer)}`);
+
+			const subdirectory = join(outer.worktree.path, "packages", "app");
+			mkdirSync(subdirectory, { recursive: true });
+			expect(await worker.request({ type: "worker_worktree_list", cwd: subdirectory })).toMatchObject({
+				type: "worktrees_result",
+				worktrees: [{ id: "outer-1" }],
+			});
+
+			const nested = join(outer.worktree.path, "vendor", "project");
+			if (kind === "submodule") {
+				const source = join(cwd, "project-source");
+				mkdirSync(source);
+				commitRepository(source);
+				git(outer.worktree.path, "-c", "protocol.file.allow=always", "submodule", "add", source, "vendor/project");
+			} else {
+				mkdirSync(nested, { recursive: true });
+				commitRepository(nested);
+			}
+			const nestedSubdirectory = join(nested, "src");
+			mkdirSync(nestedSubdirectory);
+			const head = git(cwd, "rev-parse", "HEAD");
+			const nestedHead = git(nested, "rev-parse", "HEAD");
+
+			for (const conversationCwd of [nested, nestedSubdirectory]) {
+				expect(await worker.request({ type: "worker_worktree_list", cwd: conversationCwd })).toMatchObject({
+					type: "error",
+					code: "nested_git_repository_unsupported",
+				});
+				expect(
+					await worker.request({
+						type: "worker_worktree_create",
+						cwd: conversationCwd,
+						worktreeName: "nested-request",
+					}),
+				).toMatchObject({ type: "error", code: "nested_git_repository_unsupported" });
+				expect(
+					await worker.request({
+						type: "worker_worktree_remove",
+						cwd: conversationCwd,
+						worktreeId: "outer-1",
+					}),
+				).toMatchObject({ type: "error", code: "nested_git_repository_unsupported" });
+			}
+
+			expect(await worker.request({ type: "worker_worktree_list", cwd })).toMatchObject({
+				type: "worktrees_result",
+				worktrees: [{ id: "outer-1" }],
+			});
+			expect(existsSync(outer.worktree.path)).toBe(true);
+			expect(git(cwd, "rev-parse", "HEAD")).toBe(head);
+			expect(git(nested, "rev-parse", "HEAD")).toBe(nestedHead);
+			expect(git(cwd, "branch", "--list", "volt/nested-request")).toBe("");
+		},
+		60_000,
+	);
+
 	it("serves the requests only to a worker", async () => {
 		const { harness } = await fixture();
 		const tui = await harness.connect("tui");
