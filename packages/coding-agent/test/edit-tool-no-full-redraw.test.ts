@@ -118,6 +118,8 @@ describe("edit tool TUI rendering", () => {
 			tui,
 			process.cwd(),
 		);
+		// Expanded, the whole diff renders: taller than the terminal before and after the result settles.
+		component.setExpanded(true);
 		root.addChild(component);
 		tui.addChild(root);
 		tui.start();
@@ -185,6 +187,8 @@ describe("edit tool TUI rendering", () => {
 			tui,
 			process.cwd(),
 		);
+		// Expanded, the whole diff renders.
+		component.setExpanded(true);
 		tui.addChild(component);
 		tui.start();
 		await waitForRender();

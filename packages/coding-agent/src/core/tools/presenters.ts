@@ -28,6 +28,7 @@ import {
 	errorNode,
 	isFailed,
 	isRecord,
+	moreLines,
 	oneLine,
 	plainText,
 	stringArg,
@@ -53,6 +54,8 @@ import { presentJobs, presentSubagent, presentSubagentRegistry } from "./work-pr
 const BASH_SUMMARY_LINES = 5;
 /** Lines read and write show collapsed: the start of the file. */
 const FILE_SUMMARY_LINES = 10;
+/** Diff lines edit shows collapsed: the start of the change. */
+const EDIT_SUMMARY_LINES = 16;
 /** The bash tool's own bound on a requested timeout, in seconds. */
 const MAX_TIMEOUT_SECONDS = 3600;
 
@@ -117,11 +120,11 @@ function omittedBefore(details: unknown): number {
 
 /**
  * bash: `$ command` (with the timeout in force), the output as terminal
- * lines, and how a failed command ended. Collapsed, a running command shows
- * its newest five lines; a finished one shows output that fits in five lines
- * whole, and otherwise how it ended and how many lines it wrote. While the
- * command runs, a line it is still writing is kept apart, so new output
- * reaches clients as appended lines.
+ * lines, and how a failed command ended. Collapsed, a running or failed
+ * command shows its newest five lines (and how it ended); a passing one shows
+ * output that fits in five lines whole, and otherwise how many lines it wrote.
+ * While the command runs, a line it is still writing is kept apart, so new
+ * output reaches clients as appended lines.
  */
 export const presentBash: ToolPresenter = (input) => {
 	const command = stringArg(input.args, "command");
@@ -154,19 +157,12 @@ export const presentBash: ToolPresenter = (input) => {
 	const statusNode = status === undefined ? [] : [textNode("status", status.text, status.token)];
 	const warnings = input.state === "done" ? bashWarnings(result?.details) : [];
 	const total = omitted + all.length;
-	// Finished output the summary cannot show whole is a count: its newest lines say little of it.
-	const counted = input.state === "done" && (omitted > 0 || all.length > BASH_SUMMARY_LINES);
-	const countText: UiNodeStyledText = [
-		...(status === undefined
-			? []
-			: [
-					{ text: status.text, token: status.token },
-					{ text: " · ", token: "muted" as const },
-				]),
-		{ text: `${total} line${total === 1 ? "" : "s"}`, token: "muted" },
-	];
+	// Passing output the summary cannot show whole is a count: its newest lines say little of it.
+	// A failure's newest lines are where it says why, so they show.
+	const counted =
+		input.state === "done" && result?.isError !== true && (omitted > 0 || all.length > BASH_SUMMARY_LINES);
 	const summary: UiNode[] = counted
-		? [textNode("lines", countText)]
+		? [textNode("lines", `${total} line${total === 1 ? "" : "s"}`, "muted")]
 		: [
 				...(tail.length === 0
 					? []
@@ -482,7 +478,9 @@ function changeCounts(lines: readonly DiffLine[]): UiNodeStyledText | undefined 
 /**
  * edit: the path with "+N -M", the change as a diff (before it runs, each
  * replacement's lines; once it ran, the file's diff with line numbers), and
- * diagnostics. The title names the file, so the diff does not again.
+ * diagnostics. Collapsed, a diff longer than sixteen lines shows its start and
+ * how many lines follow; errors and diagnostics always show. The title names
+ * the file, so the diff does not again.
  */
 export const presentEdit: ToolPresenter = (input) => {
 	const rawPath = stringArg(input.args, "file_path", "path");
@@ -496,16 +494,23 @@ export const presentEdit: ToolPresenter = (input) => {
 			? parseEditDiff(resultDiff)
 			: previewDiff(editsOf(input.args));
 	const title = titleOf("edit", rawPath, changeCounts(lines));
+	const diff = (diffLines: DiffLine[]): UiNode[] =>
+		diffLines.length === 0
+			? []
+			: [{ type: "diff", key: "diff", lines: diffLines, lineNumbers: resultDiff !== undefined }];
+	const shown = lines.slice(0, EDIT_SUMMARY_LINES);
 	const nodes: UiNode[] = isFailed(input)
 		? errorNode(input)
-		: lines.length === 0
-			? []
-			: [{ type: "diff", key: "diff", lines, lineNumbers: resultDiff !== undefined }];
-	const summary = [...nodes, ...(input.state === "done" ? diagnosticsNode(details) : [])];
+		: [...diff(shown), ...moreLines(shown.length, lines.length)];
+	const diagnostics = input.state === "done" ? diagnosticsNode(details) : [];
+	const summary = [...nodes, ...diagnostics];
+	// A diff the summary shows whole needs no body.
+	const body = shown.length === lines.length ? [] : [...diff(lines), ...diagnostics];
 	return {
 		title,
 		...(activity === undefined ? {} : { activity }),
 		...(summary.length === 0 ? {} : { summary }),
+		...(body.length === 0 ? {} : { body }),
 	};
 };
 
