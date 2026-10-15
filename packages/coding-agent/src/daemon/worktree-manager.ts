@@ -237,7 +237,7 @@ export interface WorktreeRuntimePreparation {
 interface WorktreeSourceResolution {
 	/** Selected directory under the registered workspace, preserving the remote relative path. */
 	workspaceDirectory: WorkspaceDirectoryResolution;
-	/** Git repository root used as `git worktree add` cwd. Host-local; never sent on the wire. */
+	/** Source checkout used as `git worktree add` cwd, not repository identity. Host-local; never sent on the wire. */
 	sourceRootPath: string;
 	/** Registered-workspace-relative git repository root. Undefined means the registered workspace root. */
 	sourceRootRelativePath?: string;
@@ -966,7 +966,7 @@ export class WorktreeManager {
 		};
 	}
 
-	/** Whether the worktree `worktreeId` of `workspace` is of the repository whose source checkout is `sourceRootPath`. */
+	/** Whether the worktree shares a canonical Git common directory with the source checkout, within `workspace`. */
 	async isRepositoryWorktree(
 		workspace: IrohRemoteWorkspace,
 		worktreeId: string,
@@ -975,21 +975,30 @@ export class WorktreeManager {
 		const record = await this.findWorktree(workspace.name, worktreeId);
 		const recordSourceRootPath =
 			record === undefined ? undefined : await this.resolveRecordSourceRootPath(workspace, record);
-		return recordSourceRootPath !== undefined && isSamePath(recordSourceRootPath, sourceRootPath);
+		if (recordSourceRootPath === undefined) return false;
+		const commonGitDir = await this.resolveRepositoryCommonGitDir(sourceRootPath);
+		const recordCommonGitDir = await this.resolveRepositoryCommonGitDir(recordSourceRootPath);
+		return (
+			commonGitDir !== undefined && recordCommonGitDir !== undefined && isSamePath(recordCommonGitDir, commonGitDir)
+		);
 	}
 
-	/** The worktrees of `workspace`; with `sourceRootPath`, only those of the repository whose source checkout it is. */
+	/** The worktrees of `workspace`; `sourceRootPath` scopes by repository, shared across all its source checkouts. */
 	async list(workspace: IrohRemoteWorkspace, options: { sourceRootPath?: string } = {}): Promise<WorktreeStatus[]> {
+		const commonGitDir =
+			options.sourceRootPath === undefined
+				? undefined
+				: await this.resolveRepositoryCommonGitDir(options.sourceRootPath);
+		if (options.sourceRootPath !== undefined && commonGitDir === undefined) return [];
 		const records = await this.stateManager.listWorktrees(workspace.name);
 		const gitListBySourceRoot = new Map<string, Set<string> | undefined>();
 		const statuses: WorktreeStatus[] = [];
 		for (const record of records) {
 			const sourceRootPath = await this.resolveRecordSourceRootPath(workspace, record);
-			if (
-				options.sourceRootPath !== undefined &&
-				(sourceRootPath === undefined || !isSamePath(sourceRootPath, options.sourceRootPath))
-			) {
-				continue;
+			if (commonGitDir !== undefined) {
+				const recordCommonGitDir =
+					sourceRootPath === undefined ? undefined : await this.resolveRepositoryCommonGitDir(sourceRootPath);
+				if (recordCommonGitDir === undefined || !isSamePath(recordCommonGitDir, commonGitDir)) continue;
 			}
 			const knownCheckouts =
 				sourceRootPath === undefined
@@ -1019,6 +1028,19 @@ export class WorktreeManager {
 			});
 		}
 		return statuses;
+	}
+
+	/** Repository identity is shared Git metadata, not a particular source checkout or its HEAD. */
+	private async resolveRepositoryCommonGitDir(sourceRootPath: string): Promise<string | undefined> {
+		const sourceRootReal = await realpathOrResolve(sourceRootPath);
+		const repository = discoverGitWorktree(sourceRootReal);
+		// A removed source's .git must not make its records belong to an enclosing repository.
+		if (repository === null || !isSamePath(repository.worktreeRoot, sourceRootReal)) return undefined;
+		try {
+			return await realpath(repository.commonGitDir);
+		} catch {
+			return undefined;
+		}
 	}
 
 	private async getKnownWorktreeCheckouts(

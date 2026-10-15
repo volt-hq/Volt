@@ -8,9 +8,9 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createDaemonClient, type DaemonClient } from "../src/daemon/control-client.ts";
 import type { WorkerSpawnSpec } from "../src/daemon/control-protocol.ts";
@@ -257,6 +257,136 @@ describe("a worker's managed worktrees", () => {
 			type: "error",
 			code: "invalid_working_directory",
 		});
+	}, 60_000);
+
+	it.each(["workspace", "outside"] as const)(
+		"shares repository scope across linked checkouts (primary location: %s)",
+		async (primaryLocation) => {
+			const { harness, worker } = await fixture();
+			const workspace = harness.workspacePath;
+			const primary = primaryLocation === "workspace" ? workspace : join(dirname(workspace), "external");
+			if (primaryLocation === "outside") {
+				mkdirSync(primary);
+				commitRepository(primary);
+			}
+			const first = join(workspace, ".worktrees", "first");
+			const second = join(workspace, ".worktrees", "second");
+			git(primary, "worktree", "add", first, "-b", "first");
+			git(primary, "worktree", "add", second, "-b", "second");
+			const primaryHead = git(primary, "rev-parse", "HEAD");
+			git(
+				first,
+				"-c",
+				"user.name=Test",
+				"-c",
+				"user.email=test@example.test",
+				"-c",
+				"commit.gpgsign=false",
+				"commit",
+				"--allow-empty",
+				"-m",
+				"linked checkout commit",
+			);
+			const firstHead = git(first, "rev-parse", "HEAD");
+			expect(firstHead).not.toBe(primaryHead);
+			const subdirectory = join(first, "src");
+			mkdirSync(subdirectory);
+
+			const fromFirst = await worker.request({
+				type: "worker_worktree_create",
+				cwd: subdirectory,
+				worktreeName: "from-first",
+			});
+			const otherCwd = primaryLocation === "workspace" ? primary : second;
+			const fromSecond = await worker.request({
+				type: "worker_worktree_create",
+				cwd: otherCwd,
+				worktreeName: "from-second",
+			});
+			if (fromFirst.type !== "worktree_result" || fromSecond.type !== "worktree_result") {
+				throw new Error(`not created: ${JSON.stringify([fromFirst, fromSecond])}`);
+			}
+			// Repository identity must not change which checkout supplies the default HEAD.
+			expect(fromFirst.worktree.baseRef).toBe("first");
+			expect(git(fromFirst.worktree.path, "rev-parse", "HEAD")).toBe(firstHead);
+			expect(git(fromSecond.worktree.path, "rev-parse", "HEAD")).toBe(primaryHead);
+			expect(git(primary, "rev-parse", "HEAD")).toBe(primaryHead);
+
+			const fromManaged = await worker.request({
+				type: "worker_worktree_create",
+				cwd: fromFirst.worktree.path,
+				worktreeName: "from-managed",
+			});
+			if (fromManaged.type !== "worktree_result") throw new Error(`not created: ${JSON.stringify(fromManaged)}`);
+			expect(commonGitDir(fromManaged.worktree.path)).toBe(commonGitDir(primary));
+			expect(git(fromManaged.worktree.path, "rev-parse", "HEAD")).toBe(firstHead);
+
+			for (const cwd of [
+				first,
+				subdirectory,
+				second,
+				otherCwd,
+				fromFirst.worktree.path,
+				fromManaged.worktree.path,
+			]) {
+				const listed = await worker.request({ type: "worker_worktree_list", cwd });
+				if (listed.type !== "worktrees_result") throw new Error(`not listed: ${JSON.stringify(listed)}`);
+				expect(listed.worktrees.map((worktree) => worktree.id)).toEqual([
+					"from-first",
+					"from-second",
+					"from-managed",
+				]);
+			}
+			if (primaryLocation === "outside") {
+				// Sharing Git metadata does not authorize a conversation outside the workspace.
+				expect(await worker.request({ type: "worker_worktree_list", cwd: primary })).toMatchObject({
+					type: "error",
+					code: "invalid_working_directory",
+				});
+				expect(await worker.request({ type: "worker_worktree_list", cwd: workspace })).toMatchObject({
+					type: "worktrees_result",
+					worktrees: [],
+				});
+			}
+
+			expect(
+				await worker.request({ type: "worker_worktree_remove", cwd: otherCwd, worktreeId: "from-first" }),
+			).toMatchObject({ type: "ok" });
+			expect(
+				await worker.request({
+					type: "worker_worktree_remove",
+					cwd: fromManaged.worktree.path,
+					worktreeId: "from-second",
+				}),
+			).toMatchObject({ type: "ok" });
+			expect(await worker.request({ type: "worker_worktree_list", cwd: first })).toMatchObject({
+				type: "worktrees_result",
+				worktrees: [{ id: "from-managed" }],
+			});
+			expect(existsSync(fromFirst.worktree.path)).toBe(false);
+			expect(existsSync(fromSecond.worktree.path)).toBe(false);
+		},
+		60_000,
+	);
+
+	it("does not attribute a worktree to an enclosing repository when its source is no longer a checkout", async () => {
+		const { harness, worker } = await fixture();
+		const workspace = harness.workspacePath;
+		const nested = join(workspace, "nested");
+		mkdirSync(nested);
+		commitRepository(nested);
+		const created = await worker.request({ type: "worker_worktree_create", cwd: nested, worktreeName: "nested-1" });
+		if (created.type !== "worktree_result") throw new Error(`not created: ${JSON.stringify(created)}`);
+		renameSync(join(nested, ".git"), join(nested, "saved-git"));
+
+		expect(await worker.request({ type: "worker_worktree_list", cwd: workspace })).toMatchObject({
+			type: "worktrees_result",
+			worktrees: [],
+		});
+		expect(
+			await worker.request({ type: "worker_worktree_remove", cwd: workspace, worktreeId: "nested-1" }),
+		).toMatchObject({ type: "error", code: "worktree_not_found" });
+		expect(existsSync(created.worktree.path)).toBe(true);
 	}, 60_000);
 
 	it.each(["repository", "submodule"] as const)(

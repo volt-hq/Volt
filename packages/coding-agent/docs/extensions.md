@@ -1284,6 +1284,8 @@ await ctx.subagents.start({ agent: "general", task: "Fix issue #12.", cwd: workt
 - `remove(id)` needs the `exec` permission. It removes the checkout of the repository's worktree `id` and keeps its branch. It is never forced: a checkout with changes, or one a conversation still has open, stays.
 - They reject with the daemon's error, whose message starts with its code: `not_a_git_repository` (the conversation's directory is in no repository), `worktree_exists`, `worktree_branch_conflict`, `worktree_limit_reached` (a workspace holds at most 16 checkouts), `worktree_dirty`, `worktree_busy`, `worktree_not_found`, and so on.
 
+Repository scope follows the canonical Git common directory, not a checkout's path: conversations in the primary checkout, unmanaged linked checkouts inside the workspace, and its managed worktrees see the same managed worktrees of that workspace. Creating a worktree still uses the selected source checkout's current branch or commit by default; it does not switch to the primary checkout's `HEAD`.
+
 An archived worktree still reserves its id. `ctx.worktrees` cannot restore it: resume a session bound to it through Volt, or create a worktree with a different name (omit `name` for a generated id). A repository nested inside a managed checkout is unsupported: these methods reject with `nested_git_repository_unsupported` rather than operating on the enclosing repository.
 
 The daemon's retention and removal rules apply to these worktrees as to any other; merging a branch back stays the extension's or the user's action.
