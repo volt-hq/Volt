@@ -224,6 +224,7 @@ export const ToolResultMessageSchema = Type.Object(
 		details: Type.Optional(Type.Unknown()),
 		isError: Type.Boolean(),
 		timestamp: Type.Number(),
+		durationMs: Type.Optional(Type.Integer({ minimum: 0 })),
 	},
 	{ additionalProperties: false },
 );

@@ -164,6 +164,13 @@ function positiveSafeInteger(value: unknown, path: string): number {
 	return value;
 }
 
+function nonNegativeSafeInteger(value: unknown, path: string): number {
+	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+		fail(path, "expected a non-negative safe integer");
+	}
+	return value;
+}
+
 function canonicalTimestamp(value: unknown, path: string): string {
 	const result = stringValue(value, path);
 	const parsed = new Date(result);
@@ -232,7 +239,12 @@ function validateAgentMessage(value: unknown, path: string): asserts value is Ag
 		return;
 	}
 	if (role === "toolResult") {
-		exactKeys(message, path, ["role", "toolCallId", "toolName", "content", "isError", "timestamp"], ["details"]);
+		exactKeys(
+			message,
+			path,
+			["role", "toolCallId", "toolName", "content", "isError", "timestamp"],
+			["details", "durationMs"],
+		);
 		idValue(message.toolCallId, `${path}.toolCallId`);
 		nonEmptyString(message.toolName, `${path}.toolName`);
 		if (!Array.isArray(message.content)) fail(`${path}.content`, "expected a content array");
@@ -244,6 +256,7 @@ function validateAgentMessage(value: unknown, path: string): asserts value is Ag
 		}
 		booleanValue(message.isError, `${path}.isError`);
 		messageTimestamp(message.timestamp, `${path}.timestamp`);
+		if (message.durationMs !== undefined) nonNegativeSafeInteger(message.durationMs, `${path}.durationMs`);
 		return;
 	}
 	if (role === "bashExecution") {

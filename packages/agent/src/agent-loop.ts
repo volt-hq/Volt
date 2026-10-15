@@ -603,6 +603,7 @@ async function executeToolCallsSequential(
 	const messages: ToolResultMessage[] = [];
 
 	for (const toolCall of toolCalls) {
+		const startedAt = Date.now();
 		await emit({
 			type: "tool_execution_start",
 			toolCallId: toolCall.id,
@@ -630,10 +631,10 @@ async function executeToolCallsSequential(
 			);
 		}
 
-		await emitToolExecutionEnd(finalized, emit);
-		const toolResultMessage = createToolResultMessage(finalized);
+		const ended = await endToolCall(finalized, startedAt, emit);
+		const toolResultMessage = createToolResultMessage(ended);
 		const finalizedToolResultMessage = await emitCompletedMessage(toolResultMessage, emit);
-		finalizedCalls.push(finalized);
+		finalizedCalls.push(ended);
 		messages.push(finalizedToolResultMessage);
 
 		if (signal?.aborted) {
@@ -655,9 +656,10 @@ async function executeToolCallsParallel(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
-	const finalizedCalls: FinalizedToolCallEntry[] = [];
+	const finalizedCalls: EndedToolCallEntry[] = [];
 
 	for (const toolCall of toolCalls) {
+		const startedAt = Date.now();
 		await emit({
 			type: "tool_execution_start",
 			toolCallId: toolCall.id,
@@ -672,8 +674,7 @@ async function executeToolCallsParallel(
 				result: preparation.result,
 				isError: preparation.isError,
 			} satisfies FinalizedToolCallOutcome;
-			await emitToolExecutionEnd(finalized, emit);
-			finalizedCalls.push(finalized);
+			finalizedCalls.push(await endToolCall(finalized, startedAt, emit));
 			if (signal?.aborted) {
 				break;
 			}
@@ -690,8 +691,7 @@ async function executeToolCallsParallel(
 				config,
 				signal,
 			);
-			await emitToolExecutionEnd(finalized, emit);
-			return finalized;
+			return endToolCall(finalized, startedAt, emit);
 		});
 		if (signal?.aborted) {
 			break;
@@ -737,7 +737,10 @@ type FinalizedToolCallOutcome = {
 	isError: boolean;
 };
 
-type FinalizedToolCallEntry = FinalizedToolCallOutcome | (() => Promise<FinalizedToolCallOutcome>);
+/** A finalized call that ended: how long it took from its execution start to its end, in milliseconds. */
+type EndedToolCall = FinalizedToolCallOutcome & { durationMs: number };
+
+type EndedToolCallEntry = EndedToolCall | (() => Promise<EndedToolCall>);
 
 function reduceToolBatchDisposition(finalizedCalls: FinalizedToolCallOutcome[]): ToolBatchDisposition {
 	if (finalizedCalls.some((finalized) => !finalized.isError && finalized.result.disposition === "final_response")) {
@@ -927,7 +930,13 @@ function createErrorToolResult(message: string): AgentToolResult<any> {
 	};
 }
 
-async function emitToolExecutionEnd(finalized: FinalizedToolCallOutcome, emit: AgentEventSink): Promise<void> {
+/** End a call that started at `startedAt`: it took until now, and its end is emitted. */
+async function endToolCall(
+	finalized: FinalizedToolCallOutcome,
+	startedAt: number,
+	emit: AgentEventSink,
+): Promise<EndedToolCall> {
+	const ended = { ...finalized, durationMs: Math.max(0, Date.now() - startedAt) };
 	await emit({
 		type: "tool_execution_end",
 		toolCallId: finalized.toolCall.id,
@@ -935,9 +944,10 @@ async function emitToolExecutionEnd(finalized: FinalizedToolCallOutcome, emit: A
 		result: finalized.result,
 		isError: finalized.isError,
 	});
+	return ended;
 }
 
-function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResultMessage {
+function createToolResultMessage(finalized: EndedToolCall): ToolResultMessage {
 	return {
 		role: "toolResult",
 		toolCallId: finalized.toolCall.id,
@@ -946,6 +956,7 @@ function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResul
 		...(finalized.result.details === undefined ? {} : { details: finalized.result.details }),
 		isError: finalized.isError,
 		timestamp: Date.now(),
+		durationMs: finalized.durationMs,
 	};
 }
 

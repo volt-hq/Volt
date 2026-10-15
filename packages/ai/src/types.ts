@@ -452,6 +452,8 @@ export interface ToolResultMessage<TDetails = unknown> {
 	details?: TDetails;
 	isError: boolean;
 	timestamp: number; // Unix timestamp in milliseconds
+	/** How long the call took, from its execution start to its end, in milliseconds. Never sent to a provider. */
+	durationMs?: number;
 }
 
 export type Message = UserMessage | AssistantMessage | ToolResultMessage;

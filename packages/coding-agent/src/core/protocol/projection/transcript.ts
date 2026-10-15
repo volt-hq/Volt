@@ -218,6 +218,7 @@ function toolResultItem(
 		content: ReadonlyArray<TextContent | ImageContent>;
 		details?: unknown;
 		isError: boolean;
+		durationMs?: number;
 	},
 	source: ProjectionSource,
 	profile: Profile,
@@ -254,6 +255,7 @@ function toolResultItem(
 		toolCallId: message.toolCallId,
 		toolName,
 		status,
+		...(message.durationMs === undefined ? {} : { durationMs: message.durationMs }),
 		...(imageCount > 0 ? { imageCount } : {}),
 		presentation,
 	};

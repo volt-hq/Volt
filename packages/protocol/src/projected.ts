@@ -36,7 +36,7 @@ import {
 } from "./entries.ts";
 import { stringEnum } from "./helpers.ts";
 import { MessagePresentationSchema, ToolPresentationSchema } from "./presentation.ts";
-import { RpcClientMessageIdSchema } from "./primitives.ts";
+import { RpcClientMessageIdSchema, RpcSafeNonNegativeIntegerSchema } from "./primitives.ts";
 
 const closed = { additionalProperties: false } as const;
 
@@ -89,6 +89,8 @@ export const TranscriptItemSchema = Type.Object(
 		toolCallId: Type.Optional(Type.String()),
 		toolName: Type.Optional(Type.String()),
 		status: Type.Optional(stringEnum(["completed", "failed"])),
+		/** A tool item's run time in milliseconds, when the host timed the call. */
+		durationMs: Type.Optional(RpcSafeNonNegativeIntegerSchema),
 		parts: Type.Optional(Type.Array(TranscriptAssistantPartSchema)),
 		stopReason: Type.Optional(StopReasonSchema),
 		/** A tool item's `ToolPresentation`, or a presented custom message's `MessagePresentation`. */
