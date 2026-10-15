@@ -140,13 +140,20 @@ describe("bash presenter", () => {
 		expect(short.body).toBeUndefined();
 	});
 
-	it("collapses finished output longer than five lines to how many lines it wrote", () => {
+	it("collapses passing output longer than five lines to how many lines it wrote", () => {
 		const lines = Array.from({ length: 12 }, (_, index) => `line-${index + 1}`);
 		const presented = present(presentBash, input({ command: "seq 12" }, "done", { text: lines.join("\n") }));
-		expect(presented.summary).toEqual([{ type: "text", key: "lines", text: [{ text: "12 lines", token: "muted" }] }]);
+		expect(presented.summary).toEqual([{ type: "text", key: "lines", text: "12 lines", token: "muted" }]);
 		expect(plain(presented.body)).toBe(lines.join("\n"));
 
-		// A failed command says how it ended beside the count.
+		// Output that fits shows whole, with no body.
+		const short = present(presentBash, input({ command: "seq 5" }, "done", { text: "1\n2\n3\n4\n5" }));
+		expect(short.summary?.[0]).toMatchObject({ type: "terminal", lines: ["1", "2", "3", "4", "5"] });
+		expect(short.body).toBeUndefined();
+	});
+
+	it("collapses a failed command to its newest five lines and how it ended", () => {
+		const lines = Array.from({ length: 12 }, (_, index) => `line-${index + 1}`);
 		const failed = present(
 			presentBash,
 			input({ command: "seq 12" }, "done", {
@@ -154,13 +161,11 @@ describe("bash presenter", () => {
 				isError: true,
 			}),
 		);
-		expect(plain(failed.summary)).toBe("exit 2 · 12 lines");
+		expect(failed.summary).toEqual([
+			{ type: "terminal", key: "tail", lines: lines.slice(-5), omittedLines: 7 },
+			{ type: "text", key: "status", text: "exit 2", token: "error" },
+		]);
 		expect(plain(failed.body)).toBe(`${lines.join("\n")}\nexit 2`);
-
-		// Output that fits shows whole, with no body.
-		const short = present(presentBash, input({ command: "seq 5" }, "done", { text: "1\n2\n3\n4\n5" }));
-		expect(short.summary?.[0]).toMatchObject({ type: "terminal", lines: ["1", "2", "3", "4", "5"] });
-		expect(short.body).toBeUndefined();
 	});
 
 	it.each([
@@ -221,7 +226,7 @@ describe("bash presenter", () => {
 				throw new Error("timeout:5");
 			},
 		},
-	])("counts every line a failed command wrote when its output was truncated: $status", async ({ status, end }) => {
+	])("shows a truncated failure's newest lines, counting every line it wrote: $status", async ({ status, end }) => {
 		const operations: BashOperations = {
 			exec: async (_command, _cwd, { onData }) => {
 				for (let i = 1; i <= 4000; i++) onData(Buffer.from(`line-${String(i).padStart(4, "0")}\n`));
@@ -242,7 +247,13 @@ describe("bash presenter", () => {
 			result: { content: result.content, details: result.details, isError: result.isError === true, partial: false },
 			cwd,
 		});
-		expect(plain(presented.summary)).toBe(`${status} · 4000 lines`);
+		expect(presented.summary?.[0]).toEqual({
+			type: "terminal",
+			key: "tail",
+			lines: ["line-3996", "line-3997", "line-3998", "line-3999", "line-4000"],
+			omittedLines: 3995,
+		});
+		expect(presented.summary?.at(-1)).toMatchObject({ key: "status", text: status });
 		const body = plain(presented.body);
 		expect(body.match(/Full output:/g)).toHaveLength(1);
 		expect(body).toContain("Truncated: showing 2000 of 4000 lines");
@@ -497,6 +508,41 @@ describe("edit presenter", () => {
 			{ kind: "hunk", text: "…" },
 		]);
 		expect(presented.summary?.find((node) => node.type === "diff")).toMatchObject({ lineNumbers: true });
+		// A diff the summary shows whole needs no body.
+		expect(presented.body).toBeUndefined();
+	});
+
+	it("collapses a diff longer than sixteen lines to its start and shows it whole expanded", () => {
+		const diff = Array.from({ length: 30 }, (_, index) => `+${String(index + 1).padStart(2)} line ${index + 1}`).join(
+			"\n",
+		);
+		const presented = present(
+			presentEdit,
+			input({ path: "a.ts", edits: [] }, "done", { text: "ok", details: { diff, diagnostics: "a.ts:1 error" } }),
+		);
+		// The title counts the whole change.
+		expect(title(presented)).toBe("edit a.ts +30 -0");
+		const collapsed = presented.summary?.find((node) => node.type === "diff");
+		expect(collapsed?.type === "diff" ? collapsed.lines.map((line) => line.newLine) : []).toEqual(
+			Array.from({ length: 16 }, (_, index) => index + 1),
+		);
+		expect(presented.summary?.slice(1)).toEqual([
+			{ type: "text", key: "more", text: "… 14 more lines", token: "muted" },
+			{ type: "text", key: "diagnostics", text: "a.ts:1 error", token: "warning" },
+		]);
+		const expanded = presented.body?.find((node) => node.type === "diff");
+		expect(expanded).toMatchObject({ lineNumbers: true });
+		expect(expanded?.type === "diff" ? expanded.lines.length : 0).toBe(30);
+		expect(presented.body?.at(-1)).toMatchObject({ key: "diagnostics" });
+
+		// A preview bounds its replacements alike while the call streams.
+		const long = Array.from({ length: 25 }, (_, index) => `line ${index}`).join("\n");
+		const preview = present(
+			presentEdit,
+			input({ path: "a.ts", edits: [{ oldText: "x", newText: long }] }, "pending"),
+		);
+		expect(plain(preview.summary)).toContain("… 10 more lines");
+		expect(preview.body?.[0]).toMatchObject({ type: "diff", lineNumbers: false });
 	});
 
 	it("shows only the error of a failed edit", () => {
