@@ -166,7 +166,8 @@ async function setup(
 		settings: { lsp: { enabled: false }, retry: { enabled: false } },
 	});
 	cleanups.push(async () => {
-		parent.cleanup();
+		// Join the parent's Git scans before another cleanup removes their working directory.
+		await parent.cleanupAsync();
 		await manager.dispose().catch(() => undefined);
 		for (const child of children) await child.cleanupAsync().catch(() => undefined);
 	});
