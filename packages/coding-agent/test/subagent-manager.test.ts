@@ -1484,6 +1484,123 @@ describe("SubagentManager", () => {
 		expect(scope.snapshot()).toMatchObject({ startsUsed: 1, activeDescendants: 0 });
 	});
 
+	it("runs a nested scope within its parent: stricter limits, shared permits, and shared accounting", () => {
+		const parent = new SubagentDelegationScope({
+			limits: { maxStarts: 2, maxTotalCostUsd: 10 },
+			turnLimits: { maxTurns: 50 },
+		});
+		cleanups.push(() => parent.dispose());
+		const nested = new SubagentDelegationScope({
+			parent,
+			limits: { maxStarts: 5, maxTotalCostUsd: 1, maxTotalTokens: 1_000 },
+			turnLimits: { maxTurns: 200 },
+		});
+		cleanups.push(() => nested.dispose());
+
+		// Each requested limit applies only where stricter; omitted ones keep the parent's.
+		expect(nested.limits).toEqual({
+			...DEFAULT_SUBAGENT_DELEGATION_LIMITS,
+			maxStarts: 2,
+			maxTotalCostUsd: 1,
+			maxTotalTokens: 1_000,
+		});
+		expect(nested.turnLimits).toEqual({ warnAtTurns: 50, maxTurns: 50 });
+		expect(nested.isWithin(parent)).toBe(true);
+		expect(parent.isWithin(nested)).toBe(false);
+
+		// A nested reservation takes the parent's permits too, and a rollback returns both.
+		const rolledBack = nested.reserve("worker", 2);
+		expect(parent.snapshot()).toMatchObject({ startsUsed: 1, activeDescendants: 1, maxDepthReached: 2 });
+		rolledBack.rollback();
+		expect(parent.snapshot()).toMatchObject({ startsUsed: 0, activeDescendants: 0 });
+		expect(nested.snapshot()).toMatchObject({ startsUsed: 0, activeDescendants: 0 });
+
+		// The parent's limits bind the nested scope.
+		const sibling = parent.reserve("other", 1);
+		sibling.commit("sa_sibling", () => undefined);
+		let childAborts = 0;
+		const child = nested.reserve("worker", 2);
+		child.commit("sa_child", () => {
+			childAborts += 1;
+		});
+		expect(() => nested.reserve("worker", 2)).toThrow(/limit of 2 \(maxStarts\)/);
+		expect(nested.snapshot()).toMatchObject({ startsUsed: 1, activeDescendants: 1 });
+		expect(nested.capacitySnapshot().maxStarts).toEqual({ maximum: 2, used: 2, reserved: 0, remaining: 0 });
+
+		// Usage counts toward both; crossing the nested budget stops only the nested scope's runs.
+		nested.recordTurn();
+		nested.recordUsage(400, 2);
+		expect(nested.signal.aborted).toBe(true);
+		expect(nested.signal.reason).toEqual(
+			new Error(`Subagent delegation tree ${nested.id} exceeded its $1 cost budget (maxTotalCostUsd).`),
+		);
+		expect(childAborts).toBe(1);
+		expect(parent.signal.aborted).toBe(false);
+		expect(parent.snapshot()).toMatchObject({ turnsUsed: 1, tokensUsed: 400, costUsd: 2 });
+		child.release();
+		sibling.release();
+		expect(parent.snapshot()).toMatchObject({ startsUsed: 2, activeDescendants: 0 });
+	});
+
+	it("aborts a nested scope with its parent, and frees the parent's batch permits with the nested batch", () => {
+		const parent = new SubagentDelegationScope({ limits: { maxStarts: 3 } });
+		cleanups.push(() => parent.dispose());
+		const nested = new SubagentDelegationScope({ parent });
+		cleanups.push(() => nested.dispose());
+
+		const batch = nested.reserveBatch({ requestedStarts: 2, peakActiveDescendants: 1, depth: 1 });
+		expect(parent.capacitySnapshot().maxStarts).toEqual({ maximum: 3, used: 0, reserved: 2, remaining: 1 });
+		const reservation = batch.reserve("worker");
+		let aborts = 0;
+		reservation.commit("sa_batch", () => {
+			aborts += 1;
+		});
+		expect(parent.snapshot()).toMatchObject({ startsUsed: 1, activeDescendants: 1 });
+		batch.release();
+		expect(parent.capacitySnapshot().maxStarts).toEqual({ maximum: 3, used: 1, reserved: 0, remaining: 2 });
+
+		const reason = new Error("parent stopped");
+		parent.abort(reason);
+		expect(nested.signal.reason).toBe(reason);
+		expect(aborts).toBeGreaterThan(0);
+		expect(() => nested.reserve("worker", 1)).toThrow("parent stopped");
+		reservation.release();
+		expect(parent.snapshot()).toMatchObject({ activeDescendants: 0 });
+
+		// A request is checked on its own, even where the parent's limits would hide it.
+		expect(() => new SubagentDelegationScope({ parent, limits: { maxTotalTokens: 0 } })).toThrow(
+			/maxTotalTokens must be a positive number or Infinity/,
+		);
+		expect(() => new SubagentDelegationScope({ parent, turnLimits: { warnAtTurns: 10, maxTurns: 5 } })).toThrow(
+			/warnAtTurns \(10\) must not exceed maxTurns \(5\)/,
+		);
+	});
+
+	it("keeps a subagent runtime's children in its delegation tree", async () => {
+		const tree = createTestDelegationScope();
+		const { manager } = await createTestManager({
+			resourceLoader: createSubagentResourceLoader([createDefinition({ name: "worker" })]),
+			subagentContext: createTestSubagentContext({
+				depth: 1,
+				agentName: "coordinator",
+				path: ["coordinator"],
+				delegationScope: tree,
+				allowedSubagents: ["worker"],
+			}),
+		});
+
+		await expect(manager.startByName("worker", { delegationScope: createTestDelegationScope() })).rejects.toThrow(
+			"Cannot start subagent: the delegation scope is outside this subagent's delegation tree.",
+		);
+		const nested = new SubagentDelegationScope({ parent: tree, limits: { maxTotalTokens: 1_000 } });
+		cleanups.push(() => nested.dispose());
+		const handle = await manager.startByName("worker", { delegationScope: nested });
+		expect(nested.snapshot()).toMatchObject({ startsUsed: 1, activeDescendants: 1 });
+		expect(tree.snapshot()).toMatchObject({ startsUsed: 1, activeDescendants: 1, maxDepthReached: 2 });
+		await handle.dispose();
+		expect(tree.snapshot()).toMatchObject({ startsUsed: 1, activeDescendants: 0 });
+	});
+
 	it("lets hosts explicitly opt out of both per-runtime turn stages", () => {
 		const scope = new SubagentDelegationScope({ turnLimits: { maxTurns: Number.POSITIVE_INFINITY } });
 		cleanups.push(() => scope.dispose());

@@ -264,7 +264,7 @@ export default function (volt: ExtensionAPI<ExtensionSettingsOf<typeof manifest>
 
 | Permission | Allows | Enforced |
 |------------|--------|----------|
-| `exec` | `volt.exec` | Yes: `volt.exec` rejects without it |
+| `exec` | `volt.exec`, starting subagents with `ctx.subagents.start`, and creating or removing worktrees with `ctx.worktrees` | Yes: each rejects without it |
 | `providers` | `volt.registerProvider`, `volt.unregisterProvider`, and registering or reaching provider implementations through `ctx.modelRegistry` and its `client` | Yes |
 | `secrets` | `ctx.modelRegistry.authStorage`, `getApiKeyAndHeaders`, `getApiKeyForProvider`, `login`, and `client.generateImages`; without it, `ctx.modelRegistry.client` requests go only to catalog models as the catalog has them (same `baseUrl` and headers) | Yes |
 | `network` | Network access | No: declared and shown only |
@@ -277,7 +277,7 @@ Permissions are advisory: extensions run in your process and can reach Node's ow
 `extensions.<id>.enabled` in global or (trusted) project settings decides whether an extension runs; it does by default. A disabled extension's factory never runs: a package's entry is not imported until it is enabled, and a single file is evaluated only to read its manifest. Toggle one with `/extensions` (pick it, then Enable or Disable), `/extensions enable <id>`, `/extensions disable <id>`, or the `set_extension_enabled` intent ([rpc.md](rpc.md)); every open conversation follows at once, without `/reload`.
 
 - **Enabling** runs a new instance: its factory, then `activate` (`reason: "enable"`) and `session_start` (`reason: "enable"`). Its tools are offered from the next request. The new instance gets contexts and a `ctx.ui` of its own; a stopped instance's `ctx.ui` stays stopped even when its id runs again. If you have not acknowledged its permissions, the client that enables it asks you to; a paired device cannot enable it until you have. A session runs an extension enabled meanwhile (by another client, conversation, or a settings edit) only once its permissions are acknowledged; until then it is listed as failed.
-- **Disabling** stops it at once: no hook, command, intent, shortcut, completion provider, or presenter of it runs again, and its tool calls show the built-in or generic presentation and its custom messages their text. It hears `session_shutdown` (`reason: "disable"`) and `deactivate` (`reason: "disable"`), for at most 10 seconds; then its status items, panels, title, pending dialogs, providers (registered through `volt` or `ctx.modelRegistry`), and managed-services tasks go, and its running work is cancelled (waited for up to 10 seconds, then finished `cancelled`). From then on its `volt` registers nothing and its calls that steer the conversation (`sendMessage`, `sendUserMessage`, `appendEntry`, `setModel`, `ctx.abort()`, `ctx.newSession()`, ...) throw, and its `ctx.ui` shows nothing. Its tools leave at the next turn boundary: a tool call already running finishes first. Then its `volt` and every context it was given throw, and its `volt.events` listeners are removed.
+- **Disabling** stops it at once: no hook, command, intent, shortcut, completion provider, or presenter of it runs again, and its tool calls show the built-in or generic presentation and its custom messages their text. It hears `session_shutdown` (`reason: "disable"`) and `deactivate` (`reason: "disable"`), for at most 10 seconds; then its status items, panels, title, pending dialogs, providers (registered through `volt` or `ctx.modelRegistry`), and managed-services tasks go, its running work is cancelled (waited for up to 10 seconds, then finished `cancelled`), and so are the subagent runs it started. From then on its `volt` registers nothing and its calls that steer the conversation (`sendMessage`, `sendUserMessage`, `appendEntry`, `setModel`, `ctx.abort()`, `ctx.newSession()`, ...) throw, and its `ctx.ui` shows nothing. Its tools leave at the next turn boundary: a tool call already running finishes first. Then its `volt` and every context it was given throw, and its `volt.events` listeners are removed.
 - Skills, prompts, and themes an extension adds through `resources_discover` change on the next `/reload`.
 
 `/store install` and `/store remove` pick up an installed or removed extension the same way; `/reload` reloads every extension (`deactivate` and `activate` with `reason: "reload"`).
@@ -1237,6 +1237,58 @@ volt.on("before_agent_start", (event, ctx) => {
 ### ctx.startWork(kind, options, run)
 
 Starts background work of a kind the extension registered with [`volt.registerWorkKind()`](#voltregisterworkkindname-kind). Resolves with `{ workId }` once the work is recorded; `run` then executes in the background. An extension starts only its own kinds: `kind` is the name it registered, and another extension's kind (or a built-in kind such as `job`) is never found. The context of a `ctx.newSession()`/`ctx.fork()`/`ctx.switchSession()` `withSession` callback cannot start work.
+
+### ctx.subagents
+
+Runs agents as work of the conversation: each run is a `subagent` item every client shows in its work list and subagent tree, with the child's conversation to open. Starting one needs the [`exec` permission](#permissions), since the child runs the conversation's tools; it runs under the conversation's tool policy, never a wider one.
+
+```typescript
+volt.registerCommand("fix-issue", {
+  handler: async (args, ctx) => {
+    const run = await ctx.subagents.start({
+      agent: "general",
+      task: `Fix issue #${args} and open a pull request.`,
+      cwd: checkoutPath, // optional
+      limits: { maxTurns: 60, maxTotalCostUsd: 5, maxDurationMs: 3_600_000 },
+    });
+    const result = await run.ended; // { status, output?, error?, usage: { tokens, cost } }
+    ctx.ui.notify(`#${args}: ${result.status}`);
+  },
+});
+```
+
+- `definitions()` lists the agent definitions the conversation may start now (`name`, `description`).
+- `start({ agent, task, cwd?, limits?, parentWorkId? })` resolves once the child accepted `task`, with the run's `id` (its work id), the child's `sessionId`, and `ended`, which resolves once the run ended and its conversation closed (so what the child held, such as its checkout, is free; it waits at most 10 seconds for the close) and never rejects: `status` (`completed`, `failed`, or `cancelled`), the child's final reply as `output`, an `error`, and the `usage` its replies reported (tokens, cache reads and writes included, and cost in USD).
+  - `cwd` is an absolute path to a directory inside the conversation's working directory, or inside a [managed worktree](daemon.md#git-worktrees) of the same repository; the conversation's working directory by default.
+  - `limits` stop the run: `maxTurns` (assistant turns before the child must give a final report without tools), `maxTotalTokens`, `maxTotalCostUsd`, and `maxDurationMs` (the child and the subagents it starts). Each only tightens the host's limit, which still applies (by default 120 turns and no token, cost, or time limit); omitted ones keep the host's. A run started inside a subagent's conversation also stays within that subagent's limits. `maxDurationMs` must be at most 2,147,483,647 ms (about 24.9 days); larger values reject before a run starts.
+  - `parentWorkId` names running work of the extension's own kind: clients show the run under it.
+- `cancel(id)` cancels a run the extension started (another extension's is not found); its `ended` resolves `cancelled`. A run that already ended is left as it is.
+
+A panel or work detail of the extension may open or cancel the runs it started (`open_work`, `cancel_work`). Disabling the extension cancels its runs, those still starting included: such a `start` rejects, and a child that had not taken its task yet never does. Runs are work: a restart leaves an unfinished one suspended, as it does a model's subagent, and its `ended` is gone with the process.
+
+### ctx.worktrees
+
+The [managed worktrees](daemon.md#git-worktrees) of the repository the conversation works in, so that each subagent can work in a checkout of its own. That is the Git repository holding the conversation's working directory, or, for a conversation in a managed worktree, the one the worktree was created from: in a workspace that holds several repositories, a conversation sees only its own repository's worktrees. Available in a conversation the daemon hosts (every interactive Volt conversation); elsewhere (`volt -p`, `--mode rpc`, the SDK) both methods reject.
+
+```typescript
+const existing = (await ctx.worktrees.list()).find((worktree) => worktree.id === "issue-12");
+if (existing && !existing.available) {
+  throw new Error("issue-12 is archived; resume its session to restore it, or choose a new worktree name.");
+}
+const worktree = existing ?? (await ctx.worktrees.create({ name: "issue-12", baseRef: "main" }));
+await ctx.subagents.start({ agent: "general", task: "Fix issue #12.", cwd: worktree.path });
+```
+
+- `list()` resolves with the repository's worktrees: `id`, checkout `path`, `branch`, `baseRef`, whether the checkout is `available` (the daemon archives an idle, clean checkout it may reclaim; an archived one has no checkout to run in), and whether it is `dirty` when the daemon checked.
+- `create({ name?, branch?, baseRef?, reuseBranch? })` needs the `exec` permission. It creates the repository's worktree `name` (a generated id by default; an id is unique in the workspace) on a new `branch` (`volt/<name>` by default) from `baseRef` (the current branch of the repository's checkout by default). With `reuseBranch: true`, an existing local `branch` is checked out instead, with its commits; `baseRef` then only records the base.
+- `remove(id)` needs the `exec` permission. It removes the checkout of the repository's worktree `id` and keeps its branch. It is never forced: a checkout with changes, or one a conversation still has open, stays.
+- They reject with the daemon's error, whose message starts with its code: `not_a_git_repository` (the conversation's directory is in no repository), `worktree_exists`, `worktree_branch_conflict`, `worktree_limit_reached` (a workspace holds at most 16 checkouts), `worktree_dirty`, `worktree_busy`, `worktree_not_found`, and so on.
+
+Repository scope follows the canonical Git common directory, not a checkout's path: conversations in the primary checkout, unmanaged linked checkouts inside the workspace, and its managed worktrees see the same managed worktrees of that workspace. Creating a worktree still uses the selected source checkout's current branch or commit by default; it does not switch to the primary checkout's `HEAD`.
+
+An archived worktree still reserves its id. `ctx.worktrees` cannot restore it: resume a session bound to it through Volt, or create a worktree with a different name (omit `name` for a generated id). A repository nested inside a managed checkout is unsupported: these methods reject with `nested_git_repository_unsupported` rather than operating on the enclosing repository.
+
+The daemon's retention and removal rules apply to these worktrees as to any other; merging a branch back stays the extension's or the user's action.
 
 ### ctx.reviews
 
@@ -2891,7 +2943,7 @@ Actions `{ id, label, token?, disabled?, destructive?, intent: { type, input? } 
 
 - its own commands, `extension.command.<id>.<command>`;
 - its own intents, `extension.intent.<id>.<name>`, which [`volt.registerIntent()`](#voltregisterintentname-options) returns;
-- `open_work` and `cancel_work` with an `input.workId` of work its own kinds run.
+- `open_work` and `cancel_work` with an `input.workId` of work its own kinds run; panels, dialog bodies, and work details may also target subagent runs the extension started.
 
 The host leaves out every other action, and a form whose `submit` it may not send, before any client sees them; in panels and dialogs it also reports an extension error.
 

@@ -2,6 +2,7 @@ import { createHash, randomInt } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { mkdir, readdir, realpath, rename, rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
+import { discoverGitWorktree } from "../core/git-repository.ts";
 import type { PrReviewLaunch } from "../core/pr-review-placement.ts";
 import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import { IROH_REMOTE_WORKTREE_ID_PATTERN } from "../core/remote/iroh/protocol.ts";
@@ -236,7 +237,7 @@ export interface WorktreeRuntimePreparation {
 interface WorktreeSourceResolution {
 	/** Selected directory under the registered workspace, preserving the remote relative path. */
 	workspaceDirectory: WorkspaceDirectoryResolution;
-	/** Git repository root used as `git worktree add` cwd. Host-local; never sent on the wire. */
+	/** Source checkout used as `git worktree add` cwd, not repository identity. Host-local; never sent on the wire. */
 	sourceRootPath: string;
 	/** Registered-workspace-relative git repository root. Undefined means the registered workspace root. */
 	sourceRootRelativePath?: string;
@@ -520,6 +521,8 @@ export class WorktreeManager {
 			signal?: AbortSignal;
 			prReviewLaunch?: PrReviewLaunch;
 			assertCurrent?: () => void;
+			/** Check out `branch` when it already exists locally, instead of failing; `baseRef` then only records the base. */
+			reuseBranch?: boolean;
 		} = {},
 	): Promise<WorktreeResult<{ worktree: IrohRemoteWorkspaceWorktree }>> {
 		const runGit = options.prReviewLaunch ? runPrReviewGit : this.runGit;
@@ -574,16 +577,30 @@ export class WorktreeManager {
 				options.assertCurrent?.();
 				if (options.prReviewLaunch && options.prReviewLaunch.placement.cwd !== checkoutPath)
 					throw new Error("PR checkout placement changed");
+				const reuse =
+					options.reuseBranch === true &&
+					!options.prReviewLaunch &&
+					(
+						await runGit(
+							["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`],
+							source.source.sourceRootPath,
+							{
+								signal: options.signal,
+							},
+						)
+					).ok;
 				const added = await runGit(
-					[
-						"worktree",
-						"add",
-						...(options.prReviewLaunch ? ["--no-checkout"] : []),
-						checkoutPath,
-						"-b",
-						branch,
-						baseRef,
-					],
+					reuse
+						? ["worktree", "add", checkoutPath, branch]
+						: [
+								"worktree",
+								"add",
+								...(options.prReviewLaunch ? ["--no-checkout"] : []),
+								checkoutPath,
+								"-b",
+								branch,
+								baseRef,
+							],
 					source.source.sourceRootPath,
 					{ signal: options.signal },
 				);
@@ -890,12 +907,99 @@ export class WorktreeManager {
 		};
 	}
 
-	async list(workspace: IrohRemoteWorkspace): Promise<WorktreeStatus[]> {
+	/**
+	 * The repository a conversation in `cwd` works in, as its source checkout
+	 * in `workspace`: the source of the managed worktree holding `cwd`, else
+	 * the Git repository holding it. A nested repository inside a managed
+	 * checkout is unsupported, never attributed to the enclosing repository.
+	 * `workingDirectory` (workspace-relative, the workspace root when undefined)
+	 * creates worktrees of that repository.
+	 */
+	async resolveConversationRepository(
+		workspace: IrohRemoteWorkspace,
+		cwd: string,
+	): Promise<WorktreeResult<{ sourceRootPath: string; workingDirectory?: string }>> {
+		const cwdReal = await realpathOrResolve(cwd);
+		let record: IrohRemoteWorkspaceWorktree | undefined;
+		let matchedPathLength = -1;
+		for (const worktree of await this.stateManager.listWorktrees(workspace.name)) {
+			const checkoutPath = await realpathOrResolve(worktree.path);
+			if (isPathContained(checkoutPath, cwdReal) && checkoutPath.length > matchedPathLength) {
+				record = worktree;
+				matchedPathLength = checkoutPath.length;
+			}
+		}
+		if (record !== undefined) {
+			const repository = discoverGitWorktree(cwdReal);
+			if (repository === null) return { ok: false, error: "not_a_git_repository" };
+			if (!isSamePath(repository.worktreeRoot, await realpathOrResolve(record.path))) {
+				return {
+					ok: false,
+					error: "nested_git_repository_unsupported",
+					detail: "nested repositories inside managed worktree checkouts are not supported",
+				};
+			}
+			const sourceRootPath = await this.resolveRecordSourceRootPath(workspace, record);
+			if (sourceRootPath === undefined) return { ok: false, error: "worktree_source_unregistered" };
+			return {
+				ok: true,
+				sourceRootPath,
+				...(record.sourceRootRelativePath === undefined ? {} : { workingDirectory: record.sourceRootRelativePath }),
+			};
+		}
+		const workingDirectory = getContainedRelativePath(await realpathOrResolve(workspace.path), cwdReal);
+		if (workingDirectory === null) {
+			return {
+				ok: false,
+				error: "invalid_working_directory",
+				detail: "the conversation's directory is outside the workspace",
+			};
+		}
+		const source = await this.resolveCreateSource(workspace, workingDirectory);
+		if (!source.ok) return source;
+		return {
+			ok: true,
+			sourceRootPath: source.source.sourceRootPath,
+			...(source.source.sourceRootRelativePath === undefined
+				? {}
+				: { workingDirectory: source.source.sourceRootRelativePath }),
+		};
+	}
+
+	/** Whether the worktree shares a canonical Git common directory with the source checkout, within `workspace`. */
+	async isRepositoryWorktree(
+		workspace: IrohRemoteWorkspace,
+		worktreeId: string,
+		sourceRootPath: string,
+	): Promise<boolean> {
+		const record = await this.findWorktree(workspace.name, worktreeId);
+		const recordSourceRootPath =
+			record === undefined ? undefined : await this.resolveRecordSourceRootPath(workspace, record);
+		if (recordSourceRootPath === undefined) return false;
+		const commonGitDir = await this.resolveRepositoryCommonGitDir(sourceRootPath);
+		const recordCommonGitDir = await this.resolveRepositoryCommonGitDir(recordSourceRootPath);
+		return (
+			commonGitDir !== undefined && recordCommonGitDir !== undefined && isSamePath(recordCommonGitDir, commonGitDir)
+		);
+	}
+
+	/** The worktrees of `workspace`; `sourceRootPath` scopes by repository, shared across all its source checkouts. */
+	async list(workspace: IrohRemoteWorkspace, options: { sourceRootPath?: string } = {}): Promise<WorktreeStatus[]> {
+		const commonGitDir =
+			options.sourceRootPath === undefined
+				? undefined
+				: await this.resolveRepositoryCommonGitDir(options.sourceRootPath);
+		if (options.sourceRootPath !== undefined && commonGitDir === undefined) return [];
 		const records = await this.stateManager.listWorktrees(workspace.name);
 		const gitListBySourceRoot = new Map<string, Set<string> | undefined>();
 		const statuses: WorktreeStatus[] = [];
 		for (const record of records) {
 			const sourceRootPath = await this.resolveRecordSourceRootPath(workspace, record);
+			if (commonGitDir !== undefined) {
+				const recordCommonGitDir =
+					sourceRootPath === undefined ? undefined : await this.resolveRepositoryCommonGitDir(sourceRootPath);
+				if (recordCommonGitDir === undefined || !isSamePath(recordCommonGitDir, commonGitDir)) continue;
+			}
 			const knownCheckouts =
 				sourceRootPath === undefined
 					? undefined
@@ -924,6 +1028,19 @@ export class WorktreeManager {
 			});
 		}
 		return statuses;
+	}
+
+	/** Repository identity is shared Git metadata, not a particular source checkout or its HEAD. */
+	private async resolveRepositoryCommonGitDir(sourceRootPath: string): Promise<string | undefined> {
+		const sourceRootReal = await realpathOrResolve(sourceRootPath);
+		const repository = discoverGitWorktree(sourceRootReal);
+		// A removed source's .git must not make its records belong to an enclosing repository.
+		if (repository === null || !isSamePath(repository.worktreeRoot, sourceRootReal)) return undefined;
+		try {
+			return await realpath(repository.commonGitDir);
+		} catch {
+			return undefined;
+		}
 	}
 
 	private async getKnownWorktreeCheckouts(
@@ -2109,7 +2226,8 @@ function resolveRequestWorkspaces(
 	return workspace ? { ok: true, workspaces: [workspace] } : { ok: false, missing: workspaceName };
 }
 
-function toControlWorktreeStatus(
+/** A worktree's status as the local control socket carries it, checkout path included. */
+export function toControlWorktreeStatus(
 	worktree: IrohRemoteWorkspaceWorktree & Partial<Pick<WorktreeStatus, "aheadBehind">>,
 	available?: boolean,
 	dirty?: boolean,

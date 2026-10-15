@@ -212,6 +212,47 @@ interface SubagentRunControl {
 	readonly detached?: boolean;
 	/** Continue suspended work under its id instead of starting new work. */
 	readonly resume?: { readonly item: WorkRecord; readonly task?: string };
+	/** The work the child's work belongs to in the conversation's log. */
+	readonly parentWorkId?: string;
+}
+
+/** How a subagent run that is work of the manager's conversation starts (`startRun`). */
+export interface SubagentRunOptions {
+	/** The child's working directory: the manager's by default. */
+	readonly cwd?: string;
+	/**
+	 * Limits of the run and its descendants. They only tighten the limits the run
+	 * runs within: the manager's, or in a subagent runtime those of its
+	 * delegation tree, which still apply.
+	 */
+	readonly limits?: SubagentDelegationScopeLimits;
+	/** Turn limits of the child and its descendants, under the same rule. */
+	readonly turnLimits?: SubagentTurnLimits;
+	/** The work the run belongs to in the conversation's log. */
+	readonly parentWorkId?: string;
+	/**
+	 * Aborting it stops the run: a start under way rejects, its child taking no task or its work cancelled once the
+	 * child took it, and a started run's work is cancelled.
+	 */
+	readonly signal?: AbortSignal;
+}
+
+/** How a subagent run ended. */
+export interface SubagentRunEnd {
+	readonly status: SubagentResultStatus;
+	/** The child's final reply, when it gave one. */
+	readonly output?: string;
+	readonly error?: string;
+	/** What the child's replies reported using: their tokens (cache reads and writes included) and cost. */
+	readonly usage: { readonly tokens: number; readonly cost: number };
+}
+
+/** A started subagent run: its work id, its child conversation, and how it ends. */
+export interface SubagentRun {
+	readonly workId: string;
+	readonly conversation: string;
+	/** Resolves once the run ended and its conversation closed (waiting at most 10 seconds for that); never rejects. */
+	readonly ended: Promise<SubagentRunEnd>;
 }
 
 export interface SubagentStartByNameOptions extends SubagentStartOptions {
@@ -252,6 +293,8 @@ const VALID_THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low"
 const MAX_RETAINED_ACTIVITIES = 50;
 const MAX_RETAINED_ACTIVITY_EVENTS = 2_000;
 const DELEGATION_SNAPSHOT_MAX_RECORDS = 25;
+/** Longest a started run's `ended` waits, after the run ended, for its conversation to close. */
+const RUN_CLOSE_WAIT_MS = 10_000;
 
 interface SubagentCallerBatchReservation {
 	reserve(): () => void;
@@ -900,15 +943,146 @@ export class SubagentManager {
 	 * conversation closes. Resolves once the child accepted `task`.
 	 */
 	async startWork(agentName: string, task: string): Promise<{ workId: string; conversation: string }> {
+		const run = await this.startRun(agentName, task);
+		return { workId: run.workId, conversation: run.conversation };
+	}
+
+	/**
+	 * Start a subagent as work of the manager's conversation, as `startWork`
+	 * does, in `options.cwd` and under `options.limits`. Resolves once the child
+	 * accepted `task`; `ended` resolves with how the run ended.
+	 */
+	async startRun(agentName: string, task: string, options: SubagentRunOptions = {}): Promise<SubagentRun> {
 		if (!this.workBinding) throw new Error("Subagents start as work only in a conversation");
+		const { signal } = options;
+		if (signal?.aborted) throw new Error("Operation aborted");
 		// Clamped to the conversation's tool policy, as a tool's start and a resume are.
 		const allowedTools = this.workBinding.allowedTools();
-		const handle = await this.startNamed(agentName, allowedTools === undefined ? {} : { allowedTools }, {
-			detached: true,
+		const scope = this.createRunScope(options);
+		let handle: LocalSubagentHandle;
+		try {
+			handle = await this.startNamed(
+				agentName,
+				{
+					...(allowedTools === undefined ? {} : { allowedTools }),
+					...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+					...(scope === undefined ? {} : { delegationScope: scope.scope }),
+				},
+				{ detached: true, ...(options.parentWorkId === undefined ? {} : { parentWorkId: options.parentWorkId }) },
+			);
+		} catch (error) {
+			scope?.dispose();
+			throw error;
+		}
+		let tokens = 0;
+		let cost = 0;
+		handle.onEvent((event) => {
+			if (event.type !== "message_end" || event.message.role !== "assistant") return;
+			const usage = event.message.usage;
+			tokens += usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+			cost += usage.cost.total;
 		});
-		// A rejected prompt disposes the handle; its work, if recorded, ends failed.
-		await handle.prompt(task);
-		return { workId: handle.id, conversation: handle.sessionId };
+		const ended = handle
+			.waitForEnd()
+			.then(
+				(result): SubagentRunEnd => {
+					const output = getFinalAssistantText(result.event);
+					return {
+						status: result.status,
+						...(output === undefined ? {} : { output }),
+						...(result.error === undefined ? {} : { error: result.error }),
+						usage: { tokens, cost },
+					};
+				},
+				(error: unknown): SubagentRunEnd => ({
+					status: "failed",
+					error: errorMessage(error),
+					usage: { tokens, cost },
+				}),
+			)
+			.then(async (end) => {
+				// The run's conversation closes as its work ends: wait for it, so what the child held
+				// (such as its checkout) is free once `ended` resolves. Bounded: a close that hangs
+				// does not hold the caller.
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				await Promise.race([
+					handle.conversation.whenClosed(),
+					new Promise<void>((resolve) => {
+						timer = setTimeout(resolve, RUN_CLOSE_WAIT_MS);
+						timer.unref?.();
+					}),
+				]);
+				clearTimeout(timer);
+				return end;
+			})
+			.finally(() => scope?.dispose());
+		// An abort while the child starts or takes its task refuses its prompt, before its work is recorded or at
+		// admission at the latest, so it requests nothing of its model.
+		const refuse = (): void => {
+			void handle.abort().catch(() => undefined);
+		};
+		signal?.addEventListener("abort", refuse, { once: true });
+		if (signal?.aborted) refuse();
+		try {
+			// A rejected prompt disposes the handle; its work, if recorded, ends failed (cancelled when aborted).
+			await handle.prompt(task);
+		} finally {
+			signal?.removeEventListener("abort", refuse);
+		}
+		if (signal) {
+			const cancel = (): void => {
+				void this.cancelRun(handle.id).catch(() => undefined);
+			};
+			if (signal.aborted) {
+				// Aborted as the child took its task.
+				cancel();
+				throw new Error("Operation aborted");
+			}
+			signal.addEventListener("abort", cancel, { once: true });
+			void ended.then(() => signal.removeEventListener("abort", cancel));
+		}
+		return { workId: handle.id, conversation: handle.sessionId, ended };
+	}
+
+	/**
+	 * The delegation scope of a run that asks for its own limits: within the
+	 * scope it would otherwise run in (its subagent runtime's tree, or a tree
+	 * under the manager's limits), so each requested limit applies only where
+	 * it is stricter. `dispose` frees both once the run ended.
+	 */
+	private createRunScope(
+		options: SubagentRunOptions,
+	): { scope: SubagentDelegationScope; dispose(): void } | undefined {
+		if (options.limits === undefined && options.turnLimits === undefined) return undefined;
+		const tree = this.createDelegationScope();
+		const disposeTree = (): void => {
+			if (tree.owned) tree.scope.dispose();
+		};
+		let scope: SubagentDelegationScope;
+		try {
+			scope = new SubagentDelegationScope({
+				parent: tree.scope,
+				...(options.limits === undefined ? {} : { limits: options.limits }),
+				...(options.turnLimits === undefined ? {} : { turnLimits: options.turnLimits }),
+			});
+		} catch (error) {
+			disposeTree();
+			throw error;
+		}
+		return {
+			scope,
+			dispose: () => {
+				scope.dispose();
+				disposeTree();
+			},
+		};
+	}
+
+	/** Cancel a subagent run that is work of the manager's conversation. */
+	async cancelRun(workId: string): Promise<void> {
+		const work = this.workBinding?.work();
+		if (!work) throw new Error("Subagents run as work only in a conversation");
+		await work.cancel(workId);
 	}
 
 	createDelegationScope(options: SubagentDelegationScopeOptions = {}): SubagentDelegationScopeLease {
@@ -1423,8 +1597,14 @@ export class SubagentManager {
 
 	private resolveDelegationScope(requested: SubagentDelegationScope | undefined): SubagentDelegationScopeLease {
 		const inherited = this.subagentContext?.delegationScope;
+		if (requested) {
+			// A subagent runtime's children stay in its delegation tree: a scope outside it would lift the tree's limits.
+			if (inherited && !requested.isWithin(inherited)) {
+				throw new Error("Cannot start subagent: the delegation scope is outside this subagent's delegation tree.");
+			}
+			return { scope: requested, owned: false };
+		}
 		if (inherited) return { scope: inherited, owned: false };
-		if (requested) return { scope: requested, owned: false };
 		return {
 			scope: new SubagentDelegationScope({ limits: this.delegationLimits, turnLimits: this.turnLimits }),
 			owned: true,
@@ -1746,7 +1926,12 @@ export class SubagentManager {
 				} finally {
 					unsubscribeActivity();
 					ctx.signal.removeEventListener("abort", stop);
-					if (control.detached) await handle!.dispose().catch(() => undefined);
+					if (control.detached) {
+						await handle!.dispose().catch(() => undefined);
+						// A detached run's conversation closes with the run, also where the host retains
+						// children for live attachment: nothing else would close it before its owner does.
+						if (!runtime.closed) await childHost.close(runtime).catch(() => undefined);
+					}
 				}
 			};
 			/** Record the child's work before its first prompt, in the conversation the manager belongs to. */
@@ -1763,7 +1948,11 @@ export class SubagentManager {
 						workId: id,
 						...(options.toolCallId === undefined ? {} : { toolCallId: options.toolCallId }),
 						// A nested child's parent is its parent run, in the parent conversation's log.
-						...(this.subagentContext ? { parentWorkId: this.subagentContext.subagentId } : {}),
+						...(control.parentWorkId !== undefined
+							? { parentWorkId: control.parentWorkId }
+							: this.subagentContext
+								? { parentWorkId: this.subagentContext.subagentId }
+								: {}),
 						child: { conversation: childLog.getSessionId(), ...(ref === undefined ? {} : { ref }) },
 					},
 				);

@@ -917,6 +917,16 @@ describe("worktree manager (fake git)", () => {
 		expect(degraded[0]?.aheadBehind).toBeUndefined();
 	});
 
+	it("fails closed for repository-scoped queries when Git identity is unavailable", async () => {
+		const manager = createManager(okGit().runGit);
+		expect((await manager.create(workspace, { id: "unresolved" })).ok).toBe(true);
+		// The fake runner creates a record, but the source has no Git metadata on disk.
+		expect(await manager.list(workspace, { sourceRootPath: workspaceDir })).toEqual([]);
+		expect(await manager.isRepositoryWorktree(workspace, "unresolved", workspaceDir)).toBe(false);
+		// Workspace-wide management still exposes unavailable records for reconciliation.
+		expect(await manager.list(workspace)).toMatchObject([{ id: "unresolved", available: false }]);
+	});
+
 	it("removeIfCleanAndMerged removes only clean, fully merged worktrees (§5.3 retention)", async () => {
 		const behaviors = { dirty: false, merged: true };
 		const git = createFakeGit((args) => {

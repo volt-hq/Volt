@@ -25,6 +25,7 @@ import {
 	type ControlRequest,
 	type ControlResponse,
 	ControlValidators,
+	type ControlWorktreeStatus,
 	type RelayPreamble,
 	type WorkerAuthorityLoss,
 	type WorkerHostKind,
@@ -32,6 +33,7 @@ import {
 	type WorkerSpawnSpec,
 	type WorkerStopReason,
 } from "../control-protocol.ts";
+import type { SessionWorktreeCreateOptions } from "../session-worktree.ts";
 
 /** A `worker_stop` the daemon sent: answer it once with `stopResult`. */
 export interface WorkerStopEvent {
@@ -308,6 +310,33 @@ export class WorkerDaemonClient {
 		return async () => {
 			await this.request({ type: "worker_worktree_release", pinId }).catch(() => undefined);
 		};
+	}
+
+	/** Create a managed worktree of the repository a conversation in `cwd` works in, for its extensions. */
+	async createWorktree(cwd: string, options: SessionWorktreeCreateOptions): Promise<ControlWorktreeStatus> {
+		const response = await this.request({
+			type: "worker_worktree_create",
+			cwd,
+			...(options.name === undefined ? {} : { worktreeName: options.name }),
+			...(options.branch === undefined ? {} : { branch: options.branch }),
+			...(options.baseRef === undefined ? {} : { baseRef: options.baseRef }),
+			...(options.reuseBranch === true ? { reuseBranch: true } : {}),
+		});
+		if (response.type !== "worktree_result") throw new Error(`Unexpected ${response.type}`);
+		return response.worktree;
+	}
+
+	/** Remove a managed worktree of the repository a conversation in `cwd` works in, for its extensions, keeping its branch. */
+	async removeWorktree(cwd: string, id: string): Promise<void> {
+		const response = await this.request({ type: "worker_worktree_remove", cwd, worktreeId: id });
+		if (response.type !== "ok") throw new Error(`Unexpected ${response.type}`);
+	}
+
+	/** The managed worktrees of the repository a conversation in `cwd` works in, for its extensions. */
+	async listWorktrees(cwd: string): Promise<ControlWorktreeStatus[]> {
+		const response = await this.request({ type: "worker_worktree_list", cwd });
+		if (response.type !== "worktrees_result") throw new Error(`Unexpected ${response.type}`);
+		return response.worktrees;
 	}
 
 	close(): Promise<void> {

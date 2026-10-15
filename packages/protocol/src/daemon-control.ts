@@ -1010,6 +1010,33 @@ export const CONTROL_REQUEST_SCHEMAS = {
 	}),
 	/** Worker: release a pin `worker_worktree_restore` took. */
 	worker_worktree_release: withId("worker_worktree_release", { pinId: Type.String({ maxLength: 64 }) }),
+	/**
+	 * Worker: create a managed worktree of the repository its conversation in
+	 * `cwd` works in, in its workspace, for its extensions. Answered by
+	 * `worktree_result`.
+	 */
+	worker_worktree_create: withId("worker_worktree_create", {
+		cwd: codePoints(1, 4096),
+		worktreeName: Type.Optional(Type.String({ maxLength: 128 })),
+		branch: Type.Optional(Type.String({ maxLength: 256 })),
+		baseRef: Type.Optional(Type.String({ maxLength: 256 })),
+		/** Check out `branch` when it already exists, instead of failing. */
+		reuseBranch: Type.Optional(Type.Boolean()),
+	}),
+	/**
+	 * Worker: list the managed worktrees of the repository its conversation in
+	 * `cwd` works in, in its workspace, for its extensions. Answered by `worktrees_result`.
+	 */
+	worker_worktree_list: withId("worker_worktree_list", { cwd: codePoints(1, 4096) }),
+	/**
+	 * Worker: remove a managed worktree of the repository its conversation in
+	 * `cwd` works in, for its extensions, keeping its branch. Refused while the
+	 * worktree is dirty or busy. Answered by `ok`.
+	 */
+	worker_worktree_remove: withId("worker_worktree_remove", {
+		cwd: codePoints(1, 4096),
+		worktreeId: Type.String({ minLength: 1, maxLength: 128 }),
+	}),
 } as const;
 
 /** The requests a worker connection may send; a control connection may send none of them. */
@@ -1030,6 +1057,9 @@ export const WORKER_REQUEST_TYPES = [
 	"worker_close_result",
 	"worker_worktree_restore",
 	"worker_worktree_release",
+	"worker_worktree_create",
+	"worker_worktree_list",
+	"worker_worktree_remove",
 ] as const satisfies readonly (keyof typeof CONTROL_REQUEST_SCHEMAS)[];
 export type WorkerRequestType = (typeof WORKER_REQUEST_TYPES)[number];
 
@@ -1075,6 +1105,9 @@ export const ControlRequestSchema = Type.Union([
 	CONTROL_REQUEST_SCHEMAS.worker_close_result,
 	CONTROL_REQUEST_SCHEMAS.worker_worktree_restore,
 	CONTROL_REQUEST_SCHEMAS.worker_worktree_release,
+	CONTROL_REQUEST_SCHEMAS.worker_worktree_create,
+	CONTROL_REQUEST_SCHEMAS.worker_worktree_list,
+	CONTROL_REQUEST_SCHEMAS.worker_worktree_remove,
 ]);
 export type ControlRequest = Static<typeof ControlRequestSchema>;
 

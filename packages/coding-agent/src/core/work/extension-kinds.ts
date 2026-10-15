@@ -206,13 +206,15 @@ interface OwnedKind {
 /** The extension kinds registered in one conversation's work registry. */
 export class ExtensionKinds {
 	private readonly work: () => WorkRegistry;
+	private readonly ownsUiWork: (extensionId: string, workId: string) => boolean;
 	/** The registered kinds, by extension id, then name. */
 	private kinds = new Map<string, Map<string, OwnedKind>>();
 	/** Declared kinds already refused, so each is reported once. */
 	private refused = new Set<string>();
 
-	constructor(work: () => WorkRegistry) {
+	constructor(work: () => WorkRegistry, ownsUiWork: (extensionId: string, workId: string) => boolean) {
 		this.work = work;
+		this.ownsUiWork = ownsUiWork;
 	}
 
 	/**
@@ -262,7 +264,7 @@ export class ExtensionKinds {
 			const detail = present(structuredClone(work));
 			refuseThenable(detail);
 			return normalizeUiNode(detail, {
-				policy: { owner: "extension", extensionId, ownsWork: (workId) => this.owns(extensionId, workId) },
+				policy: { owner: "extension", extensionId, ownsWork: (workId) => this.ownsUiWork(extensionId, workId) },
 				maxBytes: EXTENSION_DETAIL_MAX_BYTES,
 			});
 		};

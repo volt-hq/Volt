@@ -275,7 +275,12 @@ async function openConversation(
 		validateCwd: (cwd) => assertInsideRoot(spec.root, cwd),
 		onSubagentRuntimeCreated,
 		// Managed checkouts are restored by the daemon over the worker's own connection.
-		worktreeDaemon: { restore: (sessionRef, cwd) => client.restoreWorktree(sessionRef, cwd) },
+		worktreeDaemon: {
+			restore: (sessionRef, cwd) => client.restoreWorktree(sessionRef, cwd),
+			create: (cwd, options) => client.createWorktree(cwd, options),
+			list: (cwd) => client.listWorktrees(cwd),
+			remove: (cwd, id) => client.removeWorktree(cwd, id),
+		},
 	});
 	return runtime;
 }

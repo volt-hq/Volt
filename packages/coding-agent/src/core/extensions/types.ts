@@ -315,11 +315,164 @@ export interface ExtensionContext {
 	 */
 	startWork(kind: string, options: StartWorkOptions, run: WorkRun): Promise<{ readonly workId: string }>;
 	/**
+	 * Subagents the extension runs as work of the conversation: each shows in
+	 * every client's work list and subagent tree, and runs under the
+	 * conversation's tool policy. Starting one needs the `exec` permission.
+	 */
+	readonly subagents: ExtensionSubagents;
+	/**
+	 * The managed worktrees of the conversation's workspace, in a conversation
+	 * the daemon hosts. Creating one needs the `exec` permission.
+	 */
+	readonly worktrees: ExtensionWorktrees;
+	/**
 	 * Reviews of the conversation: the extension starts one on any engine the
 	 * conversation can run, as `/review` does, and reads how it ended. Starting
 	 * one needs the `exec` permission.
 	 */
 	readonly reviews: ExtensionReviews;
+}
+
+// ============================================================================
+// Worktrees
+// ============================================================================
+
+/** A managed worktree of the conversation's workspace. */
+export interface ExtensionWorktree {
+	readonly id: string;
+	/** Its checkout: a subagent may run there (`ctx.subagents.start({ cwd })`). */
+	readonly path: string;
+	readonly branch: string;
+	readonly baseRef?: string;
+	/** Whether its checkout is on disk: the daemon archives an idle, clean one it may reclaim. */
+	readonly available: boolean;
+	/** Whether its checkout has uncommitted changes, when the daemon checked. */
+	readonly dirty?: boolean;
+}
+
+/** A managed worktree to create; the daemon's defaults apply to what is omitted. */
+export interface ExtensionWorktreeCreateOptions {
+	/** Its id, unique in the workspace: a generated name by default. */
+	readonly name?: string;
+	/** Its branch: `volt/<id>` by default. */
+	readonly branch?: string;
+	/** The ref the branch starts from: the current branch of the repository's checkout by default. */
+	readonly baseRef?: string;
+	/** Check out `branch` when it already exists locally, instead of failing; `baseRef` then only records the base. */
+	readonly reuseBranch?: boolean;
+}
+
+/**
+ * The managed worktrees an extension reaches (`ctx.worktrees`): those of the
+ * repository the conversation works in, in its workspace.
+ */
+export interface ExtensionWorktrees {
+	/** The repository's managed worktrees. Rejects outside a conversation the daemon hosts. */
+	list(): Promise<ExtensionWorktree[]>;
+	/**
+	 * Create a managed worktree of the repository. Needs the `exec` permission;
+	 * rejects outside a conversation the daemon hosts, or with the daemon's
+	 * error, whose message starts with its code (`worktree_exists`,
+	 * `worktree_limit_reached`, `worktree_branch_conflict`, ...).
+	 */
+	create(options?: ExtensionWorktreeCreateOptions): Promise<ExtensionWorktree>;
+	/**
+	 * Remove the repository's managed worktree `id`, keeping its branch. Needs
+	 * the `exec` permission. Never forced: rejects with `worktree_dirty` while its
+	 * checkout has changes, and `worktree_busy` while a conversation holds it.
+	 */
+	remove(id: string): Promise<void>;
+}
+
+/** How the session reaches the daemon's worktrees for its extensions. */
+export interface ExtensionWorktreesHandler {
+	list(): Promise<ExtensionWorktree[]>;
+	create(options: ExtensionWorktreeCreateOptions): Promise<ExtensionWorktree>;
+	remove(id: string): Promise<void>;
+}
+
+// ============================================================================
+// Subagents
+// ============================================================================
+
+/** An agent definition the conversation may start. */
+export interface ExtensionSubagentDefinition {
+	readonly name: string;
+	readonly description: string;
+}
+
+/**
+ * Limits of one subagent run. Each is a positive number. They only tighten the
+ * limits the run runs within: the host's, and inside a subagent's conversation
+ * that subagent's too. Omitted ones keep those.
+ */
+export interface ExtensionSubagentLimits {
+	/** Assistant turns before the child must give a tool-free final report. */
+	readonly maxTurns?: number;
+	/** Tokens the child (and the subagents it starts) may use before the run is stopped. */
+	readonly maxTotalTokens?: number;
+	/** Provider cost in USD the run may reach before it is stopped. */
+	readonly maxTotalCostUsd?: number;
+	/** Wall-clock time the run may take before it is stopped. */
+	readonly maxDurationMs?: number;
+}
+
+/** A subagent run to start (`ctx.subagents.start`). */
+export interface ExtensionSubagentStartOptions {
+	/** The agent definition's name, one of `ctx.subagents.definitions()`. */
+	readonly agent: string;
+	/** The child's first prompt. */
+	readonly task: string;
+	/**
+	 * The child's working directory: an absolute path to a directory inside the
+	 * conversation's working directory, or inside a managed worktree of the
+	 * same repository. The conversation's working directory by default.
+	 */
+	readonly cwd?: string;
+	readonly limits?: ExtensionSubagentLimits;
+	/** Running work of the extension's own kind the run belongs to: clients show the run under it. */
+	readonly parentWorkId?: string;
+}
+
+/** How a subagent run ended. */
+export interface ExtensionSubagentResult {
+	readonly status: "completed" | "failed" | "cancelled";
+	/** The child's final reply, when it gave one. */
+	readonly output?: string;
+	readonly error?: string;
+	/** What the child's replies reported using: their tokens (cache reads and writes included) and cost in USD. */
+	readonly usage: { readonly tokens: number; readonly cost: number };
+}
+
+/** A started subagent run. */
+export interface ExtensionSubagentRun {
+	/** The run's work id: `cancel` takes it, and a panel action may open or cancel it. */
+	readonly id: string;
+	/** The child's conversation. */
+	readonly sessionId: string;
+	/** Resolves once the run ended; never rejects. */
+	readonly ended: Promise<ExtensionSubagentResult>;
+}
+
+/** The subagents an extension runs (`ctx.subagents`). */
+export interface ExtensionSubagents {
+	/** The agent definitions the conversation may start now. */
+	definitions(): ExtensionSubagentDefinition[];
+	/**
+	 * Start agent `agent` on `task`. Resolves once the child accepted the task.
+	 * Needs the `exec` permission: the child runs the conversation's tools.
+	 */
+	start(options: ExtensionSubagentStartOptions): Promise<ExtensionSubagentRun>;
+	/** Cancel a run the extension started; its `ended` resolves `cancelled`. */
+	cancel(id: string): Promise<void>;
+}
+
+/** How the session runs an extension's subagents: `owner` is the extension's manifest id. */
+export interface ExtensionSubagentsHandler {
+	definitions(): ExtensionSubagentDefinition[];
+	/** `signal` aborts once the extension's instance stopped: the run stops with it, and a start under way rejects. */
+	start(owner: string, options: ExtensionSubagentStartOptions, signal?: AbortSignal): Promise<ExtensionSubagentRun>;
+	cancel(owner: string, id: string): Promise<void>;
 }
 
 // ============================================================================
@@ -2181,6 +2334,7 @@ export class ExtensionLifetime {
 	private message: string | undefined;
 	private stoppedMessage: string | undefined;
 	private readonly cleanups = new Set<() => void>();
+	private readonly stopping = new AbortController();
 
 	get retired(): boolean {
 		return this.message !== undefined;
@@ -2202,9 +2356,18 @@ export class ExtensionLifetime {
 		if (this.stoppedMessage !== undefined) throw new Error(this.stoppedMessage);
 	}
 
+	/**
+	 * Aborted once the instance stopped (it was disabled), with the stop's message: what it started that may not
+	 * outlive it, such as its subagent runs, stops with it. Retiring it without a stop (a reload) does not abort it.
+	 */
+	get stopSignal(): AbortSignal {
+		return this.stopping.signal;
+	}
+
 	/** Stop the instance: registering or changing anything throws `message` from now on. Later calls do nothing. */
 	stop(message: string): void {
 		this.stoppedMessage ??= message;
+		this.stopping.abort(new Error(this.stoppedMessage));
 	}
 
 	/** Run `cleanup` when the instance retires (at once if it has). Returns a function that cancels it. */

@@ -342,6 +342,8 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 					allowUnlistedExtensionTools,
 					subagentToolManager: subagentManager,
 					lspServerPool,
+					// The worker's extensions reach its workspace's managed worktrees through the daemon.
+					...(options.worktreeDaemon === undefined ? {} : { worktreeDaemon: options.worktreeDaemon }),
 				});
 			} else {
 				const { modelRegistry, resourceLoader } = services;
@@ -392,6 +394,8 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 					noTools: sessionOptions.noTools,
 					subagentToolManager: subagentManager,
 					lspServerPool,
+					// The worker's extensions reach its workspace's managed worktrees through the daemon.
+					...(options.worktreeDaemon === undefined ? {} : { worktreeDaemon: options.worktreeDaemon }),
 				});
 			}
 			return {

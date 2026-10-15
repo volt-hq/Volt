@@ -32,9 +32,12 @@ export interface SubagentDelegationScopeLimits {
 	maxTotalTokens?: number;
 	/** Finite total provider cost in USD allowed across all descendants before the tree aborts. */
 	maxTotalCostUsd?: number;
-	/** Finite wall-clock lifetime of the tree before it aborts. */
+	/** Wall-clock lifetime before the tree aborts: at most MAX_SUBAGENT_DURATION_MS, or Infinity. */
 	maxDurationMs?: number;
 }
+
+/** Largest finite deadline Node's timers accept without overflowing to 1ms. */
+export const MAX_SUBAGENT_DURATION_MS = 2_147_483_647;
 
 export const DEFAULT_SUBAGENT_DELEGATION_LIMITS: Required<SubagentDelegationScopeLimits> = {
 	maxDepth: 5,
@@ -65,10 +68,20 @@ export interface SubagentDelegationBatchReservationOptions {
 
 export interface SubagentDelegationScopeOptions {
 	signal?: AbortSignal;
-	/** Tree-wide limit overrides; omitted structural limits keep their built-in safeguards. */
+	/**
+	 * Tree-wide limit overrides; omitted structural limits keep their built-in
+	 * safeguards, or the parent's limits within a parent.
+	 */
 	limits?: SubagentDelegationScopeLimits;
-	/** Per-runtime turn limit overrides inherited by every child in this scope. */
+	/** Per-runtime turn limit overrides inherited by every child in this scope, under the same rule. */
 	turnLimits?: SubagentTurnLimits;
+	/**
+	 * The scope this one runs within. Each limit applies at the stricter of the
+	 * two: a reservation here also takes the parent's permits, turns and usage
+	 * count toward both, and aborting the parent aborts this scope. Aborting
+	 * this scope leaves the parent running.
+	 */
+	parent?: SubagentDelegationScope;
 }
 
 function capacityLimitSnapshot(maximum: number, used: number, reserved: number): SubagentCapacityLimitSnapshot {
@@ -86,11 +99,25 @@ function requirePositiveSafeInteger(value: number, name: string): void {
 	}
 }
 
-function resolveLimits(overrides: SubagentDelegationScopeLimits | undefined): Required<SubagentDelegationScopeLimits> {
+/** The binding one of two snapshots of the same limit: the one with less remaining. */
+function tighterCapacityLimit(
+	left: SubagentCapacityLimitSnapshot,
+	right: SubagentCapacityLimitSnapshot,
+): SubagentCapacityLimitSnapshot {
+	if (left.remaining === null) return right;
+	if (right.remaining === null) return left;
+	return right.remaining < left.remaining ? right : left;
+}
+
+function resolveLimits(
+	overrides: SubagentDelegationScopeLimits | undefined,
+	ceiling: Required<SubagentDelegationScopeLimits> | undefined,
+): Required<SubagentDelegationScopeLimits> {
 	// Explicitly-undefined overrides use the category-specific defaults instead
 	// of bypassing resolution: structural safeguards stay finite while token,
-	// cost, and deadline budgets stay unlimited.
-	const limits: Required<SubagentDelegationScopeLimits> = { ...DEFAULT_SUBAGENT_DELEGATION_LIMITS };
+	// cost, and deadline budgets stay unlimited. Within a ceiling, they keep the
+	// ceiling's, and given ones apply only where they are stricter.
+	const limits: Required<SubagentDelegationScopeLimits> = { ...(ceiling ?? DEFAULT_SUBAGENT_DELEGATION_LIMITS) };
 	for (const key of Object.keys(limits) as Array<keyof SubagentDelegationScopeLimits>) {
 		const value = overrides?.[key];
 		if (value === undefined) {
@@ -99,7 +126,12 @@ function resolveLimits(overrides: SubagentDelegationScopeLimits | undefined): Re
 		if (typeof value !== "number" || Number.isNaN(value) || value <= 0) {
 			throw new Error(`Subagent delegation limit ${key} must be a positive number or Infinity`);
 		}
-		limits[key] = value;
+		if (key === "maxDurationMs" && Number.isFinite(value) && value > MAX_SUBAGENT_DURATION_MS) {
+			throw new Error(
+				`Subagent delegation limit maxDurationMs must be at most ${MAX_SUBAGENT_DURATION_MS}ms or Infinity`,
+			);
+		}
+		limits[key] = ceiling ? Math.min(value, ceiling[key]) : value;
 	}
 	return limits;
 }
@@ -110,6 +142,8 @@ function resolveLimits(overrides: SubagentDelegationScopeLimits | undefined): Re
  * concurrency ceilings without aborting admitted descendants. Aggregate turn
  * accounting remains observable, while opt-in finite token, cost, and deadline
  * budgets abort the whole tree. Turn enforcement is local to each runtime.
+ * A scope with a parent bounds one subtree of the parent's tree: its limits
+ * tighten the parent's, and the parent's still apply.
  */
 export class SubagentDelegationScope {
 	readonly id: string;
@@ -118,10 +152,11 @@ export class SubagentDelegationScope {
 	readonly limits: Required<SubagentDelegationScopeLimits>;
 	readonly turnLimits: Required<SubagentTurnLimits>;
 
+	private readonly parent: SubagentDelegationScope | undefined;
 	private readonly controller = new AbortController();
 	private readonly activeAborters = new Map<string, () => void>();
-	private readonly externalSignal: AbortSignal | undefined;
-	private readonly onExternalAbort: (() => void) | undefined;
+	/** The external signals and parent signal this scope aborts with, and its listener on each. */
+	private readonly abortSources: Array<{ signal: AbortSignal; listener: () => void }> = [];
 	private deadlineTimer: ReturnType<typeof setTimeout> | undefined;
 	private startsUsed = 0;
 	private reservedStarts = 0;
@@ -140,16 +175,18 @@ export class SubagentDelegationScope {
 		this.id = `sat_${randomUUID()}`;
 		this.startedAt = Date.now();
 		this.signal = this.controller.signal;
-		this.limits = resolveLimits(options.limits);
-		this.turnLimits = resolveSubagentTurnLimits(options.turnLimits);
-		this.externalSignal = options.signal;
-		this.onExternalAbort = options.signal
-			? () => this.abort(options.signal?.reason ?? new Error("Operation aborted"))
-			: undefined;
-		if (this.externalSignal?.aborted) {
-			this.abort(this.externalSignal.reason ?? new Error("Operation aborted"));
-		} else if (this.externalSignal && this.onExternalAbort) {
-			this.externalSignal.addEventListener("abort", this.onExternalAbort, { once: true });
+		this.parent = options.parent;
+		this.limits = resolveLimits(options.limits, options.parent?.limits);
+		this.turnLimits = resolveSubagentTurnLimits(options.turnLimits, options.parent?.turnLimits);
+		for (const signal of [options.signal, options.parent?.signal]) {
+			if (!signal) continue;
+			const listener = (): void => this.abort(signal.reason ?? new Error("Operation aborted"));
+			if (signal.aborted) {
+				listener();
+				break;
+			}
+			signal.addEventListener("abort", listener, { once: true });
+			this.abortSources.push({ signal, listener });
 		}
 		if (Number.isFinite(this.limits.maxDurationMs) && !this.signal.aborted) {
 			this.deadlineTimer = setTimeout(() => {
@@ -163,7 +200,29 @@ export class SubagentDelegationScope {
 		}
 	}
 
+	/** Whether this scope is `scope` or runs within it. */
+	isWithin(scope: SubagentDelegationScope): boolean {
+		for (let current: SubagentDelegationScope | undefined = this; current; current = current.parent) {
+			if (current === scope) return true;
+		}
+		return false;
+	}
+
 	capacitySnapshot(): SubagentTreeCapacitySnapshot {
+		const own = this.ownCapacitySnapshot();
+		const parent = this.parent?.capacitySnapshot();
+		if (!parent) return own;
+		// Depth is absolute and this scope's maxDepth is the stricter one; starts and width bind where less remains.
+		return {
+			maxStarts: tighterCapacityLimit(own.maxStarts, parent.maxStarts),
+			maxActiveDescendants: tighterCapacityLimit(own.maxActiveDescendants, parent.maxActiveDescendants),
+			maxDepth: own.maxDepth,
+			aborted: own.aborted || parent.aborted,
+			disposed: own.disposed || parent.disposed,
+		};
+	}
+
+	private ownCapacitySnapshot(): SubagentTreeCapacitySnapshot {
 		let highestReservedDepth = this.maxDepthReached;
 		for (const depth of this.reservedBatchDepths.values()) {
 			highestReservedDepth = Math.max(highestReservedDepth, depth);
@@ -197,12 +256,13 @@ export class SubagentDelegationScope {
 				`Cannot delegate to "${agentName}": ${this.activeDescendants + this.reservedActiveDescendants} descendant slots are already active or reserved, the limit of ${this.limits.maxActiveDescendants} (maxActiveDescendants). Wait for running subagents to finish.`,
 			);
 		}
+		const outer = this.parent?.reserve(agentName, depth);
 
 		this.startsUsed += 1;
 		this.activeDescendants += 1;
 		this.peakActiveDescendants = Math.max(this.peakActiveDescendants, this.activeDescendants);
 		this.maxDepthReached = Math.max(this.maxDepthReached, depth);
-		return this.createReservation();
+		return this.createReservation(undefined, undefined, outer);
 	}
 
 	reserveBatch(options: SubagentDelegationBatchReservationOptions): SubagentDelegationBatchReservation {
@@ -226,6 +286,7 @@ export class SubagentDelegationScope {
 				`Cannot reserve subagent batch: peak width ${options.peakActiveDescendants} exceeds the delegation tree's remaining maxActiveDescendants capacity.`,
 			);
 		}
+		const outer = this.parent?.reserveBatch(options);
 
 		const depthKey = Symbol("subagent-batch-depth");
 		let remainingStarts = options.requestedStarts;
@@ -245,6 +306,7 @@ export class SubagentDelegationScope {
 			this.reservedBatchDepths.delete(depthKey);
 			this.signal.removeEventListener("abort", release);
 			this.batchReleases.delete(release);
+			outer?.release();
 		};
 		this.signal.addEventListener("abort", release, { once: true });
 		this.batchReleases.add(release);
@@ -261,6 +323,7 @@ export class SubagentDelegationScope {
 				if (availableActiveDescendants <= 0) {
 					throw new Error("Cannot start subagent: the admitted batch has no available active permits.");
 				}
+				const outerReservation = outer?.reserve(agentName);
 
 				remainingStarts -= 1;
 				availableActiveDescendants -= 1;
@@ -284,6 +347,7 @@ export class SubagentDelegationScope {
 							this.reservedStarts += 1;
 						}
 					},
+					outerReservation,
 				);
 			},
 			release,
@@ -304,11 +368,13 @@ export class SubagentDelegationScope {
 	}
 
 	recordTurn(): void {
+		this.parent?.recordTurn();
 		if (this.signal.aborted || this.disposed) return;
 		this.turnsUsed += 1;
 	}
 
 	recordUsage(tokens: number, costUsd: number): void {
+		this.parent?.recordUsage(tokens, costUsd);
 		if (this.signal.aborted || this.disposed) return;
 		if (Number.isFinite(tokens) && tokens > 0) this.tokensUsed += tokens;
 		if (Number.isFinite(costUsd) && costUsd > 0) this.costUsd += costUsd;
@@ -354,8 +420,8 @@ export class SubagentDelegationScope {
 			clearTimeout(this.deadlineTimer);
 			this.deadlineTimer = undefined;
 		}
-		if (this.externalSignal && this.onExternalAbort) {
-			this.externalSignal.removeEventListener("abort", this.onExternalAbort);
+		for (const { signal, listener } of this.abortSources.splice(0)) {
+			signal.removeEventListener("abort", listener);
 		}
 		if (this.activeAborters.size > 0) {
 			this.abort(new Error("Subagent delegation scope disposed"));
@@ -363,9 +429,11 @@ export class SubagentDelegationScope {
 		this.activeAborters.clear();
 	}
 
+	/** A reservation of this scope; `outer`, the parent's reservation of the same start, follows it. */
 	private createReservation(
 		onActiveReleased: () => void = () => undefined,
 		onStartRolledBack: () => void = () => undefined,
+		outer?: SubagentDelegationReservation,
 	): SubagentDelegationReservation {
 		let committed = false;
 		let released = false;
@@ -378,11 +446,13 @@ export class SubagentDelegationScope {
 				this.activeAborters.delete(subagentId);
 			}
 			onActiveReleased();
+			outer?.release();
 		};
 		return {
 			commit: (id, abort) => {
 				if (committed || released) return;
 				committed = true;
+				outer?.commit(id, abort);
 				subagentId = id;
 				if (this.signal.aborted) {
 					abort();
@@ -393,6 +463,7 @@ export class SubagentDelegationScope {
 			release: releaseActive,
 			rollback: () => {
 				if (committed || released) return;
+				outer?.rollback();
 				this.startsUsed = Math.max(0, this.startsUsed - 1);
 				onStartRolledBack();
 				releaseActive();

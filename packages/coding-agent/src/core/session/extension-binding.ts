@@ -26,9 +26,15 @@
  * gets a `ctx.ui` of its own.
  */
 
-import { join } from "node:path";
+import { statSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import type { AgentTool, Conversation } from "@hansjm10/volt-agent-core";
 import { type HostRequest, type HostResponse, WORK_NOTICE_CUSTOM_TYPE } from "@hansjm10/volt-protocol";
+import type { ControlWorktreeStatus } from "../../daemon/control-protocol.ts";
+import type { SessionWorktreeDaemon } from "../../daemon/session-worktree.ts";
+import { isPathInside } from "../../daemon/workspace-directory.ts";
+import { resolveWorktreeParentCheckout } from "../../daemon/worktree-manager.ts";
+import { canonicalizePath } from "../../utils/paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import {
 	type CommandInvoker,
@@ -37,7 +43,11 @@ import {
 	type ExtensionErrorListener,
 	type ExtensionMode,
 	ExtensionRunner,
+	type ExtensionSubagentStartOptions,
+	type ExtensionSubagentsHandler,
 	type ExtensionUIContext,
+	type ExtensionWorktree,
+	type ExtensionWorktreesHandler,
 	type ReplacedSessionContext,
 	type SessionStartEvent,
 	type ShutdownHandler,
@@ -50,6 +60,7 @@ import {
 	registerReplacedSessionContext,
 } from "../extensions/runner.ts";
 import type { Extension } from "../extensions/types.ts";
+import { discoverGitWorktree } from "../git-repository.ts";
 import { ClientScope } from "../host/client-scope.ts";
 import { type HostRequestOptions, hostRequestTimeout, type LiveState } from "../host/live-state.ts";
 import type { CustomMessageInput } from "../messages.ts";
@@ -69,6 +80,8 @@ import {
 } from "../session-writer.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
+import { MAX_SUBAGENT_DURATION_MS } from "../subagents/delegation-scope.ts";
+import type { SubagentRunOptions } from "../subagents/index.ts";
 import { getAvailableThemesWithPaths } from "../theme/discovery.ts";
 import type { Theme } from "../theme/theme.ts";
 import type { ThemeInfo } from "../theme/types.ts";
@@ -132,6 +145,69 @@ function buildExtensionResourcePaths(entries: readonly DiscoveredResourcePath[])
 	}));
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The limits an extension's subagent run asks for, checked: each a positive number, `maxTurns` an integer. */
+function subagentLimits(limits: unknown): Pick<SubagentRunOptions, "limits" | "turnLimits"> {
+	if (limits === undefined) return {};
+	if (!isRecord(limits)) throw new TypeError("ctx.subagents.start: limits must be an object");
+	const read = (key: string, integer: boolean): number | undefined => {
+		const value = limits[key];
+		if (value === undefined) return undefined;
+		if (
+			typeof value !== "number" ||
+			!(value > 0) ||
+			!Number.isFinite(value) ||
+			(integer && !Number.isSafeInteger(value))
+		) {
+			throw new TypeError(`ctx.subagents.start: limits.${key} must be a positive ${integer ? "integer" : "number"}`);
+		}
+		return value;
+	};
+	const maxTurns = read("maxTurns", true);
+	const maxTotalTokens = read("maxTotalTokens", false);
+	const maxTotalCostUsd = read("maxTotalCostUsd", false);
+	const maxDurationMs = read("maxDurationMs", false);
+	if (maxDurationMs !== undefined && maxDurationMs > MAX_SUBAGENT_DURATION_MS) {
+		throw new TypeError(`ctx.subagents.start: limits.maxDurationMs must be at most ${MAX_SUBAGENT_DURATION_MS}ms`);
+	}
+	const tree = {
+		...(maxTotalTokens === undefined ? {} : { maxTotalTokens }),
+		...(maxTotalCostUsd === undefined ? {} : { maxTotalCostUsd }),
+		...(maxDurationMs === undefined ? {} : { maxDurationMs }),
+	};
+	return {
+		...(Object.keys(tree).length === 0 ? {} : { limits: tree }),
+		...(maxTurns === undefined ? {} : { turnLimits: { maxTurns } }),
+	};
+}
+
+/** Call the daemon; a refusal rejects with its code leading the message, as `worktree_busy: ...`. */
+async function daemonCall<T>(call: () => Promise<T>): Promise<T> {
+	try {
+		return await call();
+	} catch (error) {
+		const code = (error as { code?: unknown }).code;
+		const message = error instanceof Error ? error.message : String(error);
+		if (typeof code !== "string" || message.startsWith(code)) throw error;
+		throw new Error(message.length === 0 ? code : `${code}: ${message}`, { cause: error });
+	}
+}
+
+/** A managed worktree as an extension sees it. */
+function extensionWorktree(status: ControlWorktreeStatus): ExtensionWorktree {
+	return {
+		id: status.id,
+		path: status.path,
+		branch: status.branch,
+		...(status.baseRef === undefined ? {} : { baseRef: status.baseRef }),
+		available: status.available !== false,
+		...(status.dirty === undefined ? {} : { dirty: status.dirty }),
+	};
+}
+
 /** A work kind the session refused to register, as an extension error. */
 function refusedKind(refusal: WorkKindRefusal): ExtensionError {
 	return { extensionId: refusal.extensionId, event: "register_work_kind", error: refusal.error };
@@ -153,6 +229,8 @@ export interface SessionExtensionBindingHost {
 	readonly cwd: string;
 	/** The user's agent directory, where permission acknowledgments are stored. */
 	readonly agentDir: string;
+	/** The daemon's managed worktrees, in a conversation the daemon hosts. */
+	readonly worktreeDaemon: SessionWorktreeDaemon | undefined;
 	/** Aborted when the session loses its log or is disposed; command handlers see it as `ctx.signal`. */
 	readonly lifetimeSignal: AbortSignal;
 	/** The conversation's live state, where the data-only UI calls go. */
@@ -272,15 +350,18 @@ export class SessionExtensionBinding {
 	private readonly uiRouters = new Map<string | undefined, ExtensionUIContext>();
 	/** Each extension instance's `ctx.ui`: it stops when its instance stops, whatever runs under its id later. */
 	private readonly instanceUIs = new WeakMap<Extension, ExtensionUIContext>();
+	/** The subagent runs each extension started, by manifest id: its UI may open and cancel them. */
+	private readonly subagentRuns = new Map<string, Set<string>>();
+	/** The extensions' subagent runs that have not ended. */
+	private readonly runningSubagents = new Set<string>();
+	private readonly subagents: ExtensionSubagentsHandler = this.createSubagentsHandler();
+	private readonly worktrees: ExtensionWorktreesHandler = this.createWorktreesHandler();
 	/** The reviews the extensions started (`ctx.reviews`). */
 	private readonly reviews: ExtensionReviewRuns;
 	private readonly uiHost: ExtensionUiHost = {
 		// Read when a call runs: the routers are built before the binding's host is set.
 		live: () => this.host.liveState,
-		ownsWork: (extensionId, workId) =>
-			this.host.extensionKinds().owns(extensionId, workId) ||
-			this.host.extensionReviewEngines().owns(extensionId, workId) ||
-			this.reviews.owns(extensionId, workId),
+		ownsWork: (extensionId, workId) => this.ownsUiWork(extensionId, workId),
 		droppedIntent: (extensionId, intent) =>
 			this.extensionRunner.emitError({
 				extensionId,
@@ -313,6 +394,16 @@ export class SessionExtensionBinding {
 		this.registry = new ExtensionRegistry(this.createRegistryHost());
 	}
 
+	/** Whether the extension's UI may open or cancel this work, beyond just work of its own kinds. */
+	ownsUiWork(extensionId: string, workId: string): boolean {
+		return (
+			this.host.extensionKinds().owns(extensionId, workId) ||
+			this.host.extensionReviewEngines().owns(extensionId, workId) ||
+			this.subagentRuns.get(extensionId)?.has(workId) === true ||
+			this.reviews.owns(extensionId, workId)
+		);
+	}
+
 	/** What the registry starts and stops extensions through. */
 	private createRegistryHost(): ExtensionRegistryHost {
 		const resourceLoader = this.host.resourceLoader;
@@ -341,6 +432,7 @@ export class SessionExtensionBinding {
 				await Promise.all([
 					this.host.extensionKinds().retire(id),
 					this.host.extensionReviewEngines().retire(id),
+					this.cancelSubagents(id),
 					this.reviews.retire(id),
 				]);
 			},
@@ -353,6 +445,178 @@ export class SessionExtensionBinding {
 							resourceLoader.rescanExtensions?.(known) ?? Promise.reject(new Error("unavailable")),
 					}),
 		};
+	}
+
+	/** How the session runs the extensions' subagents (`ctx.subagents`): as work of the conversation, through its manager. */
+	private createSubagentsHandler(): ExtensionSubagentsHandler {
+		return {
+			definitions: () =>
+				(this.host.tools().getSubagentToolManager()?.listAvailableDefinitions?.() ?? []).map((definition) => ({
+					name: definition.name,
+					description: definition.description,
+				})),
+			start: async (owner, options, signal) => {
+				const { agent, task, run } = this.subagentStart(owner, options);
+				const manager = this.host.tools().getSubagentToolManager();
+				if (manager?.startRun === undefined) throw new Error("Subagents are not available in this session");
+				// The run stops with the extension's instance, also while it starts: no run outlives a disabled extension.
+				const started = await manager
+					.startRun(agent, task, { ...run, ...(signal === undefined ? {} : { signal }) })
+					.catch((error: unknown) => {
+						if (!signal?.aborted) throw error;
+						throw new Error(
+							`ctx.subagents.start: extension ${owner} was disabled while the run started; it was cancelled`,
+						);
+					});
+				let owned = this.subagentRuns.get(owner);
+				if (!owned) {
+					owned = new Set();
+					this.subagentRuns.set(owner, owned);
+				}
+				owned.add(started.workId);
+				this.runningSubagents.add(started.workId);
+				const ended = started.ended.then((result) => {
+					this.runningSubagents.delete(started.workId);
+					return result;
+				});
+				return { id: started.workId, sessionId: started.conversation, ended };
+			},
+			cancel: async (owner, id) => {
+				if (typeof id !== "string" || this.subagentRuns.get(owner)?.has(id) !== true) {
+					throw new Error(
+						`Unknown subagent run ${JSON.stringify(id)}: an extension cancels only the runs it started`,
+					);
+				}
+				if (!this.runningSubagents.has(id)) return;
+				const manager = this.host.tools().getSubagentToolManager();
+				if (manager?.cancelRun === undefined) throw new Error("Subagents are not available in this session");
+				await manager.cancelRun(id);
+			},
+		};
+	}
+
+	/** How the session reaches the daemon's managed worktrees for its extensions (`ctx.worktrees`). */
+	private createWorktreesHandler(): ExtensionWorktreesHandler {
+		const unavailable = (): Error =>
+			new Error("Managed worktrees are available only in conversations the daemon hosts");
+		return {
+			list: async () => {
+				const daemon = this.host.worktreeDaemon;
+				if (daemon?.list === undefined) throw unavailable();
+				return (await daemonCall(() => daemon.list!(this.host.cwd))).map(extensionWorktree);
+			},
+			create: async (options) => {
+				if (!isRecord(options)) throw new TypeError("ctx.worktrees.create takes { name?, branch?, baseRef? }");
+				const read = (key: "name" | "branch" | "baseRef"): string | undefined => {
+					const value = options[key];
+					if (value === undefined) return undefined;
+					if (typeof value !== "string" || value.trim().length === 0) {
+						throw new TypeError(`ctx.worktrees.create: ${key} must be a non-empty string`);
+					}
+					return value;
+				};
+				const name = read("name");
+				const branch = read("branch");
+				const baseRef = read("baseRef");
+				const { reuseBranch } = options;
+				if (reuseBranch !== undefined && typeof reuseBranch !== "boolean") {
+					throw new TypeError("ctx.worktrees.create: reuseBranch must be true or false");
+				}
+				const daemon = this.host.worktreeDaemon;
+				if (daemon?.create === undefined) throw unavailable();
+				return extensionWorktree(
+					await daemonCall(() =>
+						daemon.create!(this.host.cwd, {
+							...(name === undefined ? {} : { name }),
+							...(branch === undefined ? {} : { branch }),
+							...(baseRef === undefined ? {} : { baseRef }),
+							...(reuseBranch === true ? { reuseBranch: true } : {}),
+						}),
+					),
+				);
+			},
+			remove: async (id) => {
+				if (typeof id !== "string" || id.trim().length === 0) {
+					throw new TypeError("ctx.worktrees.remove: id must name a worktree");
+				}
+				const daemon = this.host.worktreeDaemon;
+				if (daemon?.remove === undefined) throw unavailable();
+				await daemonCall(() => daemon.remove!(this.host.cwd, id));
+			},
+		};
+	}
+
+	/** Check an extension's subagent start: its agent and task, a cwd it may run in, its limits, and its parent work. */
+	private subagentStart(
+		owner: string,
+		options: ExtensionSubagentStartOptions,
+	): { agent: string; task: string; run: SubagentRunOptions } {
+		if (!isRecord(options)) throw new TypeError("ctx.subagents.start needs { agent, task }");
+		const { agent, task, cwd, parentWorkId } = options;
+		if (typeof agent !== "string" || agent.trim().length === 0) {
+			throw new TypeError("ctx.subagents.start: agent must name an agent definition");
+		}
+		if (typeof task !== "string" || task.trim().length === 0) {
+			throw new TypeError("ctx.subagents.start: task must be a non-empty string");
+		}
+		if (
+			parentWorkId !== undefined &&
+			(typeof parentWorkId !== "string" || !this.host.extensionKinds().owns(owner, parentWorkId))
+		) {
+			throw new Error("ctx.subagents.start: parentWorkId must be work of the extension's own kinds");
+		}
+		return {
+			agent,
+			task,
+			run: {
+				...(cwd === undefined ? {} : { cwd: this.subagentCwd(cwd) }),
+				...subagentLimits(options.limits),
+				...(parentWorkId === undefined ? {} : { parentWorkId }),
+			},
+		};
+	}
+
+	/**
+	 * The directory an extension's subagent runs in, canonical: inside the
+	 * conversation's working directory, or inside a managed worktree of the
+	 * conversation's repository (the same Git common directory).
+	 */
+	private subagentCwd(cwd: unknown): string {
+		if (typeof cwd !== "string" || !isAbsolute(cwd)) {
+			throw new TypeError("ctx.subagents.start: cwd must be an absolute path");
+		}
+		const resolved = canonicalizePath(cwd);
+		let directory = false;
+		try {
+			directory = statSync(resolved).isDirectory();
+		} catch {
+			// Reported below.
+		}
+		if (!directory) throw new Error(`ctx.subagents.start: cwd ${JSON.stringify(cwd)} is not a directory`);
+		if (isPathInside(canonicalizePath(this.host.cwd), resolved)) return resolved;
+		const repository = (path: string): string | undefined => {
+			const commonGitDir = discoverGitWorktree(path)?.commonGitDir;
+			return commonGitDir === undefined ? undefined : canonicalizePath(commonGitDir);
+		};
+		const conversationRepository = repository(this.host.cwd);
+		if (
+			conversationRepository !== undefined &&
+			resolveWorktreeParentCheckout(this.host.agentDir, resolved) !== undefined &&
+			repository(resolved) === conversationRepository
+		) {
+			return resolved;
+		}
+		throw new Error(
+			`ctx.subagents.start: cwd ${JSON.stringify(cwd)} is outside the conversation's working directory and its repository's managed worktrees`,
+		);
+	}
+
+	/** Cancel the subagent runs of the extension `id` that have not ended. */
+	private async cancelSubagents(id: string): Promise<void> {
+		const manager = this.host.tools().getSubagentToolManager();
+		const running = [...(this.subagentRuns.get(id) ?? [])].filter((runId) => this.runningSubagents.has(runId));
+		if (manager?.cancelRun === undefined) return;
+		await Promise.all(running.map((runId) => manager.cancelRun?.(runId).catch(() => undefined)));
 	}
 
 	/**
@@ -932,6 +1196,8 @@ export class SessionExtensionBinding {
 		runner.bindServices(this.host.extensionServices().servicesManager);
 		const kinds = this.host.extensionKinds();
 		runner.bindWork(kinds.start, () => this.refuseDeclarations(runner));
+		runner.bindSubagents(this.subagents);
+		runner.bindWorktrees(this.worktrees);
 		runner.bindReviews(this.reviews);
 		// Bound after the replaced generation was invalidated: a reload's reviews start again.
 		this.reviews.open();

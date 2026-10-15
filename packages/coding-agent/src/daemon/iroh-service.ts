@@ -177,6 +177,7 @@ import {
 	getWorkspaceWorktreesDir,
 	handleWorktreeControlRequest,
 	isWorktreeControlRequest,
+	toControlWorktreeStatus,
 	WorktreeCapacityError,
 	WorktreeManager,
 	type WorktreeResult,
@@ -4642,6 +4643,9 @@ class IrohDaemonService {
 			case "worker_authority":
 			case "worker_worktree_restore":
 			case "worker_worktree_release":
+			case "worker_worktree_create":
+			case "worker_worktree_list":
+			case "worker_worktree_remove":
 				await this.handleWorkerRequest(connection, request);
 				return true;
 			case "pair_request":
@@ -5029,7 +5033,10 @@ class IrohDaemonService {
 					| "worker_session_owned"
 					| "worker_authority"
 					| "worker_worktree_restore"
-					| "worker_worktree_release";
+					| "worker_worktree_release"
+					| "worker_worktree_create"
+					| "worker_worktree_list"
+					| "worker_worktree_remove";
 			}
 		>,
 	): Promise<void> {
@@ -5185,6 +5192,58 @@ class IrohDaemonService {
 				this.workerWorktreePins.delete(request.pinId);
 				pin.release();
 				connection.send({ type: "ok", id: request.id });
+				return;
+			}
+			case "worker_worktree_create":
+			case "worker_worktree_list":
+			case "worker_worktree_remove": {
+				// For its extensions, while it serves its workspace: the workspace's worktrees of the repository
+				// the worker's conversation in `cwd` works in.
+				const workerId = this.workers.workerOf(connection.connectionId);
+				const key = workerId === undefined ? undefined : this.workers.keyOf(workerId);
+				if (workerId === undefined || key === undefined || !this.workers.isServing(workerId)) {
+					return refuse("not_current", "the worker no longer serves its workspace");
+				}
+				const workspace = (await this.stateManager.getState()).workspaces.find(
+					(candidate) => candidate.name === key.workspaceName,
+				);
+				if (!workspace) return refuse("not_found", `no registered workspace named ${key.workspaceName}`);
+				const repository = await this.worktrees.resolveConversationRepository(workspace, request.cwd);
+				if (!repository.ok) return refuse(repository.error, repository.detail ?? repository.error);
+				if (request.type === "worker_worktree_remove") {
+					if (
+						!(await this.worktrees.isRepositoryWorktree(workspace, request.worktreeId, repository.sourceRootPath))
+					) {
+						return refuse("worktree_not_found", "no such worktree of the conversation's repository");
+					}
+					// Never forced: a dirty checkout, or one a conversation still holds, stays.
+					const removed = await this.removeWorkspaceWorktree(workspace, request.worktreeId, false);
+					if (!removed.ok) return refuse(removed.error, removed.detail ?? removed.error);
+					connection.send({ type: "ok", id: request.id });
+					return;
+				}
+				if (request.type === "worker_worktree_list") {
+					const worktrees = await this.worktrees.list(workspace, { sourceRootPath: repository.sourceRootPath });
+					connection.send({
+						type: "worktrees_result",
+						id: request.id,
+						worktrees: worktrees.map((status) => toControlWorktreeStatus(status, status.available, status.dirty)),
+					});
+					return;
+				}
+				const created = await this.worktrees.create(workspace, {
+					...(repository.workingDirectory === undefined ? {} : { workingDirectory: repository.workingDirectory }),
+					...(request.worktreeName === undefined ? {} : { id: request.worktreeName }),
+					...(request.branch === undefined ? {} : { branch: request.branch }),
+					...(request.baseRef === undefined ? {} : { baseRef: request.baseRef }),
+					...(request.reuseBranch === true ? { reuseBranch: true } : {}),
+				});
+				if (!created.ok) return refuse(created.error, created.detail ?? created.error);
+				connection.send({
+					type: "worktree_result",
+					id: request.id,
+					worktree: toControlWorktreeStatus(created.worktree, true),
+				});
 				return;
 			}
 		}

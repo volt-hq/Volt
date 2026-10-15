@@ -282,6 +282,56 @@ export default function (volt) {
 		}
 	});
 
+	it("routes the conversation's extensions to the daemon's managed worktrees", async () => {
+		writeRuntimeConfig({});
+		mkdirSync(join(agentDir, "extensions"), { recursive: true });
+		writeFileSync(
+			join(agentDir, "extensions", "worktree-probe.ts"),
+			`export const manifest = { id: "worktree-probe", displayName: "worktree-probe" };
+export default function (volt) {
+	volt.on("session_start", async (_event, ctx) => {
+		globalThis.__voltWorktreeProbe = await ctx.worktrees.list().catch((error) => error.message);
+	});
+}
+`,
+		);
+		const probe = globalThis as { __voltWorktreeProbe?: unknown };
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		let runtime: Awaited<ReturnType<typeof createIrohRemoteAgentRuntime>> | undefined;
+		try {
+			runtime = await createIrohRemoteAgentRuntime({
+				agentDir,
+				cwd,
+				worktreeDaemon: {
+					restore: async () => async () => {},
+					list: async () => [
+						{
+							id: "issue-12",
+							workspaceName: "ws",
+							path: "/agent/worktrees/ws/issue-12",
+							branch: "volt/issue-12",
+							createdAt: 1,
+							sessionIds: [],
+							available: true,
+						},
+					],
+				},
+			});
+			await runtime.conversation.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
+
+			await vi.waitFor(() =>
+				expect(probe.__voltWorktreeProbe).toEqual([
+					{ id: "issue-12", path: "/agent/worktrees/ws/issue-12", branch: "volt/issue-12", available: true },
+				]),
+			);
+		} finally {
+			delete probe.__voltWorktreeProbe;
+			errorSpy.mockRestore();
+			await runtime?.host.close(runtime.conversation);
+		}
+	});
+
 	it("creates persistent attachable child runtimes for tool-created remote subagents", async () => {
 		const faux = createFauxProvider();
 		const model = faux.getModel();

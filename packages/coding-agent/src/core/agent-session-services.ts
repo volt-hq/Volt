@@ -2,6 +2,7 @@ import { join } from "node:path";
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { Model } from "@hansjm10/volt-ai";
 import { getAgentDir } from "../config.ts";
+import type { SessionWorktreeDaemon } from "../daemon/session-worktree.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
@@ -84,6 +85,8 @@ export interface CreateAgentSessionFromServicesOptions {
 	subagentToolManager?: SubagentToolManager;
 	/** Share language servers with other sessions of the same runtime factory. */
 	lspServerPool?: LspServerPool;
+	/** The daemon's managed worktrees, which a daemon-hosted session's extensions create and list. */
+	worktreeDaemon?: SessionWorktreeDaemon;
 }
 
 /**
@@ -281,5 +284,6 @@ export async function createAgentSessionFromServices(
 		sessionStartEvent: options.sessionStartEvent,
 		subagentToolManager: options.subagentToolManager,
 		lspServerPool: options.lspServerPool,
+		...(options.worktreeDaemon === undefined ? {} : { worktreeDaemon: options.worktreeDaemon }),
 	});
 }
