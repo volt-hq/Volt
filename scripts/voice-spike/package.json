@@ -1,0 +1,17 @@
+{
+	"name": "volt-voice-spike",
+	"version": "0.0.0",
+	"private": true,
+	"description": "Repo-only feasibility spike for daemon-owned voice (docs/daemon-voice-design.md, milestone 1). Not a workspace package; never shipped.",
+	"type": "module",
+	"engines": {
+		"node": ">=22"
+	},
+	"scripts": {
+		"spike": "node --conditions=volt-source src/spike.ts"
+	},
+	"devDependencies": {
+		"opusscript": "0.1.1",
+		"werift": "0.25.0"
+	}
+}
