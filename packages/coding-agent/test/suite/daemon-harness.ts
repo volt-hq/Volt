@@ -48,6 +48,8 @@ export interface DaemonHarnessOptions {
 	readonly workerExtensions?: readonly string[];
 	/** Extra global settings every worker's conversations read. */
 	readonly settings?: Record<string, unknown>;
+	/** Most voice media attachments the daemon holds at once. */
+	readonly voiceMediaSessions?: number;
 }
 
 /** What a harness phone worker opens beside its stored session. */
@@ -124,7 +126,12 @@ export async function createDaemonHarness(options: DaemonHarnessOptions = {}): P
 		return {};
 	};
 	const daemon = runVoltDaemon(
-		{ agentDir, foreground: false, workerLauncher: options.workerLauncher ?? new InProcessWorkerLauncher() },
+		{
+			agentDir,
+			foreground: false,
+			workerLauncher: options.workerLauncher ?? new InProcessWorkerLauncher(),
+			...(options.voiceMediaSessions === undefined ? {} : { voiceMediaSessions: options.voiceMediaSessions }),
+		},
 		[capture, ...(options.extensions ?? [])],
 	);
 	let probe = await probeDaemon(agentDir);

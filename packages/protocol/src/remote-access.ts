@@ -22,6 +22,13 @@ export const REMOTE_CAPABILITIES = [
 	"host.manage.v1",
 	"workspace.manage.v1",
 	"diagnostics.upload.v1",
+	/**
+	 * Voice on a conversation: start, stop, and interrupt it, and attach the
+	 * microphone and playback stream. Only an explicit grant holds it: no
+	 * preset but `full` includes it, so a device paired before it existed
+	 * gains it only through a grant update.
+	 */
+	"voice.stream.v1",
 ] as const;
 
 export const RemoteCapabilitySchema = stringEnum(REMOTE_CAPABILITIES);

@@ -1905,6 +1905,27 @@
 						"offerId": {
 							"type": "string",
 							"pattern": "^[A-Za-z0-9_-]{16,128}$"
+						},
+						"handshake": {
+							"type": "object",
+							"required": [
+								"response",
+								"initialInput"
+							],
+							"properties": {
+								"response": {
+									"$ref": "#/$defs/RemoteHandshake.Success"
+								},
+								"initialInput": {
+									"type": "array",
+									"items": {
+										"type": "integer",
+										"minimum": 0,
+										"maximum": 255
+									}
+								}
+							},
+							"additionalProperties": false
 						}
 					},
 					"additionalProperties": false
@@ -2900,7 +2921,8 @@
 						"session_unavailable",
 						"duplicate_conversation_connection",
 						"conversation_in_use",
-						"conversation_locked"
+						"conversation_locked",
+						"voice_media_unavailable"
 					]
 				},
 				"message": {
@@ -18608,7 +18630,7 @@
 			"items": {
 				"$ref": "#/$defs/RemoteCapability"
 			},
-			"maxItems": 8,
+			"maxItems": 9,
 			"uniqueItems": true
 		},
 		"RemoteCapability": {
@@ -18621,7 +18643,8 @@
 				"worktrees.manage.v1",
 				"host.manage.v1",
 				"workspace.manage.v1",
-				"diagnostics.upload.v1"
+				"diagnostics.upload.v1",
+				"voice.stream.v1"
 			]
 		},
 		"RemoteGrant": {
@@ -18856,6 +18879,10 @@
 						"workspaceManagement": {
 							"not": {},
 							"x-volt-expected": "be absent"
+						},
+						"voiceMedia": {
+							"not": {},
+							"x-volt-expected": "be absent"
 						}
 					},
 					"additionalProperties": true
@@ -18905,6 +18932,10 @@
 						"workspaceManagement": {
 							"not": {},
 							"x-volt-expected": "be absent"
+						},
+						"voiceMedia": {
+							"not": {},
+							"x-volt-expected": "be absent"
 						}
 					},
 					"additionalProperties": true
@@ -18952,6 +18983,76 @@
 							"x-volt-expected": "be absent"
 						},
 						"workspaceDiscovery": {
+							"not": {},
+							"x-volt-expected": "be absent"
+						},
+						"voiceMedia": {
+							"not": {},
+							"x-volt-expected": "be absent"
+						}
+					},
+					"additionalProperties": true
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"protocol",
+						"workspace",
+						"voiceMedia"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "volt_iroh_hello"
+						},
+						"protocol": {
+							"type": "string",
+							"const": "volt/1"
+						},
+						"workspace": {
+							"$ref": "#/$defs/IrohRemoteWorkspaceName"
+						},
+						"secret": {
+							"not": {},
+							"x-volt-expected": "be absent"
+						},
+						"clientLabel": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"clientNodeId": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"voiceMedia": {
+							"type": "object",
+							"required": [
+								"sessionId",
+								"offerId"
+							],
+							"properties": {
+								"sessionId": {
+									"$ref": "#/$defs/RemoteHandshake.SessionId"
+								},
+								"offerId": {
+									"type": "string",
+									"pattern": "^[A-Za-z0-9_-]{16,128}$"
+								}
+							},
+							"additionalProperties": false
+						},
+						"conversation": {
+							"not": {},
+							"x-volt-expected": "be absent"
+						},
+						"workspaceDiscovery": {
+							"not": {},
+							"x-volt-expected": "be absent"
+						},
+						"workspaceManagement": {
 							"not": {},
 							"x-volt-expected": "be absent"
 						}
@@ -19046,6 +19147,7 @@
 				"duplicate_conversation_connection",
 				"conversation_in_use",
 				"conversation_locked",
+				"voice_media_unavailable",
 				"host_identity_mismatch",
 				"saved_host_invalid"
 			]
@@ -19189,6 +19291,65 @@
 						}
 					},
 					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"protocol",
+						"workspace",
+						"mode",
+						"voiceMedia"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "volt_iroh_hello"
+						},
+						"protocol": {
+							"type": "string",
+							"const": "volt/1"
+						},
+						"workspace": {
+							"$ref": "#/$defs/IrohRemoteWorkspaceName"
+						},
+						"secret": {
+							"not": {},
+							"x-volt-expected": "be absent"
+						},
+						"clientLabel": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"clientNodeId": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"mode": {
+							"type": "string",
+							"const": "voiceMedia"
+						},
+						"voiceMedia": {
+							"type": "object",
+							"required": [
+								"sessionId",
+								"offerId"
+							],
+							"properties": {
+								"sessionId": {
+									"$ref": "#/$defs/RemoteHandshake.SessionId"
+								},
+								"offerId": {
+									"type": "string",
+									"pattern": "^[A-Za-z0-9_-]{16,128}$"
+								}
+							},
+							"additionalProperties": false
+						}
+					},
+					"additionalProperties": false
 				}
 			]
 		},
@@ -19279,6 +19440,18 @@
 				},
 				"workspaceManagement": {
 					"$ref": "#/$defs/RemoteHandshake.WorkspaceManagementTarget"
+				},
+				"voiceMedia": {
+					"type": "object",
+					"required": [
+						"sessionId"
+					],
+					"properties": {
+						"sessionId": {
+							"$ref": "#/$defs/RemoteHandshake.SessionId"
+						}
+					},
+					"additionalProperties": false
 				},
 				"remoteHost": {
 					"$ref": "#/$defs/RemoteHandshake.HostMetadata"

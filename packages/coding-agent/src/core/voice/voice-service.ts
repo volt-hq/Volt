@@ -30,13 +30,11 @@ export interface VoiceServiceOptions {
 	readonly clientsOf: (conversation: HostedConversation) => readonly HostClient[];
 	/** The providers this host can start sessions with, by name. */
 	readonly providers: ReadonlyMap<string, VoiceProvider>;
-	/** The projection a client's spoken text passes through; the local profile for local clients. */
-	readonly profile: Profile;
 	readonly log?: (message: string) => void;
 	readonly now?: () => number;
 }
 
-/** The client a voice intent runs for: its control attachment and its process identity. */
+/** The client a voice intent runs for: its control attachment, and what its media must prove. */
 export interface VoiceClient {
 	readonly clientId: string;
 	readonly clientKey: string;
@@ -86,7 +84,6 @@ export class VoiceService {
 		session = new VoiceSession({
 			conversation,
 			provider,
-			profile: this.options.profile,
 			instructions: VOICE_FRONTEND_INSTRUCTIONS,
 			isOwnerAttached: (owner) =>
 				this.options.clientsOf(conversation).some((client) => client.id === owner.clientId),
@@ -132,13 +129,22 @@ export class VoiceService {
 		});
 	}
 
-	start(conversation: HostedConversation, client: VoiceClient, intentId: string | undefined): VoiceStartOutput {
+	/** Start voice for `client`; it hears assistant text as `profile`, its connection's projection, shows it. */
+	start(
+		conversation: HostedConversation,
+		client: VoiceClient,
+		intentId: string | undefined,
+		profile: Profile,
+	): VoiceStartOutput {
 		const availability = this.availability(conversation);
 		const existing = this.sessions.get(conversation);
 		if (!availability.available && (existing === undefined || existing.state === "off")) {
 			throw new VoiceStartError("unavailable", `Voice is unavailable: ${availability.reason}`);
 		}
-		return this.sessionFor(conversation).start({ clientId: client.clientId, clientKey: client.clientKey }, intentId);
+		return this.sessionFor(conversation).start(
+			{ clientId: client.clientId, clientKey: client.clientKey, profile },
+			intentId,
+		);
 	}
 
 	/** Only the owner stops or interrupts its epoch; any other client is refused. */
@@ -172,6 +178,13 @@ export class VoiceService {
 		session.attachMedia(offerId, clientKey, stream);
 	}
 
+	/** Throws unless `attachMedia` with the same arguments would admit a stream now; consumes nothing. */
+	assertMediaOffer(conversation: HostedConversation, offerId: string, clientKey: string): void {
+		const session = this.sessions.get(conversation);
+		if (!session) throw new Error("No voice session is starting on this conversation");
+		session.assertMediaOffer(offerId, clientKey);
+	}
+
 	/** The host stops: every session ends, joined. */
 	async close(): Promise<void> {
 		this.closed = true;
@@ -189,7 +202,8 @@ export class VoiceService {
 	intentServices(clientKey: string): IntentVoiceServices {
 		return {
 			availability: (conversation) => this.availability(conversation),
-			start: (conversation, clientId, intentId) => this.start(conversation, { clientId, clientKey }, intentId),
+			start: (conversation, clientId, intentId, profile) =>
+				this.start(conversation, { clientId, clientKey }, intentId, profile),
 			stop: (conversation, clientId, epoch) => this.stop(conversation, { clientId, clientKey }, epoch),
 			interrupt: (conversation, clientId, epoch) => this.interrupt(conversation, { clientId, clientKey }, epoch),
 		};
@@ -199,8 +213,13 @@ export class VoiceService {
 /** What the voice intents need from their host; `clientId` is the invoking client's control attachment. */
 export interface IntentVoiceServices {
 	availability(conversation: HostedConversation): VoiceAvailability;
-	/** Throws `VoiceStartError`. */
-	start(conversation: HostedConversation, clientId: string, intentId: string | undefined): VoiceStartOutput;
+	/** Throws `VoiceStartError`. `profile` is the invoking connection's projection: what the owner may hear. */
+	start(
+		conversation: HostedConversation,
+		clientId: string,
+		intentId: string | undefined,
+		profile: Profile,
+	): VoiceStartOutput;
 	/** False when `epoch` is not the live one; throws `VoiceStartError` for a non-owner. */
 	stop(conversation: HostedConversation, clientId: string, epoch: number): Promise<boolean>;
 	interrupt(conversation: HostedConversation, clientId: string, epoch: number): boolean;

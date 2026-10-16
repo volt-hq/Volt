@@ -4,6 +4,7 @@ import type { IrohBytes, IrohRecvStreamLike } from "../src/core/protocol/transpo
 import {
 	createEmptyIrohRemoteHostState,
 	createIrohRemoteHandshakeSuccess,
+	getIrohRemoteStreamCapability,
 	IROH_REMOTE_ALPN,
 	IROH_REMOTE_HOST_FEATURES,
 	IROH_REMOTE_SESSION_RUNTIME_STATE_FEATURE,
@@ -339,5 +340,59 @@ describe("Iroh remote handshake stream modes", () => {
 			sessionId: "abc123",
 			conversation: { target: "new", sessionId: "abc123", selection: "created" },
 		});
+	});
+
+	test("a voice media stream names its conversation and offer, never a pairing secret", async () => {
+		const offerId = "offer_0123456789abcdef";
+		expect(parseHello({ voiceMedia: { sessionId: "abc123", offerId } })).toEqual({
+			type: "volt_iroh_hello",
+			protocol: IROH_REMOTE_ALPN,
+			workspace: "volt",
+			clientLabel: undefined,
+			clientNodeId: undefined,
+			mode: "voiceMedia",
+			voiceMedia: { sessionId: "abc123", offerId },
+		});
+		for (const invalid of [
+			{ voiceMedia: { sessionId: "abc123" } },
+			{ voiceMedia: { offerId } },
+			{ voiceMedia: { sessionId: "ABC", offerId } },
+			{ voiceMedia: { sessionId: "abc123", offerId: "short" } },
+			{ voiceMedia: { sessionId: "abc123", offerId, extra: true } },
+			{ voiceMedia: { sessionId: "abc123", offerId }, conversation: { target: "last" } },
+			{ voiceMedia: { sessionId: "abc123", offerId }, secret: "secret" },
+		]) {
+			expect(() => parseHello(invalid)).toThrow();
+		}
+		expect(getIrohRemoteStreamCapability({ mode: "voiceMedia" })).toBe("voice.stream.v1");
+
+		expect(parseIrohRemoteHandshakeResponseLine(responseLine({ voiceMedia: { sessionId: "abc123" } }))).toMatchObject(
+			{ success: true, voiceMedia: { sessionId: "abc123" } },
+		);
+		for (const invalid of [
+			responseLine({ sessionId: "abc123", voiceMedia: { sessionId: "abc123" } }),
+			responseLine({ voiceMedia: { sessionId: "abc123", offerId } }),
+			responseLine({ voiceMedia: { sessionId: "abc123" }, workspaceDiscovery: { purpose: "list_sessions" } }),
+		]) {
+			expect(() => parseIrohRemoteHandshakeResponseLine(invalid)).toThrow();
+		}
+
+		const hostEngine = await createPairedHostEngine();
+		const paired = await readHandshakeForHello(hostEngine, {
+			type: "volt_iroh_hello",
+			protocol: IROH_REMOTE_ALPN,
+			workspace: "volt",
+			secret: "secret",
+			workspaceDiscovery: { purpose: "list_sessions" },
+		});
+		expect(paired.ok).toBe(true);
+		const media = await readHandshakeForHello(hostEngine, {
+			type: "volt_iroh_hello",
+			protocol: IROH_REMOTE_ALPN,
+			workspace: "volt",
+			voiceMedia: { sessionId: "abc123", offerId },
+		});
+		expect(media).toMatchObject({ ok: true, response: { success: true, voiceMedia: { sessionId: "abc123" } } });
+		expect(media.response).not.toHaveProperty("sessionId");
 	});
 });

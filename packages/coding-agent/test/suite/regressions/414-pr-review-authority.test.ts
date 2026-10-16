@@ -18,6 +18,7 @@ import { getDaemonPaths } from "../../../src/daemon/paths.ts";
 import { PrReviewCheckoutManager, type PrReviewPreparationAuthority } from "../../../src/daemon/pr-review-checkout.ts";
 import * as reviewGit from "../../../src/daemon/pr-review-git.ts";
 import { VoltdStateStore } from "../../../src/daemon/state.ts";
+import { VoiceMediaBudget } from "../../../src/daemon/voice-media.ts";
 import { WorkerRegistry } from "../../../src/daemon/worker-registry.ts";
 import { WorkspaceSessions } from "../../../src/daemon/workspace-sessions.ts";
 import { getWorktreesRoot, WorktreeManager } from "../../../src/daemon/worktree-manager.ts";
@@ -322,6 +323,7 @@ async function fixture(grant = capabilities) {
 				throw new Error("unexpected credential write");
 			},
 		},
+		voiceMedia: new VoiceMediaBudget(),
 		requestShutdown() {
 			throw new Error("unexpected shutdown request");
 		},

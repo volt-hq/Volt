@@ -782,6 +782,8 @@ describe("branch fences and review-discussion boundaries carry over", () => {
 		for (const action of LEGACY_REMOTE_SAFE_UI_ACTIONS) fencedByLegacy.add(BUILTIN_UI_ACTION_INTENTS[action]!);
 		// `cancel_job` became `cancel_work`: work is not on a branch, so cancelling it needs no branch fence.
 		fencedByLegacy.delete("cancel_work");
+		// Voice had no legacy command; starting it is branch-fenced (docs/daemon-voice-design.md), stopping is not.
+		fencedByLegacy.add("voice_start");
 		for (const name of intentRegistry.names()) {
 			const definition = intentRegistry.get(name);
 			if (definition.remote !== "safe" || definition.scope === "host") {

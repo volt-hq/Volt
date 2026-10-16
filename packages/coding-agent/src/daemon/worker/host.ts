@@ -65,11 +65,12 @@
  */
 
 import { realpath } from "node:fs/promises";
+import type { Duplex } from "node:stream";
 import { ConversationLockedError } from "../../core/conversation-log/conversation-lock.ts";
 import type { ProjectTrustContext } from "../../core/extensions/index.ts";
 import { hostRequestTrustContext } from "../../core/host/trust-prompts.ts";
-import { localProfile } from "../../core/protocol/profiles.ts";
 import type { AuthorityLoss, ProtocolConnection } from "../../core/protocol/server/connection.ts";
+import { createIrohRemoteHandshakeFailure } from "../../core/remote/iroh/handshake.ts";
 import {
 	type IrohRemoteHostHandshakeFailureOutcome,
 	isIrohRemoteHostHandshakeFailureOutcome,
@@ -77,11 +78,12 @@ import {
 import { SessionManager, type SessionReference } from "../../core/session-manager.ts";
 import type { VoiceProvider } from "../../core/voice/provider.ts";
 import { VoiceService } from "../../core/voice/voice-service.ts";
-import type { WorkerSpawnSpec } from "../control-protocol.ts";
+import type { MediaRelayPreamble, WorkerSpawnSpec } from "../control-protocol.ts";
 import { createDaemonLogger } from "../log.ts";
 import { getDaemonPaths } from "../paths.ts";
 import { admitRemoteIntent } from "../remote-intents.ts";
 import { type ResolvedSessionTargetWithManager, resolveIrohRemoteSessionTarget } from "../session-target.ts";
+import { irohVoiceClientKey } from "../voice-media.ts";
 import { holdWorkerGate } from "../worker-gate.ts";
 import type { WorkerExit, WorkerExitReason, WorkerLaunchRequest } from "../worker-launcher.ts";
 import { isPathInside } from "../workspace-directory.ts";
@@ -364,6 +366,8 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 	const served = new Map<string, ProtocolConnection>();
 	/** Relays whose client lost its authority, with the fatal code their stream ends with. */
 	const losses = new Map<string, AuthorityLoss>();
+	/** The voice media streams the worker took, by relay: a lost authority ends them at once. */
+	const mediaStreams = new Map<string, Duplex>();
 	const serving = new Set<Promise<void>>();
 	const lockRetryMs = options.lockRetryMs ?? WORKER_LOCK_RETRY_MS;
 	/** What the worker decided for each TUI's conversations, by client key: never another TUI's. */
@@ -537,6 +541,49 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 		return task;
 	};
 
+	/**
+	 * Hand a media relay to the conversation's voice session, which admits it
+	 * only against the pending offer of the same client key. A paired
+	 * device's stream is answered first: its handshake success, in the same
+	 * turn the offer is consumed, or a failure.
+	 */
+	const admitMedia = (
+		relayId: string,
+		conversation: WorkerConversation["conversation"],
+		preamble: MediaRelayPreamble,
+		stream: Duplex,
+	): void => {
+		const handshake = preamble.handshake;
+		const service = voice;
+		try {
+			if (losses.has(relayId)) throw new Error("the client lost its authority");
+			if (preamble.sessionId !== conversation.id || !service) throw new Error("no voice session for this relay");
+			service.assertMediaOffer(conversation, preamble.offerId, preamble.clientKey);
+		} catch {
+			if (!handshake) {
+				stream.destroy();
+				return;
+			}
+			const failure = createIrohRemoteHandshakeFailure("the voice media offer is not pending", {
+				outcome: "voice_media_unavailable",
+				...(handshake.response.hostNodeId === undefined ? {} : { hostNodeId: handshake.response.hostNodeId }),
+				workspace: handshake.response.workspace,
+			});
+			stream.end(`${JSON.stringify(failure)}\n`);
+			return;
+		}
+		mediaStreams.set(relayId, stream);
+		stream.once("close", () => {
+			if (mediaStreams.get(relayId) === stream) mediaStreams.delete(relayId);
+		});
+		if (handshake) {
+			stream.write(`${JSON.stringify(handshake.response)}\n`);
+			// The bytes the device sent after its hello come before what the relay carried since.
+			if (handshake.initialInput.length > 0) stream.unshift(Buffer.from(handshake.initialInput));
+		}
+		service.attachMedia(conversation, preamble.offerId, preamble.clientKey, stream);
+	};
+
 	/** Serve a relay the daemon offered for a client of a conversation this worker hosts. */
 	const onRelayOffer = (offer: WorkerRelayOffer): void => {
 		// An offer the worker does not take expires; the daemon tells the client to retry.
@@ -566,14 +613,7 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 				return;
 			}
 			if (relay.preamble.kind === "media") {
-				// The voice session admits the stream against the offer its owner's `voice_start` minted, or nothing does.
-				const preamble = relay.preamble;
-				try {
-					if (preamble.sessionId !== conversation.id || !voice) throw new Error("no voice session for this relay");
-					voice.attachMedia(conversation, preamble.offerId, preamble.clientKey, relay.stream);
-				} catch {
-					relay.stream.destroy();
-				}
+				admitMedia(relayId, conversation, relay.preamble, relay.stream);
 				return;
 			}
 			const voiceServices = voice;
@@ -631,6 +671,18 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 					}),
 				authority: () => losses.get(relayId),
 				reviewDiscussions: hosted.reviewDiscussions(conversation),
+				// Voice the device starts here is bound to this very stream: its media must come beside it.
+				...(voiceServices === undefined
+					? {}
+					: {
+							voice: voiceServices.intentServices(
+								irohVoiceClientKey(
+									relay.preamble.authorization.clientNodeId,
+									relay.preamble.connectionId,
+									relay.preamble.streamId,
+								),
+							),
+						}),
 				onConnection,
 			});
 		})().finally(() => losses.delete(relayId));
@@ -641,6 +693,8 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 	const onRelayAuthority = (relayId: string, loss: AuthorityLoss): void => {
 		losses.set(relayId, loss);
 		void served.get(relayId)?.close({ code: loss });
+		// Media carries no frames to end with: the stream ends, and voice with it.
+		mediaStreams.get(relayId)?.destroy();
 	};
 
 	const client = new WorkerDaemonClient({
@@ -678,7 +732,6 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 	voice = new VoiceService({
 		clientsOf: (conversation) => conversations?.get(conversation.id)?.host.clientsOf(conversation) ?? [],
 		providers: new Map([...workerVoiceProviders(), ...(options.voiceProviders ?? [])]),
-		profile: localProfile,
 		log: (message) => console.error(`worker: ${message}`),
 	});
 	// Every conversation of the worker is of one workspace (the daemon routes only compatible opens here).

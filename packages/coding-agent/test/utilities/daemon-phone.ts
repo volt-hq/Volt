@@ -35,12 +35,23 @@ interface PhoneEndpointLike {
 	close(): Promise<void>;
 }
 
+/** A raw stream a paired phone opened, after its handshake line. */
+export interface PhoneRawStream {
+	/** The handshake response the host wrote. */
+	readonly handshake: Record<string, unknown>;
+	readonly stream: IrohBiStreamLike;
+	/** Bytes read past the handshake response. */
+	readonly rest: Buffer;
+}
+
 /** A conversation stream a paired phone opened, after its handshake. */
 export interface PhoneConversation {
 	/** The handshake response the conversation's host wrote. */
 	readonly handshake: Record<string, unknown>;
 	/** The protocol client on the stream, when the handshake succeeded. */
 	readonly phone: RemotePhone | undefined;
+	/** Open another stream on this stream's Iroh connection with `hello`'s mode, after its handshake. */
+	openSibling(hello: Record<string, unknown>): Promise<PhoneRawStream>;
 	/** Close the phone's Iroh connection for this stream. */
 	close(): Promise<void>;
 }
@@ -51,6 +62,8 @@ export interface PairedPhone {
 	openConversation(conversation: Record<string, unknown>, workspace?: string): Promise<PhoneConversation>;
 	/** Open a workspace stream for `purpose`, after its handshake. */
 	openWorkspace(mode: "workspaceDiscovery" | "workspaceManagement", purpose: string): Promise<PhoneConversation>;
+	/** Open a stream with `hello`'s mode on a new Iroh connection, after its handshake. */
+	openStream(hello: Record<string, unknown>): Promise<PhoneRawStream>;
 	close(): Promise<void>;
 }
 
@@ -119,9 +132,10 @@ export async function pairPhone(
 		await pairing.closed().catch(() => undefined);
 		const nodeId = bound.id().toString();
 
-		const open = async (hello: Record<string, unknown>): Promise<PhoneConversation> => {
-			const connection = await bound.connect(address.endpointAddr(), ALPN);
-			connections.push(connection);
+		const handshakeOn = async (
+			connection: PhoneConnectionLike,
+			hello: Record<string, unknown>,
+		): Promise<PhoneRawStream> => {
 			const stream = await connection.openBi();
 			await writeJsonLine(stream, {
 				type: "volt_iroh_hello",
@@ -131,10 +145,24 @@ export async function pairPhone(
 			});
 			const response = await readIrohJsonlLine(stream.recv, Buffer.alloc(0), { maxLineBytes: 1024 * 1024 });
 			if (response.line === undefined) throw new Error("the stream ended before its handshake");
-			const handshake = JSON.parse(response.line) as Record<string, unknown>;
+			return {
+				handshake: JSON.parse(response.line) as Record<string, unknown>,
+				stream,
+				rest: Buffer.from(response.rest),
+			};
+		};
+		const connect = async (): Promise<PhoneConnectionLike> => {
+			const connection = await bound.connect(address.endpointAddr(), ALPN);
+			connections.push(connection);
+			return connection;
+		};
+		const open = async (hello: Record<string, unknown>): Promise<PhoneConversation> => {
+			const connection = await connect();
+			const { handshake, stream, rest } = await handshakeOn(connection, hello);
 			return {
 				handshake,
-				phone: handshake.success === true ? connectRemotePhone(stream, response.rest) : undefined,
+				phone: handshake.success === true ? connectRemotePhone(stream, rest) : undefined,
+				openSibling: (sibling) => handshakeOn(connection, sibling),
 				close: async () => {
 					connection.close(0n, Array.from(Buffer.from("done", "utf8")));
 					await connection.closed().catch(() => undefined);
@@ -147,6 +175,7 @@ export async function pairPhone(
 			openConversation: (conversation, workspace) =>
 				open({ conversation, ...(workspace === undefined ? {} : { workspace }) }),
 			openWorkspace: (mode, purpose) => open({ [mode]: { purpose } }),
+			openStream: async (hello) => handshakeOn(await connect(), hello),
 			close: async () => {
 				for (const connection of connections) {
 					try {

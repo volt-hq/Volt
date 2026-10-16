@@ -2,11 +2,14 @@
  * Voice intents (docs/daemon-voice-design.md, "Control and media planes"):
  * control only, on the ordinary conversation protocol. Media attaches on a
  * separate stream. A host without voice services has none of them
- * available; one with them reports why voice cannot start distinctly.
+ * available; one with them reports why voice cannot start distinctly. A
+ * paired device needs `voice.stream.v1` besides conversation control; the
+ * voice owner hears assistant text as its own connection projects it.
  */
 
 import type { VoiceStartOutput } from "@hansjm10/volt-protocol";
 import { VoiceStartError } from "../../voice/voice-session.ts";
+import { localProfile } from "../profiles.ts";
 import { targetOf } from "./conversation.ts";
 import {
 	defineIntent,
@@ -16,7 +19,7 @@ import {
 	type IntentView,
 } from "./types.ts";
 
-const control = ["conversation.control.v1"] as const;
+const voiceControl = ["conversation.control.v1", "voice.stream.v1"] as const;
 
 function voiceAvailability(view: IntentView): IntentAvailability {
 	const voice = view.services.voice;
@@ -45,18 +48,20 @@ export const voiceStartIntent = defineIntent({
 	category: "session",
 	scope: "conversation",
 	fence: "branch",
-	// Remote media needs its own capability and stream purpose (milestone 3); local clients only until then.
-	remote: "unsafe",
-	requires: control,
+	remote: "safe",
+	requires: voiceControl,
 	whileBusy: "run",
 	available: voiceAvailability,
 	async run(ctx): Promise<VoiceStartOutput> {
 		const { conversation, client } = targetOf(ctx);
 		const voice = ctx.services.voice;
 		if (!voice) throw new IntentRejectedError("unavailable", "Voice is not available on this host");
+		// What the owner may hear is what its connection projects; a remote caller without one starts nothing.
+		const projection = ctx.subscriber ?? (ctx.profile.name === "local" ? localProfile : undefined);
+		if (!projection) throw new IntentRejectedError("unavailable", "Voice needs a connection to project for");
 		ctx.assertCurrent?.();
 		try {
-			return voice.start(conversation, client.id, ctx.intentId);
+			return voice.start(conversation, client.id, ctx.intentId, projection);
 		} catch (error) {
 			rejectStart(error);
 		}
@@ -71,8 +76,8 @@ export const voiceStopIntent = defineIntent({
 	category: "session",
 	scope: "conversation",
 	fence: "none",
-	remote: "unsafe",
-	requires: control,
+	remote: "safe",
+	requires: voiceControl,
 	whileBusy: "run",
 	available: (view) =>
 		view.services.voice
@@ -99,8 +104,8 @@ export const voiceInterruptIntent = defineIntent({
 	category: "session",
 	scope: "conversation",
 	fence: "none",
-	remote: "unsafe",
-	requires: control,
+	remote: "safe",
+	requires: voiceControl,
 	whileBusy: "run",
 	available: (view) =>
 		view.services.voice

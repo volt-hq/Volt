@@ -652,6 +652,9 @@ export class IrohRemoteHostEngine {
 				workspaceManagement: { purpose: hello.workspaceManagement.purpose },
 			});
 		}
+		if (hello.mode === "voiceMedia") {
+			return createIrohRemoteHandshakeSuccess({ ...common, voiceMedia: { sessionId: hello.voiceMedia.sessionId } });
+		}
 		if (options.conversationSession === undefined) {
 			return createIrohRemoteHandshakeSuccess(common);
 		}

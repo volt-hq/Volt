@@ -1,6 +1,6 @@
 # Daemon-owned voice
 
-Status: milestones 1 and 2 landed, 2026-10-16; milestones 3 and 4 open.
+Status: milestones 1 to 3 landed, 2026-10-16; milestone 4 open.
 Development-facing; not a supported feature or a wire contract. This replaces
 the extension/browser prototype direction.
 
@@ -445,6 +445,44 @@ observed and bounded, including after a client is lost.
    protocol schemas/contracts in place; do not add old-client fallback wire
    formats. Coordinate dependent client changes with a `volt-app` issue when
    implementation reaches that boundary, not a compatibility branch.
+
+   **Landed, 2026-10-16.** The capability is `voice.stream.v1`: the voice
+   intents require it with conversation control and are remote-safe, only
+   the `full` preset includes it, and stored grants are explicit lists, so
+   an existing pairing gains it only through an access update. The Iroh
+   stream mode is `voiceMedia: {sessionId, offerId}` (never a pairing
+   secret), with the handshake outcome `voice_media_unavailable`. The daemon
+   (`runVoiceMediaStream` in `iroh-service.ts`) admits it only on the
+   connection of the device's live conversation stream of that session, to
+   the worker serving that stream, with the grant revision that stream was
+   admitted with, one per conversation stream, and mints a `media` relay
+   bound to the stream's key (`irohVoiceClientKey`). Registered beside the
+   phone relays, it inherits their fences (revocation, access update,
+   workspace removal, worker exit, and the 2 s authority close); it also
+   ends with its conversation stream and counts as the device attached for
+   retention. The worker admits it against the pending offer and writes
+   the handshake answer in the same turn the offer is consumed, then hands
+   the bytes after the hello to the session. A remote owner hears assistant
+   text through its own stream's projection, so synthesis carries the same
+   path redaction as its transcript. `VoiceMediaBudget` (four by default,
+   `voiceMediaSessions` in the daemon config) bounds the media attachments
+   of TUIs and devices together, and with them the billed provider sessions
+   of the daemon: the per-worker limit of milestone 2 is now daemon-wide.
+   The wire contract is in [the Iroh protocol](iroh-remote-protocol.md#voice).
+
+   Fixtures: `test/daemon-voice-iroh.test.ts` over native Iroh loopback
+   (relay disabled): the full path with redacted synthesis, the capability
+   and its grant update, the binding (another connection, another device, a
+   wrong or replayed offer, a second media stream), revocation, connection
+   loss, a device that stops reading (voice ends `slow_reader` while the
+   conversation stream on the same connection still answers), and the
+   shared budget. Measured on that loopback, with the daemon, an in-process
+   worker, and the device in one process, 250 frames each way at 20 ms
+   concurrently: uplink p50 0.34 ms, p95 0.56 ms, max 1.6 ms; downlink p50
+   0.30 ms, p95 0.46 ms, max 1.25 ms. Independent reliable streams are
+   therefore kept; loss, jitter, and congestion on real mobile networks are
+   unmeasured and belong to the client milestone, behind the same
+   session/media boundary.
 4. **Client integrations.** Add TUI capture/playback and app audio independently.
    Both use the same control/media contract, local device permission, visible
    listening state, echo cancellation, interruption, and reconnect policy.

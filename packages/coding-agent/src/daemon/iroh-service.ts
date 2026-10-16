@@ -170,6 +170,7 @@ import {
 } from "./remote-intents.ts";
 import { resolveWorktreeCleanupPolicy } from "./state.ts";
 import { sanitizeHostThemeTokens } from "./theme-push.ts";
+import { irohVoiceClientKey } from "./voice-media.ts";
 import { type LiveWorker, MAX_WORKER_HOSTED_SESSIONS, type WorkerRegistry } from "./worker-registry.ts";
 import { isPathInside, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
 import type { WorkspaceSession } from "./workspace-sessions.ts";
@@ -3128,6 +3129,10 @@ class IrohDaemonService {
 			});
 			return;
 		}
+		if (handshake.hello.mode === "voiceMedia") {
+			await this.runVoiceMediaStream(stream, handshake, connectionId, streamId, owner);
+			return;
+		}
 		await this.runIntegratedConversation(stream, handshake, connectionId, streamId, owner);
 	}
 
@@ -3865,10 +3870,12 @@ class IrohDaemonService {
 			return;
 		}
 		// One relay per phone and conversation on a connection; one on an older connection is replaced.
-		const relaysOf = () => [
-			...this.relays.forConversation(authorization.client.nodeId, workspaceName, sessionId, "active"),
-			...this.relays.forConversation(authorization.client.nodeId, workspaceName, sessionId, "offered"),
-		];
+		// Voice media relays of the conversation are not conversation streams: they end with theirs.
+		const relaysOf = () =>
+			[
+				...this.relays.forConversation(authorization.client.nodeId, workspaceName, sessionId, "active"),
+				...this.relays.forConversation(authorization.client.nodeId, workspaceName, sessionId, "offered"),
+			].filter((relay) => relay.preamble.kind === "phone");
 		if (relaysOf().some((relay) => relay.connectionId === connectionId)) {
 			await this.rejectDuplicateActiveConnection(stream, authorization, sessionId, "relay_registry");
 			return;
@@ -3992,6 +3999,190 @@ class IrohDaemonService {
 			},
 		});
 		await relay.settled;
+	}
+
+	/**
+	 * Relay a device's voice media stream (`voiceMedia`) to the worker serving
+	 * the device's conversation stream of the same session on this very
+	 * connection: media attaches only beside the conversation stream whose
+	 * `voice_start` minted the offer, and the worker admits it only against
+	 * that offer, answering the handshake itself. The relay counts as the
+	 * device attached to the worker, draws on the daemon's voice media
+	 * budget, ends with its conversation stream, and is fenced as every relay
+	 * of the device is (revocation, access update, workspace removal, worker
+	 * exit).
+	 */
+	private async runVoiceMediaStream(
+		stream: IrohBiStreamLike,
+		handshake: Extract<IrohRemoteHostHandshakeResult, { ok: true }>,
+		connectionId: string,
+		streamId: string,
+		physicalOwner: IrohPhysicalStreamOwner,
+	): Promise<void> {
+		const hello = handshake.hello;
+		if (hello.mode !== "voiceMedia") return;
+		const admission = this.admission.tryAcquire();
+		if (!admission) {
+			await physicalOwner.close("host_shutdown").catch(() => {});
+			return;
+		}
+		const authorization = handshake.authorization;
+		const nodeId = authorization.client.nodeId;
+		const workspaceName = authorization.workspace.name;
+		const { sessionId, offerId } = hello.voiceMedia;
+		const unavailable = (target: IrohBiStreamLike, message: string, retryAfterMs?: number): Promise<void> =>
+			this.writeTerminalHandshakeResponse(
+				target,
+				createIrohRemoteHandshakeFailure(message, {
+					hostNodeId: this.hostNodeId,
+					outcome: "voice_media_unavailable",
+					workspace: workspaceName,
+					...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+				}),
+			);
+		try {
+			// The persisted grant is read again before the attachment is published.
+			if (!(await this.isAuthorizationCurrent(authorization))) {
+				await unavailable(stream, "client or workspace authority changed; reconnect");
+				return;
+			}
+			if (!admission.isCurrent()) return;
+			// Everything below runs in one turn: what it checks still holds when the relay is minted.
+			const control = this.relays
+				.forConversation(nodeId, workspaceName, sessionId, "active")
+				.find((relay) => relay.connectionId === connectionId && relay.preamble.kind === "phone");
+			const controlEntry = control === undefined ? undefined : this.workerRelays.get(control.relayId);
+			const worker = this.workers.liveHosting(workspaceName, sessionId);
+			if (!control || !controlEntry || !worker || worker.workerId !== controlEntry.workerId) {
+				await unavailable(stream, "no conversation stream of the session on this connection");
+				return;
+			}
+			if (
+				getIrohRemoteAuthorizationLoss(this.services.state.getHostState(), authorization) !== undefined ||
+				controlEntry.authorization.client.rpcGrant.revision !== authorization.client.rpcGrant.revision
+			) {
+				await unavailable(stream, "client or workspace authority changed; reconnect");
+				return;
+			}
+			// One media stream per conversation stream; another waits for it to end.
+			if (
+				this.relays
+					.forConversation(nodeId, workspaceName, sessionId)
+					.some((relay) => relay.connectionId === connectionId && relay.preamble.kind === "media")
+			) {
+				await unavailable(stream, "the conversation stream already has a media stream", RELAY_OFFER_RETRY_AFTER_MS);
+				return;
+			}
+			const lease = this.services.voiceMedia.tryAcquire();
+			if (!lease) {
+				await unavailable(stream, "the host holds as many voice sessions as it allows");
+				return;
+			}
+			let detach: () => void;
+			try {
+				detach = worker.attach("remote");
+			} catch (error) {
+				lease.release();
+				await unavailable(stream, error instanceof Error ? error.message : String(error));
+				return;
+			}
+			const relayPhysicalStream = physicalOwner.physicalStream ?? stream;
+			let relay: RelayLifecycleOwner;
+			try {
+				relay = this.relays.mint({
+					workspaceName,
+					sessionId,
+					clientNodeId: nodeId,
+					connectionId,
+					streamId,
+					stream: relayPhysicalStream,
+					observePhysicalTask: (task) => this.trackNativeLifecycleTask(task),
+					preamble: {
+						kind: "media",
+						sessionId,
+						clientKey: irohVoiceClientKey(nodeId, control.connectionId, control.streamId),
+						offerId,
+						handshake: { response: handshake.response, initialInput: Array.from(handshake.initialInput) },
+					},
+					rejectPending: ({ message, retryAfterMs }) => unavailable(relayPhysicalStream, message, retryAfterMs),
+					onSettled: async (outcome) => {
+						detach();
+						lease.release();
+						this.workerRelays.delete(relay.relayId);
+						this.services.controlServer.sendTo(worker.connectionId, {
+							type: "relay_closed",
+							relayId: relay.relayId,
+							reason: outcome.reason,
+						});
+						await this.logAudit({
+							type: "relay_closed",
+							clientNodeId: nodeId,
+							workspace: workspaceName,
+							success: outcome.error === undefined,
+							error: outcome.error,
+							details: {
+								relayId: relay.relayId,
+								workerId: worker.workerId,
+								purpose: "voice_media",
+								reason: outcome.reason,
+								bytesUp: outcome.bytesUp,
+								bytesDown: outcome.bytesDown,
+								durationMs: outcome.durationMs,
+							},
+						});
+					},
+				});
+			} catch (error) {
+				detach();
+				lease.release();
+				await unavailable(stream, error instanceof Error ? error.message : String(error));
+				return;
+			}
+			this.workerRelays.set(relay.relayId, { relay, authorization, workerId: worker.workerId });
+			const delivered = this.services.controlServer.sendTo(worker.connectionId, {
+				type: "relay_offer",
+				clientKind: "media",
+				relayId: relay.relayId,
+				relayToken: relay.relayToken,
+				workspaceName,
+				sessionId,
+			});
+			if (!delivered) void relay.close("error", { retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS });
+			// The media ends with the conversation stream it belongs to.
+			void control.settled.then(() => relay.close("phone_disconnected"));
+			if (
+				!physicalOwner.installCloseAction((reason) =>
+					relay
+						.close(normalizeRelayCloseReason(reason), { pendingMessage: relayPendingMessageForReason(reason) })
+						.then(() => undefined),
+				)
+			) {
+				await relay.close("host_shutdown", { pendingMessage: relayPendingMessageForReason("host_shutdown") });
+				return;
+			}
+			if (this.physicalStreamOwners.get(streamId) === physicalOwner) {
+				this.physicalStreamOwners.delete(streamId);
+			}
+			admission.release();
+			void this.logAudit({
+				type: "relay_opened",
+				clientNodeId: nodeId,
+				workspace: workspaceName,
+				success: true,
+				details: {
+					relayId: relay.relayId,
+					workerId: worker.workerId,
+					purpose: "voice_media",
+					workspaceName,
+					sessionId,
+					connectionId,
+					streamId,
+				},
+			});
+			await relay.settled;
+		} finally {
+			admission.release();
+		}
 	}
 
 	/**
@@ -5010,7 +5201,13 @@ class IrohDaemonService {
 	): { ok: true; entry: WorkerRelay } | { ok: false; code: string; message: string } {
 		const workerId = this.workers.workerOf(connection.connectionId);
 		const entry = this.workerRelays.get(relayId);
-		if (workerId === undefined || entry === undefined || entry.workerId !== workerId) {
+		// A voice media relay carries no frames: no service acts on it.
+		if (
+			workerId === undefined ||
+			entry === undefined ||
+			entry.workerId !== workerId ||
+			entry.relay.preamble.kind !== "phone"
+		) {
 			return { ok: false, code: "not_found", message: "the worker has no such relay" };
 		}
 		if (entry.relay.phase !== "active") {

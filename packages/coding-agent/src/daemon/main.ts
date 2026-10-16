@@ -75,6 +75,7 @@ import {
 import { verifyPidfileProcess, verifyVoltdProcessIdentity } from "./process-identity.ts";
 import { VoltdStateStore } from "./state.ts";
 import { TuiConversations } from "./tui-conversations.ts";
+import { VoiceMediaBudget } from "./voice-media.ts";
 import { waitForWorkerGate } from "./worker-gate.ts";
 import type { WorkerLauncher } from "./worker-launcher.ts";
 import { WorkerRegistry } from "./worker-registry.ts";
@@ -110,6 +111,8 @@ export interface VoltdConfig {
 	 * for a daemon the login service runs, nor without it (tests).
 	 */
 	idleExitMs?: number;
+	/** Most voice media attachments the daemon holds at once; `VOICE_LIMITS.sessionsPerHost` by default. */
+	voiceMediaSessions?: number;
 }
 
 export interface VoltdProcessLifecycle {
@@ -199,6 +202,8 @@ export interface VoltdRuntimeServices {
 	keepAwake: KeepAwakeController;
 	/** Stored Brave Search API key for the web_search tool, persisted in auth.json. */
 	webSearchKey: { set(apiKey: string | null): void; readonly configured: boolean };
+	/** The voice media attachments of every client kind draw on this one budget. */
+	voiceMedia: VoiceMediaBudget;
 	requestShutdown(reason: VoltdShutdownReason): void;
 }
 
@@ -539,10 +544,12 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 					launch: launchExtensionInventory,
 					log: (message) => logger.log("info", "extension-inventory", message),
 				});
+	const voiceMedia = new VoiceMediaBudget(config.voiceMediaSessions);
 	// The conversations TUIs open in workers, and the streams that reach them.
 	const tuiConversations = new TuiConversations({
 		agentDir,
 		workers,
+		voiceMedia,
 		sessions: workspaceSessions,
 		workspaces: () => state.getHostState().workspaces,
 		currentGeneration: (workspaceName) => {
@@ -1248,6 +1255,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		workspaceSessions,
 		keepAwake,
 		webSearchKey,
+		voiceMedia,
 		requestShutdown,
 	};
 	for (const extension of extensions) {

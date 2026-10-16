@@ -11,6 +11,7 @@
 
 import { type Static, Type } from "typebox";
 import { stringEnum } from "./helpers.ts";
+import { VoiceMediaOfferIdSchema } from "./voice.ts";
 import { IrohRemoteWorkspaceNameSchema, IrohRemoteWorkspaceStatusSchema } from "./workspace.ts";
 
 /** The ALPN of protocol 1 streams: after the handshake line, a stream carries protocol 1 frames. */
@@ -37,6 +38,7 @@ export const IROH_REMOTE_OUTCOMES = [
 	"duplicate_conversation_connection",
 	"conversation_in_use",
 	"conversation_locked",
+	"voice_media_unavailable",
 	"host_identity_mismatch",
 	"saved_host_invalid",
 ] as const;
@@ -60,6 +62,7 @@ export const IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOMES = [
 	"duplicate_conversation_connection",
 	"conversation_in_use",
 	"conversation_locked",
+	"voice_media_unavailable",
 ] as const;
 
 export const IROH_REMOTE_SESSION_ID_PATTERN_SOURCE = "^[a-z0-9_-]{1,128}$";
@@ -175,6 +178,18 @@ export const IrohRemoteWorkspaceManagementTargetSchema = Type.Object(
 );
 export type IrohRemoteWorkspaceManagementTarget = Static<typeof IrohRemoteWorkspaceManagementTargetSchema>;
 
+/**
+ * A voice media stream: the binary media of the voice session the device's
+ * conversation stream of `sessionId`, on the same connection, started.
+ * `offerId` is what that stream's `voice_start` answered; it is single-use
+ * and grants nothing by itself.
+ */
+export const IrohRemoteVoiceMediaTargetSchema = Type.Object(
+	{ sessionId: IrohRemoteSessionIdSchema, offerId: VoiceMediaOfferIdSchema },
+	{ additionalProperties: false },
+);
+export type IrohRemoteVoiceMediaTarget = Static<typeof IrohRemoteVoiceMediaTargetSchema>;
+
 const helloProperties = {
 	type: Type.Literal(IROH_REMOTE_HELLO_TYPE),
 	protocol: Type.Literal(IROH_REMOTE_ALPN),
@@ -194,6 +209,7 @@ export const IROH_REMOTE_HELLO_WIRE_SCHEMAS = {
 			conversation: IrohRemoteConversationTargetSchema,
 			workspaceDiscovery: absent(),
 			workspaceManagement: absent(),
+			voiceMedia: absent(),
 		},
 		{ additionalProperties: true },
 	),
@@ -203,6 +219,7 @@ export const IROH_REMOTE_HELLO_WIRE_SCHEMAS = {
 			workspaceDiscovery: IrohRemoteWorkspaceDiscoveryTargetSchema,
 			conversation: absent(),
 			workspaceManagement: absent(),
+			voiceMedia: absent(),
 		},
 		{ additionalProperties: true },
 	),
@@ -212,16 +229,30 @@ export const IROH_REMOTE_HELLO_WIRE_SCHEMAS = {
 			workspaceManagement: IrohRemoteWorkspaceManagementTargetSchema,
 			conversation: absent(),
 			workspaceDiscovery: absent(),
+			voiceMedia: absent(),
+		},
+		{ additionalProperties: true },
+	),
+	/** A paired device's media stream: never a pairing, so no secret. */
+	voiceMedia: Type.Object(
+		{
+			...helloProperties,
+			secret: absent(),
+			voiceMedia: IrohRemoteVoiceMediaTargetSchema,
+			conversation: absent(),
+			workspaceDiscovery: absent(),
+			workspaceManagement: absent(),
 		},
 		{ additionalProperties: true },
 	),
 } as const;
 
-/** What a phone writes: exactly one of `conversation`, `workspaceDiscovery`, or `workspaceManagement`. */
+/** What a phone writes: exactly one of `conversation`, `workspaceDiscovery`, `workspaceManagement`, or `voiceMedia`. */
 export const IrohRemoteHelloWireSchema = Type.Union([
 	IROH_REMOTE_HELLO_WIRE_SCHEMAS.conversation,
 	IROH_REMOTE_HELLO_WIRE_SCHEMAS.workspaceDiscovery,
 	IROH_REMOTE_HELLO_WIRE_SCHEMAS.workspaceManagement,
+	IROH_REMOTE_HELLO_WIRE_SCHEMAS.voiceMedia,
 ]);
 
 /** A parsed hello: the wire hello reduced to its known fields, with the derived stream `mode`. */
@@ -243,6 +274,15 @@ export const IrohRemoteHelloSchema = Type.Union([
 			...helloProperties,
 			mode: Type.Literal("workspaceManagement"),
 			workspaceManagement: IrohRemoteWorkspaceManagementTargetSchema,
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			...helloProperties,
+			secret: absent(),
+			mode: Type.Literal("voiceMedia"),
+			voiceMedia: IrohRemoteVoiceMediaTargetSchema,
 		},
 		{ additionalProperties: false },
 	),
@@ -309,6 +349,8 @@ export const IrohRemoteHandshakeSuccessSchema = Type.Object(
 		conversation: Type.Optional(IrohRemoteConversationHandshakeMetadataSchema),
 		workspaceDiscovery: Type.Optional(IrohRemoteWorkspaceDiscoveryTargetSchema),
 		workspaceManagement: Type.Optional(IrohRemoteWorkspaceManagementTargetSchema),
+		/** The conversation whose voice session the media stream attached to; no top-level `sessionId`. */
+		voiceMedia: Type.Optional(Type.Object({ sessionId: IrohRemoteSessionIdSchema }, { additionalProperties: false })),
 		remoteHost: Type.Optional(IrohRemoteHostHandshakeMetadataSchema),
 		child: Type.Optional(NonEmptyStringSchema),
 	},

@@ -129,10 +129,11 @@ export function cloneIrohRemoteRpcGrant(grant: IrohRemoteRpcGrant): IrohRemoteRp
 }
 
 export function getIrohRemoteStreamCapability(options: {
-	mode: "conversation" | "workspaceDiscovery" | "workspaceManagement";
+	mode: "conversation" | "workspaceDiscovery" | "workspaceManagement" | "voiceMedia";
 	purpose?: string;
 }): IrohRemoteRpcCapability | undefined {
 	if (options.mode === "conversation") return "conversation.observe.v1";
+	if (options.mode === "voiceMedia") return "voice.stream.v1";
 	if (options.mode === "workspaceDiscovery") {
 		return options.purpose === "agent_options" ? "model.select.v1" : "conversation.observe.v1";
 	}

@@ -1,9 +1,10 @@
 /**
- * The headless voice fixture client (docs/daemon-voice-design.md, milestone
- * 2): what a TUI or app does on the control plane and the media plane,
- * without a microphone or speaker. It starts voice with the `voice_start`
- * intent on its conversation stream, attaches media through the daemon's
- * `voice_media_open` relay, frames PCM into envelopes, and decodes what it
+ * The headless voice fixture client (docs/daemon-voice-design.md,
+ * milestones 2 and 3): what a TUI or app does on the control plane and the
+ * media plane, without a microphone or speaker. It starts voice with the
+ * `voice_start` intent on its conversation stream, attaches media through
+ * the daemon's `voice_media_open` relay (a TUI) or a `voiceMedia` Iroh
+ * stream (a paired device), frames PCM into envelopes, and decodes what it
  * receives.
  */
 
@@ -15,6 +16,7 @@ import {
 	type VoiceStartOutput,
 } from "@hansjm10/volt-protocol";
 import type { ProtocolClient } from "../../src/client/protocol-client.ts";
+import type { IrohBiStreamLike } from "../../src/core/protocol/transport/iroh-transport.ts";
 import {
 	encodeVoiceEnvelope,
 	frameToPayload,
@@ -140,6 +142,75 @@ export async function attachVoiceMedia(
 		},
 		close() {
 			stream.destroy();
+		},
+	};
+}
+
+/** A paired device's media stream, after its `voiceMedia` handshake succeeded. */
+export interface IrohVoiceMedia {
+	readonly received: VoiceEnvelope[];
+	/** Settles once the host ended the stream, or it failed. */
+	readonly ended: Promise<void>;
+	/** Send one PCM frame (a flat tone when omitted) with the next sequence; resolves once written. */
+	sendFrame(frame?: Int16Array): Promise<void>;
+	/** Stop reading what the host sends, as a device whose network stalled does. */
+	pauseReading(): void;
+	close(): Promise<void>;
+}
+
+/** The media client on `stream` for `epoch`; `rest` holds bytes read past the handshake response. */
+export function irohVoiceMedia(stream: IrohBiStreamLike, rest: Uint8Array, epoch: number): IrohVoiceMedia {
+	const decoder = new VoiceEnvelopeDecoder();
+	const received: VoiceEnvelope[] = [];
+	const ended = Promise.withResolvers<void>();
+	let paused = false;
+	const take = (bytes: Uint8Array | number[]) => {
+		try {
+			received.push(...decoder.push(Buffer.from(bytes)));
+		} catch {
+			// A malformed host envelope would be a host bug; tests inspect `received`.
+		}
+	};
+	if (rest.length > 0) take(rest);
+	void (async () => {
+		try {
+			while (!paused) {
+				const chunk = await stream.recv.read(64 * 1024);
+				// The end of the stream reads as nothing or as an empty chunk.
+				if (!chunk || chunk.length === 0) break;
+				if (!paused) take(chunk);
+			}
+		} catch {
+			// A reset is an end too.
+		}
+		if (!paused) ended.resolve();
+	})();
+	let writes: Promise<void> = Promise.resolve();
+	let sequence = 0;
+	let samples = 0;
+	const tone = new Int16Array(VOICE_FRAME_SAMPLES).fill(1234);
+	return {
+		received,
+		ended: ended.promise,
+		sendFrame(frame = tone) {
+			const bytes = encodeVoiceEnvelope({
+				kind: VOICE_ENVELOPE_KINDS.audio,
+				epoch,
+				sequence,
+				sampleOffset: samples,
+				payload: frameToPayload(frame),
+			});
+			sequence += 1;
+			samples += frame.length;
+			writes = writes.then(() => stream.send.writeAll(Array.from(bytes)));
+			return writes;
+		},
+		pauseReading() {
+			paused = true;
+		},
+		async close() {
+			await Promise.resolve(stream.send.finish?.()).catch(() => undefined);
+			await Promise.resolve(stream.recv.stop?.(0n)).catch(() => undefined);
 		},
 	};
 }

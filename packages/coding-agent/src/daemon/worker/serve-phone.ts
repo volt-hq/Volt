@@ -27,6 +27,7 @@ import type {
 	IrohRemotePushNotificationIntent,
 } from "../../core/remote/iroh/push.ts";
 import type { ReviewDiscussionService } from "../../core/review-discussions.ts";
+import type { IntentVoiceServices } from "../../core/voice/voice-service.ts";
 import type { PhoneRelayPreamble } from "../control-protocol.ts";
 import {
 	createIntegratedConversationHandshakeResponse,
@@ -120,6 +121,8 @@ export interface ServePhoneRelayOptions {
 	/** The relay's authority as the daemon last pushed it, checked before every frame. */
 	readonly authority?: () => AuthorityLoss | undefined;
 	readonly reviewDiscussions?: ReviewDiscussionService;
+	/** Voice on the conversation, bound to this stream: media attaches only on its connection. */
+	readonly voice?: IntentVoiceServices;
 	/** The connection serving the phone, once it exists: the host ends it on shutdown or authority loss. */
 	readonly onConnection?: (connection: ProtocolConnection) => void;
 }
@@ -187,6 +190,7 @@ export async function servePhoneRelay(options: ServePhoneRelayOptions): Promise<
 						: { ownsSession: (sessionId: string) => ownsSession.call(daemon, sessionId) }),
 				},
 				...(options.reviewDiscussions === undefined ? {} : { reviewDiscussions: options.reviewDiscussions }),
+				...(options.voice === undefined ? {} : { voice: options.voice }),
 			}),
 			relay: async (frame) => {
 				const outcome = await daemon.forward(frame);

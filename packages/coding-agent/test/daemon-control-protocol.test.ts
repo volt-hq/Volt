@@ -1001,6 +1001,44 @@ describe("relay preamble", () => {
 		}
 	});
 
+	it("accepts a media preamble of a TUI, or of a device with the handshake its worker answers", () => {
+		const media: Extract<RelayPreamble, { kind: "media" }> = {
+			type: "relay_preamble",
+			kind: "media",
+			relayId: "rl-9",
+			sessionId: "s-abc",
+			clientKey: "tui-1",
+			offerId: "offer_0123456789abcdef",
+		};
+		const device: Extract<RelayPreamble, { kind: "media" }> = {
+			...media,
+			clientKey: "iroh:n-1:ic-3:st-9",
+			handshake: {
+				response: {
+					type: "volt_iroh_handshake",
+					success: true,
+					workspace: "volt",
+					hostNodeId: "n-host",
+					clientNodeId: "n-1",
+					features: ["multi_streams.v1", "conversation_streams.v1"],
+					voiceMedia: { sessionId: "s-abc" },
+				},
+				initialInput: [0, 0, 0, 13],
+			},
+		};
+		expect(ControlValidators.relayPreamble.Check(roundTrip(media))).toBe(true);
+		expect(ControlValidators.relayPreamble.Check(roundTrip(device))).toBe(true);
+		for (const invalid of [
+			{ ...media, offerId: "short" },
+			{ ...media, authorization: preamble.authorization },
+			{ ...device, handshake: { ...device.handshake, hello: preamble.handshake.hello } },
+			{ ...device, handshake: { response: device.handshake?.response } },
+			{ ...device, handshake: { ...device.handshake, initialInput: [256] } },
+		]) {
+			expect(ControlValidators.relayPreamble.Check(JSON.parse(JSON.stringify(invalid)))).toBe(false);
+		}
+	});
+
 	it("accepts a preamble and rejects malformed authorization, targets, and handshakes", () => {
 		expect(ControlValidators.relayPreamble.Check(roundTrip(preamble))).toBe(true);
 		const { handshake, authorization, resolvedTarget } = preamble;

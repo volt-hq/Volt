@@ -65,8 +65,13 @@ const SLOW_READER_BYTES = Math.ceil((VOICE_LIMITS.queuedAudioMs / VOICE_MEDIA_FO
 export interface VoiceOwner {
 	/** The owning client's id in its conversation host: its control attachment. */
 	readonly clientId: string;
-	/** The owning client process across its connections: what a media attachment must prove. */
+	/**
+	 * What a media attachment must prove: a TUI's process key, or the key of
+	 * a paired device's conversation stream.
+	 */
 	readonly clientKey: string;
+	/** The owner's projection: what it may hear is what its transcript could show, redacted as its stream is. */
+	readonly profile: Profile;
 }
 
 /** How a start failed, with the code the intent reports. */
@@ -83,8 +88,6 @@ export class VoiceStartError extends Error {
 export interface VoiceSessionOptions {
 	readonly conversation: HostedConversation;
 	readonly provider: VoiceProvider;
-	/** The owner's projection: what it may hear is what its transcript could show. */
-	readonly profile: Profile;
 	readonly instructions: string;
 	/** Whether the owner's control attachment is still on the conversation. */
 	readonly isOwnerAttached: (owner: VoiceOwner) => boolean;
@@ -322,14 +325,8 @@ export class VoiceSession {
 		return output;
 	}
 
-	/**
-	 * Attach the media stream for `offerId`: the offer must be pending for
-	 * this epoch and client key. Consumed atomically; the provider session
-	 * opens once media is attached, so no provider session listens without a
-	 * media owner. Throws when the offer does not match; the stream is then
-	 * the caller's to close.
-	 */
-	attachMedia(offerId: string, clientKey: string, stream: Duplex): void {
+	/** The pending offer `offerId` of `clientKey`; throws when there is none. Consumes nothing. */
+	private pendingOffer(offerId: string, clientKey: string): PendingOffer {
 		const offer = this.offer;
 		if (
 			this.lifecycle !== "starting" ||
@@ -341,6 +338,23 @@ export class VoiceSession {
 		) {
 			throw new Error("The media offer is not pending for this client");
 		}
+		return offer;
+	}
+
+	/** Throws unless `attachMedia(offerId, clientKey, ...)` would admit a stream now. */
+	assertMediaOffer(offerId: string, clientKey: string): void {
+		this.pendingOffer(offerId, clientKey);
+	}
+
+	/**
+	 * Attach the media stream for `offerId`: the offer must be pending for
+	 * this epoch and client key. Consumed atomically; the provider session
+	 * opens once media is attached, so no provider session listens without a
+	 * media owner. Throws when the offer does not match; the stream is then
+	 * the caller's to close.
+	 */
+	attachMedia(offerId: string, clientKey: string, stream: Duplex): void {
+		const offer = this.pendingOffer(offerId, clientKey);
 		this.offer = undefined;
 		clearTimeout(offer.timer);
 		const epoch = this.epoch;
@@ -766,8 +780,8 @@ export class VoiceSession {
 		// A failed or aborted partial message is not a successful reply.
 		if (message.error !== undefined || message.stopReason === "error" || message.stopReason === "aborted") return;
 		const source = this.source;
-		const profile = this.options.profile;
-		if (!source || !profile.includes(entry)) return;
+		const profile = this.owner?.profile;
+		if (!source || !profile || !profile.includes(entry)) return;
 		const item = projectTranscriptItem(entry, source, profile);
 		if (!item || item.role !== "assistant") return;
 		const text = (item.parts ?? [])

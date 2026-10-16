@@ -819,6 +819,7 @@ describe("Iroh remote core helpers", () => {
 			"duplicate_conversation_connection",
 			"conversation_in_use",
 			"conversation_locked",
+			"voice_media_unavailable",
 			"host_identity_mismatch",
 			"saved_host_invalid",
 		]);
@@ -840,6 +841,7 @@ describe("Iroh remote core helpers", () => {
 			"duplicate_conversation_connection",
 			"conversation_in_use",
 			"conversation_locked",
+			"voice_media_unavailable",
 		]);
 		const workspacePath = "/Users/jordan/project";
 		expect(

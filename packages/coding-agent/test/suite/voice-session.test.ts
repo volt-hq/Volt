@@ -106,7 +106,6 @@ async function fixture(options: HostHarnessOptions & { voiceEnabled?: boolean } 
 	const service = new VoiceService({
 		clientsOf: (target) => harness.host.clientsOf(target),
 		providers: new Map([["fake", provider]]),
-		profile: localProfile,
 		now: () => now.value,
 	});
 	cleanups.push(() => service.close());
@@ -119,7 +118,12 @@ async function fixture(options: HostHarnessOptions & { voiceEnabled?: boolean } 
 		now,
 		live: () => liveVoice(conversation),
 		async activate() {
-			const started = service.start(conversation, { clientId: owner.id, clientKey: "owner-key" }, "intent-1");
+			const started = service.start(
+				conversation,
+				{ clientId: owner.id, clientKey: "owner-key" },
+				"intent-1",
+				localProfile,
+			);
 			const media = mediaPair();
 			service.attachMedia(conversation, started.media.offerId, "owner-key", media.sessionSide);
 			await until(() => liveVoice(conversation).lifecycle === "active", "voice active");
@@ -144,17 +148,24 @@ describe("voice session lifecycle", () => {
 	it("starts for its owner, opens the provider only once media attached, and stops without touching the agent", async () => {
 		const { conversation, owner, provider, service, live } = await fixture();
 		expect(service.availability(conversation)).toEqual({ available: true });
-		const started = service.start(conversation, { clientId: owner.id, clientKey: "owner-key" }, "intent-1");
+		const started = service.start(
+			conversation,
+			{ clientId: owner.id, clientKey: "owner-key" },
+			"intent-1",
+			localProfile,
+		);
 		expect(started.epoch).toBe(1);
 		expect(started.media.format).toEqual({ encoding: "pcm_s16le", sampleRate: 24_000, channels: 1, frameMs: 20 });
 		expect(live()).toMatchObject({ lifecycle: "starting", epoch: 1, owner: { client: owner.id }, input: "muted" });
 		// No provider session without a media owner.
 		expect(provider.sessions).toHaveLength(0);
 		// A retry of the same intent answers the same; a competing start conflicts.
-		expect(service.start(conversation, { clientId: owner.id, clientKey: "owner-key" }, "intent-1")).toEqual(started);
-		expect(() => service.start(conversation, { clientId: "other", clientKey: "other-key" }, "intent-2")).toThrow(
-			/Another client owns voice/,
-		);
+		expect(
+			service.start(conversation, { clientId: owner.id, clientKey: "owner-key" }, "intent-1", localProfile),
+		).toEqual(started);
+		expect(() =>
+			service.start(conversation, { clientId: "other", clientKey: "other-key" }, "intent-2", localProfile),
+		).toThrow(/Another client owns voice/);
 
 		const media = mediaPair();
 		service.attachMedia(conversation, started.media.offerId, "owner-key", media.sessionSide);
@@ -180,7 +191,12 @@ describe("voice session lifecycle", () => {
 
 	it("refuses a media attachment with the wrong client key or after the offer expired", async () => {
 		const { conversation, owner, service, now, live } = await fixture();
-		const started = service.start(conversation, { clientId: owner.id, clientKey: "owner-key" }, "intent-1");
+		const started = service.start(
+			conversation,
+			{ clientId: owner.id, clientKey: "owner-key" },
+			"intent-1",
+			localProfile,
+		);
 		expect(() => service.attachMedia(conversation, started.media.offerId, "thief", mediaPair().sessionSide)).toThrow(
 			/not pending/,
 		);
@@ -196,12 +212,12 @@ describe("voice session lifecycle", () => {
 		const disabled = await fixture({ voiceEnabled: false });
 		expect(disabled.service.availability(disabled.conversation)).toEqual({ available: false, reason: "disabled" });
 		expect(() =>
-			disabled.service.start(disabled.conversation, { clientId: "c", clientKey: "k" }, "intent-1"),
+			disabled.service.start(disabled.conversation, { clientId: "c", clientKey: "k" }, "intent-1", localProfile),
 		).toThrow(/unavailable/);
 		const { conversation, provider, service } = await fixture();
 		provider.availabilityValue = { available: false, reason: "auth_unavailable" };
 		expect(service.availability(conversation)).toEqual({ available: false, reason: "auth_unavailable" });
-		expect(() => service.start(conversation, { clientId: "c", clientKey: "k" }, "intent-1")).toThrow(
+		expect(() => service.start(conversation, { clientId: "c", clientKey: "k" }, "intent-1", localProfile)).toThrow(
 			/auth_unavailable/,
 		);
 	});
@@ -454,7 +470,12 @@ describe("voice media", () => {
 	it("joins a stop that races the provider's start without leaking the session", async () => {
 		const { conversation, provider, service, owner, live } = await fixture();
 		provider.startDelayMs = 100;
-		const started = service.start(conversation, { clientId: owner.id, clientKey: "owner-key" }, "intent-1");
+		const started = service.start(
+			conversation,
+			{ clientId: owner.id, clientKey: "owner-key" },
+			"intent-1",
+			localProfile,
+		);
 		service.attachMedia(conversation, started.media.offerId, "owner-key", mediaPair().sessionSide);
 		await service.stop(conversation, { clientId: owner.id, clientKey: "owner-key" }, started.epoch);
 		expect(live().lifecycle).toBe("off");

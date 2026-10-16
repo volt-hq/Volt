@@ -15,6 +15,8 @@ import {
 	type IrohRemoteHello,
 	type IrohRemoteHostHandshakeFailureOutcome,
 	type IrohRemoteHostHandshakeMetadata,
+	type IrohRemoteVoiceMediaTarget,
+	IrohRemoteVoiceMediaTargetSchema,
 	type IrohRemoteWorkspaceDiscoveryTarget,
 	IrohRemoteWorkspaceDiscoveryTargetSchema,
 	type IrohRemoteWorkspaceManagementTarget,
@@ -40,6 +42,7 @@ export type {
 	IrohRemoteHandshakeSuccess,
 	IrohRemoteHello,
 	IrohRemoteHostHandshakeMetadata,
+	IrohRemoteVoiceMediaTarget,
 	IrohRemoteWorkspaceDiscoveryTarget,
 	IrohRemoteWorkspaceManagementTarget,
 } from "@hansjm10/volt-protocol/remote-handshake";
@@ -47,7 +50,8 @@ export type {
 export type IrohRemoteHelloMode =
 	| { mode: "conversation"; conversation: IrohRemoteConversationTarget }
 	| { mode: "workspaceDiscovery"; workspaceDiscovery: IrohRemoteWorkspaceDiscoveryTarget }
-	| { mode: "workspaceManagement"; workspaceManagement: IrohRemoteWorkspaceManagementTarget };
+	| { mode: "workspaceManagement"; workspaceManagement: IrohRemoteWorkspaceManagementTarget }
+	| { mode: "voiceMedia"; voiceMedia: IrohRemoteVoiceMediaTarget };
 
 export const IROH_REMOTE_SESSION_ID_PATTERN = new RegExp(IROH_REMOTE_SESSION_ID_PATTERN_SOURCE);
 
@@ -65,7 +69,7 @@ export class IrohRemoteHandshakeError extends Error {
 // Compiled contract validators
 // ============================================================================
 
-const STREAM_MODES = ["conversation", "workspaceDiscovery", "workspaceManagement"] as const;
+const STREAM_MODES = ["conversation", "workspaceDiscovery", "workspaceManagement", "voiceMedia"] as const;
 type StreamMode = (typeof STREAM_MODES)[number];
 
 function compileHandshakeValidators() {
@@ -75,15 +79,17 @@ function compileHandshakeValidators() {
 			conversation: Compile(IROH_REMOTE_HELLO_WIRE_SCHEMAS.conversation),
 			workspaceDiscovery: Compile(IROH_REMOTE_HELLO_WIRE_SCHEMAS.workspaceDiscovery),
 			workspaceManagement: Compile(IROH_REMOTE_HELLO_WIRE_SCHEMAS.workspaceManagement),
+			voiceMedia: Compile(IROH_REMOTE_HELLO_WIRE_SCHEMAS.voiceMedia),
 		},
 		conversationTarget: {
 			last: Compile(IROH_REMOTE_CONVERSATION_TARGET_SCHEMAS.last),
 			new: Compile(IROH_REMOTE_CONVERSATION_TARGET_SCHEMAS.new),
 			session: Compile(IROH_REMOTE_CONVERSATION_TARGET_SCHEMAS.session),
 		} as Record<string, Validator>,
-		workspaceTarget: {
+		modeTarget: {
 			workspaceDiscovery: Compile(IrohRemoteWorkspaceDiscoveryTargetSchema),
 			workspaceManagement: Compile(IrohRemoteWorkspaceManagementTargetSchema),
+			voiceMedia: Compile(IrohRemoteVoiceMediaTargetSchema),
 		},
 		success: Compile(IrohRemoteHandshakeSuccessSchema),
 		failure: Compile(IrohRemoteHandshakeFailureSchema),
@@ -195,6 +201,10 @@ export function parseIrohRemoteHello(value: unknown): IrohRemoteHello {
 	if (mode === "workspaceManagement" && validators.workspaceManagement.Check(value)) {
 		return { ...readHelloEnvelope(value), mode, workspaceManagement: { ...value.workspaceManagement } };
 	}
+	if (mode === "voiceMedia" && validators.voiceMedia.Check(value)) {
+		const { secret: _secret, ...envelope } = readHelloEnvelope(value);
+		return { ...envelope, mode, voiceMedia: { ...value.voiceMedia } };
+	}
 	throw rejectIrohRemoteHello(value, mode);
 }
 
@@ -262,7 +272,7 @@ function describeWorkspaceName(value: unknown): string {
 function describeStreamTarget(mode: StreamMode, target: Record<string, unknown>): string | undefined {
 	const label = `handshake ${mode}`;
 	if (mode !== "conversation") {
-		const validator = getHandshakeValidators().workspaceTarget[mode];
+		const validator = getHandshakeValidators().modeTarget[mode];
 		return validator.Check(target) ? undefined : describeSchemaError(validator, target, label);
 	}
 	const kind = target.target;
@@ -384,7 +394,10 @@ function normalizeAdvisoryFeatures(value: unknown): string[] | undefined {
 function getHandshakeSuccessMode(
 	response: IrohRemoteHandshakeSuccess,
 ):
-	| Pick<IrohRemoteHandshakeSuccess, "sessionId" | "conversation" | "workspaceDiscovery" | "workspaceManagement">
+	| Pick<
+			IrohRemoteHandshakeSuccess,
+			"sessionId" | "conversation" | "workspaceDiscovery" | "workspaceManagement" | "voiceMedia"
+	  >
 	| undefined {
 	const modes = STREAM_MODES.filter((mode) => response[mode] !== undefined);
 	if (modes.length === 0) {
@@ -413,6 +426,9 @@ function getHandshakeSuccessMode(
 	}
 	if (response.sessionId !== undefined) {
 		throw new Error(`handshake response ${mode} must not include sessionId`);
+	}
+	if (mode === "voiceMedia") {
+		return { voiceMedia: { sessionId: (response.voiceMedia as { sessionId: string }).sessionId } };
 	}
 	return mode === "workspaceDiscovery"
 		? { workspaceDiscovery: { ...(response.workspaceDiscovery as IrohRemoteWorkspaceDiscoveryTarget) } }
@@ -456,6 +472,7 @@ export function createIrohRemoteHandshakeSuccess(options: {
 	conversation?: IrohRemoteConversationHandshakeMetadata;
 	workspaceDiscovery?: IrohRemoteWorkspaceDiscoveryTarget;
 	workspaceManagement?: IrohRemoteWorkspaceManagementTarget;
+	voiceMedia?: { sessionId: string };
 	remoteHost?: IrohRemoteHostHandshakeMetadata;
 	child?: string;
 }): IrohRemoteHandshakeSuccess {
@@ -470,6 +487,7 @@ export function createIrohRemoteHandshakeSuccess(options: {
 		...(options.conversation === undefined ? {} : { conversation: { ...options.conversation } }),
 		...(options.workspaceDiscovery === undefined ? {} : { workspaceDiscovery: { ...options.workspaceDiscovery } }),
 		...(options.workspaceManagement === undefined ? {} : { workspaceManagement: { ...options.workspaceManagement } }),
+		...(options.voiceMedia === undefined ? {} : { voiceMedia: { sessionId: options.voiceMedia.sessionId } }),
 		...(options.remoteHost === undefined ? {} : { remoteHost: cloneRemoteHostHandshakeMetadata(options.remoteHost) }),
 		child: options.child,
 	};

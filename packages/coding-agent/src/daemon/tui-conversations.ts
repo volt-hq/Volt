@@ -82,6 +82,7 @@ import {
 	RelayRegistry,
 } from "./relay-stream.ts";
 import { sensitiveDirectoryReason } from "./sensitive-directory.ts";
+import type { VoiceMediaBudget } from "./voice-media.ts";
 import {
 	type LiveWorker,
 	WorkerOpenError,
@@ -111,6 +112,8 @@ interface Question {
 export interface TuiConversationsOptions {
 	readonly agentDir: string;
 	readonly workers: WorkerRegistry;
+	/** The daemon's voice media budget, which a TUI's media attachments draw on. */
+	readonly voiceMedia: VoiceMediaBudget;
 	/** Where the default store is, and where registered directories run: the placement every daemon lookup uses. */
 	readonly sessions: WorkspaceSessions;
 	/** The registered workspaces now. */
@@ -338,12 +341,19 @@ export class TuiConversations {
 		const worker =
 			workspaceName === undefined ? undefined : this.options.workers.liveHosting(workspaceName, request.sessionId);
 		if (!worker || workspaceName === undefined) return refuse("not_found", "No live worker hosts that conversation");
-		let release: () => void;
+		const lease = this.options.voiceMedia.tryAcquire();
+		if (!lease) return refuse("capacity", "The host holds as many voice sessions as it allows");
+		let detach: () => void;
 		try {
-			release = worker.attach("local");
+			detach = worker.attach("local");
 		} catch (error) {
+			lease.release();
 			return refuse("unavailable", errorMessage(error));
 		}
+		const release = () => {
+			detach();
+			lease.release();
+		};
 		const relayId = `rl-${uuidv7()}`;
 		const ticket: Ticket = {
 			relayId,

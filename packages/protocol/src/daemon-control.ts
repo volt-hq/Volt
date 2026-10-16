@@ -792,8 +792,9 @@ const LocalRelayPreambleSchema = Type.Object(
 );
 
 /**
- * A local TUI's voice media stream (`voice_media_open`): the daemon mints
- * it only for a TUI control connection, and the worker hands the raw bytes
+ * A voice media stream: a local TUI's (`voice_media_open` on its control
+ * connection) or a paired device's (a `voiceMedia` Iroh stream on the
+ * connection of its conversation stream). The worker hands the raw bytes
  * after it to the conversation's voice session, which admits them only
  * against the pending media offer the same client key's `voice_start`
  * minted. Never protocol frames: a binary envelope stream.
@@ -801,15 +802,32 @@ const LocalRelayPreambleSchema = Type.Object(
 const MediaRelayPreambleSchema = Type.Object(
 	{
 		type: Type.Literal("relay_preamble"),
-		/** The relayed client: a TUI's media attachment on this host. */
+		/** The relayed client: a voice media attachment. */
 		kind: Type.Literal("media"),
 		relayId: Type.String(),
 		/** The conversation whose voice session the attachment is for. */
 		sessionId: LogSessionIdSchema,
-		/** The TUI process across its connections: must match the offer's. */
+		/**
+		 * Whose control attachment the media belongs to: a TUI's process key, or
+		 * the daemon's key for the device's conversation stream. Must match the offer's.
+		 */
 		clientKey: codePoints(1, 128, SINGLE_LINE),
 		/** The single-use offer `voice_start` answered. */
 		offerId: VoiceMediaOfferIdSchema,
+		/**
+		 * A paired device's stream only: the handshake success the worker writes
+		 * once the offer admitted the stream (a failure otherwise), and the bytes
+		 * the device sent after its hello.
+		 */
+		handshake: Type.Optional(
+			Type.Object(
+				{
+					response: IrohRemoteHandshakeSuccessSchema,
+					initialInput: Type.Array(Type.Integer({ minimum: 0, maximum: 255 })),
+				},
+				closed,
+			),
+		),
 	},
 	closed,
 );
@@ -1314,7 +1332,7 @@ export const CONTROL_EVENT_SCHEMAS = {
 			sessionId: LogSessionIdSchema,
 		}),
 		event("relay_offer", {
-			/** The relayed client: a TUI's voice media attachment, to a worker only. */
+			/** The relayed client: a TUI's or a paired device's voice media attachment, to a worker only. */
 			clientKind: Type.Literal("media"),
 			relayId: Type.String(),
 			/** Single-use; expires after 10 seconds. */
