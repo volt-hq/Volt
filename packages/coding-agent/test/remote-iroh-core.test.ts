@@ -3092,6 +3092,38 @@ describe("Iroh remote core helpers", () => {
 		expect(await hostEngine.listClients()).toEqual([expect.objectContaining({ nodeId: "client-node" })]);
 	});
 
+	test("host engine sends its host name in workspace discovery handshakes", async () => {
+		const stateManager = new IrohRemoteHostStateManager({ initialState: createEmptyIrohRemoteHostState() });
+		const hostEngine = new IrohRemoteHostEngine({
+			hostName: "Jordan's MacBook Pro",
+			hostNodeId: "host-node",
+			now: () => 100,
+			stateManager,
+			workspace: { name: "volt", path: "/workspace" },
+		});
+		await hostEngine.pair({ irohTicket: "iroh-endpoint-ticket", secret: "secret" });
+		const recv = new ManualIrohRecvStream();
+		recv.push(
+			Buffer.from(
+				`${JSON.stringify({
+					type: "volt_iroh_hello",
+					protocol: IROH_REMOTE_ALPN,
+					workspace: "volt",
+					secret: "secret",
+					workspaceDiscovery: { purpose: "list_sessions" },
+				})}\n`,
+			),
+		);
+
+		const handshake = await hostEngine.readHandshake(recv, "client-node");
+
+		if (!handshake.ok) {
+			throw new Error(handshake.error);
+		}
+		expect(handshake.response.workspaceDiscovery).toEqual({ purpose: "list_sessions" });
+		expect(handshake.response.remoteHost?.hostName).toBe("Jordan's MacBook Pro");
+	});
+
 	test("host engine pairs registered workspaces and rejects unavailable pair workspaces", async () => {
 		const stateManager = new IrohRemoteHostStateManager({ initialState: createEmptyIrohRemoteHostState() });
 		await stateManager.upsertWorkspace({ name: "safe", path: "/workspace" });

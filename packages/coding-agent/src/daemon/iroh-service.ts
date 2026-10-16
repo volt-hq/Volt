@@ -111,6 +111,7 @@ import {
 	resolveConversationOpen,
 } from "./conversation-open.ts";
 import type { IntegratedConversationSessionSelection } from "./handshake-responses.ts";
+import { getHostDisplayName } from "./host-display-name.ts";
 import { IrohConnectionSupervisor } from "./iroh-connection-supervisor.ts";
 import { createIrohEndpointTicket } from "./iroh-endpoint-ticket.ts";
 import {
@@ -2581,6 +2582,7 @@ class IrohDaemonService {
 					this.authorizeRelayCredentialPairing(claimId, remoteNodeId),
 				classifyWorkspaceAvailability: getIrohRemoteWorkspaceAvailabilityStatus,
 				hostNodeId,
+				hostName: getHostDisplayName(),
 				relayMode: this.relayMode,
 				...(this.relayMode === "production" ? { relayUrls: this.relayUrls } : {}),
 				stateManager: this.stateManager,
