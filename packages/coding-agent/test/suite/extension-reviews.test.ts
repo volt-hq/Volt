@@ -97,8 +97,9 @@ function decider(decide: () => Decide, seen: ReviewEngineContext["previousFindin
 }
 
 /**
- * An engine that reviews every hunk and reports one finding on the changed line, and, when the review collects
- * them, a follow-up in a file the change does not touch and one in no file at all.
+ * An engine that reviews every hunk and reports one finding on the changed line, which its discovery calls
+ * introduced and its verifier finds predates the change, and, when the review collects them, a follow-up in a file
+ * the change does not touch and one in no file at all.
  */
 async function probe(ctx: ReviewEngineContext): Promise<void> {
 	const hunks = ctx.changedFiles().flatMap((file) => file.hunks.map((hunk) => hunk.id));
@@ -120,6 +121,7 @@ async function probe(ctx: ReviewEngineContext): Promise<void> {
 					confidence: 0.9,
 					changeLocation: { path: "src/value.ts", side: "head", startLine: 2, endLine: 2 },
 					evidenceLocations: [],
+					introduced: true,
 				},
 			],
 			followUps: [
@@ -147,7 +149,14 @@ async function probe(ctx: ReviewEngineContext): Promise<void> {
 			summary: "Confirmed.",
 			assessment: "complete",
 			decisions: [
-				{ candidateId: "c1", outcome: "accept", method: "Read it.", rationale: "It is 3.", confidence: 0.9 },
+				{
+					candidateId: "c1",
+					outcome: "accept",
+					method: "Read it.",
+					rationale: "It is 3, as it was at the base.",
+					confidence: 0.9,
+					introduced: false,
+				},
 			],
 			priorFindingDecisions: [],
 			followUpDecisions: [
@@ -332,9 +341,13 @@ describe("ctx.reviews", () => {
 					priority: 1,
 					status: "open",
 					changeLocation: { path: "src/value.ts", side: "head", startLine: 2, endLine: 2 },
+					// The verifier's determination over discovery's.
+					introduced: false,
 				},
 			],
 			coverage: { commandsRun: ["npm test"] },
+			// A pre-existing defect on a line the change touches still counts against it.
+			overallCorrectness: "incorrect",
 		});
 		expect(await reviewer.reviews.result(review.id)).toEqual(end.run);
 		expect(await reviewer.reviews.result("no-such-run")).toBeUndefined();
@@ -659,7 +672,8 @@ describe("ctx.reviews", () => {
 		expect(kept).toMatchObject({
 			parentRunId: first.id,
 			options: { scopeMode: "full" },
-			findings: [{ id: found.id, status: "open", title: "Other changed" }],
+			// This round did not say whether the change introduced it: the earlier round's determination stands.
+			findings: [{ id: found.id, status: "open", title: "Other changed", introduced: false }],
 		});
 
 		// The round after finds it fixed: it closes in both earlier rounds.

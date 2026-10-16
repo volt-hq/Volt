@@ -527,10 +527,12 @@ export interface ExtensionReviewStartOptions {
 	readonly previousRunId?: string;
 	/**
 	 * Also collect follow-ups: defects the review notices outside the change,
-	 * such as pre-existing bugs, each verified like a finding and kept apart
+	 * in code it does not touch, each verified like a finding and kept apart
 	 * from the findings (`followUps` of the result). They never affect the
-	 * verdict; an extension may file them as issues of their own. An engine
-	 * reports the ones it can.
+	 * verdict; an extension may file them as issues of their own. A defect on
+	 * a line the change touches is never one, even when it predates the
+	 * change: such a review reports it as a finding, for the change to fix,
+	 * with `introduced: false`. An engine reports the ones it can.
 	 */
 	readonly followUps?: boolean;
 	/**
@@ -555,7 +557,12 @@ export interface ExtensionReviewStartOptions {
 	readonly parentWorkId?: string;
 }
 
-/** A review run as clients see it (`review.result`): its target, status, and, once it has one, its result. */
+/**
+ * A review run as clients see it (`review.result`): its target, status, and, once it has one, its result. A
+ * finding's `introduced` says whether the reviewed change introduced the defect: `false` when it already existed at
+ * the base revision on a line the change touches, absent when the review did not determine it. It never affects
+ * the verdict.
+ */
 export type ExtensionReviewResult = QueryResult<"review.result"> & {
 	/**
 	 * The follow-ups of a review that collected them: verified defects outside

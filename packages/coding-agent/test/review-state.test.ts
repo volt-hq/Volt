@@ -416,6 +416,49 @@ describe("durable review state", () => {
 		},
 	);
 
+	it("persists whether the change introduced each finding, and presents a pre-existing one as such", async () => {
+		const root = join(tmpdir(), `volt-review-introduced-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(root, { recursive: true });
+		directories.push(root);
+		const manager = await SessionManager.create(root, join(root, "sessions"));
+		const run = createReviewRunRecord({
+			workflowId: "review:introduced",
+			workflowAction: "review.branch",
+			startedAt: 1,
+			endedAt: 2,
+			snapshot: snapshot("blob-introduced"),
+			controls: { scope: [], effort: "standard", includeOptional: false, scopeMode: "full" },
+			status: "completed",
+			result: result([
+				finding({ id: "old-defect", introduced: false }),
+				finding({ id: "new-defect", fingerprint: "b".repeat(64), introduced: true }),
+				finding({ id: "unknown-defect", fingerprint: "c".repeat(64) }),
+			]),
+		});
+		await appendReviewRunDurably(manager.logWriter, run);
+		const ref = manager.getSessionRef();
+		if (!ref) throw new Error("Expected a persisted session reference");
+		await manager.closePersistence();
+		const reopened = await SessionManager.open(ref);
+		const restored = getReviewRun(reopened, run.runId);
+		if (!restored?.result) throw new Error("Expected a restored review result");
+		const [old, introduced, unknown] = restored.result.findings;
+		expect(old).toMatchObject({ id: "old-defect", introduced: false });
+		expect(introduced).toMatchObject({ id: "new-defect", introduced: true });
+		expect(unknown).toMatchObject({ id: "unknown-defect" });
+		expect(unknown).not.toHaveProperty("introduced");
+
+		// Only the pre-existing finding says so, in the transcript and in its collapsed summary.
+		const seed = createReviewSeedMessage(restored);
+		for (const text of [seed.content, seed.details.summary]) {
+			const sections = text.split("### ").slice(1);
+			expect(sections).toHaveLength(3);
+			expect(
+				sections.filter((section) => section.includes("Pre-existing: this defect predates the change.")),
+			).toEqual([expect.stringContaining("old-defect")]);
+		}
+	});
+
 	it.each([
 		{ limit: "file count", count: MAX_REVIEW_INVENTORY_FILES + 1, padding: 0 },
 		{ limit: "serialized bytes", count: 300, padding: 200 },
@@ -784,6 +827,58 @@ describe("durable review state", () => {
 			expect(decided.fixed).toEqual([decision("fixed-1", "fixed")]);
 			// The current findings it was given are left as they were.
 			expect(current.id).toBe("new-1");
+		});
+
+		it("keeps whether an earlier finding was introduced where it stays open, unless this review determined it", () => {
+			const decided = applyPreviousFindingDecisions(
+				[
+					// Reported again at another anchor, determining nothing.
+					finding({ id: "new-1", fingerprint: "d".repeat(64) }),
+					// Reported again at another anchor, determined introduced this time.
+					finding({ id: "new-2", fingerprint: "f".repeat(64), introduced: true }),
+					// Reported again with its anchor, without a decision.
+					finding({ id: "new-3", fingerprint: "e".repeat(64) }),
+				],
+				[
+					finding({ id: "moved-1", introduced: false }),
+					finding({ id: "redetermined-1", fingerprint: "b".repeat(64), introduced: false }),
+					finding({ id: "carried-1", fingerprint: "c".repeat(64), introduced: false }),
+					finding({ id: "undecided-1", fingerprint: "e".repeat(64), introduced: false }),
+				],
+				[
+					decision("moved-1", "open", "c1"),
+					decision("redetermined-1", "open", "c2"),
+					decision("carried-1", "open"),
+				],
+				new Map([
+					["c1", "d".repeat(64)],
+					["c2", "f".repeat(64)],
+				]),
+			);
+			expect(decided.findings.map(({ id, introduced }) => ({ id, introduced }))).toEqual([
+				{ id: "moved-1", introduced: false },
+				{ id: "redetermined-1", introduced: true },
+				{ id: "undecided-1", introduced: false },
+				{ id: "carried-1", introduced: false },
+			]);
+
+			// A finding reported again with its anchor takes the earlier one's id, and whether it was introduced.
+			const plan = followUpReviewPlan(
+				record("run-1", 1, [finding({ id: "open-1", introduced: false })]),
+				snapshot("blob-2"),
+				[],
+			);
+			expect(reconcileFindingIdentities([finding({ id: "new-1" })], plan)).toEqual([
+				expect.objectContaining({ id: "open-1", introduced: false }),
+			]);
+			expect(reconcileFindingIdentities([finding({ id: "new-1", introduced: true })], plan)).toEqual([
+				expect.objectContaining({ id: "open-1", introduced: true }),
+			]);
+
+			// Pre-existing or not, a finding still open counts against the change.
+			const review = result([finding({ id: "moved-1", introduced: false })]);
+			settleReviewVerdict(review);
+			expect(review).toMatchObject({ completionStatus: "complete", overallCorrectness: "incorrect" });
 		});
 
 		it("settles as open an uncertain finding reported again with its anchor", () => {
