@@ -661,11 +661,9 @@ describe("background subagent calls", () => {
 	};
 	const args = { agent: "scout", task: job.label, background: true };
 
-	it("shows the job a background spawn started", () => {
+	it("shows a background spawn that started its job by its title, for the job to show under", () => {
 		const presented = present(background, "subagent", input(args, "done", { ...jobResult(job), text: "" }));
-		expect(presented.hidden).toBeUndefined();
-		expect(plain(presented.summary)).toContain("Background job");
-		expect(plain(presented.summary)).toContain(job.id);
+		expect(presented).toEqual({ title: [{ text: "Subagent", bold: true, token: "accent" }] });
 	});
 
 	it("keeps a background spawn's confirmation preflight hidden", () => {

@@ -145,12 +145,9 @@ describe("background jobs on the protocol", () => {
 		};
 
 		const result = project(resultId);
-		// The call presents as the job card it started: the job's id and state when it started.
+		// The call presents by its title: the job it started is a work item, shown live under the call.
 		expect(result.view).toMatchObject({ role: "tool", toolName: "bash", text: "$ do work (completed)" });
-		const card = JSON.stringify(result.view?.presentation);
-		expect(card).toContain(job.id);
-		expect(card).toContain("Started");
-		expect(card).not.toContain("/repo/test");
+		expect(result.view?.presentation).toEqual({ title: [{ text: "$ ", bold: true }, { text: "do work" }] });
 		expect(project(noticeId).view).toMatchObject({
 			role: "system",
 			text: `/workspace/test (job ${job.id}) completed.`,

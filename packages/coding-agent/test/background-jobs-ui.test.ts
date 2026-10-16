@@ -102,7 +102,6 @@ describe("background job cards", () => {
 		card.updateResult({ ...jobResult(work.job), isError: false });
 		let rendered = text(card);
 		expect(rendered).toContain(`$ ${work.job.label}`);
-		expect(rendered).toContain("Background job");
 		expect(rendered).not.toContain("Use jobs with action");
 		work.output("old line\nPASS cancellation\nPASS snapshots\nTests 12 passed (12)\n");
 		vi.setSystemTime(19_000);
@@ -132,8 +131,9 @@ describe("background job cards", () => {
 		card.updateResult({ ...jobResult(work.job), isError: false });
 		work.output("LIVE OUTPUT MUST NOT ENTER REPLAY");
 		card.invalidate();
-		expect(text(card)).toContain("Background job");
-		expect(text(card)).toContain("Started");
+		expect(text(card)).toContain(`$ ${work.job.label}`);
+		// The result recorded no state of the job, so none goes stale.
+		expect(text(card)).not.toContain("Started");
 		expect(text(card)).not.toContain("LIVE OUTPUT MUST NOT ENTER REPLAY");
 		expect(text(card)).not.toContain("Use jobs with action");
 	});

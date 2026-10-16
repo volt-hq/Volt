@@ -554,7 +554,7 @@ describe("edit presenter", () => {
 	});
 });
 
-describe("background job card", () => {
+describe("background calls", () => {
 	const background = presentBackground(presentBash);
 
 	it("presents a call without background as the tool does", () => {
@@ -563,7 +563,7 @@ describe("background job card", () => {
 		);
 	});
 
-	it("keeps the tool's title and shows the job it started as a card", () => {
+	it("keeps the tool's title and shows nothing more once the job started", () => {
 		expect(present(background, input({ command: "npm test", background: true }, "running"))).toEqual({
 			title: [{ text: "$ ", bold: true }, { text: "npm test" }],
 			activity: "Starting background job",
@@ -576,12 +576,8 @@ describe("background job card", () => {
 				details: { job },
 			}),
 		);
-		expect(presented.summary?.[0]).toMatchObject({
-			type: "card",
-			title: "Background job",
-			badges: [{ label: "Started", token: "warning" }],
-		});
-		expect(plain(presented.summary)).toContain("Job: job_1");
+		// The job is a work item clients show live under the call; its state at start would go stale.
+		expect(presented).toEqual({ title: [{ text: "$ ", bold: true }, { text: "npm test" }] });
 	});
 
 	it("says when a job failed to start", () => {

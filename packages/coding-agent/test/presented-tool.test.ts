@@ -171,7 +171,7 @@ describe("presented tool rows", () => {
 			details: { job },
 			isError: false,
 		});
-		expect(text(component)).toContain("Background job");
+		expect(text(component)).toContain("$ npm test");
 		work = [
 			{
 				workId: "job_1",
