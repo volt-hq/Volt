@@ -7,6 +7,8 @@ function isAssistantMessage(message: unknown): message is AssistantMessage {
 	return role === "assistant";
 }
 
+const compactNumber = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
+
 export const manifest = defineManifest({
 	id: "tps",
 	displayName: "TPS",
@@ -32,7 +34,6 @@ export default function (volt: ExtensionAPI) {
 		let output = 0;
 		let cacheRead = 0;
 		let cacheWrite = 0;
-		let totalTokens = 0;
 
 		for (const message of event.messages) {
 			if (!isAssistantMessage(message)) continue;
@@ -40,14 +41,25 @@ export default function (volt: ExtensionAPI) {
 			output += message.usage.output || 0;
 			cacheRead += message.usage.cacheRead || 0;
 			cacheWrite += message.usage.cacheWrite || 0;
-			totalTokens += message.usage.totalTokens || 0;
 		}
 
 		if (output <= 0) return;
 
 		const elapsedSeconds = elapsedMs / 1000;
 		const tokensPerSecond = output / elapsedSeconds;
-		const message = `TPS ${tokensPerSecond.toFixed(1)} tok/s. out ${output.toLocaleString()}, in ${input.toLocaleString()}, cache r/w ${cacheRead.toLocaleString()}/${cacheWrite.toLocaleString()}, total ${totalTokens.toLocaleString()}, ${elapsedSeconds.toFixed(1)}s`;
+		// Usage is summed over every model call in the run, so `promptTokens` is
+		// the input billed for the run, not the size of the context window.
+		const promptTokens = input + cacheRead + cacheWrite;
+		const parts = [
+			`${compactNumber.format(output)} tokens`,
+			`${Math.round(tokensPerSecond)} tok/s`,
+			`${elapsedSeconds.toFixed(1)}s`,
+		];
+		if (promptTokens > 0) {
+			const cached = cacheRead + cacheWrite > 0 ? `, ${Math.round((cacheRead / promptTokens) * 100)}% cached` : "";
+			parts.push(`${compactNumber.format(promptTokens)} input${cached}`);
+		}
+		const message = parts.join(" · ");
 		ctx.ui.notify(message, "info");
 	});
 }
