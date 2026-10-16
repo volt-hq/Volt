@@ -132,7 +132,7 @@ describe("#585 background job interrupted after a restart", () => {
 		card.updateResult({ content: launch.content, details: launch.details, isError: false });
 		const replayed = stripAnsi(card.render(100).lines.join("\n"));
 		card.dispose();
-		expect(replayed).toContain("Background job");
+		expect(replayed).toContain("$ npm test");
 		expect(replayed).toContain("Interrupted · npm test");
 		expect(replayed).not.toContain("at capture");
 

@@ -1,7 +1,7 @@
 /**
  * The built-in tools' presenters (RFC §8.3, Q9): bash, read, write, and edit
- * present their calls as `UiNode` data, and the background decorator wraps a
- * call made with `background: true` in a job card. Each presenter is a pure
+ * present their calls as `UiNode` data, and the background decorator presents
+ * a call made with `background: true` by its title. Each presenter is a pure
  * function of the call's arguments, state, result, and working directory: it
  * reads no files and keeps no state, so the same call presents the same way
  * on every client, live and in the log. Paths show as the call spells them:
@@ -518,36 +518,36 @@ export const presentEdit: ToolPresenter = (input) => {
 // Background jobs
 // ============================================================================
 
-const JOB_STATUS: Readonly<Record<string, { label: string; token: UiNodeToken }>> = {
-	running: { label: "Started", token: "warning" },
-	cancelling: { label: "Cancelling", token: "warning" },
-	completed: { label: "Completed", token: "success" },
-	failed: { label: "Failed", token: "error" },
-	cancelled: { label: "Cancelled", token: "muted" },
-	interrupted: { label: "Interrupted", token: "muted" },
-};
+const JOB_STATUSES: ReadonlySet<string> = new Set([
+	"running",
+	"cancelling",
+	"completed",
+	"failed",
+	"cancelled",
+	"interrupted",
+]);
 
-/** The job a background start's result names, when it names one. */
-function jobOf(details: unknown): { id: string; tool: string; status: string } | undefined {
+/** Whether a background start's result names the job it started. */
+function namesJob(details: unknown): boolean {
 	const job = isRecord(details) ? details.job : undefined;
-	if (!isRecord(job)) return undefined;
-	const { id, tool, status } = job;
-	return typeof id === "string" &&
-		/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(id) &&
-		(tool === "bash" || tool === "subagent") &&
-		typeof status === "string" &&
-		Object.hasOwn(JOB_STATUS, status)
-		? { id, tool, status }
-		: undefined;
+	return (
+		isRecord(job) &&
+		typeof job.id === "string" &&
+		/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(job.id) &&
+		(job.tool === "bash" || job.tool === "subagent") &&
+		typeof job.status === "string" &&
+		JOB_STATUSES.has(job.status)
+	);
 }
 
 /**
  * The presenter of a tool the background decorator wraps: a call without
  * `background: true` presents as the tool does; one with it keeps the tool's
- * title and shows the job it started as a card, or how it failed to start. A
- * background call the tool answered itself, without a job, presents as the
- * tool does. The job's progress is the work item's, which clients show with
- * the call.
+ * title, and once its job started shows nothing more. The job is a work item
+ * that clients show live under the call, so anything the result recorded
+ * about it (its state when it started) would only go stale. A call whose job
+ * failed to start says why. A background call the tool answered itself,
+ * without a job, presents as the tool does.
  */
 export function presentBackground(inner: ToolPresenter): ToolPresenter {
 	return (input) => {
@@ -558,10 +558,10 @@ export function presentBackground(inner: ToolPresenter): ToolPresenter {
 		if (input.state !== "done") {
 			return { title, activity: input.state === "running" ? "Starting background job" : "Preparing background job" };
 		}
-		const job = jobOf(input.result?.details);
+		const started = namesJob(input.result?.details);
 		// A call the tool answered without starting a job (a subagent spawn's confirmation preflight) presents as the tool does.
-		if (!job && input.result?.isError !== true) return inner({ ...input, args });
-		if (!job || input.result?.isError) {
+		if (!started && input.result?.isError !== true) return inner({ ...input, args });
+		if (!started || input.result?.isError) {
 			const output = resultText(input.result).trim();
 			const failure = [
 				textNode(
@@ -572,29 +572,7 @@ export function presentBackground(inner: ToolPresenter): ToolPresenter {
 			];
 			return { title, summary: failure, body: failure };
 		}
-		const status = JOB_STATUS[job.status] ?? { label: job.status, token: "muted" as const };
-		const card: UiNode = {
-			type: "card",
-			key: "job",
-			title: "Background job",
-			badges: [{ label: status.label, token: status.token }],
-			sections: [
-				{
-					key: "job",
-					children: [
-						{
-							type: "keyValue",
-							key: "job",
-							items: [
-								{ key: "id", label: "Job", value: job.id },
-								{ key: "tool", label: "Tool", value: job.tool },
-							],
-						},
-					],
-				},
-			],
-		};
-		return { title, summary: [card] };
+		return { title };
 	};
 }
 
