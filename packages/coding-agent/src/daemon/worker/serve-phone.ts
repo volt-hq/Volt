@@ -164,7 +164,13 @@ export async function servePhoneRelay(options: ServePhoneRelayOptions): Promise<
 			authorization,
 			conversation.id,
 			sessionSelection,
-			{ hostNodeId, relayMode: preamble.relayMode, relayUrls: preamble.relayUrls },
+			{
+				hostNodeId,
+				relayMode: preamble.relayMode,
+				relayUrls: preamble.relayUrls,
+				// Resolved once by the daemon and carried in the relayed engine response.
+				hostName: handshake.response.remoteHost?.hostName,
+			},
 			preamble.resolvedTarget.worktreeId,
 			preamble.resolvedTarget.workingDirectory,
 		);
