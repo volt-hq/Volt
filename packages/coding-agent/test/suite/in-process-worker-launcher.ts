@@ -16,10 +16,10 @@ import type {
 } from "../../src/daemon/worker-launcher.ts";
 
 export class InProcessWorkerLauncher implements WorkerLauncher {
-	private readonly options: Pick<RunWorkerOptions, "lockRetryMs">;
+	private readonly options: Pick<RunWorkerOptions, "lockRetryMs" | "voiceProviders">;
 
 	/** `lockRetryMs`: how long a worker's primary open retries a held lock (75 s by default). */
-	constructor(options: Pick<RunWorkerOptions, "lockRetryMs"> = {}) {
+	constructor(options: Pick<RunWorkerOptions, "lockRetryMs" | "voiceProviders"> = {}) {
 		this.options = options;
 	}
 

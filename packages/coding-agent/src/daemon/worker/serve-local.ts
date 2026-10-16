@@ -25,6 +25,7 @@ import {
 } from "../../core/protocol/server/connection.ts";
 import { createJsonlStreamRpcTransport } from "../../core/protocol/transport/transport.ts";
 import type { ReviewDiscussionService } from "../../core/review-discussions.ts";
+import type { IntentVoiceServices } from "../../core/voice/voice-service.ts";
 import type { LocalRelayPreamble, WorkerSessionOptions } from "../control-protocol.ts";
 
 /** A relay redeemed for a local TUI: its preamble and stream. */
@@ -45,6 +46,8 @@ export interface ServeLocalRelayOptions {
 	/** The worker's own admission of the TUI's intents. */
 	readonly admit?: ServeConnectionOptions["admit"];
 	readonly reviewDiscussions?: ReviewDiscussionService;
+	/** Voice on the conversations this TUI joins, bound to its client key. */
+	readonly voice?: IntentVoiceServices;
 	/** The connection serving the TUI, once it exists: the worker ends it on shutdown. */
 	readonly onConnection?: (connection: ProtocolConnection) => void;
 }
@@ -106,6 +109,7 @@ export async function serveLocalRelay(options: ServeLocalRelayOptions): Promise<
 				abortRun: (session) => session.abort("keyboard_interrupt"),
 				...(preamble.modelScopePatterns === undefined ? {} : { modelScopePatterns: preamble.modelScopePatterns }),
 				...(options.reviewDiscussions === undefined ? {} : { reviewDiscussions: options.reviewDiscussions }),
+				...(options.voice === undefined ? {} : { voice: options.voice }),
 			}),
 			beforeServing: async (served) => {
 				if (!applied && preamble.apply !== undefined && served === conversation) {

@@ -42,6 +42,7 @@ export * from "./session.ts";
 export * from "./subscription-usage.ts";
 export * from "./ui-node.ts";
 export * from "./ui-patch.ts";
+export * from "./voice.ts";
 export * from "./wire-limits.ts";
 export * from "./work.ts";
 export * from "./workspace.ts";

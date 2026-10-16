@@ -62,6 +62,7 @@ import type {
 	ControlRequest,
 	ControlResponse,
 	LocalRelayPreamble,
+	MediaRelayPreamble,
 	SensitiveDirectoryReason,
 	WorkerSessionOptions,
 	WorkerSpawnOnlyOption,
@@ -97,6 +98,7 @@ import { findStoredSessionLocation, type SessionPlacement, type WorkspaceSession
 
 type ConversationOpenRequest = Extract<ControlRequest, { type: "conversation_open" }>;
 type ConversationHostResponse = Extract<ControlRequest, { type: "conversation_host_response" }>;
+type VoiceMediaOpenRequest = Extract<ControlRequest, { type: "voice_media_open" }>;
 
 /** A question a worker asks the TUI whose open it opens, until answered. */
 interface Question {
@@ -175,7 +177,7 @@ interface Ticket {
 	readonly sessionId: string;
 	/** The TUI's control connection. */
 	readonly connectionId: string;
-	readonly preamble: Omit<LocalRelayPreamble, "type" | "relayId">;
+	readonly preamble: Omit<LocalRelayPreamble, "type" | "relayId"> | Omit<MediaRelayPreamble, "type" | "relayId">;
 	/** Ends the worker's attachment for this stream. */
 	readonly release: () => void;
 	readonly timer: ReturnType<typeof setTimeout>;
@@ -314,6 +316,58 @@ export class TuiConversations {
 			settle(undefined);
 		}
 		return asked.promise;
+	}
+
+	/**
+	 * Answer a TUI's `voice_media_open`: the TUI's end of a media relay to
+	 * the live worker hosting the conversation, valid for 10 s, during which
+	 * (and while the stream lives) the worker counts the session as attached.
+	 * The worker admits the stream only against the pending offer the same
+	 * client key's `voice_start` minted; the daemon binds no more than that.
+	 */
+	openMedia(connection: ControlConnection, request: VoiceMediaOpenRequest): ControlResponse {
+		const refuse = (code: string, message: string): ControlResponse => ({
+			type: "error",
+			id: request.id,
+			code,
+			message,
+		});
+		if (connection.client !== "tui") return refuse("forbidden", "Only a TUI attaches voice media");
+		if (this.closed) return refuse("shutting_down", "The daemon is shutting down");
+		const workspaceName = this.options.workers.workspaceHosting(request.sessionId);
+		const worker =
+			workspaceName === undefined ? undefined : this.options.workers.liveHosting(workspaceName, request.sessionId);
+		if (!worker || workspaceName === undefined) return refuse("not_found", "No live worker hosts that conversation");
+		let release: () => void;
+		try {
+			release = worker.attach("local");
+		} catch (error) {
+			return refuse("unavailable", errorMessage(error));
+		}
+		const relayId = `rl-${uuidv7()}`;
+		const ticket: Ticket = {
+			relayId,
+			token: randomBytes(32).toString("base64url"),
+			worker,
+			workspaceName,
+			sessionId: request.sessionId,
+			connectionId: connection.connectionId,
+			preamble: {
+				kind: "media",
+				sessionId: request.sessionId,
+				clientKey: request.clientKey,
+				offerId: request.offerId,
+			},
+			release,
+			timer: setTimeout(() => {
+				if (this.tickets.get(relayId) !== ticket) return;
+				this.tickets.delete(relayId);
+				release();
+			}, RELAY_TOKEN_TTL_MS),
+		};
+		ticket.timer.unref?.();
+		this.tickets.set(relayId, ticket);
+		return { type: "voice_media_opened", id: request.id, relayId, relayToken: ticket.token };
 	}
 
 	/** A TUI's `conversation_host_response`: it answers only a question its own connection was asked. */
@@ -474,7 +528,7 @@ export class TuiConversations {
 		this.relayWorkers.set(owner, worker.workerId);
 		const delivered = this.options.sendTo(worker.connectionId, {
 			type: "relay_offer",
-			clientKind: "local",
+			clientKind: ticket.preamble.kind,
 			relayId: owner.relayId,
 			relayToken: owner.relayToken,
 			workspaceName: ticket.workspaceName,

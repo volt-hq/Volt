@@ -13,7 +13,7 @@
  * and a gap in `seq` means the client must resubscribe after its position.
  *
  * Keys name a value family and, for keyed families, an id:
- * `phase`, `git`, `prompt_cache`, `usage`, `intents`, `presence`, `ext_title`, `bash`, or
+ * `phase`, `git`, `prompt_cache`, `usage`, `intents`, `presence`, `ext_title`, `bash`, `voice`, or
  * `host_request/<requestId>`, `ext_status/<extension>/<name>`,
  * `ext_panel/<extension>/<name>`, `work/<workId>`. A value's `kind` is its
  * key's family, and an extension's status items and panels are keyed by its
@@ -59,6 +59,7 @@ import {
 	UiTerminalNodeSchema,
 } from "./ui-node.ts";
 import { UiPatchSchema } from "./ui-patch.ts";
+import { LiveVoiceValueSchema } from "./voice.ts";
 import { WorkProgressSchema } from "./work.ts";
 
 const closed = { additionalProperties: false } as const;
@@ -454,6 +455,7 @@ export const LIVE_VALUE_SCHEMAS = {
 	ext_title: LiveExtensionTitleValueSchema,
 	work: LiveWorkValueSchema,
 	bash: LiveBashValueSchema,
+	voice: LiveVoiceValueSchema,
 } as const;
 
 export type LiveValueKind = keyof typeof LIVE_VALUE_SCHEMAS;
@@ -471,6 +473,7 @@ export const LiveValueSchema = Type.Union([
 	LiveExtensionTitleValueSchema,
 	LiveWorkValueSchema,
 	LiveBashValueSchema,
+	LiveVoiceValueSchema,
 ]);
 export type LiveValue = Static<typeof LiveValueSchema>;
 
@@ -484,6 +487,7 @@ export const LIVE_SINGLETON_KINDS = [
 	"presence",
 	"ext_title",
 	"bash",
+	"voice",
 ] as const satisfies readonly LiveValueKind[];
 
 /** Families with one value per id: the key is `<kind>/<id>`. */

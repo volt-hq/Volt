@@ -744,6 +744,9 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			case "conversation_open":
 				connection.send(await tuiConversations.open(connection, request));
 				return;
+			case "voice_media_open":
+				connection.send(tuiConversations.openMedia(connection, request));
+				return;
 			case "conversation_host_response":
 				connection.send(tuiConversations.answer(connection, request));
 				return;

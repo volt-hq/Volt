@@ -1492,6 +1492,25 @@ export class WorkerRegistry {
 			: undefined;
 	}
 
+	/**
+	 * The live worker hosting `sessionId` of `workspaceName`, as a relayed
+	 * stream of the session attaches to it: undefined unless the worker is
+	 * live and the session's top-level conversation open.
+	 */
+	liveHosting(workspaceName: string, sessionId: string): LiveWorker | undefined {
+		const record = this.hostOf(sessionId);
+		if (
+			!record ||
+			record.workspaceName !== workspaceName ||
+			record.state !== "live" ||
+			record.forced ||
+			this.topOf(record, sessionId)?.conversation.state !== "open"
+		) {
+			return undefined;
+		}
+		return this.liveView(record, sessionId);
+	}
+
 	/** Whether the worker `workerId` hosts `sessionId`. */
 	workerHosts(workerId: string, sessionId: string): boolean {
 		return this.workers.get(workerId)?.hosts.has(sessionId) ?? false;

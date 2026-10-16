@@ -146,6 +146,13 @@ const REQUESTS: ByType<ControlRequest> = {
 		spawn: SPAWN_OPTIONS,
 		clientKey: "tui-1",
 	},
+	voice_media_open: {
+		type: "voice_media_open",
+		id: "44",
+		sessionId: "s-1",
+		clientKey: "tui-1",
+		offerId: "abcdefghijklmnopqrstuvwxyz012345",
+	},
 	conversation_host_response: {
 		type: "conversation_host_response",
 		id: "43",
@@ -231,6 +238,7 @@ const REVIEW_NOTIFICATION = {
 
 // Type-specific rejections; every closed message also rejects an unknown field and a missing or wrong type.
 const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, unknown>> } = {
+	voice_media_open: [{ offerId: "short" }, { offerId: "has spaces in it and more" }, { clientKey: "" }],
 	change_observe: [
 		{ gitContext: { repository: "repo", branch: "feature/work", headOid: "not-an-oid" } },
 		{ gitContext: { repository: "repo", branch: "feature/work\npoison", headOid: HEAD_OID } },
@@ -464,6 +472,7 @@ const RESPONSES: ByType<ControlResponse> = {
 		spawned: false,
 		ignoredOptions: ["extensions", "trust"],
 	},
+	voice_media_opened: { type: "voice_media_opened", id: "22", relayId: "rl-3", relayToken: "tok" },
 	worker_host_response: { type: "worker_host_response", id: "21", response: { cancelled: true } },
 	worker_forward_result: {
 		type: "worker_forward_result",

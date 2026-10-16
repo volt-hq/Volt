@@ -55,6 +55,7 @@ import { RemoteCapabilitiesSchema } from "./remote-access.ts";
 import { IrohRemoteWorkingDirectorySchema, IrohRemoteWorktreeIdSchema } from "./remote-handshake.ts";
 import { RpcResetReviewDiscussionSchema, RpcStartReviewDiscussionsSchema } from "./review-discussions.ts";
 import { RpcKeepAwakeStatusSchema, RpcRegisterPushTargetResponseSchema, RpcWebSearchStatusSchema } from "./session.ts";
+import { VoiceEpochInputSchema, VoiceStartOutputSchema } from "./voice.ts";
 import { RPC_CONVERSATION_INPUT_MESSAGE_MAX_UTF8_BYTES, RPC_GIT_CONTEXT_REF_MAX_CHARS } from "./wire-limits.ts";
 import { IrohRemoteWorkspaceNameSchema, IrohRemoteWorktreeSummarySchema } from "./workspace.ts";
 
@@ -396,6 +397,18 @@ export const INTENT_SCHEMAS = {
 	},
 	plan_change: { input: Type.Object(planRevision, closed) },
 	plan_discard: { input: Type.Object(planRevision, closed) },
+
+	// Voice (docs/daemon-voice-design.md): control only; media is a separate binary stream.
+	/**
+	 * Start voice on the conversation for the invoking client, which becomes
+	 * the media owner. Idempotent by intent id: a retry answers as the first
+	 * did. Answers the epoch and the single-use media offer to attach with.
+	 */
+	voice_start: { input: EmptyInputSchema, output: VoiceStartOutputSchema },
+	/** Stop the exact voice epoch: media, provider, and buffers go; the agent's work does not. */
+	voice_stop: { input: VoiceEpochInputSchema },
+	/** Barge-in on the exact voice epoch: queued and provider speech stop; backend work does not. */
+	voice_interrupt: { input: VoiceEpochInputSchema },
 
 	// Structural
 	/**

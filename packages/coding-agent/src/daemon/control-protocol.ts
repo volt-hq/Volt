@@ -61,6 +61,7 @@ export type {
 	HelloMessage,
 	HelloProof,
 	LocalRelayPreamble,
+	MediaRelayPreamble,
 	PhoneRelayPreamble,
 	RelayCloseReason,
 	RelayPreamble,

@@ -215,6 +215,9 @@
 				"plan_execute",
 				"plan_change",
 				"plan_discard",
+				"voice_start",
+				"voice_stop",
+				"voice_interrupt",
 				"new_session",
 				"switch_session",
 				"fork",
@@ -1163,6 +1166,42 @@
 						}
 					},
 					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"clientKind",
+						"relayId",
+						"relayToken",
+						"workspaceName",
+						"sessionId"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "relay_offer"
+						},
+						"clientKind": {
+							"type": "string",
+							"const": "media"
+						},
+						"relayId": {
+							"type": "string"
+						},
+						"relayToken": {
+							"type": "string"
+						},
+						"workspaceName": {
+							"type": "string"
+						},
+						"sessionId": {
+							"type": "string",
+							"maxLength": 512,
+							"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+						}
+					},
+					"additionalProperties": false
 				}
 			]
 		},
@@ -1830,6 +1869,45 @@
 						}
 					},
 					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"kind",
+						"relayId",
+						"sessionId",
+						"clientKey",
+						"offerId"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "relay_preamble"
+						},
+						"kind": {
+							"type": "string",
+							"const": "media"
+						},
+						"relayId": {
+							"type": "string"
+						},
+						"sessionId": {
+							"type": "string",
+							"maxLength": 512,
+							"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+						},
+						"clientKey": {
+							"type": "string",
+							"maxLength": 128,
+							"pattern": "^[^\\u0000\\r\\n]{1,128}$"
+						},
+						"offerId": {
+							"type": "string",
+							"pattern": "^[A-Za-z0-9_-]{16,128}$"
+						}
+					},
+					"additionalProperties": false
 				}
 			]
 		},
@@ -1965,6 +2043,9 @@
 				},
 				{
 					"$ref": "#/$defs/Control.Request.conversation_open"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.voice_media_open"
 				},
 				{
 					"$ref": "#/$defs/Control.Request.conversation_host_response"
@@ -2494,6 +2575,40 @@
 				},
 				"theme": {
 					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.voice_media_open": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"sessionId",
+				"clientKey",
+				"offerId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "voice_media_open"
+				},
+				"id": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"clientKey": {
+					"type": "string",
+					"maxLength": 128,
+					"pattern": "^[^\\u0000\\r\\n]{1,128}$"
+				},
+				"offerId": {
+					"type": "string",
+					"pattern": "^[A-Za-z0-9_-]{16,128}$"
 				}
 			},
 			"additionalProperties": false
@@ -3329,6 +3444,9 @@
 					"$ref": "#/$defs/Control.Response.conversation_opened"
 				},
 				{
+					"$ref": "#/$defs/Control.Response.voice_media_opened"
+				},
+				{
 					"$ref": "#/$defs/Control.Response.workspace_confirmation_required"
 				},
 				{
@@ -3642,6 +3760,31 @@
 					"items": {
 						"$ref": "#/$defs/Control.WorkerStatus"
 					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.voice_media_opened": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"relayId",
+				"relayToken"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "voice_media_opened"
+				},
+				"id": {
+					"type": "string"
+				},
+				"relayId": {
+					"type": "string"
+				},
+				"relayToken": {
+					"type": "string"
 				}
 			},
 			"additionalProperties": false
@@ -5433,6 +5576,15 @@
 				},
 				{
 					"$ref": "#/$defs/Frame.intent.plan_discard"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.voice_start"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.voice_stop"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.voice_interrupt"
 				},
 				{
 					"$ref": "#/$defs/Frame.intent.new_session"
@@ -7830,6 +7982,92 @@
 				},
 				"input": {
 					"$ref": "#/$defs/IntentInput.upload_device_logs"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.voice_interrupt": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "voice_interrupt"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.voice_stop"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.voice_start": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "voice_start"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/EmptyInput"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.voice_stop": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "voice_stop"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.voice_stop"
 				}
 			},
 			"additionalProperties": false
@@ -11768,6 +12006,26 @@
 			},
 			"additionalProperties": false
 		},
+		"IntentInput.voice_interrupt": {
+			"$ref": "#/$defs/IntentInput.voice_stop"
+		},
+		"IntentInput.voice_start": {
+			"$ref": "#/$defs/EmptyInput"
+		},
+		"IntentInput.voice_stop": {
+			"type": "object",
+			"required": [
+				"epoch"
+			],
+			"properties": {
+				"epoch": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				}
+			},
+			"additionalProperties": false
+		},
 		"IntentInput.withdraw_queued": {
 			"$ref": "#/$defs/EmptyInput"
 		},
@@ -12402,6 +12660,67 @@
 				"byteCount": {
 					"type": "integer",
 					"minimum": 0
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentOutput.voice_start": {
+			"type": "object",
+			"required": [
+				"epoch",
+				"media"
+			],
+			"properties": {
+				"epoch": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"media": {
+					"type": "object",
+					"required": [
+						"offerId",
+						"format",
+						"expiresAt"
+					],
+					"properties": {
+						"offerId": {
+							"type": "string",
+							"pattern": "^[A-Za-z0-9_-]{16,128}$"
+						},
+						"format": {
+							"type": "object",
+							"required": [
+								"encoding",
+								"sampleRate",
+								"channels",
+								"frameMs"
+							],
+							"properties": {
+								"encoding": {
+									"type": "string",
+									"const": "pcm_s16le"
+								},
+								"sampleRate": {
+									"type": "number",
+									"const": 24000
+								},
+								"channels": {
+									"type": "number",
+									"const": 1
+								},
+								"frameMs": {
+									"type": "number",
+									"const": 20
+								}
+							},
+							"additionalProperties": false
+						},
+						"expiresAt": {
+							"$ref": "#/$defs/RpcEpochMilliseconds"
+						}
+					},
+					"additionalProperties": false
 				}
 			},
 			"additionalProperties": false
@@ -13284,7 +13603,7 @@
 		},
 		"LiveKey": {
 			"type": "string",
-			"pattern": "^(?:(?:phase|git|prompt_cache|usage|intents|presence|ext_title|bash)|(?:host_request|work)/[^\\u0000-\\u001f\\u007f]{1,256}|(?:ext_status|ext_panel)/(?!(?:volt|core|builtin|host|ext)/)[a-z0-9][a-z0-9-]{0,63}/[^\\u0000-\\u001f\\u007f]{1,128})$",
+			"pattern": "^(?:(?:phase|git|prompt_cache|usage|intents|presence|ext_title|bash|voice)|(?:host_request|work)/[^\\u0000-\\u001f\\u007f]{1,256}|(?:ext_status|ext_panel)/(?!(?:volt|core|builtin|host|ext)/)[a-z0-9][a-z0-9-]{0,63}/[^\\u0000-\\u001f\\u007f]{1,128})$",
 			"x-volt-expected": "be a live key"
 		},
 		"LivePatchKey": {
@@ -13369,6 +13688,9 @@
 				},
 				{
 					"$ref": "#/$defs/LiveValue.bash"
+				},
+				{
+					"$ref": "#/$defs/LiveValue.voice"
 				}
 			]
 		},
@@ -13703,6 +14025,182 @@
 						}
 					},
 					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveValue.voice": {
+			"type": "object",
+			"required": [
+				"kind",
+				"availability",
+				"lifecycle",
+				"epoch",
+				"input",
+				"output",
+				"usage"
+			],
+			"properties": {
+				"kind": {
+					"type": "string",
+					"const": "voice"
+				},
+				"availability": {
+					"anyOf": [
+						{
+							"type": "object",
+							"required": [
+								"available"
+							],
+							"properties": {
+								"available": {
+									"type": "boolean",
+									"const": true
+								}
+							},
+							"additionalProperties": false
+						},
+						{
+							"type": "object",
+							"required": [
+								"available",
+								"reason"
+							],
+							"properties": {
+								"available": {
+									"type": "boolean",
+									"const": false
+								},
+								"reason": {
+									"type": "string",
+									"enum": [
+										"disabled",
+										"native_media_unavailable",
+										"auth_unavailable",
+										"provider_unavailable",
+										"remote_transport_unavailable",
+										"capacity"
+									]
+								}
+							},
+							"additionalProperties": false
+						}
+					]
+				},
+				"lifecycle": {
+					"type": "string",
+					"enum": [
+						"off",
+						"starting",
+						"active",
+						"stopping"
+					]
+				},
+				"epoch": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991
+				},
+				"owner": {
+					"type": "object",
+					"required": [
+						"client"
+					],
+					"properties": {
+						"client": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 128
+						}
+					},
+					"additionalProperties": false
+				},
+				"input": {
+					"type": "string",
+					"enum": [
+						"muted",
+						"listening"
+					]
+				},
+				"output": {
+					"type": "string",
+					"enum": [
+						"idle",
+						"speaking"
+					]
+				},
+				"error": {
+					"type": "object",
+					"required": [
+						"code",
+						"message"
+					],
+					"properties": {
+						"code": {
+							"type": "string",
+							"enum": [
+								"attach_timeout",
+								"auth_unavailable",
+								"native_media_unavailable",
+								"provider_failed",
+								"media_lost",
+								"media_invalid",
+								"media_overrun",
+								"input_stalled",
+								"slow_reader",
+								"owner_detached",
+								"speech_backlog",
+								"transcript_overflow",
+								"conversation_changed",
+								"capacity",
+								"stopped"
+							]
+						},
+						"message": {
+							"type": "string",
+							"maxLength": 512
+						}
+					},
+					"additionalProperties": false
+				},
+				"usage": {
+					"anyOf": [
+						{
+							"type": "object",
+							"required": [
+								"available"
+							],
+							"properties": {
+								"available": {
+									"type": "boolean",
+									"const": false
+								}
+							},
+							"additionalProperties": false
+						},
+						{
+							"type": "object",
+							"required": [
+								"available",
+								"audioSeconds",
+								"partial"
+							],
+							"properties": {
+								"available": {
+									"type": "boolean",
+									"const": true
+								},
+								"audioSeconds": {
+									"type": "number",
+									"minimum": 0
+								},
+								"partial": {
+									"type": "boolean"
+								}
+							},
+							"additionalProperties": false
+						}
+					]
 				}
 			},
 			"additionalProperties": false

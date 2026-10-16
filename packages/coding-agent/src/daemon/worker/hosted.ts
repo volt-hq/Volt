@@ -79,6 +79,7 @@ export class WorkerConversations {
 	private readonly workspaceName: string;
 	private readonly log: ReturnType<DaemonLogger["child"]>;
 	private readonly onCatalogChanged: (conversation: HostedConversation, catalog: "settings" | "models") => void;
+	private readonly onHosted: ((conversation: HostedConversation) => void) | undefined;
 	private readonly hosted = new Map<string, WorkerConversation>();
 	/** What each top-level conversation was opened from, by its id. */
 	private readonly specs = new Map<string, WorkerSpawnSpec>();
@@ -99,11 +100,14 @@ export class WorkerConversations {
 		log: ReturnType<DaemonLogger["child"]>;
 		/** Settings or credentials another process wrote changed what a hosted conversation's clients see. */
 		onCatalogChanged: (conversation: HostedConversation, catalog: "settings" | "models") => void;
+		/** A conversation is hosted here from now on. */
+		onHosted?: (conversation: HostedConversation) => void;
 	}) {
 		this.client = options.client;
 		this.workspaceName = options.workspaceName;
 		this.log = options.log;
 		this.onCatalogChanged = options.onCatalogChanged;
+		this.onHosted = options.onHosted;
 		this.reviews = new HostReviewDiscussionService({
 			findRuntime: (ref, requester) => {
 				if (!this.isHosted(requester))
@@ -288,6 +292,7 @@ export class WorkerConversations {
 		});
 		this.pendingClaims.delete(sessionId);
 		this.hosted.set(sessionId, hosted);
+		this.onHosted?.(hosted.conversation);
 		const binding = new GitContextObservationBinding(
 			(observation) => {
 				if (observation.status !== "definitive" || this.observations.get(sessionId) !== binding) return;

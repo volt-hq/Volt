@@ -93,6 +93,10 @@
 		"undici": "8.10.2",
 		"yaml": "2.9.0"
 	},
+	"optionalDependencies": {
+		"opusscript": "0.1.1",
+		"werift": "0.25.0"
+	},
 	"overrides": {
 		"rimraf": "6.1.2",
 		"gaxios": {

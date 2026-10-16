@@ -68,12 +68,15 @@ import { realpath } from "node:fs/promises";
 import { ConversationLockedError } from "../../core/conversation-log/conversation-lock.ts";
 import type { ProjectTrustContext } from "../../core/extensions/index.ts";
 import { hostRequestTrustContext } from "../../core/host/trust-prompts.ts";
+import { localProfile } from "../../core/protocol/profiles.ts";
 import type { AuthorityLoss, ProtocolConnection } from "../../core/protocol/server/connection.ts";
 import {
 	type IrohRemoteHostHandshakeFailureOutcome,
 	isIrohRemoteHostHandshakeFailureOutcome,
 } from "../../core/remote/iroh/protocol.ts";
 import { SessionManager, type SessionReference } from "../../core/session-manager.ts";
+import type { VoiceProvider } from "../../core/voice/provider.ts";
+import { VoiceService } from "../../core/voice/voice-service.ts";
 import type { WorkerSpawnSpec } from "../control-protocol.ts";
 import { createDaemonLogger } from "../log.ts";
 import { getDaemonPaths } from "../paths.ts";
@@ -96,6 +99,7 @@ import {
 import { type WorkerConversation, WorkerConversations } from "./hosted.ts";
 import { serveLocalRelay } from "./serve-local.ts";
 import { servePhoneRelay } from "./serve-phone.ts";
+import { workerVoiceProviders } from "./voice-providers.ts";
 
 /** How long a worker waits for the conversation it opens after its hello. */
 const SPAWN_SPEC_TIMEOUT_MS = 30_000;
@@ -111,6 +115,8 @@ const LOCK_RETRY_MAX_DELAY_MS = 2_000;
 export interface RunWorkerOptions {
 	/** How long an open retries a held lock; `WORKER_LOCK_RETRY_MS` by default. */
 	readonly lockRetryMs?: number;
+	/** The voice providers the worker offers besides the built-in ones (test fixtures). */
+	readonly voiceProviders?: ReadonlyMap<string, VoiceProvider>;
 	/** Once aborted, the worker stops as on a forced stop: a running turn finishes, for at most 60 s. */
 	readonly signal?: AbortSignal;
 	/** The worker began to stop. */
@@ -338,6 +344,8 @@ async function quiesce(hosted: readonly WorkerConversation[], capMs: number | un
 
 async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptions): Promise<WorkerExit> {
 	let conversations: WorkerConversations | undefined;
+	/** The worker's voice sessions, one per hosted conversation at most. */
+	let voice: VoiceService | undefined;
 	/** The top-level conversations being opened, by session: a stop or a close meanwhile waits for them. */
 	const opening = new Map<string, Promise<unknown>>();
 	/** Aborts the open of a routed conversation (a lock it still retries): a forced close of it cancels it. */
@@ -389,6 +397,7 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 				[...served.values()].map((connection) => (shuttingDown ? connection.shutdown() : connection.close())),
 			);
 			await Promise.allSettled([...serving]);
+			await voice?.close().catch(() => undefined);
 			let error: string | undefined;
 			try {
 				await conversations?.closeAll();
@@ -556,6 +565,18 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 				relay.stream.destroy();
 				return;
 			}
+			if (relay.preamble.kind === "media") {
+				// The voice session admits the stream against the offer its owner's `voice_start` minted, or nothing does.
+				const preamble = relay.preamble;
+				try {
+					if (preamble.sessionId !== conversation.id || !voice) throw new Error("no voice session for this relay");
+					voice.attachMedia(conversation, preamble.offerId, preamble.clientKey, relay.stream);
+				} catch {
+					relay.stream.destroy();
+				}
+				return;
+			}
+			const voiceServices = voice;
 			if (relay.preamble.kind === "local") {
 				await serveLocalRelay({
 					host: target.host,
@@ -574,6 +595,9 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 					},
 					admit: (intent) => admitRemoteIntent(intent, { shuttingDown: stopping !== undefined, subagent: false }),
 					reviewDiscussions: hosted.reviewDiscussions(conversation),
+					...(voiceServices === undefined
+						? {}
+						: { voice: voiceServices.intentServices(relay.preamble.clientKey) }),
 					onConnection,
 				});
 				return;
@@ -651,6 +675,12 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 		await client.close().catch(() => undefined);
 		return { reason: "failed", error: errorMessage(error) };
 	}
+	voice = new VoiceService({
+		clientsOf: (conversation) => conversations?.get(conversation.id)?.host.clientsOf(conversation) ?? [],
+		providers: new Map([...workerVoiceProviders(), ...(options.voiceProviders ?? [])]),
+		profile: localProfile,
+		log: (message) => console.error(`worker: ${message}`),
+	});
 	// Every conversation of the worker is of one workspace (the daemon routes only compatible opens here).
 	conversations = new WorkerConversations({
 		client,
@@ -661,7 +691,11 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 			for (const connection of served.values()) {
 				if (connection.conversation === conversation) connection.changed(catalog);
 			}
+			// `voice.enabled` or its provider may have changed.
+			voice?.publishAvailability(conversation);
 		},
+		// Every hosted conversation shows whether voice could start on it.
+		onHosted: (conversation) => voice?.publishAvailability(conversation),
 	});
 	// The first conversation's failure ends the worker: the daemon spawned it for that one.
 	const hosted = conversations;

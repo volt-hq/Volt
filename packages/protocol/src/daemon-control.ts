@@ -33,6 +33,7 @@ import {
 	IrohRemoteHelloSchema,
 	IrohRemoteRelayModeSchema,
 } from "./remote-handshake.ts";
+import { VoiceMediaOfferIdSchema } from "./voice.ts";
 import { RPC_GIT_CONTEXT_OID_PATTERN, RPC_WIRE_MAX_SAFE_INTEGER } from "./wire-limits.ts";
 import { IrohRemoteWorkspaceMetadataSnapshotSchema } from "./workspace.ts";
 
@@ -790,11 +791,39 @@ const LocalRelayPreambleSchema = Type.Object(
 	closed,
 );
 
+/**
+ * A local TUI's voice media stream (`voice_media_open`): the daemon mints
+ * it only for a TUI control connection, and the worker hands the raw bytes
+ * after it to the conversation's voice session, which admits them only
+ * against the pending media offer the same client key's `voice_start`
+ * minted. Never protocol frames: a binary envelope stream.
+ */
+const MediaRelayPreambleSchema = Type.Object(
+	{
+		type: Type.Literal("relay_preamble"),
+		/** The relayed client: a TUI's media attachment on this host. */
+		kind: Type.Literal("media"),
+		relayId: Type.String(),
+		/** The conversation whose voice session the attachment is for. */
+		sessionId: LogSessionIdSchema,
+		/** The TUI process across its connections: must match the offer's. */
+		clientKey: codePoints(1, 128, SINGLE_LINE),
+		/** The single-use offer `voice_start` answered. */
+		offerId: VoiceMediaOfferIdSchema,
+	},
+	closed,
+);
+
 /** The first line a worker reads on a relay it redeemed: who the client is, and how to serve it. */
-export const ControlRelayPreambleSchema = Type.Union([PhoneRelayPreambleSchema, LocalRelayPreambleSchema]);
+export const ControlRelayPreambleSchema = Type.Union([
+	PhoneRelayPreambleSchema,
+	LocalRelayPreambleSchema,
+	MediaRelayPreambleSchema,
+]);
 export type RelayPreamble = Static<typeof ControlRelayPreambleSchema>;
 export type PhoneRelayPreamble = Extract<RelayPreamble, { kind: "phone" }>;
 export type LocalRelayPreamble = Extract<RelayPreamble, { kind: "local" }>;
+export type MediaRelayPreamble = Extract<RelayPreamble, { kind: "media" }>;
 
 // ============================================================================
 // Requests (client -> daemon)
@@ -909,6 +938,17 @@ export const CONTROL_REQUEST_SCHEMAS = {
 		workspaceRegistration: Type.Optional(WorkspaceRegistrationSchema),
 		/** The TUI's own session change that led it to the conversation. */
 		cause: Type.Optional(ConversationOpenCauseSchema),
+	}),
+	/**
+	 * TUI: attach the media stream of a voice session `voice_start` answered
+	 * with `offerId` on the conversation `sessionId` it has open. Answered by
+	 * `voice_media_opened`; the worker admits the stream only against that
+	 * pending offer, for the same client key, within the offer's lifetime.
+	 */
+	voice_media_open: withId("voice_media_open", {
+		sessionId: LogSessionIdSchema,
+		clientKey: codePoints(1, 128, SINGLE_LINE),
+		offerId: VoiceMediaOfferIdSchema,
 	}),
 	/**
 	 * TUI: its answer to `conversation_host_request`, on the connection that
@@ -1088,6 +1128,7 @@ export const ControlRequestSchema = Type.Union([
 	CONTROL_REQUEST_SCHEMAS.theme_set,
 	CONTROL_REQUEST_SCHEMAS.keep_awake_set,
 	CONTROL_REQUEST_SCHEMAS.conversation_open,
+	CONTROL_REQUEST_SCHEMAS.voice_media_open,
 	CONTROL_REQUEST_SCHEMAS.conversation_host_response,
 	CONTROL_REQUEST_SCHEMAS.worker_host_request,
 	CONTROL_REQUEST_SCHEMAS.worker_ready,
@@ -1191,6 +1232,12 @@ export const CONTROL_RESPONSE_SCHEMAS = {
 		ignoredOptions: Type.Array(WorkerSpawnOnlyOptionSchema),
 	}),
 	/**
+	 * The media stream a TUI asked for: dial a relay hello with `relayId` and
+	 * `relayToken` (single-use, expiring after 10 seconds) within that time,
+	 * and carry voice media envelopes once it is acked.
+	 */
+	voice_media_opened: withId("voice_media_opened", { relayId: Type.String(), relayToken: Type.String() }),
+	/**
 	 * A TUI's open of a conversation in a sensitive directory no workspace
 	 * holds: the daemon registers it only once asked how (`conversation_open`
 	 * again with `workspaceRegistration`). Nothing was opened or registered.
@@ -1225,6 +1272,7 @@ export const ControlResponseSchema = Type.Union([
 	CONTROL_RESPONSE_SCHEMAS.worktree_prune_result,
 	CONTROL_RESPONSE_SCHEMAS.pair_started,
 	CONTROL_RESPONSE_SCHEMAS.conversation_opened,
+	CONTROL_RESPONSE_SCHEMAS.voice_media_opened,
 	CONTROL_RESPONSE_SCHEMAS.workspace_confirmation_required,
 	CONTROL_RESPONSE_SCHEMAS.worker_host_response,
 	CONTROL_RESPONSE_SCHEMAS.worker_forward_result,
@@ -1259,6 +1307,15 @@ export const CONTROL_EVENT_SCHEMAS = {
 		event("relay_offer", {
 			/** The relayed client: a TUI on this host, to a worker only. */
 			clientKind: Type.Literal("local"),
+			relayId: Type.String(),
+			/** Single-use; expires after 10 seconds. */
+			relayToken: Type.String(),
+			workspaceName: Type.String(),
+			sessionId: LogSessionIdSchema,
+		}),
+		event("relay_offer", {
+			/** The relayed client: a TUI's voice media attachment, to a worker only. */
+			clientKind: Type.Literal("media"),
 			relayId: Type.String(),
 			/** Single-use; expires after 10 seconds. */
 			relayToken: Type.String(),

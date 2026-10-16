@@ -195,6 +195,7 @@ export interface Settings {
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
 	lsp?: LspSettings; // LSP diagnostics after edit/write (see docs/lsp.md)
 	remote?: RemoteSettings; // voltd daemon / remote access (see docs/daemon.md)
+	voice?: VoiceSettings; // daemon-owned voice (see docs/daemon-voice-design.md); off by default
 	tuiMode?: TuiMode; // default: "regular"
 	fullscreenExitOutput?: FullscreenExitOutput; // default: "transcript"; no effect in regular mode
 	fullscreenScrollbar?: ScrollViewScrollbar; // default: "auto"; no effect in regular mode
@@ -213,6 +214,13 @@ export interface RemoteSettings {
 	allowTools?: string[];
 	/** Discover exact pull-request associations for trusted Work sessions. Default: true. */
 	pullRequestDiscovery?: boolean;
+}
+
+export interface VoiceSettings {
+	/** Whether conversation workers offer voice. Default: false. */
+	enabled?: boolean;
+	/** The voice provider a session uses. Default: "openai-codex". */
+	provider?: string;
 }
 
 /** Deep merge records: overrides take precedence, nested objects merge recursively, arrays replace. */
@@ -1570,6 +1578,10 @@ export class SettingsManager {
 
 	getRemoteSettings(): RemoteSettings {
 		return this.settings.remote ?? {};
+	}
+
+	getVoiceSettings(): VoiceSettings {
+		return this.settings.voice ?? {};
 	}
 
 	setHttpIdleTimeoutMs(timeoutMs: number): void {

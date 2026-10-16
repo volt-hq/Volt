@@ -1,9 +1,8 @@
 # Daemon-owned voice
 
-Status: proposed, 2026-10-16. Development-facing; not a supported feature or a
-wire contract. This replaces the extension/browser prototype direction. No
-runtime, dependency, protocol, credential, or client changes are part of this
-design-only change.
+Status: milestones 1 and 2 landed, 2026-10-16; milestones 3 and 4 open.
+Development-facing; not a supported feature or a wire contract. This replaces
+the extension/browser prototype direction.
 
 ## Decision
 
@@ -413,6 +412,33 @@ observed and bounded, including after a client is lost.
    Exercise the real daemon/worker with a faux text provider and fake voice
    adapter before an explicitly authorized provider smoke test. No microphone,
    browser, TUI UI, or mobile app is needed for this milestone.
+
+   **Landed, 2026-10-16.** `packages/coding-agent/src/core/voice/` holds the
+   provider adapter boundary (`provider.ts`), the media envelope codec, the
+   bounded speech queue and transcript window, `VoiceSession` (lifecycle,
+   epochs, media lease, input and output bridges), and `VoiceService` (one
+   session per hosted conversation, gated by the `voice` setting:
+   `{ enabled, provider }`, off by default). The intents are `voice_start`,
+   `voice_stop`, and `voice_interrupt`; the live value is `voice`; a local
+   media attachment is `voice_media_open` on the TUI's control connection,
+   answered with a relay whose `media` preamble the worker hands to the
+   session, admitted only against the pending offer of the same client key.
+   The `openai-codex` adapter (`codex-live/`) reproduces the spike's
+   signaling over `werift`/`opusscript`, which ship as optional dependencies
+   behind `src/remote/voice-native-adapter.cjs`. Spoken turns reach
+   extensions' `input` hooks with `source: "voice"` and are admitted with
+   `expandPromptTemplates: false`, within the owner's client scope.
+   Fixtures: `test/suite/voice-session.test.ts` (bridge, bounds, media),
+   `test/daemon-voice.test.ts` (real daemon and worker with the fake
+   adapter), and the opt-in `test/daemon-voice-smoke.test.ts` (real
+   provider; `VOLT_VOICE_SMOKE_WAV`, `VOLT_VOICE_SMOKE_EXPECT`).
+   Deliberate limits of this milestone: the per-host session budget is per
+   worker, not daemon-wide; the engine runs in the worker process rather
+   than a helper; the ephemeral transcript is kept but not yet projected to
+   clients as captions; the codex adapter's `interrupt` is a no-op (V3 has
+   no cancel), so barge-in is the playback-epoch drop; a delegation is
+   correlated only when the provider names its turn, which no run has shown
+   yet, so replies go through session-level `speakable` injection.
 3. **Iroh media routing and authorization.** Add the explicit stream purpose,
    voice grant, binary consumer, budgets, ownership/retention, and revocation
    fences. Test native loopback and network-loss/congestion behavior. Change

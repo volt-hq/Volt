@@ -48,6 +48,7 @@ import type { AmbiguousClientInput } from "../../session/client-inputs.ts";
 import type { SessionManager } from "../../session-manager.ts";
 import type { SettingsManager } from "../../settings-manager.ts";
 import type { SubscriptionUsageService } from "../../subscription-usage.ts";
+import type { IntentVoiceServices } from "../../voice/voice-service.ts";
 import type { Profile } from "../profiles.ts";
 
 // ============================================================================
@@ -191,6 +192,8 @@ export interface IntentServices {
 	readonly hostTheme?: () => IntentHostTheme | undefined;
 	/** The model patterns the host started with (`--models`): a profile switch scopes models by them, not by settings. */
 	readonly modelScopePatterns?: readonly string[];
+	/** Voice on the conversation, bound to the invoking client; hosts without voice omit it. */
+	readonly voice?: IntentVoiceServices;
 }
 
 /** One invocation's context: the target conversation (conversation scope), the host's services, and the profile. */

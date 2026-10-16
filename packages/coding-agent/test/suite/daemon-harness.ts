@@ -46,6 +46,8 @@ export interface DaemonHarnessOptions {
 	readonly detachedRuntimeTtlMs?: number;
 	/** Single-file extensions (absolute paths) the workers' conversations load beside the faux provider; none may declare permissions. */
 	readonly workerExtensions?: readonly string[];
+	/** Extra global settings every worker's conversations read. */
+	readonly settings?: Record<string, unknown>;
 }
 
 /** What a harness phone worker opens beside its stored session. */
@@ -105,6 +107,7 @@ export async function createDaemonHarness(options: DaemonHarnessOptions = {}): P
 			defaultProvider: model.provider,
 			defaultModel: model.id,
 			extensionPaths: [FAUX_EXTENSION_PATH, ...(options.workerExtensions ?? [])],
+			...(options.settings ?? {}),
 		})}\n`,
 	);
 	new ExtensionPermissionStore(agentDir).acknowledge({

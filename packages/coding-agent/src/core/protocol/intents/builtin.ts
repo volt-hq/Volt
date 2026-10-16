@@ -81,6 +81,7 @@ import {
 	setSettingsIntent,
 } from "./settings.ts";
 import type { IntentDefinition } from "./types.ts";
+import { voiceInterruptIntent, voiceStartIntent, voiceStopIntent } from "./voice.ts";
 import { cancelWorkIntent, openWorkIntent, resumeWorkIntent, startSubagentIntent } from "./work.ts";
 
 /**
@@ -108,6 +109,9 @@ export function createBuiltinIntents() {
 		plan_execute: planExecuteIntent,
 		plan_change: planChangeIntent,
 		plan_discard: planDiscardIntent,
+		voice_start: voiceStartIntent,
+		voice_stop: voiceStopIntent,
+		voice_interrupt: voiceInterruptIntent,
 		new_session: newSessionIntent,
 		switch_session: switchSessionIntent,
 		fork: forkIntent,
