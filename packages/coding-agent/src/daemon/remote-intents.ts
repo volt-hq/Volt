@@ -62,10 +62,11 @@ import {
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
 import type { IrohRemoteWorktreeRpcBackend } from "../core/remote/iroh/worktree-rpc.ts";
 import { getReviewDiscussionLink } from "../core/review-discussions.ts";
+import { canonicalizePath } from "../utils/paths.ts";
 import type { KeepAwakeStatus } from "./keep-awake.ts";
 import { listWorkspaceDirectories } from "./workspace-directory.ts";
 import type { WorkspaceSessions } from "./workspace-sessions.ts";
-import { getRegisteredWorkingDirectoryForWorktree, getWorktreesRoot } from "./worktree-manager.ts";
+import { getRegisteredWorkingDirectoryForWorktree, getWorktreesRootSpellings } from "./worktree-manager.ts";
 
 type SessionListItem = Static<typeof RpcSessionListItemSchema>;
 type SessionChangeContext = Static<typeof RpcSessionChangeContextSchema>;
@@ -162,7 +163,7 @@ export function workspaceStreamRedaction(
 	return {
 		workspacePath,
 		remoteWorkspacePath: "/workspace",
-		...(WORKTREE_PURPOSES.has(purpose) ? { additionalRedactedPaths: [getWorktreesRoot(agentDir)] } : {}),
+		...(WORKTREE_PURPOSES.has(purpose) ? { additionalRedactedPaths: getWorktreesRootSpellings(agentDir) } : {}),
 	};
 }
 
@@ -276,7 +277,7 @@ export async function listRemoteWorkspaceSessions(
 	// Titles are redacted before they are cut, so a cut never leaves part of a root.
 	const titles = createIrohRemoteProjectionSanitizer({
 		workspacePath: workspace.path,
-		additionalRedactedPaths: [getWorktreesRoot(host.agentDir)],
+		additionalRedactedPaths: getWorktreesRootSpellings(host.agentDir),
 	});
 	const title = (text: string): string => truncateScalars(titles.sanitizeText(text), SESSION_TITLE_MAX_SCALARS);
 	const sessions = new Map<string, { item: SessionListItem; cwd: string }>();
@@ -327,7 +328,8 @@ export async function listRemoteWorkspaceSessions(
 				const session = sessions.get(sessionId);
 				if (!session) continue;
 				session.item.worktreeId = worktree.id;
-				const inWorktree = relativeWorkingDirectory(worktree.path, session.cwd);
+				// The store records a session's cwd with its symlinks resolved: compare the checkout the same way.
+				const inWorktree = relativeWorkingDirectory(canonicalizePath(worktree.path), session.cwd);
 				const workingDirectory =
 					inWorktree === null ? undefined : getRegisteredWorkingDirectoryForWorktree(worktree, inWorktree);
 				if (workingDirectory === undefined) delete session.item.workingDirectory;
