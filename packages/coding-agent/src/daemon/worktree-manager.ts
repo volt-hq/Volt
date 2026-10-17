@@ -41,6 +41,15 @@ export function getWorktreesRoot(agentDir: string): string {
 	return join(resolvedAgentDir, "worktrees");
 }
 
+/**
+ * Both spellings of the worktrees root: through `agentDir` as configured, and
+ * with its symlinks resolved. Text can name a checkout either way, so
+ * redaction needs both.
+ */
+export function getWorktreesRootSpellings(agentDir: string): string[] {
+	return [...new Set([join(resolve(agentDir), "worktrees"), getWorktreesRoot(agentDir)])];
+}
+
 export const WORKTREE_ID_PATTERN = IROH_REMOTE_WORKTREE_ID_PATTERN;
 const MAX_RECOVERY_CHECKOUTS = 32;
 const RECOVERY_PURGE_MARKER = ".volt-safe-to-purge.json";

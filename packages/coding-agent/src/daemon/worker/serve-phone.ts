@@ -33,7 +33,7 @@ import {
 	type IntegratedConversationSessionSelection,
 } from "../handshake-responses.ts";
 import { adaptRelaySocketToIrohStream } from "../relay-stream.ts";
-import { getWorktreesRoot } from "../worktree-manager.ts";
+import { getWorktreesRootSpellings } from "../worktree-manager.ts";
 
 /** Rehydrate the daemon-authorized relay snapshot without recomputing its workspace scope. */
 export function createRelayAuthorization(
@@ -78,7 +78,7 @@ export function getRelaySanitizerOptions(
 			? {}
 			: { remoteWorkspacePath: `/workspace/${authorization.worktreeSourceRootRelativePath}` }),
 		workspacePath: authorization.worktreePath,
-		additionalRedactedPaths: [authorization.workspacePath, getWorktreesRoot(agentDir)],
+		additionalRedactedPaths: [authorization.workspacePath, ...getWorktreesRootSpellings(agentDir)],
 	};
 }
 
