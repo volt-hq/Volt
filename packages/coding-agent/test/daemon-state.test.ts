@@ -3,14 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
-import type { IrohRemoteHostState } from "../src/core/remote/iroh/state.ts";
+import { createEmptyIrohRemoteHostState, type IrohRemoteHostState } from "../src/core/remote/iroh/state.ts";
 import { getDaemonPaths } from "../src/daemon/paths.ts";
 import {
 	createEmptyVoltdState,
 	findRecoverableVoltdStateBackup,
-	getLegacyRemoteStatePath,
 	inspectVoltdStateFiles,
-	migrateLegacyRemoteState,
 	parseVoltdState,
 	recoverVoltdStateFromBackup,
 	regenerateInvalidVoltdState,
@@ -19,9 +17,13 @@ import {
 
 const SECRET_KEY_BYTES = Array.from({ length: 32 }, (_, index) => index + 1);
 
-function createLegacyState(): IrohRemoteHostState {
+function createGrantedHostState(): IrohRemoteHostState {
+	const rpcGrant = createIrohRemotePresetAccess("coding").rpcGrant;
 	return {
+		...createEmptyIrohRemoteHostState(),
 		hostSecretKey: [...SECRET_KEY_BYTES],
+		workspaceGenerationCounter: 7,
+		workspaceGenerations: [{ workspaceName: "volt", generation: 7 }],
 		workspaces: [{ name: "volt", path: "/tmp/volt", allowedTools: undefined }],
 		clients: [
 			{
@@ -29,6 +31,7 @@ function createLegacyState(): IrohRemoteHostState {
 				label: "phone",
 				allowedWorkspaces: ["volt"],
 				allowedTools: "read,bash",
+				rpcGrant,
 				pairedAt: 1000,
 				lastSeenAt: 2000,
 				lastSessionIdByWorkspace: { volt: "s-abc" },
@@ -51,6 +54,7 @@ function createLegacyState(): IrohRemoteHostState {
 				label: "old",
 				allowedWorkspaces: [],
 				allowedTools: "read",
+				rpcGrant,
 				pairedAt: 1,
 				lastSeenAt: 2,
 				revokedAt: 3,
@@ -58,107 +62,47 @@ function createLegacyState(): IrohRemoteHostState {
 		],
 		pendingPairingTickets: [
 			{
-				secretHash: "legacy-ticket",
+				secretHash: "pre-grant-ticket",
 				workspace: "volt",
 				allowedTools: "read",
+				rpcGrant,
 				expiresAt: 3000,
 				createdAt: 2000,
 			},
 		],
-		pairingSecretTombstones: [],
 	};
 }
 
-function createGrantedHostState(): IrohRemoteHostState {
-	const grant = createIrohRemotePresetAccess("coding").rpcGrant;
-	const state = createLegacyState();
+function withoutGrant<T extends { rpcGrant: unknown }>({ rpcGrant: _rpcGrant, ...entry }: T): Omit<T, "rpcGrant"> {
+	return entry;
+}
+
+/** The granted state as it was written before RPC grants existed: no access record carries one. */
+function createPreGrantState() {
+	const state = createGrantedHostState();
 	return {
 		...state,
-		workspaceGenerationCounter: 7,
-		workspaceGenerations: [{ workspaceName: "volt", generation: 7 }],
-		clients: state.clients.map((client) => ({ ...client, rpcGrant: grant })),
-		revokedClients: state.revokedClients?.map((client) => ({ ...client, rpcGrant: grant })),
-		pendingPairingTickets: state.pendingPairingTickets?.map((ticket) => ({ ...ticket, rpcGrant: grant })),
+		clients: state.clients.map(withoutGrant),
+		revokedClients: state.revokedClients.map(withoutGrant),
+		pendingPairingTickets: state.pendingPairingTickets.map(withoutGrant),
 	};
 }
 
-describe("voltd state migration", () => {
+describe("voltd state", () => {
 	let agentDir: string;
 	let statePath: string;
-	let legacyPath: string;
 
 	beforeEach(() => {
 		agentDir = mkdtempSync(join(tmpdir(), "voltd-state-"));
 		statePath = getDaemonPaths(agentDir).statePath;
-		legacyPath = getLegacyRemoteStatePath(agentDir);
-		mkdirSync(join(agentDir, "remote"), { recursive: true });
 	});
 
 	afterEach(() => {
 		rmSync(agentDir, { recursive: true, force: true });
 	});
 
-	it("preserves pre-grant identity and workspace metadata but drops old access records", () => {
-		writeFileSync(legacyPath, JSON.stringify(createLegacyState()));
-		const migrated = migrateLegacyRemoteState(agentDir, statePath);
-		expect(migrated).not.toBeNull();
-		expect(migrated?.state.irohSecretKey).toEqual(SECRET_KEY_BYTES);
-		expect(migrated?.state.clients).toEqual([]);
-		expect(migrated?.state.revokedClients).toEqual([]);
-		expect(migrated?.state.pendingPairingTickets).toEqual([]);
-		expect(migrated?.state.workspaces[0]?.name).toBe("volt");
-		expect(migrated?.state.workspaceGenerationCounter).toBe(1);
-		expect(migrated?.state.workspaceGenerations).toEqual([{ workspaceName: "volt", generation: 1 }]);
-		expect(migrated?.state.settings.detachedRuntimeTtlMs).toBe(30 * 60 * 1000);
-		expect(migrated?.droppedAccess).toEqual({ clients: 1, revokedClients: 1, pendingPairingTickets: 1 });
-	});
-
-	it("defaults missing legacy sections to empty", () => {
-		writeFileSync(legacyPath, JSON.stringify({ workspaces: [], clients: [] }));
-		const migrated = migrateLegacyRemoteState(agentDir, statePath);
-		expect(migrated).not.toBeNull();
-		expect(migrated?.state.irohSecretKey).toBeUndefined();
-		expect(migrated?.state.revokedClients).toEqual([]);
-		expect(migrated?.state.pendingPairingTickets).toEqual([]);
-		expect(migrated?.droppedAccess).toEqual({ clients: 0, revokedClients: 0, pendingPairingTickets: 0 });
-	});
-
-	it("does nothing when state.json already exists", () => {
-		mkdirSync(join(agentDir, "daemon"), { recursive: true });
-		writeFileSync(statePath, JSON.stringify(createEmptyVoltdState()));
-		writeFileSync(legacyPath, JSON.stringify(createLegacyState()));
-		expect(migrateLegacyRemoteState(agentDir, statePath)).toBeNull();
-	});
-
-	it("store.load migrates once, renames legacy to .migrated, and is idempotent", async () => {
-		writeFileSync(legacyPath, JSON.stringify(createLegacyState()));
-		const store = new VoltdStateStore({ agentDir, statePath, debounceMs: 1 });
-		const first = await store.load();
-		expect(first.migratedFromLegacyState).toBe(true);
-		expect(first.legacyDroppedAccess).toEqual({ clients: 1, revokedClients: 1, pendingPairingTickets: 1 });
-		expect(existsSync(statePath)).toBe(true);
-		expect(existsSync(legacyPath)).toBe(false);
-		expect(existsSync(`${legacyPath}.migrated`)).toBe(true);
-		await store.close();
-
-		// Reload from disk: secret key survives byte-identically.
-		const secondStore = new VoltdStateStore({ agentDir, statePath, debounceMs: 1 });
-		const second = await secondStore.load();
-		expect(second.migratedFromLegacyState).toBe(false);
-		expect(second.state.irohSecretKey).toEqual(SECRET_KEY_BYTES);
-		expect(second.state.clients).toEqual([]);
-		expect(second.state.workspaces[0]?.name).toBe("volt");
-		await secondStore.close();
-
-		// Legacy file restored alongside state.json: still nothing happens.
-		writeFileSync(legacyPath, JSON.stringify(createLegacyState()));
-		const thirdStore = new VoltdStateStore({ agentDir, statePath, debounceMs: 1 });
-		expect((await thirdStore.load()).migratedFromLegacyState).toBe(false);
-		await thirdStore.close();
-	});
-
 	it("round-trips through parseVoltdState including settings", async () => {
-		const store = new VoltdStateStore({ agentDir, statePath, debounceMs: 1 });
+		const store = new VoltdStateStore({ statePath, debounceMs: 1 });
 		await store.load();
 		store.updateSettings({ detachedRuntimeTtlMs: 60_000, allowTools: ["read", "grep"] });
 		await store.close();
@@ -216,7 +160,7 @@ describe("voltd state migration", () => {
 	});
 
 	it("round-trips a valid Iroh bind port across host-state writes and drops invalid ones", async () => {
-		const store = new VoltdStateStore({ agentDir, statePath, debounceMs: 1 });
+		const store = new VoltdStateStore({ statePath, debounceMs: 1 });
 		await store.load();
 		store.updateSettings({ irohBindPort: 47_000 });
 		store.setHostState(createGrantedHostState());
@@ -233,7 +177,7 @@ describe("voltd state migration", () => {
 	});
 
 	it("setHostState updates the persisted host portion", async () => {
-		const store = new VoltdStateStore({ agentDir, statePath, debounceMs: 1 });
+		const store = new VoltdStateStore({ statePath, debounceMs: 1 });
 		await store.load();
 		store.setHostState(createGrantedHostState());
 		await store.close();
@@ -253,7 +197,7 @@ describe("voltd state migration", () => {
 		const invalidState = "{ this is : not valid json";
 		writeFileSync(statePath, invalidState);
 
-		const store = new VoltdStateStore({ agentDir, statePath, debounceMs: 1 });
+		const store = new VoltdStateStore({ statePath, debounceMs: 1 });
 		await expect(store.load()).rejects.toThrow("Confirm regeneration from /remote");
 		expect(readFileSync(statePath, "utf8")).toBe(invalidState);
 	});
@@ -265,57 +209,58 @@ describe("voltd state migration", () => {
 
 		expect(inspectVoltdStateFiles(agentDir)).toMatchObject({ path: statePath });
 		expect(readFileSync(statePath, "utf8")).toBe(invalidState);
-		const { backupPath, preservedIdentity } = await regenerateInvalidVoltdState(agentDir);
-		expect(preservedIdentity).toBe(false);
+		const { backupPath } = await regenerateInvalidVoltdState(agentDir);
 		expect(existsSync(statePath)).toBe(false);
 		expect(readFileSync(backupPath, "utf8")).toBe(invalidState);
 
-		const replacementStore = new VoltdStateStore({ agentDir, statePath, debounceMs: 1 });
+		const replacementStore = new VoltdStateStore({ statePath, debounceMs: 1 });
 		const replacement = await replacementStore.load();
-		expect(replacement.state).toEqual(createEmptyVoltdState());
+		expect(replacement).toEqual(createEmptyVoltdState());
 		await replacementStore.close();
 	});
 
-	it("rejects incompatible pre-grant daemon state without dropping identity or settings", async () => {
+	it("rejects pre-grant daemon state, and regeneration starts empty state", async () => {
 		mkdirSync(join(agentDir, "daemon"), { recursive: true });
-		const incompatibleState = {
+		const incompatibleState = JSON.stringify({
 			...createEmptyVoltdState(),
 			irohSecretKey: SECRET_KEY_BYTES,
-			clients: createLegacyState().clients,
-			workspaces: createLegacyState().workspaces,
-			settings: {
-				...createEmptyVoltdState().settings,
-				relayAuthToken: "persisted-relay-token",
-			},
-		};
-		writeFileSync(statePath, JSON.stringify(incompatibleState));
+			clients: createPreGrantState().clients,
+			workspaces: createPreGrantState().workspaces,
+		});
+		writeFileSync(statePath, incompatibleState);
 
-		const store = new VoltdStateStore({ agentDir, statePath, debounceMs: 1 });
+		const store = new VoltdStateStore({ statePath, debounceMs: 1 });
 		await expect(store.load()).rejects.toThrow("client rpcGrant must be an object");
-		const persisted = JSON.parse(readFileSync(statePath, "utf8")) as typeof incompatibleState;
-		expect(persisted.irohSecretKey).toEqual(SECRET_KEY_BYTES);
-		expect(persisted.clients).toHaveLength(1);
-		expect(persisted.settings.relayAuthToken).toBe("persisted-relay-token");
+		expect(readFileSync(statePath, "utf8")).toBe(incompatibleState);
 
-		const { backupPath, preservedIdentity } = await regenerateInvalidVoltdState(agentDir);
-		expect(preservedIdentity).toBe(true);
-		expect(existsSync(backupPath)).toBe(true);
-		const regenerated = parseVoltdState(JSON.parse(readFileSync(statePath, "utf8")));
-		expect(regenerated.irohSecretKey).toEqual(SECRET_KEY_BYTES);
-		expect(regenerated.settings.relayAuthToken).toBe("persisted-relay-token");
-		expect(regenerated.workspaces).toEqual(createLegacyState().workspaces);
-		expect(regenerated.clients).toEqual([]);
-		expect(regenerated.revokedClients).toEqual([]);
-		expect(regenerated.pendingPairingTickets).toEqual([]);
+		const { backupPath } = await regenerateInvalidVoltdState(agentDir);
+		expect(readFileSync(backupPath, "utf8")).toBe(incompatibleState);
+		expect(existsSync(statePath)).toBe(false);
+		expect(findRecoverableVoltdStateBackup(agentDir)).toBeUndefined();
 
-		const recoveryCandidate = findRecoverableVoltdStateBackup(agentDir);
-		expect(recoveryCandidate?.path).toBe(backupPath);
+		const replacementStore = new VoltdStateStore({ statePath, debounceMs: 1 });
+		expect(await replacementStore.load()).toEqual(createEmptyVoltdState());
+		await replacementStore.close();
+	});
+
+	it("recovers a backup that parses as current state, pairings included", async () => {
+		const store = new VoltdStateStore({ statePath, debounceMs: 1 });
+		await store.load();
+		store.setHostState(createGrantedHostState());
+		store.updateSettings({ relayAuthToken: "persisted-relay-token" });
+		await store.close();
+		const backupPath = `${statePath}.invalid-1`;
+		writeFileSync(backupPath, readFileSync(statePath, "utf8"));
+		writeFileSync(`${statePath}.invalid-2`, "{ not state");
 		writeFileSync(statePath, JSON.stringify(createEmptyVoltdState()));
+
+		expect(findRecoverableVoltdStateBackup(agentDir)).toEqual({ path: backupPath, preservedIdentity: true });
 		const recovered = await recoverVoltdStateFromBackup(agentDir, backupPath);
 		expect(recovered.preservedIdentity).toBe(true);
 		expect(recovered.previousStateBackupPath).toBeDefined();
 		const restored = parseVoltdState(JSON.parse(readFileSync(statePath, "utf8")));
 		expect(restored.irohSecretKey).toEqual(SECRET_KEY_BYTES);
+		expect(restored.clients.map((client) => client.nodeId)).toEqual(["n-phone"]);
 		expect(restored.settings.relayAuthToken).toBe("persisted-relay-token");
 	});
 });

@@ -70,6 +70,7 @@ import {
 	writeIrohRemoteHostState,
 } from "../src/core/remote/iroh/index.ts";
 import { IROH_REMOTE_HOST_STORAGE_FULL_MESSAGE } from "../src/core/remote/iroh/protocol.ts";
+import { createIrohRemoteHostStateFixture } from "./utilities/iroh-host-state.ts";
 
 const CODING_RPC_GRANT = createIrohRemotePresetAccess("coding").rpcGrant;
 
@@ -995,16 +996,13 @@ describe("Iroh remote core helpers", () => {
 					...state,
 					clients: [
 						{
-							nodeId: "legacy-client",
-							label: "old phone",
+							nodeId: "grantless-client",
+							label: "phone",
 							allowedWorkspaces: ["volt"],
 							pairedAt: 10,
 							lastSeenAt: 20,
 						},
 					],
-					pairingSecretTombstones: undefined,
-					revokedClients: undefined,
-					pendingPairingTickets: undefined,
 				}),
 			).toThrow("client rpcGrant must be an object");
 			expect((await readFile(statePath, "utf8")).endsWith("\n")).toBe(true);
@@ -1022,13 +1020,13 @@ describe("Iroh remote core helpers", () => {
 			expect(() =>
 				parseIrohRemoteHostState({
 					...state,
-					pairingSecretTombstones: [{ ...state.pairingSecretTombstones![0], outcome: "pairing_secret_unknown" }],
+					pairingSecretTombstones: [{ ...state.pairingSecretTombstones[0], outcome: "pairing_secret_unknown" }],
 				}),
 			).toThrow("pairing secret tombstone outcome must be pairing_secret_consumed or pairing_secret_expired");
 			expect(() =>
 				parseIrohRemoteHostState({
 					...state,
-					revokedClients: [{ ...state.revokedClients![0], rePairApprovedAt: Number.NaN }],
+					revokedClients: [{ ...state.revokedClients[0], rePairApprovedAt: Number.NaN }],
 				}),
 			).toThrow("revoked client rePairApprovedAt must be a finite number");
 			await expect(readIrohRemoteHostState(statePath)).rejects.toThrow("client label must be a non-empty string");
@@ -1064,30 +1062,32 @@ describe("Iroh remote core helpers", () => {
 		expect(normalizeIrohRemoteAllowTools("")).toBe("");
 		expect(parseIrohRemoteAllowTools("")).toEqual([]);
 		expect(
-			parseIrohRemoteHostState({
-				workspaces: [{ name: "volt", path: "/workspace", allowedTools: legacyDefaultGrant }],
-				clients: [
-					{
-						nodeId: "client-node",
-						label: "phone",
-						allowedWorkspaces: [],
-						allowedTools: "",
-						rpcGrant: CODING_RPC_GRANT,
-						pairedAt: 10,
-						lastSeenAt: 20,
-					},
-				],
-				pendingPairingTickets: [
-					{
-						secretHash: "sha256:pending",
-						workspace: "volt",
-						allowedTools: legacyDefaultGrant,
-						rpcGrant: CODING_RPC_GRANT,
-						createdAt: 30,
-						expiresAt: 40,
-					},
-				],
-			}),
+			parseIrohRemoteHostState(
+				createIrohRemoteHostStateFixture({
+					workspaces: [{ name: "volt", path: "/workspace", allowedTools: legacyDefaultGrant }],
+					clients: [
+						{
+							nodeId: "client-node",
+							label: "phone",
+							allowedWorkspaces: [],
+							allowedTools: "",
+							rpcGrant: CODING_RPC_GRANT,
+							pairedAt: 10,
+							lastSeenAt: 20,
+						},
+					],
+					pendingPairingTickets: [
+						{
+							secretHash: "sha256:pending",
+							workspace: "volt",
+							allowedTools: legacyDefaultGrant,
+							rpcGrant: CODING_RPC_GRANT,
+							createdAt: 30,
+							expiresAt: 40,
+						},
+					],
+				}),
+			),
 		).toMatchObject({
 			workspaces: [{ allowedTools: legacyDefaultGrant }],
 			clients: [{ allowedTools: "" }],
@@ -1343,11 +1343,11 @@ describe("Iroh remote core helpers", () => {
 
 		expect(() =>
 			parseIrohRemoteHostState({
-				workspaces: [workspace],
+				...createIrohRemoteHostStateFixture({ workspaces: [workspace] }),
 				clients: [
 					{
-						nodeId: "legacy-client",
-						label: "old phone",
+						nodeId: "grantless-client",
+						label: "phone",
 						allowedWorkspaces: ["volt"],
 						pairedAt: 10,
 						lastSeenAt: 20,
@@ -1662,7 +1662,7 @@ describe("Iroh remote core helpers", () => {
 		expect(await stateManager.insertWorkspace({ name: "ALPHA", path: "/elsewhere" })).toBe(false);
 		const state = await stateManager.getState();
 		expect(state.workspaces).toEqual([{ name: "alpha", path: "/alpha" }]);
-		expect(state.workspaceGenerations?.filter((record) => record.workspaceName === "alpha")).toHaveLength(1);
+		expect(state.workspaceGenerations.filter((record) => record.workspaceName === "alpha")).toHaveLength(1);
 	});
 
 	test("host engine authorizes paired clients across registered workspaces without another pairing secret", async () => {
@@ -2287,7 +2287,7 @@ describe("Iroh remote core helpers", () => {
 
 	test("host state manager returns defensive copies", async () => {
 		const workspace: IrohRemoteWorkspace = { name: "volt", path: "/workspace" };
-		const initialState: IrohRemoteHostState = {
+		const initialState: IrohRemoteHostState = createIrohRemoteHostStateFixture({
 			hostSecretKey: [1, 2, 3],
 			pairingSecretTombstones: [
 				{
@@ -2337,14 +2337,14 @@ describe("Iroh remote core helpers", () => {
 					expiresAt: 200,
 				},
 			],
-		};
+		});
 		const stateManager = new IrohRemoteHostStateManager({ initialState });
 		initialState.workspaces[0].path = "/mutated-before-load";
 		initialState.clients[0].lastSessionIdByWorkspace!.volt = "mutated-before-load";
-		initialState.revokedClients![0].lastSessionIdByWorkspace!.volt = "mutated-before-load";
-		initialState.revokedClients![0].allowedWorkspaces.push("mutated-before-load");
+		initialState.revokedClients[0].lastSessionIdByWorkspace!.volt = "mutated-before-load";
+		initialState.revokedClients[0].allowedWorkspaces.push("mutated-before-load");
 		initialState.hostSecretKey?.push(4);
-		initialState.pairingSecretTombstones?.push({
+		initialState.pairingSecretTombstones.push({
 			secretHash: "sha256:leaked-tombstone",
 			workspace: "leaked",
 			outcome: "pairing_secret_expired",
@@ -2353,7 +2353,7 @@ describe("Iroh remote core helpers", () => {
 			expiredAt: 3,
 			retainUntil: 4,
 		});
-		initialState.pendingPairingTickets?.push({
+		initialState.pendingPairingTickets.push({
 			secretHash: "sha256:leaked",
 			workspace: "leaked",
 			allowedTools: "bash",
@@ -2365,7 +2365,7 @@ describe("Iroh remote core helpers", () => {
 		const loaded = await stateManager.load();
 		loaded.hostSecretKey?.push(5);
 		loaded.workspaces[0].path = "/mutated-loaded";
-		loaded.pairingSecretTombstones?.push({
+		loaded.pairingSecretTombstones.push({
 			secretHash: "sha256:loaded-tombstone-leak",
 			workspace: "loaded-leak",
 			outcome: "pairing_secret_expired",
@@ -2374,7 +2374,7 @@ describe("Iroh remote core helpers", () => {
 			expiredAt: 3,
 			retainUntil: 4,
 		});
-		loaded.pendingPairingTickets?.push({
+		loaded.pendingPairingTickets.push({
 			secretHash: "sha256:loaded-leak",
 			workspace: "loaded-leak",
 			allowedTools: "bash",
@@ -2383,7 +2383,7 @@ describe("Iroh remote core helpers", () => {
 			expiresAt: 200,
 		});
 		loaded.clients[0].lastSessionIdByWorkspace!.volt = "mutated-session";
-		loaded.revokedClients?.push({
+		loaded.revokedClients.push({
 			nodeId: "loaded-revoked-leak",
 			label: "loaded revoked leak",
 			allowedWorkspaces: ["loaded-leak"],
@@ -2393,7 +2393,7 @@ describe("Iroh remote core helpers", () => {
 			lastSeenAt: 2,
 			revokedAt: 3,
 		});
-		loaded.revokedClients![0].lastSessionIdByWorkspace!.volt = "mutated-revoked-session";
+		loaded.revokedClients[0].lastSessionIdByWorkspace!.volt = "mutated-revoked-session";
 		loaded.clients.push({
 			nodeId: "leaked-client",
 			label: "leaked",
@@ -2405,8 +2405,8 @@ describe("Iroh remote core helpers", () => {
 		});
 		expect(await stateManager.getState()).toEqual({
 			hostSecretKey: [1, 2, 3],
-			workspaceGenerationCounter: 0,
-			workspaceGenerations: [],
+			workspaceGenerationCounter: 1,
+			workspaceGenerations: [{ workspaceName: "volt", generation: 1 }],
 			pairingSecretTombstones: [
 				{
 					secretHash: "sha256:consumed",
@@ -2501,8 +2501,7 @@ describe("Iroh remote core helpers", () => {
 			).resolves.toBe("unavailable");
 
 			const stateManager = new IrohRemoteHostStateManager({
-				initialState: {
-					hostSecretKey: undefined,
+				initialState: createIrohRemoteHostStateFixture({
 					workspaces: [
 						{ name: "available", path: availablePath },
 						{ name: "missing", path: missingPath },
@@ -2519,7 +2518,7 @@ describe("Iroh remote core helpers", () => {
 							lastSeenAt: 2,
 						},
 					],
-				},
+				}),
 			});
 			const authorized = await stateManager.authorizeClient(makeHello("available", "secret"), "client-node", {
 				allowTools: "read",
@@ -2591,8 +2590,7 @@ describe("Iroh remote core helpers", () => {
 
 	test("host state manager unregisters workspaces by exact name only", async () => {
 		const stateManager = new IrohRemoteHostStateManager({
-			initialState: {
-				hostSecretKey: undefined,
+			initialState: createIrohRemoteHostStateFixture({
 				workspaces: [
 					{ name: "alpha", path: "/alpha", allowedTools: "read" },
 					{ name: "alphabet", path: "/alphabet", allowedTools: "read,grep" },
@@ -2627,7 +2625,7 @@ describe("Iroh remote core helpers", () => {
 						expiresAt: 4,
 					},
 				],
-			},
+			}),
 		});
 
 		await expect(stateManager.unregisterWorkspace("alp")).resolves.toBeUndefined();
@@ -2642,11 +2640,10 @@ describe("Iroh remote core helpers", () => {
 		expect(state.pendingPairingTickets).toEqual([expect.objectContaining({ workspace: "alphabet" })]);
 	});
 
-	test("repairs missing workspace generations and fences re-registration ABA", async () => {
+	test("fences workspace re-registration ABA with workspace generations", async () => {
 		const workspace = { name: "alpha", path: "/alpha", allowedTools: "read" };
 		const stateManager = new IrohRemoteHostStateManager({
-			initialState: {
-				...createEmptyIrohRemoteHostState(),
+			initialState: createIrohRemoteHostStateFixture({
 				workspaces: [workspace],
 				clients: [
 					{
@@ -2659,7 +2656,7 @@ describe("Iroh remote core helpers", () => {
 						lastSeenAt: 2,
 					},
 				],
-			},
+			}),
 		});
 		const authorize = () =>
 			stateManager.authorizeClient(makeHello("alpha"), "client-node", {
@@ -2667,20 +2664,17 @@ describe("Iroh remote core helpers", () => {
 				now: 100,
 			});
 
-		const legacyAuthorization = await authorize();
-		if (!legacyAuthorization.ok) throw new Error(legacyAuthorization.error);
-		expect(legacyAuthorization).not.toHaveProperty("workspaceGeneration");
+		const initialAuthorization = await authorize();
+		if (!initialAuthorization.ok) throw new Error(initialAuthorization.error);
+		expect(initialAuthorization.workspaceGeneration).toBe(1);
+		// Registering the same workspace again keeps its generation.
 		await stateManager.upsertWorkspace(workspace);
 		expect((await stateManager.getState()).workspaceGenerationCounter).toBe(1);
-		await expect(stateManager.isAuthorizationCurrent(legacyAuthorization)).resolves.toBe(false);
-		const repairedAuthorization = await authorize();
-		if (!repairedAuthorization.ok) throw new Error(repairedAuthorization.error);
-		expect(repairedAuthorization.workspaceGeneration).toBe(1);
-		await expect(stateManager.isAuthorizationCurrent(repairedAuthorization)).resolves.toBe(true);
+		await expect(stateManager.isAuthorizationCurrent(initialAuthorization)).resolves.toBe(true);
 
 		await stateManager.unregisterWorkspace("alpha");
 		await stateManager.upsertWorkspace(workspace);
-		await expect(stateManager.isAuthorizationCurrent(repairedAuthorization)).resolves.toBe(false);
+		await expect(stateManager.isAuthorizationCurrent(initialAuthorization)).resolves.toBe(false);
 		const replacementAuthorization = await authorize();
 		if (!replacementAuthorization.ok) throw new Error(replacementAuthorization.error);
 		expect(replacementAuthorization.workspaceGeneration).toBe(2);
@@ -2698,8 +2692,7 @@ describe("Iroh remote core helpers", () => {
 
 	test("host engine does not re-register an unregistered primary workspace from stale pairing state", async () => {
 		const stateManager = new IrohRemoteHostStateManager({
-			initialState: {
-				hostSecretKey: undefined,
+			initialState: createIrohRemoteHostStateFixture({
 				workspaces: [
 					{ name: "alpha", path: "/alpha", allowedTools: "read" },
 					{ name: "beta", path: "/beta", allowedTools: "read,grep" },
@@ -2717,7 +2710,7 @@ describe("Iroh remote core helpers", () => {
 				],
 				revokedClients: [],
 				pendingPairingTickets: [],
-			},
+			}),
 		});
 		const hostEngine = new IrohRemoteHostEngine({
 			stateManager,
@@ -2755,8 +2748,7 @@ describe("Iroh remote core helpers", () => {
 
 	test("host engine does not re-register primary workspace while pairing another workspace", async () => {
 		const stateManager = new IrohRemoteHostStateManager({
-			initialState: {
-				hostSecretKey: undefined,
+			initialState: createIrohRemoteHostStateFixture({
 				workspaces: [
 					{ name: "alpha", path: "/alpha", allowedTools: "read" },
 					{ name: "beta", path: "/beta", allowedTools: "read,grep" },
@@ -2764,7 +2756,7 @@ describe("Iroh remote core helpers", () => {
 				clients: [],
 				revokedClients: [],
 				pendingPairingTickets: [],
-			},
+			}),
 		});
 		const hostEngine = new IrohRemoteHostEngine({
 			stateManager,
@@ -2793,8 +2785,7 @@ describe("Iroh remote core helpers", () => {
 
 	test("host engine clears stale primary runtime pairing secret after workspace unregister", async () => {
 		const stateManager = new IrohRemoteHostStateManager({
-			initialState: {
-				hostSecretKey: undefined,
+			initialState: createIrohRemoteHostStateFixture({
 				workspaces: [{ name: "alpha", path: "/alpha", allowedTools: "read" }],
 				clients: [
 					{
@@ -2809,7 +2800,7 @@ describe("Iroh remote core helpers", () => {
 				],
 				revokedClients: [],
 				pendingPairingTickets: [],
-			},
+			}),
 		});
 		const hostEngine = new IrohRemoteHostEngine({
 			pairingExpiresAt: 200,
@@ -2854,8 +2845,7 @@ describe("Iroh remote core helpers", () => {
 			await mkdir(alphaPath, { recursive: true });
 			await mkdir(betaPath, { recursive: true });
 			const stateManager = new IrohRemoteHostStateManager({
-				initialState: {
-					hostSecretKey: undefined,
+				initialState: createIrohRemoteHostStateFixture({
 					workspaces: [
 						{ name: "alpha", path: alphaPath, allowedTools: "read" },
 						{ name: "beta", path: betaPath, allowedTools: "read,grep" },
@@ -2903,7 +2893,7 @@ describe("Iroh remote core helpers", () => {
 							expiresAt: Number.MAX_SAFE_INTEGER,
 						},
 					],
-				},
+				}),
 			});
 
 			await expect(stateManager.unregisterWorkspace("beta")).resolves.toEqual({
@@ -2932,11 +2922,10 @@ describe("Iroh remote core helpers", () => {
 
 	test("host state manager unregister of an unknown workspace does not mutate state", async () => {
 		const stateManager = new IrohRemoteHostStateManager({
-			initialState: {
-				hostSecretKey: undefined,
+			initialState: createIrohRemoteHostStateFixture({
 				workspaces: [{ name: "alpha", path: "/alpha" }],
 				clients: [],
-			},
+			}),
 		});
 		const before = await stateManager.getState();
 
@@ -3189,13 +3178,12 @@ describe("Iroh remote core helpers", () => {
 		await expect(
 			hostEngine.pair({ irohTicket: "iroh-endpoint-ticket", secret: "broken-secret", workspace: "broken" }),
 		).rejects.toThrow("workspace_unavailable: workspace path is unavailable: broken");
-		expect((await stateManager.getState()).pendingPairingTickets ?? []).toHaveLength(0);
+		expect((await stateManager.getState()).pendingPairingTickets).toHaveLength(0);
 	});
 
 	test("host engine handshake rejections distinguish missing and unavailable workspace paths", async () => {
 		const stateManager = new IrohRemoteHostStateManager({
-			initialState: {
-				hostSecretKey: undefined,
+			initialState: createIrohRemoteHostStateFixture({
 				workspaces: [
 					{ name: "gone", path: "/gone" },
 					{ name: "broken", path: "/broken" },
@@ -3211,7 +3199,7 @@ describe("Iroh remote core helpers", () => {
 						lastSeenAt: 20,
 					},
 				],
-			},
+			}),
 		});
 		const hostEngine = new IrohRemoteHostEngine({
 			classifyWorkspaceAvailability: (workspace) => (workspace.name === "gone" ? "missing" : "unavailable"),
@@ -3422,21 +3410,23 @@ describe("Iroh remote core helpers", () => {
 		try {
 			const statePath = join(stateDir, "host.json");
 			const workspace: IrohRemoteWorkspace = { name: "volt", path: "/workspace" };
-			await writeIrohRemoteHostState(statePath, {
-				hostSecretKey: undefined,
-				workspaces: [workspace],
-				clients: [
-					{
-						nodeId: "client-node",
-						label: "phone",
-						allowedWorkspaces: ["volt"],
-						allowedTools: "read",
-						rpcGrant: CODING_RPC_GRANT,
-						pairedAt: 10,
-						lastSeenAt: 20,
-					},
-				],
-			});
+			await writeIrohRemoteHostState(
+				statePath,
+				createIrohRemoteHostStateFixture({
+					workspaces: [workspace],
+					clients: [
+						{
+							nodeId: "client-node",
+							label: "phone",
+							allowedWorkspaces: ["volt"],
+							allowedTools: "read",
+							rpcGrant: CODING_RPC_GRANT,
+							pairedAt: 10,
+							lastSeenAt: 20,
+						},
+					],
+				}),
+			);
 			const stateManager = new IrohRemoteHostStateManager({ statePath });
 
 			const [revocation, authorization] = await Promise.all([
@@ -3468,21 +3458,23 @@ describe("Iroh remote core helpers", () => {
 		try {
 			const statePath = join(stateDir, "host.json");
 			const workspace: IrohRemoteWorkspace = { name: "volt", path: "/workspace" };
-			await writeIrohRemoteHostState(statePath, {
-				hostSecretKey: undefined,
-				workspaces: [workspace],
-				clients: [
-					{
-						nodeId: "client-node",
-						label: "phone",
-						allowedWorkspaces: ["volt"],
-						allowedTools: "read",
-						rpcGrant: CODING_RPC_GRANT,
-						pairedAt: 10,
-						lastSeenAt: 20,
-					},
-				],
-			});
+			await writeIrohRemoteHostState(
+				statePath,
+				createIrohRemoteHostStateFixture({
+					workspaces: [workspace],
+					clients: [
+						{
+							nodeId: "client-node",
+							label: "phone",
+							allowedWorkspaces: ["volt"],
+							allowedTools: "read",
+							rpcGrant: CODING_RPC_GRANT,
+							pairedAt: 10,
+							lastSeenAt: 20,
+						},
+					],
+				}),
+			);
 			const firstManager = new IrohRemoteHostStateManager({ statePath });
 			const secondManager = new IrohRemoteHostStateManager({ statePath });
 
@@ -3519,21 +3511,23 @@ describe("Iroh remote core helpers", () => {
 		try {
 			const statePath = join(stateDir, "host.json");
 			const workspace: IrohRemoteWorkspace = { name: "volt", path: "/workspace" };
-			await writeIrohRemoteHostState(statePath, {
-				hostSecretKey: undefined,
-				workspaces: [workspace],
-				clients: [
-					{
-						nodeId: "client-node",
-						label: "phone",
-						allowedWorkspaces: ["volt"],
-						allowedTools: "read",
-						rpcGrant: CODING_RPC_GRANT,
-						pairedAt: 10,
-						lastSeenAt: 20,
-					},
-				],
-			});
+			await writeIrohRemoteHostState(
+				statePath,
+				createIrohRemoteHostStateFixture({
+					workspaces: [workspace],
+					clients: [
+						{
+							nodeId: "client-node",
+							label: "phone",
+							allowedWorkspaces: ["volt"],
+							allowedTools: "read",
+							rpcGrant: CODING_RPC_GRANT,
+							pairedAt: 10,
+							lastSeenAt: 20,
+						},
+					],
+				}),
+			);
 			const firstManager = new IrohRemoteHostStateManager({ statePath });
 			const secondManager = new IrohRemoteHostStateManager({ statePath });
 
@@ -3555,21 +3549,23 @@ describe("Iroh remote core helpers", () => {
 		try {
 			const statePath = join(stateDir, "host.json");
 			const workspace: IrohRemoteWorkspace = { name: "volt", path: "/workspace" };
-			await writeIrohRemoteHostState(statePath, {
-				hostSecretKey: undefined,
-				workspaces: [workspace],
-				clients: [
-					{
-						nodeId: "client-node",
-						label: "phone",
-						allowedWorkspaces: ["volt"],
-						allowedTools: "read",
-						rpcGrant: CODING_RPC_GRANT,
-						pairedAt: 10,
-						lastSeenAt: 20,
-					},
-				],
-			});
+			await writeIrohRemoteHostState(
+				statePath,
+				createIrohRemoteHostStateFixture({
+					workspaces: [workspace],
+					clients: [
+						{
+							nodeId: "client-node",
+							label: "phone",
+							allowedWorkspaces: ["volt"],
+							allowedTools: "read",
+							rpcGrant: CODING_RPC_GRANT,
+							pairedAt: 10,
+							lastSeenAt: 20,
+						},
+					],
+				}),
+			);
 			const firstManager = new IrohRemoteHostStateManager({ statePath });
 			const secondManager = new IrohRemoteHostStateManager({ statePath });
 

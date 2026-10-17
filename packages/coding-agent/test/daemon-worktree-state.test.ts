@@ -46,43 +46,35 @@ function createHostStateWithWorktrees(): IrohRemoteHostState {
 }
 
 describe("worktree state round-trips (all five enumeration sites)", () => {
-	it("parseIrohRemoteHostState preserves worktrees and workspace generations with legacy defaults", () => {
-		const parsed = parseIrohRemoteHostState({
-			workspaceGenerationCounter: 4,
-			workspaceGenerations: [{ workspaceName: "ws", generation: 4 }],
-			workspaces: [{ name: "ws", path: "/tmp/ws" }],
-			clients: [],
-			worktrees: [createWorktree()],
-		});
+	it("parseIrohRemoteHostState preserves worktrees and workspace generations", () => {
+		const parsed = parseIrohRemoteHostState(JSON.parse(JSON.stringify(createHostStateWithWorktrees())));
 		expect(parsed.worktrees).toEqual([createWorktree()]);
 		expect(parsed.workspaceGenerationCounter).toBe(4);
 		expect(parsed.workspaceGenerations).toEqual([{ workspaceName: "ws", generation: 4 }]);
+	});
 
-		// Old state files never carried these keys: empty state stays empty, while
-		// registered workspaces receive fresh authority generations on load.
-		const legacy = parseIrohRemoteHostState({ workspaces: [], clients: [] });
-		expect(legacy.worktrees).toEqual([]);
-		expect(legacy.workspaceGenerationCounter).toBe(0);
-		expect(legacy.workspaceGenerations).toEqual([]);
-
-		const repaired = parseIrohRemoteHostState({
-			workspaceGenerationCounter: 4,
-			workspaceGenerations: [
-				{ workspaceName: "retired", generation: 2 },
-				{ workspaceName: "current", generation: 4 },
-			],
-			workspaces: [
-				{ name: "current", path: "/tmp/current" },
-				{ name: "legacy", path: "/tmp/legacy" },
-			],
-			clients: [],
-		});
-		expect(repaired.workspaceGenerationCounter).toBe(5);
-		expect(repaired.workspaceGenerations).toEqual([
-			{ workspaceName: "retired", generation: 2 },
-			{ workspaceName: "current", generation: 4 },
-			{ workspaceName: "legacy", generation: 5 },
-		]);
+	it("parseIrohRemoteHostState requires every section and a generation for each workspace", () => {
+		for (const section of [
+			"pairingSecretTombstones",
+			"workspaceGenerationCounter",
+			"workspaceGenerations",
+			"worktrees",
+			"revokedClients",
+			"pendingPairingTickets",
+		] as const) {
+			const state: Record<string, unknown> = { ...createHostStateWithWorktrees() };
+			delete state[section];
+			expect(() => parseIrohRemoteHostState(state), section).toThrow(section);
+		}
+		expect(() =>
+			parseIrohRemoteHostState({
+				...createHostStateWithWorktrees(),
+				workspaces: [
+					{ name: "ws", path: "/tmp/ws" },
+					{ name: "other", path: "/tmp/other" },
+				],
+			}),
+		).toThrow("workspace other has no workspace generation");
 	});
 
 	it("rejects malformed worktree entries with the standard error shape", () => {
@@ -95,7 +87,9 @@ describe("worktree state round-trips (all five enumeration sites)", () => {
 		expect(() => parseIrohRemoteWorkspaceWorktree({ ...createWorktree(), sessionIds: "s-abc" })).toThrow(
 			"worktree sessionIds",
 		);
-		expect(() => parseIrohRemoteHostState({ workspaces: [], clients: [], worktrees: [{ id: "x" }] })).toThrow();
+		expect(() => parseIrohRemoteHostState({ ...createEmptyIrohRemoteHostState(), worktrees: [{ id: "x" }] })).toThrow(
+			"worktree workspaceName",
+		);
 		for (const generationState of [
 			{ workspaceGenerationCounter: -1, workspaceGenerations: [] },
 			{ workspaceGenerationCounter: 1.5, workspaceGenerations: [] },
@@ -116,7 +110,7 @@ describe("worktree state round-trips (all five enumeration sites)", () => {
 				],
 			},
 		]) {
-			expect(() => parseIrohRemoteHostState({ workspaces: [], clients: [], ...generationState })).toThrow();
+			expect(() => parseIrohRemoteHostState({ ...createEmptyIrohRemoteHostState(), ...generationState })).toThrow();
 		}
 		// A missing baseRef stays absent (optional).
 		const withoutBaseRef = { ...createWorktree() } as Record<string, unknown>;
@@ -143,11 +137,11 @@ describe("worktree state round-trips (all five enumeration sites)", () => {
 		const state = await manager.getState();
 		expect(state.worktrees).toEqual([createWorktree()]);
 		// Mutating the returned clone must not leak into the manager's state.
-		state.worktrees?.[0]?.sessionIds.push("s-injected");
-		state.worktrees?.pop();
-		const generationRecord = state.workspaceGenerations?.[0];
+		state.worktrees[0]?.sessionIds.push("s-injected");
+		state.worktrees.pop();
+		const generationRecord = state.workspaceGenerations[0];
 		if (generationRecord) generationRecord.generation = 99;
-		state.workspaceGenerations?.pop();
+		state.workspaceGenerations.pop();
 		const fresh = await manager.getState();
 		expect(fresh.worktrees).toEqual([createWorktree()]);
 		expect(fresh.workspaceGenerations).toEqual([{ workspaceName: "ws", generation: 4 }]);
@@ -164,15 +158,9 @@ describe("worktree state round-trips (all five enumeration sites)", () => {
 			workspaceGenerationCounter: 4,
 			workspaceGenerations: [{ workspaceName: "ws", generation: 4 }],
 		});
-		// Host state without the collections maps to empty defaults on the return trip.
-		expect(hostStateToVoltdState({ workspaces: [], clients: [] }, settings)).toMatchObject({
-			worktrees: [],
-			workspaceGenerationCounter: 0,
-			workspaceGenerations: [],
-		});
 	});
 
-	it("parseVoltdState preserves worktrees and defaults them for old daemon state files", () => {
+	it("parseVoltdState preserves worktrees and rejects a state file without them", () => {
 		const settings = createEmptyVoltdState().settings;
 		const withWorktrees = parseVoltdState(
 			JSON.parse(JSON.stringify(hostStateToVoltdState(createHostStateWithWorktrees(), settings))),
@@ -187,11 +175,7 @@ describe("worktree state round-trips (all five enumeration sites)", () => {
 		delete oldFile.worktrees;
 		delete oldFile.workspaceGenerationCounter;
 		delete oldFile.workspaceGenerations;
-		expect(parseVoltdState(oldFile)).toMatchObject({
-			worktrees: [],
-			workspaceGenerationCounter: 1,
-			workspaceGenerations: [{ workspaceName: "ws", generation: 1 }],
-		});
+		expect(() => parseVoltdState(oldFile)).toThrow("workspaceGenerationCounter");
 	});
 });
 

@@ -150,7 +150,7 @@ export async function createDaemonHarness(options: DaemonHarnessOptions = {}): P
 	const generation = (): number => {
 		const record = runtime.state
 			.getHostState()
-			.workspaceGenerations?.find((candidate) => candidate.workspaceName === workspaceName);
+			.workspaceGenerations.find((candidate) => candidate.workspaceName === workspaceName);
 		if (record === undefined) throw new Error("The harness workspace has no generation");
 		return record.generation;
 	};

@@ -171,9 +171,9 @@ function isEmptyIrohRemoteHostStateForRuntimePairingBootstrap(state: IrohRemoteH
 	return (
 		state.workspaces.length === 0 &&
 		state.clients.length === 0 &&
-		(state.revokedClients ?? []).length === 0 &&
-		(state.pendingPairingTickets ?? []).length === 0 &&
-		(state.pairingSecretTombstones ?? []).length === 0
+		state.revokedClients.length === 0 &&
+		state.pendingPairingTickets.length === 0 &&
+		state.pairingSecretTombstones.length === 0
 	);
 }
 
@@ -442,7 +442,7 @@ export class IrohRemoteHostEngine {
 		const pendingPairingTicket =
 			secretHash === undefined
 				? undefined
-				: (await this.stateManager.getState()).pendingPairingTickets?.find(
+				: (await this.stateManager.getState()).pendingPairingTickets.find(
 						(ticket) => ticket.secretHash === secretHash,
 					);
 		if (pendingPairingTicket?.relayCredentialClaimId !== undefined && pendingPairingTicket.expiresAt >= this.now()) {

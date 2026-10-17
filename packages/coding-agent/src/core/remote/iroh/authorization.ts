@@ -13,7 +13,6 @@ import {
 } from "./protocol.ts";
 import type {
 	IrohRemoteClient,
-	IrohRemoteGrantedClient,
 	IrohRemoteHostState,
 	IrohRemotePairingSecretTombstone,
 	IrohRemotePendingPairingTicket,
@@ -59,7 +58,7 @@ export interface AuthorizeIrohRemoteClientOptions {
 export interface IrohRemoteClientAuthorizationSuccess {
 	ok: true;
 	allowTools: string;
-	client: IrohRemoteGrantedClient;
+	client: IrohRemoteClient;
 	consumedPairingTicket?: IrohRemotePendingPairingTicket;
 	expiredPairingTickets?: IrohRemotePendingPairingTicket[];
 	paired: boolean;
@@ -107,7 +106,7 @@ export function authorizeIrohRemoteClient(
 		? expiredPairingTickets.find((ticket) => ticket.secretHash === pairingSecretHash)
 		: undefined;
 	const matchingPendingPairingTicket = pairingSecretHash
-		? getPendingPairingTickets(state).find((ticket) => ticket.secretHash === pairingSecretHash)
+		? state.pendingPairingTickets.find((ticket) => ticket.secretHash === pairingSecretHash)
 		: undefined;
 	const matchingRuntimePairingSecret =
 		options.pairingSecret !== undefined && hello.secret === options.pairingSecret ? options.pairingSecret : undefined;
@@ -141,17 +140,6 @@ export function authorizeIrohRemoteClient(
 		// indefinitely.
 		now >= revokedClient.rePairApprovedAt &&
 		now - revokedClient.rePairApprovedAt <= DEFAULT_IROH_REMOTE_RE_PAIR_APPROVAL_TTL_MS;
-	try {
-		if (revokedClient) parseIrohRemoteRpcGrant(revokedClient.rpcGrant, "revoked client rpcGrant");
-		if (existingClient) assertGrantedClient(existingClient);
-	} catch {
-		return {
-			ok: false,
-			error: "client RPC grant is missing or malformed",
-			outcome: revokedClient ? "client_revoked" : "client_unknown",
-			pairingSecretExpired: false,
-		};
-	}
 	const hasActivePairingSecretForRevokedClient =
 		rePairApprovalActive &&
 		hasPairingSecret &&
@@ -298,10 +286,7 @@ export function authorizeIrohRemoteClient(
 					options.rpcGrant ??
 					createIrohRemotePresetAccess("coding").rpcGrant,
 			);
-			const revokedRevision =
-				revokedClient === undefined
-					? 0
-					: parseIrohRemoteRpcGrant(revokedClient.rpcGrant, "revoked client rpcGrant").revision;
+			const revokedRevision = revokedClient === undefined ? 0 : revokedClient.rpcGrant.revision;
 			if (revokedRevision === Number.MAX_SAFE_INTEGER) {
 				throw new Error("revoked client RPC grant revision is exhausted");
 			}
@@ -319,7 +304,7 @@ export function authorizeIrohRemoteClient(
 		}
 		const allowedWorkspace = matchingPendingPairingTicket?.workspace ?? workspace.name;
 		const ticketExpiresAt = matchingPendingPairingTicket?.expiresAt ?? options.pairingExpiresAt;
-		const client: IrohRemoteGrantedClient = {
+		const client: IrohRemoteClient = {
 			nodeId: remoteNodeId,
 			label: hello.clientLabel || matchingPendingPairingTicket?.labelHint || remoteNodeId.slice(0, 12),
 			allowedWorkspaces: [],
@@ -344,12 +329,12 @@ export function authorizeIrohRemoteClient(
 			retainUntil: getPairingSecretTombstoneRetainUntil(now, ticketExpiresAt),
 		});
 		if (matchingPendingPairingTicket) {
-			state.pendingPairingTickets = getPendingPairingTickets(state).filter(
+			state.pendingPairingTickets = state.pendingPairingTickets.filter(
 				(ticket) => ticket.secretHash !== matchingPendingPairingTicket.secretHash,
 			);
 		}
 		if (revokedClient) {
-			state.revokedClients = getRevokedClients(state).filter((client) => client.nodeId !== remoteNodeId);
+			state.revokedClients = state.revokedClients.filter((client) => client.nodeId !== remoteNodeId);
 			state.clients = state.clients.filter((entry) => entry.nodeId !== remoteNodeId);
 		}
 		state.clients.push(client);
@@ -391,9 +376,7 @@ function getWorkspaceGenerationProperty(
 	state: IrohRemoteHostState,
 	workspaceName: string,
 ): { workspaceGeneration?: number } {
-	const generation = (state.workspaceGenerations ?? []).find(
-		(record) => record.workspaceName === workspaceName,
-	)?.generation;
+	const generation = state.workspaceGenerations.find((record) => record.workspaceName === workspaceName)?.generation;
 	return generation === undefined ? {} : { workspaceGeneration: generation };
 }
 
@@ -415,30 +398,11 @@ export function findIrohRemoteRevokedClient(
 	state: IrohRemoteHostState,
 	nodeId: string,
 ): IrohRemoteRevokedClient | undefined {
-	return getRevokedClients(state).find((client) => client.nodeId === nodeId);
+	return state.revokedClients.find((client) => client.nodeId === nodeId);
 }
 
 export function hashIrohRemotePairingSecret(secret: string): string {
 	return `sha256:${createHash("sha256").update(secret, "utf8").digest("base64url")}`;
-}
-
-function assertGrantedClient(client: IrohRemoteClient): asserts client is IrohRemoteGrantedClient {
-	client.rpcGrant = parseIrohRemoteRpcGrant(client.rpcGrant, "client rpcGrant");
-}
-
-function getPendingPairingTickets(state: IrohRemoteHostState): IrohRemotePendingPairingTicket[] {
-	state.pendingPairingTickets ??= [];
-	return state.pendingPairingTickets;
-}
-
-function getPairingSecretTombstones(state: IrohRemoteHostState): IrohRemotePairingSecretTombstone[] {
-	state.pairingSecretTombstones ??= [];
-	return state.pairingSecretTombstones;
-}
-
-function getRevokedClients(state: IrohRemoteHostState): IrohRemoteRevokedClient[] {
-	state.revokedClients ??= [];
-	return state.revokedClients;
 }
 
 function getPairingSecretTombstoneRetainUntil(terminalAt: number, expiresAt: number | undefined): number {
@@ -446,7 +410,7 @@ function getPairingSecretTombstoneRetainUntil(terminalAt: number, expiresAt: num
 }
 
 function prunePairingSecretTombstones(state: IrohRemoteHostState, now: number): IrohRemotePairingSecretTombstone[] {
-	const tombstones = getPairingSecretTombstones(state);
+	const tombstones = state.pairingSecretTombstones;
 	const retainedTombstones = tombstones.filter((tombstone) => now <= tombstone.retainUntil);
 	if (retainedTombstones.length !== tombstones.length) {
 		state.pairingSecretTombstones = retainedTombstones;
@@ -455,7 +419,7 @@ function prunePairingSecretTombstones(state: IrohRemoteHostState, now: number): 
 }
 
 function upsertPairingSecretTombstone(state: IrohRemoteHostState, tombstone: IrohRemotePairingSecretTombstone): void {
-	const tombstones = getPairingSecretTombstones(state);
+	const tombstones = state.pairingSecretTombstones;
 	state.pairingSecretTombstones = [
 		...tombstones.filter((entry) => entry.secretHash !== tombstone.secretHash),
 		tombstone,
@@ -463,7 +427,7 @@ function upsertPairingSecretTombstone(state: IrohRemoteHostState, tombstone: Iro
 }
 
 function pruneExpiredPendingPairingTickets(state: IrohRemoteHostState, now: number): IrohRemotePendingPairingTicket[] {
-	const pendingPairingTickets = getPendingPairingTickets(state);
+	const pendingPairingTickets = state.pendingPairingTickets;
 	const expiredPairingTickets = pendingPairingTickets.filter((ticket) => now > ticket.expiresAt);
 	if (expiredPairingTickets.length > 0) {
 		state.pendingPairingTickets = pendingPairingTickets.filter((ticket) => now <= ticket.expiresAt);

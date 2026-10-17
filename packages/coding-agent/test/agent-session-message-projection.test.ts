@@ -1,7 +1,8 @@
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
+import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
-import { createHarness, type Harness } from "./test-harness.ts";
+import { createHarness, type Harness } from "./suite/harness.ts";
 
 let harness: Harness | undefined;
 
@@ -50,7 +51,8 @@ void assertReadonlyAgentSessionState;
 
 describe("AgentSession message projection", () => {
 	it("returns deep detached snapshots from messages and state", async () => {
-		harness = await createHarness({ responses: ["assistant original"] });
+		harness = await createHarness();
+		harness.setResponses([fauxAssistantMessage("assistant original")]);
 		await harness.session.prompt("user original");
 
 		const messages = harness.session.messages;

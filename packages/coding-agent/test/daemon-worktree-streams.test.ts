@@ -31,6 +31,7 @@ import {
 	remoteStreamAllows,
 } from "../src/daemon/remote-intents.ts";
 import { WorkspaceSessions } from "../src/daemon/workspace-sessions.ts";
+import { createIrohRemoteHostStateFixture } from "./utilities/iroh-host-state.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
 import { connectRemotePhone, type IntentOutcome, type RemotePhone } from "./utilities/remote-phone.ts";
 
@@ -383,11 +384,10 @@ describe("manage_worktrees management stream", () => {
 	it("ends with fatal{revoked} before an intent when the workspace was removed without changing the client grant", async () => {
 		const authorization = createAuthorization();
 		const stateManager = new IrohRemoteHostStateManager({
-			initialState: {
+			initialState: createIrohRemoteHostStateFixture({
 				workspaces: [authorization.workspace],
-				worktrees: [],
 				clients: [authorization.client],
-			},
+			}),
 		});
 		await stateManager.unregisterWorkspace(authorization.workspace.name);
 

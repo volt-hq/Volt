@@ -47,6 +47,8 @@ vi.mock("../src/daemon/control-client.ts", () => ({
 					phoneConnections: 0,
 					workspaces: [{ name: "volt", path: "/tmp/volt" }],
 					clients: [],
+					revokedClients: [],
+					remotePolicy: { allowTools: null, detachedRuntimeTtlMs: 1_800_000 },
 					remoteTransport: mockDaemon.remoteTransport,
 					keepAwake: { enabled: false, state: "disabled" },
 					workers: [],

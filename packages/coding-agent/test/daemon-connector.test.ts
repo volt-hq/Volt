@@ -271,6 +271,8 @@ describe("the daemon connector against a daemon of another version (D7)", () => 
 							remoteTransport: { state: "unavailable" },
 							workspaces: [],
 							clients: [],
+							revokedClients: [],
+							remotePolicy: { allowTools: null, detachedRuntimeTtlMs: 1_800_000 },
 							keepAwake: { enabled: false, state: "disabled" },
 							workers: Array.from({ length: workers }, (_, index) => ({
 								workerId: `w-${index}`,

@@ -198,8 +198,6 @@ export default function (volt) {
 	it("applies HTTP proxy settings before creating the runtime", async () => {
 		writeRuntimeConfig({ httpProxy: "http://127.0.0.1:7890" });
 		writeMcpConfig();
-		mkdirSync(join(agentDir, "commands"), { recursive: true });
-		writeFileSync(join(agentDir, "commands", "remote.md"), "remote prompt\n");
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
 		let runtime: Awaited<ReturnType<typeof createIrohRemoteAgentRuntime>> | undefined;
@@ -207,8 +205,6 @@ export default function (volt) {
 			runtime = await createIrohRemoteAgentRuntime({ agentDir: pathToFileURL(agentDir).href, cwd });
 			expect(process.env.HTTP_PROXY).toBe("http://127.0.0.1:7890");
 			expect(process.env.HTTPS_PROXY).toBe("http://127.0.0.1:7890");
-			expect(existsSync(join(agentDir, "prompts", "remote.md"))).toBe(true);
-			expect(existsSync(join(agentDir, "commands"))).toBe(false);
 			// The session is in the default store; no per-directory store is created.
 			expect(existsSync(join(agentDir, "sessions", "sessions.sqlite"))).toBe(true);
 			expect(
@@ -442,7 +438,11 @@ export default function (volt) {
 
 		let runtime: Awaited<ReturnType<typeof createIrohRemoteAgentRuntime>> | undefined;
 		try {
-			runtime = await createIrohRemoteAgentRuntime({ agentDir, allowTools: "read", cwd });
+			runtime = await createIrohRemoteAgentRuntime({
+				agentDir,
+				cwd,
+				toolPolicy: { tools: ["read"], allowUnlistedExtensionTools: false },
+			});
 			await runtime.conversation.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 
 			expect(

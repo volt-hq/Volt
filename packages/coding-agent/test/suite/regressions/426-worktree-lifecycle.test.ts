@@ -5,7 +5,7 @@ import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { githubCliCodeHostProvider, type ResolvedPullRequestCheckout } from "../../../src/core/code-host/index.ts";
 import { type IrohRemoteAuditEvent, IrohRemoteAuditLogger } from "../../../src/core/remote/iroh/audit.ts";
-import { createEmptyIrohRemoteHostState, writeIrohRemoteHostState } from "../../../src/core/remote/iroh/state.ts";
+import { writeIrohRemoteHostState } from "../../../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../../../src/core/remote/iroh/state-manager.ts";
 import { getDefaultSessionDirPath, SessionManager } from "../../../src/core/session-manager.ts";
 import { PrReviewCheckoutManager } from "../../../src/daemon/pr-review-checkout.ts";
@@ -18,6 +18,7 @@ import {
 	WorktreeManager,
 	WorktreeRetentionSweeper,
 } from "../../../src/daemon/worktree-manager.ts";
+import { createIrohRemoteHostStateFixture } from "../../utilities/iroh-host-state.ts";
 import { createHarness } from "../harness.ts";
 import { createPrReviewGitSeed } from "../pr-review-git-fixture.ts";
 
@@ -49,7 +50,7 @@ async function fixture(maxWorktreesPerWorkspace = 16) {
 	const workspace = { name: "project", path: source };
 	const agentDir = join(root, "agent");
 	const statePath = join(root, "state.json");
-	await writeIrohRemoteHostState(statePath, { ...createEmptyIrohRemoteHostState(), workspaces: [workspace] });
+	await writeIrohRemoteHostState(statePath, createIrohRemoteHostStateFixture({ workspaces: [workspace] }));
 	const events: IrohRemoteAuditEvent[] = [];
 	const auditLogger = new IrohRemoteAuditLogger({
 		sink: {

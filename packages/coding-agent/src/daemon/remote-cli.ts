@@ -400,11 +400,6 @@ async function handleAccessCommand(args: string[]): Promise<void> {
 			process.exitCode = 1;
 			return;
 		}
-		if (!client.rpcGrant) {
-			console.error(`Error: paired client has no RPC grant and must re-pair: ${nodeId}`);
-			process.exitCode = 1;
-			return;
-		}
 		const response = await session.client.request({
 			type: "client_access_update",
 			clientNodeId: nodeId,
@@ -412,7 +407,7 @@ async function handleAccessCommand(args: string[]): Promise<void> {
 			access: presetValue,
 		});
 		if (reportControlError(response, "access set")) return;
-		if (response.type !== "client_access_updated" || response.client.rpcGrant === undefined) {
+		if (response.type !== "client_access_updated") {
 			console.error("Error: unexpected daemon response for access set");
 			process.exitCode = 1;
 			return;

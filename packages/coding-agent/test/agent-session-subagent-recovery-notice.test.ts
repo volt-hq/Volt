@@ -8,6 +8,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type Context, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { describe, expect, it, vi } from "vitest";
 import type { ResourceLoader } from "../src/core/resource-loader.ts";
 import { type CustomMessageEntry, SessionManager } from "../src/core/session-manager.ts";
@@ -15,7 +16,7 @@ import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import { type SubagentDefinition, SubagentManager, type SubagentRegistryRecord } from "../src/core/subagents/index.ts";
 import type { SubagentToolManager } from "../src/core/tools/index.ts";
 import { SUBAGENT_RECOVERY_NOTICE_CUSTOM_TYPE } from "../src/core/ui/message-presenters.ts";
-import { createHarness } from "./test-harness.ts";
+import { createHarness } from "./suite/harness.ts";
 import { seedSession } from "./utilities/seed-log.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
@@ -72,7 +73,15 @@ describe("subagent recovery notice", () => {
 			record({ id: "sa_nested", parentId: "sa_unclaimed" }),
 			record({ id: "sa_live", status: "running" }),
 		]);
-		const harness = await createHarness({ responses: ["ok", "ok"], subagentToolManager: manager });
+		const harness = await createHarness({ subagentToolManager: manager });
+		let firstTurn: Context | undefined;
+		harness.setResponses([
+			(context) => {
+				firstTurn = context;
+				return fauxAssistantMessage("ok");
+			},
+			fauxAssistantMessage("ok"),
+		]);
 		try {
 			await harness.session.prompt("hello");
 
@@ -93,7 +102,7 @@ describe("subagent recovery notice", () => {
 			// The feature's point: the model sees the notice in THIS turn's
 			// provider context, not after the next reload. Custom messages reach
 			// the provider transformed, so assert on the notice text.
-			const firstTurnContext = JSON.stringify(harness.faux.contexts[0]?.messages ?? []);
+			const firstTurnContext = JSON.stringify(firstTurn?.messages ?? []);
 			expect(firstTurnContext).toContain("Subagent recovery:");
 			expect(firstTurnContext).toContain("sa_unclaimed");
 
@@ -126,7 +135,8 @@ describe("subagent recovery notice", () => {
 
 	it("durably skips runs already offered by a persisted notice", async () => {
 		const { manager } = createStubManager([record({ id: "sa_old" }), record({ id: "sa_new", task: "new work" })]);
-		const harness = await createHarness({ responses: ["ok"], subagentToolManager: manager });
+		const harness = await createHarness({ subagentToolManager: manager });
+		harness.setResponses([fauxAssistantMessage("ok")]);
 		try {
 			// A notice persisted by a previous process already offered sa_old.
 			await harness.session.sessionWriter.appendCustomMessageEntry(
@@ -151,7 +161,8 @@ describe("subagent recovery notice", () => {
 
 	it("appends nothing when no run is suspended", async () => {
 		const { manager } = createStubManager([record({ id: "sa_done", status: "completed" })]);
-		const harness = await createHarness({ responses: ["ok"], subagentToolManager: manager });
+		const harness = await createHarness({ subagentToolManager: manager });
+		harness.setResponses([fauxAssistantMessage("ok")]);
 		try {
 			await harness.session.prompt("hello");
 			expect(noticeEntries(harness)).toHaveLength(0);
@@ -162,9 +173,10 @@ describe("subagent recovery notice", () => {
 
 	it("skips without persisting when the subagent tool is not active", async () => {
 		const { manager } = createStubManager([record({ id: "sa_unclaimed" })]);
-		// baseToolsOverride replaces the toolset, so "subagent" is not active
-		// even though the manager is wired.
-		const harness = await createHarness({ responses: ["ok"], subagentToolManager: manager, baseToolsOverride: {} });
+		// An empty tool set replaces the built-in tools, so "subagent" is not
+		// active even though the manager is wired.
+		const harness = await createHarness({ subagentToolManager: manager, tools: [] });
+		harness.setResponses([fauxAssistantMessage("ok")]);
 		try {
 			await harness.session.prompt("hello");
 			expect(noticeEntries(harness)).toHaveLength(0);
@@ -221,11 +233,8 @@ describe("subagent recovery notice", () => {
 			resourceLoader,
 			parentSessionManager: reopened,
 		});
-		const harness = await createHarness({
-			responses: ["ok"],
-			sessionManager: reopened,
-			subagentToolManager: manager,
-		});
+		const harness = await createHarness({ sessionManager: reopened, subagentToolManager: manager });
+		harness.setResponses([fauxAssistantMessage("ok")]);
 		try {
 			await harness.session.prompt("continue where we left off");
 
@@ -239,8 +248,7 @@ describe("subagent recovery notice", () => {
 			expect(harness.session.work.running()).toEqual([]);
 			await expect(manager.followDelegation("sa_e2e")).resolves.toMatchObject({ status: "suspended" });
 		} finally {
-			harness.cleanup();
-			await harness.session.waitForClosed();
+			await harness.cleanupAsync();
 			await manager.dispose();
 		}
 	});
@@ -251,7 +259,8 @@ describe("subagent recovery notice", () => {
 		const { manager, hydrateCalls } = createStubManager([record({ id: "sa_unclaimed" })], {
 			isSubagentRuntime: true,
 		});
-		const harness = await createHarness({ responses: ["ok"], subagentToolManager: manager });
+		const harness = await createHarness({ subagentToolManager: manager });
+		harness.setResponses([fauxAssistantMessage("ok")]);
 		try {
 			await harness.session.prompt("do the delegated task");
 			expect(noticeEntries(harness)).toHaveLength(0);

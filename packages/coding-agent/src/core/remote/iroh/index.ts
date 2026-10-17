@@ -215,9 +215,6 @@ export {
 export {
 	createEmptyIrohRemoteHostState,
 	type IrohRemoteClient,
-	type IrohRemoteGrantedClient,
-	type IrohRemoteGrantedPendingPairingTicket,
-	type IrohRemoteGrantedRevokedClient,
 	type IrohRemoteHostState,
 	type IrohRemotePairingSecretTombstone,
 	type IrohRemotePairingSecretTombstoneOutcome,

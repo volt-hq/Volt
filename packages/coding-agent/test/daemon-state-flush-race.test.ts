@@ -31,7 +31,6 @@ describe("VoltdStateStore flush serialization", () => {
 		await writeFile(statePath, `${JSON.stringify(createEmptyVoltdState())}\n`);
 		const storageError = Object.assign(new Error("quota exhausted"), { code: "EDQUOT" });
 		const store = new VoltdStateStore({
-			agentDir: directory,
 			statePath,
 			debounceMs: 60_000,
 			writeStateFile: async () => {
@@ -62,7 +61,6 @@ describe("VoltdStateStore flush serialization", () => {
 		let maximumActiveWriters = 0;
 		let persistedContent = "";
 		const store = new VoltdStateStore({
-			agentDir: directory,
 			statePath,
 			debounceMs: 60_000,
 			writeStateFile: async (_path, content) => {

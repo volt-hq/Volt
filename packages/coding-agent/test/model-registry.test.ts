@@ -220,6 +220,18 @@ describe("ModelRegistry", () => {
 		});
 	});
 
+	test.each([
+		["malformed", '{\n  "providers": {\n'],
+		["blank", ""],
+	])("reports a %s models.json with its path", (_name, content) => {
+		writeFileSync(modelsJsonPath, content, "utf-8");
+
+		const loadError = ModelRegistry.create(authStorage, modelsJsonPath).getError();
+
+		expect(loadError).toContain("Failed to parse models.json");
+		expect(loadError).toContain(`File: ${modelsJsonPath}`);
+	});
+
 	describe("custom models merge behavior", () => {
 		test("built-in provider custom models inherit api and baseUrl without explicit fields", () => {
 			// Built-in providers already have api/baseUrl on every model, and auth
