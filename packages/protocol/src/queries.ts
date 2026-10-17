@@ -290,6 +290,7 @@ export const QUERY_SCHEMAS = {
 				httpIdleTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
 				enableInstallTelemetry: Type.Optional(Type.Boolean()),
 				warnings: Type.Optional(HostWarningSettingsSchema),
+				voiceEnabled: Type.Optional(Type.Boolean()),
 			},
 			closed,
 		),

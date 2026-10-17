@@ -218,6 +218,7 @@ export const settingsQuery = defineQuery({
 			...(httpIdleTimeoutMs === undefined ? {} : { httpIdleTimeoutMs }),
 			enableInstallTelemetry: settings.getEnableInstallTelemetry(),
 			warnings: settings.getWarnings(),
+			voiceEnabled: settings.getVoiceSettings().enabled === true,
 		};
 	},
 });

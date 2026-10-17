@@ -20,14 +20,20 @@ const hostManage = ["host.manage.v1"] as const;
 export const setSettingsIntent = defineIntent({
 	name: "set_settings",
 	label: "Settings",
-	description: "Change settings the host reads: personality, transport, review model, images, timeouts, and warnings",
+	description:
+		"Change settings the host reads: personality, transport, review model, images, timeouts, warnings, and voice",
 	category: "host",
 	scope: "host",
 	fence: "none",
 	remote: "unsafe",
 	requires: hostManage,
 	whileBusy: "run",
-	run: (ctx, input) => setHostSettings(targetOf(ctx).session, input),
+	async run(ctx, input) {
+		const { session, conversation } = targetOf(ctx);
+		await setHostSettings(session, input);
+		// Whether voice could start shows at once; the host's other conversations follow as they reload settings.
+		if (input.voiceEnabled !== undefined) ctx.services.voice?.publishAvailability(conversation);
+	},
 });
 
 export const setProfileIntent = defineIntent({

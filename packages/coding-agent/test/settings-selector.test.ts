@@ -128,6 +128,25 @@ describe("SettingsSelectorComponent", () => {
 		expect(stripAnsi(noModel.render(100).lines.join("\n"))).not.toContain("Compact at");
 	});
 
+	test("toggles voice when the host says whether it offers it, and shows no voice item otherwise", () => {
+		const onVoiceEnabledChange = vi.fn();
+		const callbacks = createCallbacks(() => undefined);
+		callbacks.onVoiceEnabledChange = onVoiceEnabledChange;
+		const config = createConfig("default");
+		config.voiceEnabled = false;
+		const list = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+		for (const character of "voice") list.handleInput(character);
+		expect(stripAnsi(list.render(100).lines.join("\n"))).toContain("Voice (experimental)");
+		list.handleInput(" ");
+		expect(onVoiceEnabledChange).toHaveBeenLastCalledWith(true);
+		list.handleInput(" ");
+		expect(onVoiceEnabledChange).toHaveBeenLastCalledWith(false);
+
+		const unsaid = new SettingsSelectorComponent(createConfig("default"), callbacks).getSettingsList();
+		for (const character of "voice") unsaid.handleInput(character);
+		expect(stripAnsi(unsaid.render(100).lines.join("\n"))).not.toContain("Voice (experimental)");
+	});
+
 	test("cycles through fullscreen settings", () => {
 		const onTuiModeChange = vi.fn();
 		const onExitOutputChange = vi.fn();

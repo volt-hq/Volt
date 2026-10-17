@@ -110,6 +110,8 @@ export interface SettingsConfig {
 	fullscreenExitOutput: FullscreenExitOutput;
 	fullscreenScrollbar: ScrollViewScrollbar;
 	warnings: WarningSettings;
+	/** Whether the host offers voice; undefined when it does not say (the item does not show). */
+	voiceEnabled?: boolean;
 }
 
 const PROMPT_CACHE_KEEPALIVE_CHOICES = [
@@ -170,6 +172,7 @@ export interface SettingsCallbacks {
 	onFullscreenExitOutputChange: (output: FullscreenExitOutput) => void;
 	onFullscreenScrollbarChange: (mode: ScrollViewScrollbar) => void;
 	onWarningsChange: (warnings: WarningSettings) => void;
+	onVoiceEnabledChange?: (enabled: boolean) => void;
 	onCancel: () => void;
 }
 
@@ -670,6 +673,17 @@ export class SettingsSelectorComponent extends Container {
 			});
 		}
 
+		if (callbacks.onVoiceEnabledChange && config.voiceEnabled !== undefined) {
+			items.push({
+				id: "voice",
+				label: "Voice (experimental)",
+				description:
+					"Offer /voice: talk to the agent; microphone audio and replies go to the voice provider (OpenAI Codex subscription)",
+				currentValue: config.voiceEnabled ? "true" : "false",
+				values: ["true", "false"],
+			});
+		}
+
 		const sectionById: Record<string, string> = {
 			autocompact: "Agent",
 			"compact-at": "Agent",
@@ -701,11 +715,12 @@ export class SettingsSelectorComponent extends Container {
 			"clear-on-shrink": "Terminal",
 			"terminal-progress": "Terminal",
 			"turn-done-alert": "Terminal",
+			voice: "Voice",
 			"install-telemetry": "Privacy & trust",
 			"default-project-trust": "Privacy & trust",
 			warnings: "Privacy & trust",
 		};
-		const sectionOrder = ["Agent", "Messages", "Interface", "Images", "Terminal", "Privacy & trust"];
+		const sectionOrder = ["Agent", "Messages", "Interface", "Images", "Terminal", "Voice", "Privacy & trust"];
 		for (const item of items) {
 			item.section = sectionById[item.id];
 		}
@@ -824,6 +839,9 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "fullscreen-scrollbar":
 						callbacks.onFullscreenScrollbarChange(newValue as ScrollViewScrollbar);
+						break;
+					case "voice":
+						callbacks.onVoiceEnabledChange?.(newValue === "true");
 						break;
 				}
 			},

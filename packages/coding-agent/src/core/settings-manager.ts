@@ -1595,6 +1595,16 @@ export class SettingsManager {
 		return this.settings.voice ?? {};
 	}
 
+	setVoiceEnabled(enabled: boolean): void {
+		this.updateGlobalSettings(
+			"voice",
+			(settings) => {
+				settings.voice = { ...settings.voice, enabled };
+			},
+			"enabled",
+		);
+	}
+
 	setHttpIdleTimeoutMs(timeoutMs: number): void {
 		if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
 			throw new Error(`Invalid httpIdleTimeoutMs setting: ${String(timeoutMs)}`);

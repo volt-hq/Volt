@@ -53,7 +53,7 @@ export interface TuiVoiceHost {
 export function voiceUnavailableMessage(reason: VoiceUnavailableReason): string {
 	switch (reason) {
 		case "disabled":
-			return 'Voice is off. It is experimental: set "voice": { "enabled": true } in settings to enable it.';
+			return "Voice is off. It is experimental: enable it under Voice in /settings, then try again.";
 		case "native_media_unavailable":
 			return "Voice is unavailable: this installation lacks its optional media engine (werift and opusscript).";
 		case "auth_unavailable":

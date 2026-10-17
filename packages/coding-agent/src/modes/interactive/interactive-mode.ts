@@ -5304,6 +5304,7 @@ export class InteractiveMode {
 					fullscreenExitOutput: settingsManager.getFullscreenExitOutput(),
 					fullscreenScrollbar: settingsManager.getFullscreenScrollbar(),
 					warnings: hostSettings.warnings ?? settingsManager.getWarnings(),
+					...(hostSettings.voiceEnabled === undefined ? {} : { voiceEnabled: hostSettings.voiceEnabled }),
 				},
 				{
 					onAutoCompactChange: (enabled) => {
@@ -5443,6 +5444,12 @@ export class InteractiveMode {
 					},
 					onPromptCacheKeepAliveChange: (mode) => {
 						setHostSettings({ promptCacheKeepAlive: mode });
+					},
+					onVoiceEnabledChange: (enabled) => {
+						setHostSettings(
+							{ voiceEnabled: enabled },
+							enabled ? "Voice enabled: /voice starts it" : "Voice disabled",
+						);
 					},
 					onTuiModeChange: (mode) => {
 						if (!this.switchTuiMode(mode)) {

@@ -10495,6 +10495,9 @@
 						}
 					},
 					"additionalProperties": false
+				},
+				"voiceEnabled": {
+					"type": "boolean"
 				}
 			},
 			"additionalProperties": false,
@@ -18389,6 +18392,9 @@
 						}
 					},
 					"additionalProperties": false
+				},
+				"voiceEnabled": {
+					"type": "boolean"
 				}
 			},
 			"additionalProperties": false

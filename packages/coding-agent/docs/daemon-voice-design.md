@@ -518,6 +518,9 @@ observed and bounded, including after a client is lost.
    adds `/voice [on|off|mute|unmute]`, `app.voice.toggle`/`mute`/`interrupt`,
    the disclosure on every start, the footer state (listening, muted,
    speaking, or another client's voice), and the availability reasons.
+   `/settings` toggles `voice.enabled` through `set_settings`
+   (`voiceEnabled`), and the host republishes the `voice` value at once;
+   turning it off gates new starts and stops no running voice.
 
    Fixtures: `test/daemon-voice-tui.test.ts` runs the TUI's connector,
    store, and voice against the real daemon and an in-process worker with

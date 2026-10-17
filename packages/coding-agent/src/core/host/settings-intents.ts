@@ -40,6 +40,7 @@ export async function setHostSettings(session: AgentSession, values: HostSetting
 	if (values.httpIdleTimeoutMs !== undefined) settings.setHttpIdleTimeoutMs(values.httpIdleTimeoutMs);
 	if (values.enableInstallTelemetry !== undefined) settings.setEnableInstallTelemetry(values.enableInstallTelemetry);
 	if (values.warnings !== undefined) settings.setWarnings(values.warnings);
+	if (values.voiceEnabled !== undefined) settings.setVoiceEnabled(values.voiceEnabled);
 	await settings.flush();
 	if (values.httpIdleTimeoutMs !== undefined) configureHttpDispatcher(settings.getHttpIdleTimeoutMs());
 	session.applySettings();

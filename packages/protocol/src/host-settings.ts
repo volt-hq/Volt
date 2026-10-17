@@ -65,6 +65,8 @@ export const HostSettingsValuesSchema = Type.Object(
 		enableInstallTelemetry: Type.Optional(Type.Boolean()),
 		/** Replaces the warnings settings: the host reads whether to warn about extra usage. */
 		warnings: Type.Optional(HostWarningSettingsSchema),
+		/** Whether conversations offer voice (`voice.enabled`); the live `voice` value follows at once. */
+		voiceEnabled: Type.Optional(Type.Boolean()),
 	},
 	{ ...closed, minProperties: 1 },
 );

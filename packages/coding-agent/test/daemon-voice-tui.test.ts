@@ -6,6 +6,8 @@
  * ownership, and endings are real.
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { VOICE_FRAME_SAMPLES } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -335,7 +337,7 @@ describe("the TUI's voice", () => {
 		expect(voiceValue(other.client)?.lifecycle).toBe("off");
 	}, 60_000);
 
-	it("says how to enable voice when the host has it off", async () => {
+	it("says how to enable voice when the host has it off, and starts once /settings enabled it", async () => {
 		const { harness } = await startHarness({ enabled: false });
 		const tui = await startTui(harness);
 		await untilVoice(tui.client, (value) => !value.availability.available, "voice unavailable");
@@ -344,5 +346,26 @@ describe("the TUI's voice", () => {
 		expect(tui.audio.captures).toHaveLength(0);
 		await tui.voice.command("mute");
 		expect(tui.statuses.at(-1)).toBe("Voice is off");
+
+		// What /settings sends: the host saves voice.enabled, keeps the provider, and says at once that voice can start.
+		expect((await tui.client.query("settings")).voiceEnabled).toBe(false);
+		await tui.client.intent("set_settings", { voiceEnabled: true });
+		await untilVoice(tui.client, (value) => value.availability.available, "voice available", 1_000);
+		expect((await tui.client.query("settings")).voiceEnabled).toBe(true);
+		const saved = JSON.parse(readFileSync(join(harness.agentDir, "settings.json"), "utf8")) as {
+			voice?: unknown;
+		};
+		expect(saved.voice).toEqual({ enabled: true, provider: "fake" });
+		await tui.voice.command("on");
+		await untilVoice(tui.client, (value) => value.lifecycle === "active", "active");
+
+		await tui.client.intent("set_settings", { voiceEnabled: false });
+		await untilVoice(tui.client, (value) => value.availability.available === false, "unavailable again", 1_000);
+		// Turning it off stops no running voice; it keeps new starts from starting.
+		expect(tui.voice.on).toBe(true);
+		await tui.voice.command("off");
+		await untilVoice(tui.client, (value) => value.lifecycle === "off", "off");
+		await tui.voice.command("on");
+		expect(tui.warnings.at(-1)).toBe(voiceUnavailableMessage("disabled"));
 	}, 60_000);
 });

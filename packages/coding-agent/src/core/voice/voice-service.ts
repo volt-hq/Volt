@@ -206,6 +206,7 @@ export class VoiceService {
 				this.start(conversation, { clientId, clientKey }, intentId, profile),
 			stop: (conversation, clientId, epoch) => this.stop(conversation, { clientId, clientKey }, epoch),
 			interrupt: (conversation, clientId, epoch) => this.interrupt(conversation, { clientId, clientKey }, epoch),
+			publishAvailability: (conversation) => this.publishAvailability(conversation),
 		};
 	}
 }
@@ -223,4 +224,6 @@ export interface IntentVoiceServices {
 	/** False when `epoch` is not the live one; throws `VoiceStartError` for a non-owner. */
 	stop(conversation: HostedConversation, clientId: string, epoch: number): Promise<boolean>;
 	interrupt(conversation: HostedConversation, clientId: string, epoch: number): boolean;
+	/** Publish whether voice could start on `conversation` now, as a settings change left it. */
+	publishAvailability(conversation: HostedConversation): void;
 }
