@@ -1,6 +1,6 @@
 {
 	"name": "@hansjm10/volt-protocol",
-	"version": "0.3.0",
+	"version": "0.4.0",
 	"description": "Volt protocol schemas: conversation log entries, wire frames, the UiNode UI schema, and the JSON Schema contract artifact",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -76,7 +76,7 @@
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"dependencies": {
-		"@hansjm10/volt-ai": "^0.3.0",
+		"@hansjm10/volt-ai": "^0.4.0",
 		"typebox": "1.1.38"
 	},
 	"keywords": [
