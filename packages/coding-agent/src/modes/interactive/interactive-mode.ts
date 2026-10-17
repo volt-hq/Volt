@@ -223,6 +223,7 @@ import { createClientIntentSink } from "./ui-node/intents.ts";
 import { PanelFocus, UiPanels } from "./ui-node/panels.ts";
 import { TUI_SEMANTIC_THEME } from "./ui-node/semantic-theme.ts";
 import type { ToolCardWork } from "./ui-node/tool-card.ts";
+import { TuiVoice } from "./voice-control.ts";
 import { type DaemonWorktreeControl, openDaemonWorktreeControl } from "./worktree-control.ts";
 
 function isAsciiOnlyTerminal(): boolean {
@@ -736,6 +737,8 @@ export class InteractiveMode {
 	private hostWaitLoader: { loader: Loader; startedAt: number; timer: ReturnType<typeof setInterval> } | undefined;
 	/** The user left the running turn to run on after the TUI quits (D6). */
 	private leftRunning = false;
+	/** `/voice` and the voice keys on the conversation the TUI shows. */
+	private readonly voice: TuiVoice;
 
 	constructor(connector: ConversationConnector, options: InteractiveModeOptions = {}) {
 		this.connector = connector;
@@ -770,6 +773,16 @@ export class InteractiveMode {
 		this.pendingMessagesContainer.addChild(this.queueContainer);
 		this.statusContainer = new Container();
 		this.work = new ConversationWork({ client: () => this.store.client, holder: this.store });
+		this.voice = new TuiVoice({
+			store: this.store,
+			openVoiceMedia: connector.openVoiceMedia?.bind(connector),
+			voiceSettings: () => this.settingsManager.getVoiceSettings(),
+			showStatus: (message) => this.showStatus(message),
+			showWarning: (message) => this.showWarning(message),
+			requestRender: () => this.ui.requestRender(),
+			isShuttingDown: () => this.isShuttingDown,
+			keyText: (action) => keyText(action),
+		});
 		this.workStatus = new WorkStatus(() => this.work, { terminalRows: () => this.ui.terminal.rows });
 		this.planStatusContainer = new Container();
 		this.planDetailsContainer = new Container();
@@ -2111,6 +2124,7 @@ export class InteractiveMode {
 			contextWarningTokens:
 				this.catalogs.settings?.warnings?.contextTokens ?? this.settingsManager.getContextWarningTokens(),
 			phoneLabel: (count) => (isAsciiOnlyTerminal() ? `[phone ${count}]` : `📱 ${count}`),
+			voiceLabel: this.voice.footerLabel(this.connected ? this.store.client.connectionId : undefined),
 		});
 	}
 
@@ -2241,6 +2255,7 @@ export class InteractiveMode {
 		switch (change.type) {
 			case "live":
 				this.liveView.apply(change);
+				this.voice.observe();
 				if (!this.connected || this.store.conversation === undefined) return;
 				this.transcript.sync(change.items);
 				this.syncStatus();
@@ -2261,6 +2276,7 @@ export class InteractiveMode {
 					void this.loadMovedConversationScope();
 				} else {
 					this.transcript.refresh();
+					this.voice.observe();
 					this.showQueueIfChanged();
 					this.syncStatus();
 				}
@@ -2357,6 +2373,8 @@ export class InteractiveMode {
 		this.syncStatus();
 		this.shownFold = undefined;
 		this.resetExtensionUI();
+		// Voice runs on the conversation left behind: it ends there as the TUI detaches.
+		this.voice.leave();
 	}
 
 	/**
@@ -3387,6 +3405,24 @@ export class InteractiveMode {
 		};
 	}
 
+	/**
+	 * The voice keys act wherever focus is: the toggle always, mute and
+	 * interruption while the TUI's voice is on (otherwise the key goes on).
+	 */
+	private voiceKeyAction(data: string): { consume: true } | undefined {
+		const act = (action: () => void): { consume: true } => {
+			if (!isKeyRelease(data) && !isKeyRepeat(data)) action();
+			return { consume: true };
+		};
+		if (this.keybindings.matches(data, "app.voice.toggle")) {
+			return act(() => this.runKeyAction(() => this.voice.toggle()));
+		}
+		if (!this.voice.on) return undefined;
+		if (this.keybindings.matches(data, "app.voice.mute")) return act(() => this.voice.toggleMute());
+		if (this.keybindings.matches(data, "app.voice.interrupt")) return act(() => this.voice.interrupt());
+		return undefined;
+	}
+
 	private setupGlobalInputRouting(): void {
 		this.globalInputUnsubscribe?.();
 		this.globalInputUnsubscribe = this.ui.addInputListener((data) => {
@@ -3402,6 +3438,8 @@ export class InteractiveMode {
 			) {
 				return { consume: true };
 			}
+			const voiceKey = this.voiceKeyAction(data);
+			if (voiceKey !== undefined) return voiceKey;
 			if (this.keybindings.matches(data, "app.work.open")) {
 				if (!isKeyRelease(data) && !isKeyRepeat(data)) {
 					if (this.workOverlay?.isFocused()) this.workInspector?.handleInput(data);
@@ -3574,6 +3612,12 @@ export class InteractiveMode {
 				const searchTerm = text.startsWith("/model ") ? text.slice(7).trim() : undefined;
 				this.editor.setText("");
 				await this.handleModelCommand(searchTerm);
+				return;
+			}
+			if (text === "/voice" || text.startsWith("/voice ")) {
+				this.editor.setText("");
+				await this.clientConnected.promise;
+				await this.voice.command(text.slice("/voice".length).trim());
 				return;
 			}
 			if (text === "/fast" || text.startsWith("/fast ")) {

@@ -401,6 +401,17 @@ Settings the background daemon reads; see [Background daemon](daemon.md). The da
 
 How long a conversation no client is attached to stays open once it is idle (30 minutes by default) is a setting of the daemon itself, not of `settings.json`; see [Background daemon](daemon.md#retention-and-background).
 
+### Voice (experimental)
+
+Voice lets you talk to the conversation from the TUI: `/voice` starts and stops it, and what you say is sent as your message as soon as you finish speaking. Microphone audio and the assistant's replies go to the voice provider (OpenAI Live on your Codex subscription, signed in with `/login`), whichever model `/model` uses, and anyone audible to the microphone can prompt the conversation. The footer shows whether voice is listening, muted, or speaking; see [Voice keys](keybindings.md#voice).
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `voice.enabled` | boolean | `false` | Offer voice in conversations. Read by the host |
+| `voice.provider` | string | `"openai-codex"` | The voice provider. Read by the host |
+| `voice.audio` | string | `"auto"` | The TUI's microphone and speaker tool: `"pulse"` (`parec` and `pacat`, which PipeWire also serves), `"sox"`, or `"alsa"` (`arecord` and `aplay`). `"auto"` uses the first installed, in that order on Linux; elsewhere it needs SoX (`brew install sox` on macOS) |
+| `voice.duplex` | string | `"half"` | `"half"` keeps the microphone silent while voice speaks, so it cannot hear itself; interrupt it with a key. `"full"` keeps the microphone open so that speaking interrupts; use it with headphones or the system's echo cancellation |
+
 ### Resources
 
 These settings define where to load extensions, skills, prompts, and themes from.

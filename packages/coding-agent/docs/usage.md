@@ -64,6 +64,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/store` | Search, inspect, install, remove, and update store packages |
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/remote` | Manage the daemon: status, conversation workers, pairing, devices, workspaces, and phone tool policy |
+| `/voice` | Start or stop voice; `/voice mute` and `/voice unmute` mute the microphone (experimental; see [Voice](settings.md#voice-experimental)) |
 | `/changelog` | Display version history |
 | `/quit` | Quit volt |
 

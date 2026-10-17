@@ -41,6 +41,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "hotkeys", description: "Show all keyboard shortcuts" },
 	{ name: "debug", description: "Capture diagnostics without interrupting work" },
 	{ name: "remote", description: "Manage daemon status, phone pairing, and remote access" },
+	{ name: "voice", description: "Talk to the agent: start or stop voice (/voice on|off|mute|unmute)" },
 	{ name: "fork", description: "Create a new fork from a previous user message" },
 	{ name: "clone", description: "Duplicate the current session at the current position" },
 	{ name: "tree", description: "Navigate session tree (switch branches)" },

@@ -29,6 +29,7 @@
  * what was not answered.
  */
 
+import type { Duplex } from "node:stream";
 import type { BuiltinIntentName, HostPromptRequest, HostResponse } from "@hansjm10/volt-protocol";
 import type { RpcTransport } from "../core/protocol/transport/transport.ts";
 import type { WorkspaceRegistration } from "../daemon/control-protocol.ts";
@@ -169,6 +170,12 @@ export interface ConversationConnector {
 	daemonWorkspaceName(): string | undefined;
 	/** A theme the daemon broadcast to its TUIs. */
 	onThemeSnapshot(listener: (themeName: string) => void): () => void;
+	/**
+	 * Attach voice media for the offer `voice_start` answered on conversation
+	 * `sessionId`: a binary stream to the host's voice session, bound to this
+	 * client. A connector without one offers the client no voice.
+	 */
+	openVoiceMedia?(sessionId: string, offerId: string): Promise<Duplex>;
 }
 
 /** A connection the client lost, and the attempt to resume it. */

@@ -1,11 +1,11 @@
 /**
  * The footer's view model from what the TUI's client holds (architecture
  * rewrite §10): the client fold's name, model, thinking level, and Fast mode;
- * the live `usage`, `git`, `prompt_cache`, `presence`, and extension status
- * values; and the `models`, `settings`, and `conversation_info` catalogs.
+ * the live `usage`, `git`, `prompt_cache`, `presence`, `voice`, and extension
+ * status values; and the `models`, `settings`, and `conversation_info` catalogs.
  */
 
-import type { LiveValue, ProjectedEntry, RpcPromptCacheStatus } from "@hansjm10/volt-protocol";
+import type { LiveValue, LiveVoiceValue, ProjectedEntry, RpcPromptCacheStatus } from "@hansjm10/volt-protocol";
 import { renderStyledText } from "@hansjm10/volt-tui";
 import type { FooterModel, FooterUsage, FooterViewModel } from "../components/footer.ts";
 import { TUI_SEMANTIC_THEME } from "../ui-node/semantic-theme.ts";
@@ -18,11 +18,43 @@ export interface FooterLocal {
 	readonly contextWarningTokens: number;
 	/** How the footer shows paired devices attached to the conversation, by their count. */
 	readonly phoneLabel: (count: number) => string;
+	/** The conversation's voice as the footer shows it (see {@link voiceStatusLabel}), if any. */
+	readonly voiceLabel?: string;
+}
+
+/** What the TUI's own voice client knows before the host's `voice` value says it, or that it never says. */
+export interface FooterVoiceLocal {
+	readonly state: "off" | "starting" | "on";
+	readonly muted: boolean;
+	readonly playing: boolean;
+}
+
+/**
+ * The footer's voice status: the TUI's own voice as its client runs it
+ * (starting, muted, speaking, or listening); otherwise the conversation's
+ * `voice` value, which shows when another client holds voice. None when voice
+ * is off.
+ */
+export function voiceStatusLabel(
+	value: LiveVoiceValue | undefined,
+	local: FooterVoiceLocal | undefined,
+	connectionId: string | undefined,
+): string | undefined {
+	if (local !== undefined && local.state !== "off") {
+		if (local.state === "starting") return "voice: starting";
+		if (local.muted) return "voice: muted";
+		return local.playing ? "voice: speaking" : "voice: listening";
+	}
+	if (value === undefined || value.lifecycle === "off") return undefined;
+	if (value.owner !== undefined && value.owner.client !== connectionId) return "voice: another client";
+	return `voice: ${value.lifecycle}`;
 }
 
 const STATUS_KEY = "ext_status/";
 /** The key the phone indicator sorts under among the extensions' status items. */
 const PHONE_STATUS_KEY = "__phone_attached";
+/** The key the voice indicator sorts under, after the phone indicator. */
+const VOICE_STATUS_KEY = "__voice";
 
 function liveValue<K extends LiveValue["kind"]>(
 	store: TuiStore,
@@ -59,7 +91,11 @@ export function gitBranchOf(store: TuiStore): string | null {
 }
 
 /** The status items the footer shows: the extensions', and the paired devices attached. */
-export function footerStatuses(store: TuiStore, phoneLabel: (count: number) => string): Map<string, string> {
+export function footerStatuses(
+	store: TuiStore,
+	phoneLabel: (count: number) => string,
+	voiceLabel?: string,
+): Map<string, string> {
 	const statuses = new Map<string, string>();
 	for (const [key, value] of store.live.values) {
 		if (value.kind !== "ext_status" || !key.startsWith(STATUS_KEY)) continue;
@@ -67,6 +103,7 @@ export function footerStatuses(store: TuiStore, phoneLabel: (count: number) => s
 	}
 	const phones = liveValue(store, "presence", "presence")?.remote ?? 0;
 	if (phones > 0) statuses.set(PHONE_STATUS_KEY, phoneLabel(phones));
+	if (voiceLabel !== undefined) statuses.set(VOICE_STATUS_KEY, voiceLabel);
 	return statuses;
 }
 
@@ -113,6 +150,6 @@ export function footerViewModel(store: TuiStore, catalogs: TuiCatalogs, local: F
 		contextWarningTokens: local.contextWarningTokens,
 		usage: hitRate === undefined ? usage : { ...usage, latestCacheHitRate: hitRate },
 		promptCache,
-		statuses: footerStatuses(store, local.phoneLabel),
+		statuses: footerStatuses(store, local.phoneLabel, local.voiceLabel),
 	};
 }

@@ -1,6 +1,7 @@
 # Daemon-owned voice
 
-Status: milestones 1 to 3 landed, 2026-10-16; milestone 4 open.
+Status: milestones 1 to 3 and the TUI half of milestone 4 landed,
+2026-10-16; app audio (volt-app) open.
 Development-facing; not a supported feature or a wire contract. This replaces
 the extension/browser prototype direction.
 
@@ -488,6 +489,51 @@ observed and bounded, including after a client is lost.
    listening state, echo cancellation, interruption, and reconnect policy.
    Native capture, OS audio-session behavior, Bluetooth, mobile suspension,
    and acoustic echo handling are client work, not daemon responsibilities.
+
+   **TUI landed, 2026-10-16.** No audio dependency: an installed tool in a
+   child process captures and plays raw PCM in the media format
+   (`src/client/voice/audio-tools.ts`): PulseAudio's `parec`/`pacat` (also
+   served by PipeWire), SoX, or ALSA's `arecord`/`aplay`, picked by
+   `voice.audio` (`auto` tries them in that order on Linux; elsewhere it
+   needs SoX). A tool that exits on its own ends voice with what it printed.
+   `VoiceClient` (`src/client/voice/voice-client.ts`) is the client half of
+   the contract: `voice_start`, the media attachment through the connector
+   (`openVoiceMedia`, the daemon's `voice_media_open` with the TUI
+   process's client key), envelopes up and down, and one end per start
+   with its reason: stopped here, a local audio failure (which also stops
+   the host's epoch), the host's `voice` value ending the epoch, the media
+   stream ending, or the TUI leaving the conversation. Nothing restarts
+   it. Mute stops the capture process, so the OS microphone indicator goes
+   off, and the host hears `unmute` with the new capture's first frame, so
+   a microphone that is slow to open (a Bluetooth profile switch) does not
+   read as stalled input. Microphone frames beyond real time plus 100 ms,
+   half the host's allowance, are dropped as stale. Interruption kills the
+   playback tool at once and discards audio of the interrupted playback
+   epoch until the host announces the next one. The tools cancel no echo,
+   so `voice.duplex` defaults to `half`: the client sends silence instead of
+   the microphone while its speaker plays and for 400 ms after, and
+   barge-in is a key (`app.voice.interrupt`, `alt+s`). `full` is for
+   headphones or OS echo cancellation, such as PipeWire's or PulseAudio's
+   `module-echo-cancel` as the default source. The TUI (`voice-control.ts`)
+   adds `/voice [on|off|mute|unmute]`, `app.voice.toggle`/`mute`/`interrupt`,
+   the disclosure on every start, the footer state (listening, muted,
+   speaking, or another client's voice), and the availability reasons.
+
+   Fixtures: `test/daemon-voice-tui.test.ts` runs the TUI's connector,
+   store, and voice against the real daemon and an in-process worker with
+   stand-in audio: both directions, the half-duplex gate, interruption with
+   a stale frame in flight, mute and the deferred unmute, a capture burst,
+   each way voice ends, another client's voice, and the refusals.
+   `test/voice-audio-tools.test.ts` covers tool lookup and the spawned
+   processes with stand-in tools. Checked by hand against a real
+   PulseAudio 16.1 server with a null sink: a 440 Hz tone played through
+   `pacat` came back through `parec` at 435 Hz, capture started in about
+   20 ms and ran at exactly real time (bursts of at most two frames), a
+   flush was silent within one frame, and playback restarted about 40 ms
+   later. Not verified here: SoX and ALSA against devices (their command
+   lines only parse), macOS and Windows, and a real microphone and
+   speaker with the real provider. App audio waits for a `volt-app` issue
+   once this branch merges.
 
 Required fixture scenarios before calling the worker service complete:
 

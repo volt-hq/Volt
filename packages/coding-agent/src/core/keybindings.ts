@@ -37,6 +37,9 @@ export interface AppKeybindings {
 	"app.work.cancel": true;
 	"app.work.resume": true;
 	"app.work.follow": true;
+	"app.voice.toggle": true;
+	"app.voice.mute": true;
+	"app.voice.interrupt": true;
 	"app.tree.foldOrUp": true;
 	"app.tree.unfoldOrDown": true;
 	"app.tree.editLabel": true;
@@ -137,6 +140,9 @@ export const KEYBINDINGS = {
 	"app.work.cancel": { defaultKeys: "ctrl+k", description: "Cancel the selected work (with confirmation)" },
 	"app.work.resume": { defaultKeys: "ctrl+r", description: "Resume the selected suspended work" },
 	"app.work.follow": { defaultKeys: "end", description: "Follow the latest work output" },
+	"app.voice.toggle": { defaultKeys: [], description: "Start or stop voice" },
+	"app.voice.mute": { defaultKeys: "alt+m", description: "Mute or unmute the voice microphone" },
+	"app.voice.interrupt": { defaultKeys: "alt+s", description: "Stop what voice is saying" },
 	"app.tree.foldOrUp": {
 		defaultKeys: ["ctrl+left", "alt+left"],
 		description: "Fold tree branch or move up",

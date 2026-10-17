@@ -42,6 +42,7 @@
 
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import type { Duplex } from "node:stream";
 import type { HostResponse } from "@hansjm10/volt-protocol";
 import {
 	type ConnectorDaemon,
@@ -290,6 +291,28 @@ export class DaemonConnector implements ConversationConnector {
 		return () => {
 			this.themeListeners.delete(listener);
 		};
+	}
+
+	/**
+	 * Voice media through the daemon: `voice_media_open` on the control
+	 * connection with the TUI process's client key, which the worker admits
+	 * only against the offer that key's `voice_start` minted, then the relay.
+	 */
+	async openVoiceMedia(sessionId: string, offerId: string): Promise<Duplex> {
+		const control = this.control;
+		if (this.stopped || control?.connectionState !== "connected") {
+			throw new Error("The TUI is not connected to the Volt daemon");
+		}
+		const response = await control.request({
+			type: "voice_media_open",
+			sessionId,
+			clientKey: this.clientKey,
+			offerId,
+		});
+		if (response.type !== "voice_media_opened") {
+			throw new Error(response.type === "error" ? response.message : `Unexpected answer: ${response.type}`);
+		}
+		return control.openConversationRelay({ relayId: response.relayId, relayToken: response.relayToken });
 	}
 
 	/**

@@ -221,6 +221,17 @@ export interface VoiceSettings {
 	enabled?: boolean;
 	/** The voice provider a session uses. Default: "openai-codex". */
 	provider?: string;
+	/**
+	 * The TUI's microphone and speaker tool: PulseAudio's `parec`/`pacat`, SoX, or
+	 * ALSA's `arecord`/`aplay`. Default: "auto", the first installed.
+	 */
+	audio?: "auto" | "pulse" | "sox" | "alsa";
+	/**
+	 * "half" keeps the TUI's microphone silent while voice speaks, so it never
+	 * hears itself; "full" keeps it open, for headphones or OS echo
+	 * cancellation, so speaking interrupts. Default: "half".
+	 */
+	duplex?: "half" | "full";
 }
 
 /** Deep merge records: overrides take precedence, nested objects merge recursively, arrays replace. */

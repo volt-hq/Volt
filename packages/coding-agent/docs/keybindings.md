@@ -174,6 +174,16 @@ Use `F12` or `/debug` to capture diagnostics while a response or tool is active.
 
 Cancellation uses Enter to confirm and Escape to keep the job running. The job remains **Cancelling** until its worker stops. Navigation and confirmation use the configurable `tui.select.*` actions.
 
+### Voice
+
+[Voice](settings.md#voice-experimental) keys work wherever focus is. Mute and interruption act only while this TUI's voice is on; otherwise the key goes to the editor. Interrupting stops what voice is saying, not the agent's work.
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.voice.toggle` | *(none)* | Start or stop voice (`/voice`) |
+| `app.voice.mute` | `alt+m` | Mute or unmute the microphone (`/voice mute`, `/voice unmute`) |
+| `app.voice.interrupt` | `alt+s` | Stop what voice is saying |
+
 ### Structured Questions
 
 Questions replace the editor while Volt waits for your preferences. Use `tui.select.up`/`down` to highlight an option and `tui.select.confirm` to answer. Typing or pasting starts a custom answer, including the first character. Custom answers and optional notes use the normal multiline editor (`tui.input.submit` to continue, `tui.input.newLine` for a newline).
