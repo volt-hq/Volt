@@ -166,8 +166,6 @@ The `apiKey` and `headers` fields support command execution, environment interpo
   "apiKey": "sk-..."
   ```
 
-Legacy uppercase env-var-like values such as `MY_API_KEY` are migrated to `$MY_API_KEY` on startup.
-
 For `models.json`, shell commands are resolved at request time. volt intentionally does not apply built-in TTL, stale reuse, or recovery logic for arbitrary commands. Different commands need different caching and failure strategies, and volt cannot infer the right one.
 
 If your command is slow, expensive, rate-limited, or should keep using a previous value on transient failures, wrap it in your own script or command that implements the caching or TTL behavior you want.
@@ -252,8 +250,6 @@ Example for a model where thinking cannot be disabled:
   }
 }
 ```
-
-Migration: older configs that used `compat.reasoningEffortMap` should move that mapping to model-level `thinkingLevelMap`. Use `null` for levels that should not appear in the UI.
 
 ## Overriding Built-in Providers
 

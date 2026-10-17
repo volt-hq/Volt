@@ -44,6 +44,8 @@ function healthyProbe(pid = child.pid): ControlSocketProbe {
 			phoneConnections: 0,
 			workspaces: [],
 			clients: [],
+			revokedClients: [],
+			remotePolicy: { allowTools: null, detachedRuntimeTtlMs: 1_800_000 },
 			remoteTransport: { state: "starting" },
 			keepAwake: { enabled: false, state: "disabled" },
 			workers: [],
@@ -178,7 +180,16 @@ describe("#395 detached daemon startup readiness", () => {
 	it("shares a probe budget across the pidfile and default endpoints", async () => {
 		const paths = getDaemonPaths(harness.tempDir);
 		mkdirSync(paths.daemonDir, { recursive: true });
-		writeFileSync(paths.pidfilePath, JSON.stringify({ pid: child.pid, socketPath: "published-endpoint" }));
+		writeFileSync(
+			paths.pidfilePath,
+			JSON.stringify({
+				pid: child.pid,
+				version: "test",
+				startedAtMs: 0,
+				socketPath: "published-endpoint",
+				token: "published-token",
+			}),
+		);
 		vi.mocked(probeControlSocket)
 			.mockImplementationOnce(
 				() => new Promise((resolve) => setTimeout(() => resolve({ kind: "no-listener", cause: "refused" }), 250)),

@@ -628,7 +628,7 @@ Security defaults and limitations:
 - Pairing tickets are short-lived, one-time credentials. `volt remote pair` talks to the running daemon; it does not generate offline tickets from persisted state.
 - Remote workspaces are selected by saved name, not arbitrary client-provided paths.
 - Remote sessions do not bypass project trust. Saved workspace trust is honored; otherwise project resources run untrusted.
-- Daemon files live under `~/.volt/agent/daemon/` (`state.json`, `audit.jsonl`, `voltd.log`, and conversation worker logs in `workers/`); legacy `remote/iroh-host.json` state migrates automatically with pairings intact.
+- Daemon files live under `~/.volt/agent/daemon/` (`state.json`, `audit.jsonl`, `voltd.log`, and conversation worker logs in `workers/`).
 - Phone transport requires a Node.js npm package install or source checkout with the exact required `@hansjm10/volt-iroh` wrapper and its optional selected platform binding. `--omit=optional` installs cannot provide phone transport; Darwin x64 has no binding. `volt daemon status --json` reports `remoteTransport` (`starting`, `ready`, `degraded`, or `unavailable`) plus managed `relayCredential` access, and exits nonzero unless transport is ready and relay access is not expired, suspended, or pending reset, or the build has no phone transport (`native_binding_missing`); `volt remote status` exits nonzero even then. Standalone Node SEA builds intentionally do not bundle Iroh: their daemon runs for local clients and workers, with phone transport unavailable.
 
 See [Background daemon](docs/daemon.md), [Iroh remote protocol v1](docs/iroh-remote-protocol.md), and [Security](docs/security.md#remote-access-over-iroh-preview).

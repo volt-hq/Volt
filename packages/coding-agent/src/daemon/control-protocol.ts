@@ -84,9 +84,6 @@ export const PROTOCOL_VERSION = 8;
 /** Hard cap per JSONL line; longer lines close the connection with a fatal frame. */
 export const CONTROL_MAX_LINE_BYTES = 8 * 1024 * 1024;
 
-/** Status capability for cancellable, immediately-invalidated pairing tickets. */
-export const CONTROL_PAIR_CANCEL_CAPABILITY = "pair_cancel";
-
 /** Single mapping from a persisted client record to its control-socket status. */
 export function createControlClientStatus(client: IrohRemoteClient): ControlClientStatus {
 	return {

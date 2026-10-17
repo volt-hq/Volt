@@ -429,8 +429,6 @@ function scopedModels(models: readonly RpcCatalogModel[], cycleScope: readonly S
  * Options for InteractiveMode initialization.
  */
 export interface InteractiveModeOptions {
-	/** Providers that were migrated to auth.json (shows warning) */
-	migratedProviders?: string[];
 	/**
 	 * Where the TUI reads its own settings until its client says where the
 	 * conversation runs and how its host decided its project trust
@@ -1363,12 +1361,7 @@ export class InteractiveMode {
 			}
 		});
 
-		// Show startup warnings
-		const { migratedProviders, initialMessage, initialImages, initialMessages } = this.options;
-
-		if (migratedProviders && migratedProviders.length > 0) {
-			this.showWarning(`Migrated credentials to auth.json: ${migratedProviders.join(", ")}`);
-		}
+		const { initialMessage, initialImages, initialMessages } = this.options;
 
 		this.showResourceNotices();
 

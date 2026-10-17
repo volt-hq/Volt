@@ -242,16 +242,22 @@ export async function daemonStop(agentDir: string): Promise<boolean> {
 		console.error("voltd is already draining; waiting for exit");
 	}
 
-	const target: PidfileContents | undefined =
-		probe.healthy && probe.pid !== undefined && probe.startedAtMs !== undefined
-			? {
-					pid: probe.pid,
-					version: probe.version ?? VERSION,
-					startedAtMs: probe.startedAtMs,
-					socketPath: probe.socketPath,
-					...(probe.authToken === undefined ? {} : { token: probe.authToken }),
-				}
-			: pidfile;
+	let target: PidfileContents | undefined = pidfile;
+	let targetPid = pidfile?.pid;
+	if (probe.healthy && probe.pid !== undefined && probe.startedAtMs !== undefined) {
+		targetPid = probe.pid;
+		// A daemon that answered without proving a token has no verifiable generation to signal.
+		target =
+			probe.authToken === undefined
+				? undefined
+				: {
+						pid: probe.pid,
+						version: probe.version ?? VERSION,
+						startedAtMs: probe.startedAtMs,
+						socketPath: probe.socketPath,
+						token: probe.authToken,
+					};
+	}
 	const result = await escalateDaemonExit({
 		gracefulShutdownRequested: probe.healthy || probe.state === "shutting-down",
 		gracefulTimeoutMs: STOP_TIMEOUT_MS,
@@ -259,7 +265,7 @@ export async function daemonStop(agentDir: string): Promise<boolean> {
 		waitForExit: (timeoutMs) =>
 			waitForDaemonExit({
 				agentDir,
-				pid: target?.pid,
+				pid: targetPid,
 				pidfile: target,
 				socketPath: probe.socketPath,
 				timeoutMs,
@@ -290,11 +296,7 @@ export async function daemonStop(agentDir: string): Promise<boolean> {
 	return false;
 }
 
-function formatKeepAwake(keepAwake: ControlKeepAwakeStatus | undefined): string {
-	// Older daemons predate the field; report that instead of guessing "off".
-	if (!keepAwake) {
-		return "unknown (daemon predates keep-awake)";
-	}
+function formatKeepAwake(keepAwake: ControlKeepAwakeStatus): string {
 	if (!keepAwake.enabled) {
 		return "off";
 	}
@@ -478,16 +480,16 @@ async function daemonRegenerateState(agentDir: string): Promise<void> {
 		return;
 	}
 	console.error(invalidState.error);
-	console.error("Regeneration preserves validated identity/settings when safe and drops invalid access records.");
-	console.error("If the identity cannot be preserved, all phones will need to pair again.");
+	console.error(
+		"Regeneration starts empty daemon state with a new Iroh identity; all phones will need to pair again.",
+	);
 	if (!(await promptConfirm("Back up the invalid file and regenerate daemon state?"))) {
 		console.error("Daemon state was not changed.");
 		process.exitCode = 1;
 		return;
 	}
-	const { backupPath, preservedIdentity } = await regenerateInvalidVoltdState(agentDir);
+	const { backupPath } = await regenerateInvalidVoltdState(agentDir);
 	console.error(`Backed up invalid daemon state to ${backupPath}`);
-	console.error(preservedIdentity ? "Preserved the Iroh identity." : "A new Iroh identity will be created.");
 	console.error("Run `volt daemon start` to create fresh state.");
 }
 

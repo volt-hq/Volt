@@ -26,7 +26,7 @@
 
 import { join } from "node:path";
 import { buildSessionOptions } from "../../cli/agent-options.ts";
-import { ENV_AGENT_DIR, getAgentDir } from "../../config.ts";
+import { getAgentDir } from "../../config.ts";
 import {
 	type AgentSessionDiagnostic,
 	createAgentSessionFromServices,
@@ -41,11 +41,7 @@ import type { ConversationFactory, HostedConversation } from "../../core/host/ho
 import { LspServerPool } from "../../core/lsp/server-pool.ts";
 import { resolveModelScope } from "../../core/model-resolver.ts";
 import { decideProjectTrust, projectTrustPath, resolveConversationProjectTrust } from "../../core/project-trust.ts";
-import {
-	type IrohRemoteRuntimeToolPolicy,
-	parseIrohRemoteAllowTools,
-	usesDefaultIrohRemoteAllowTools,
-} from "../../core/remote/iroh/index.ts";
+import { type IrohRemoteRuntimeToolPolicy, parseIrohRemoteAllowTools } from "../../core/remote/iroh/index.ts";
 import { getDefaultSessionDir, type SessionManager, type SessionReference } from "../../core/session-manager.ts";
 import {
 	SubagentManager,
@@ -53,7 +49,6 @@ import {
 	type SubagentRuntimeRegistration,
 } from "../../core/subagents/index.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
-import { runMigrations } from "../../migrations.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import type { WorkerAgentConfig, WorkerSessionOptions } from "../control-protocol.ts";
 import {
@@ -83,9 +78,7 @@ export interface WorkerTrustOptions {
 }
 
 export interface IrohRemoteAgentRuntimeOptions {
-	/** Legacy unresolved grant used by direct callers. Daemon runtimes pass toolPolicy instead. */
-	allowTools?: string;
-	/** Pre-composed client/workspace/daemon policy. Preserves an explicit deny-all. */
+	/** Pre-composed client/workspace/daemon policy. Preserves an explicit deny-all. Defaults to the default remote grant. */
 	toolPolicy?: IrohRemoteRuntimeToolPolicy;
 	agentDir?: string;
 	conversationTarget?: IrohRemoteAgentRuntimeConversationTarget;
@@ -189,13 +182,9 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 			try {
 				const agentDir = resolvePath(options.agentDir ?? getAgentDir());
 				const projectCwd = resolvePath(options.projectCwd ?? options.cwd);
-				runIrohRemoteStartupMigrations(projectCwd, agentDir);
 				const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
-				const tools = options.toolPolicy
-					? [...options.toolPolicy.tools]
-					: parseIrohRemoteAllowTools(options.allowTools);
-				const allowUnlistedExtensionTools =
-					options.toolPolicy?.allowUnlistedExtensionTools ?? usesDefaultIrohRemoteAllowTools(options.allowTools);
+				const tools = options.toolPolicy ? [...options.toolPolicy.tools] : parseIrohRemoteAllowTools(undefined);
+				const allowUnlistedExtensionTools = options.toolPolicy?.allowUnlistedExtensionTools ?? true;
 				return {
 					agentDir,
 					projectCwd,
@@ -621,21 +610,4 @@ function getConversationTarget(options: IrohRemoteAgentRuntimeOptions): IrohRemo
 		return { target: "last", resumeSessionId: options.resumeSessionId };
 	}
 	return { target: "new" };
-}
-
-function runIrohRemoteStartupMigrations(cwd: string, agentDir: string): void {
-	const previousAgentDir = process.env[ENV_AGENT_DIR];
-	const previousLog = console.log;
-	try {
-		process.env[ENV_AGENT_DIR] = agentDir;
-		console.log = (...data: Parameters<typeof console.log>) => console.error(...data);
-		runMigrations(cwd);
-	} finally {
-		console.log = previousLog;
-		if (previousAgentDir === undefined) {
-			delete process.env[ENV_AGENT_DIR];
-		} else {
-			process.env[ENV_AGENT_DIR] = previousAgentDir;
-		}
-	}
 }

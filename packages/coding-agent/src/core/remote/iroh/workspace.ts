@@ -96,9 +96,6 @@ export function upsertIrohRemoteWorkspace(
 
 	const nextAllowedTools = savedWorkspace.allowedTools ?? existing.allowedTools;
 	if (existing.path === savedWorkspace.path && existing.allowedTools === nextAllowedTools) {
-		if (!(state.workspaceGenerations ?? []).some((record) => record.workspaceName === workspace.name)) {
-			allocateIrohRemoteWorkspaceGeneration(state, workspace.name);
-		}
 		return existing;
 	}
 	allocateIrohRemoteWorkspaceGeneration(state, workspace.name);

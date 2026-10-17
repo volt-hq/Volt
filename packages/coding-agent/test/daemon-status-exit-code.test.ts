@@ -58,6 +58,8 @@ vi.mock("../src/daemon/control-client.ts", () => ({
 				phoneConnections: 0,
 				workspaces: [],
 				clients: [],
+				revokedClients: [],
+				remotePolicy: { allowTools: null, detachedRuntimeTtlMs: 1_800_000 },
 				remoteTransport: mockDaemon.remoteTransport,
 				...(mockDaemon.relayCredential === undefined ? {} : { relayCredential: mockDaemon.relayCredential }),
 				keepAwake: { enabled: false, state: "disabled" },

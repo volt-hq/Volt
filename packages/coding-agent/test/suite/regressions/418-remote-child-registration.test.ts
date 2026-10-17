@@ -54,6 +54,8 @@ describe("#418 explicit current-directory registration", () => {
 			remoteTransport: { state: "ready" },
 			workspaces: [structuredClone(parent)],
 			clients: [],
+			revokedClients: [],
+			remotePolicy: { allowTools: null, detachedRuntimeTtlMs: 1_800_000 },
 			keepAwake: { enabled: false, state: "disabled" },
 			workers: structuredClone(initialWorkers),
 		};

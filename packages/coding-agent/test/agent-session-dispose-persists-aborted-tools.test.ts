@@ -11,12 +11,11 @@
  */
 
 import type { AgentTool } from "@hansjm10/volt-agent-core";
-import { fauxToolCall } from "@hansjm10/volt-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { type Static, Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "../src/core/session-manager.ts";
-import { createHarness as createSeededHarness } from "./suite/harness.ts";
-import { createHarness, createHarnessWithExtensions } from "./test-harness.ts";
+import { createHarness, type Harness } from "./suite/harness.ts";
 import { appendsEntryType, injectFaultyLog } from "./utilities/faulty-log.ts";
 
 const hangToolSchema = Type.Object({});
@@ -44,17 +43,16 @@ function createHangingTool(onStarted: () => void, name = "hang"): AgentTool<type
 describe("AgentSession dispose with in-flight tool calls", () => {
 	it("persists an aborted toolResult for a dangling toolCall on dispose", async () => {
 		let toolStarted = false;
-		// The trailing "ok" is a terminal response for any post-abort provider
-		// call: the faux stream fn ignores abort signals and wraps around its
-		// response list, so an all-toolCall list would loop forever.
 		const harness = await createHarness({
-			responses: [{ toolCalls: [{ id: "tc-hang-1", name: "hang", args: {} }] }, "ok"],
-			baseToolsOverride: {
-				hang: createHangingTool(() => {
+			tools: [
+				createHangingTool(() => {
 					toolStarted = true;
 				}),
-			},
+			],
 		});
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("hang", {}, { id: "tc-hang-1" })], { stopReason: "toolUse" }),
+		]);
 		try {
 			const promptPromise = harness.session.prompt("run the hanging tool").catch(() => {});
 
@@ -94,29 +92,29 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 	it("attaches child sessions from the call's subagent work to a dangling subagent call", async () => {
 		let toolStarted = false;
 		const harness = await createHarness({
-			responses: [
-				{
-					toolCalls: [
-						{
-							id: "tc-subagent-1",
-							name: "subagent",
-							args: {
-								tasks: [
-									{ agent: "researcher", task: "audit one" },
-									{ agent: "researcher", task: "audit two" },
-								],
-							},
-						},
-					],
-				},
-				"ok",
-			],
-			baseToolsOverride: {
-				subagent: createHangingTool(() => {
+			tools: [
+				createHangingTool(() => {
 					toolStarted = true;
 				}, "subagent"),
-			},
+			],
 		});
+		harness.setResponses([
+			fauxAssistantMessage(
+				[
+					fauxToolCall(
+						"subagent",
+						{
+							tasks: [
+								{ agent: "researcher", task: "audit one" },
+								{ agent: "researcher", task: "audit two" },
+							],
+						},
+						{ id: "tc-subagent-1" },
+					),
+				],
+				{ stopReason: "toolUse" },
+			),
+		]);
 		try {
 			const promptPromise = harness.session.prompt("delegate the audits").catch(() => {});
 			await vi.waitFor(() => {
@@ -191,7 +189,8 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 	});
 
 	it("does not append tool results when disposing an idle session", async () => {
-		const harness = await createHarness({ responses: ["ok"] });
+		const harness = await createHarness();
+		harness.setResponses([fauxAssistantMessage("ok")]);
 		try {
 			await harness.session.prompt("hello");
 			const before = harness.sessionManager.getConversationState().context.messages.length;
@@ -216,18 +215,17 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 			execute: async () => ({ content: [{ type: "text", text: "done" }] }),
 		};
 		const harness = await createHarness({
-			responses: [
-				{ toolCalls: [{ id: "tc-quick-1", name: "quick", args: {} }] },
-				{ toolCalls: [{ id: "tc-hang-2", name: "hang", args: {} }] },
-				"ok",
-			],
-			baseToolsOverride: {
-				quick: quickTool,
-				hang: createHangingTool(() => {
+			tools: [
+				quickTool,
+				createHangingTool(() => {
 					hangStarted = true;
 				}),
-			},
+			],
 		});
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("quick", {}, { id: "tc-quick-1" })], { stopReason: "toolUse" }),
+			fauxAssistantMessage([fauxToolCall("hang", {}, { id: "tc-hang-2" })], { stopReason: "toolUse" }),
+		]);
 		try {
 			const promptPromise = harness.session.prompt("run tools").catch(() => {});
 			await vi.waitFor(() => {
@@ -259,8 +257,7 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 		const assistantGate = new Promise<void>((resolve) => {
 			releaseAssistant = resolve;
 		});
-		const harness = await createHarnessWithExtensions({
-			responses: ["late assistant"],
+		const harness = await createHarness({
 			extensionFactories: [
 				(volt) => {
 					volt.on("message_end", async (event) => {
@@ -271,6 +268,7 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 				},
 			],
 		});
+		harness.setResponses([fauxAssistantMessage("late assistant")]);
 		try {
 			const prompt = harness.session.prompt("start").catch(() => {});
 			await assistantEntered;
@@ -299,7 +297,7 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 	});
 
 	it("allows an active extension callback to await disposal without self-joining the Harness run", async () => {
-		let harness!: Awaited<ReturnType<typeof createHarnessWithExtensions>>;
+		let harness!: Harness;
 		let markAssistantEntered!: () => void;
 		let markCallbackCompleted!: () => void;
 		const assistantEntered = new Promise<void>((resolve) => {
@@ -308,8 +306,7 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 		const callbackCompleted = new Promise<void>((resolve) => {
 			markCallbackCompleted = resolve;
 		});
-		harness = await createHarnessWithExtensions({
-			responses: ["late assistant"],
+		harness = await createHarness({
 			extensionFactories: [
 				(volt) => {
 					volt.on("message_end", async (event) => {
@@ -321,6 +318,7 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 				},
 			],
 		});
+		harness.setResponses([fauxAssistantMessage("late assistant")]);
 		try {
 			const prompt = harness.session.prompt("start").catch(() => {});
 			await assistantEntered;
@@ -343,7 +341,8 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 	it("prevents client-input WAL transitions after the final disposal watermark", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const log = injectFaultyLog(sessionManager);
-		const harness = await createHarness({ responses: ["ok"], sessionManager });
+		const harness = await createHarness({ sessionManager });
+		harness.setResponses([fauxAssistantMessage("ok")]);
 		const receipt = log.holdNext(appendsEntryType("client_input_receipt"));
 		try {
 			const prompt = harness.session.prompt("admission race", { clientMessageId: "dispose-admission-race" });
@@ -367,7 +366,7 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 	});
 
 	it("does not resolve disposal until the persistence watermark drains", async () => {
-		const harness = await createHarness({ responses: ["ok"] });
+		const harness = await createHarness();
 		let releaseFlush!: () => void;
 		const flushGate = new Promise<void>((resolve) => {
 			releaseFlush = resolve;
@@ -404,7 +403,7 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 		const rejected = fauxToolCall("write", { path: "rejected.ts" });
 		const interrupted = fauxToolCall("read", { path: "interrupted.ts" });
 		const dangling = fauxToolCall("read", { path: "dangling.ts" });
-		const harness = await createSeededHarness({
+		const harness = await createHarness({
 			seed: (seed) =>
 				seed
 					.user("Update the files", { timestamp: 1 })

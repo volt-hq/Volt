@@ -10,7 +10,7 @@ import {
 } from "@hansjm10/volt-tui";
 import png from "@jimp/js-png";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { IrohRemoteAccessPresetName } from "../src/core/remote/iroh/access-grant.ts";
+import { createIrohRemotePresetAccess, type IrohRemoteAccessPresetName } from "../src/core/remote/iroh/access-grant.ts";
 import { DEFAULT_IROH_REMOTE_ALLOW_TOOLS, IROH_REMOTE_ALPN } from "../src/core/remote/iroh/protocol.ts";
 import {
 	createIrohRemoteTicketQrCode,
@@ -20,12 +20,7 @@ import {
 import { encodeIrohRemoteTicketPayload } from "../src/core/remote/iroh/ticket.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { initTheme, theme } from "../src/core/theme/runtime.ts";
-import {
-	CONTROL_PAIR_CANCEL_CAPABILITY,
-	type ControlEvent,
-	type ControlRelayCredentialStatus,
-	type ControlResponse,
-} from "../src/daemon/control-protocol.ts";
+import type { ControlEvent, ControlRelayCredentialStatus, ControlResponse } from "../src/daemon/control-protocol.ts";
 import {
 	type RemoteControlBackend,
 	RemoteControlCenterComponent,
@@ -39,6 +34,7 @@ type RemoteStatus = Extract<ControlResponse, { type: "status_result" }>;
 type PairingProgress = Extract<ControlEvent, { type: "pairing_progress" }>;
 
 const PAIRING_HOST_NODE_ID = Array.from({ length: 32 }, (_, index) => index.toString(16).padStart(2, "0")).join("");
+const RPC_GRANT = createIrohRemotePresetAccess("coding").rpcGrant;
 
 function verificationTicket(): string {
 	return encodeIrohRemoteTicketPayload({
@@ -77,7 +73,6 @@ function status(overrides: Partial<RemoteStatus> = {}): RemoteStatus {
 		pid: 42,
 		startedAtMs: Date.now() - 5 * 60 * 1000,
 		environment: { source: "inherited", reason: "not resolved" },
-		capabilities: [CONTROL_PAIR_CANCEL_CAPABILITY],
 		phoneConnections: 1,
 		workers: [
 			{
@@ -99,6 +94,8 @@ function status(overrides: Partial<RemoteStatus> = {}): RemoteStatus {
 				pairedAtMs: Date.now() - 60_000,
 				lastSeenAtMs: Date.now() - 5_000,
 				allowedTools: ["read", "bash"],
+				usesDefaultTools: false,
+				rpcGrant: RPC_GRANT,
 			},
 		],
 		revokedClients: [],
@@ -148,9 +145,9 @@ class FakeBackend implements RemoteControlBackend {
 		this.startCalls++;
 	}
 
-	async regenerateState(): Promise<{ backupPath: string; preservedIdentity: boolean }> {
+	async regenerateState(): Promise<{ backupPath: string }> {
 		this.regenerateCalls++;
-		return { backupPath: "/tmp/state.json.invalid-1", preservedIdentity: true };
+		return { backupPath: "/tmp/state.json.invalid-1" };
 	}
 
 	async findRecoveryBackup(): Promise<{ path: string; preservedIdentity: boolean } | undefined> {
@@ -231,7 +228,7 @@ class FakeBackend implements RemoteControlBackend {
 				kind: "online",
 				status: {
 					...this.snapshot.status,
-					revokedClients: this.snapshot.status.revokedClients?.map((client) =>
+					revokedClients: this.snapshot.status.revokedClients.map((client) =>
 						client.clientNodeId === clientNodeId ? { ...client, rePairApprovedAtMs: Date.now() } : client,
 					),
 				},
@@ -250,7 +247,7 @@ class EndpointUnavailableBackend extends FakeBackend {
 	}
 
 	override async findRecoveryBackup(): Promise<{ path: string; preservedIdentity: boolean }> {
-		return { path: "/tmp/state.json.corrupt-1", preservedIdentity: true };
+		return { path: "/tmp/state.json.invalid-1", preservedIdentity: true };
 	}
 
 	override async recoverStateBackup(path: string): Promise<{ preservedIdentity: boolean }> {
@@ -767,6 +764,7 @@ describe("RemoteControlCenterComponent", () => {
 						lastSeenAtMs: Date.now() - 5_000,
 						allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS.split(","),
 						usesDefaultTools: true,
+						rpcGrant: RPC_GRANT,
 					},
 					{
 						clientNodeId: "denyall-node-1234567890",
@@ -774,6 +772,8 @@ describe("RemoteControlCenterComponent", () => {
 						pairedAtMs: Date.now() - 60_000,
 						lastSeenAtMs: Date.now() - 5_000,
 						allowedTools: [],
+						usesDefaultTools: false,
+						rpcGrant: RPC_GRANT,
 					},
 				],
 			}),
@@ -784,28 +784,6 @@ describe("RemoteControlCenterComponent", () => {
 
 		expect(text).toContain(`Tools: ${DEFAULT_IROH_REMOTE_ALLOW_TOOLS.split(",").join(", ")} (default)`);
 		expect(text).toContain("Tools: none");
-	});
-
-	it("renders compatibility defaults for an older protocol-v1 daemon", async () => {
-		const legacyStatus = status({
-			capabilities: undefined,
-			revokedClients: undefined,
-			remotePolicy: undefined,
-			clients: [
-				{
-					clientNodeId: "legacy-phone-node",
-					label: "Legacy phone",
-					pairedAtMs: Date.now() - 5_000,
-				},
-			],
-		});
-		const backend = new FakeBackend({ kind: "online", status: legacyStatus });
-		const { component } = createComponent(backend, 45);
-		await component.start();
-		const text = component.render(100).lines.map(stripAnsi).join("\n");
-		expect(text).toContain("Detached runtime retention: not reported");
-		expect(text).toContain("Tools: not reported");
-		expect(text).toContain("Restart voltd to pair with explicit access grants");
 	});
 
 	it("is height- and width-safe across the visual validation matrix", async () => {
@@ -831,6 +809,8 @@ describe("RemoteControlCenterComponent", () => {
 			pairedAtMs: Date.now(),
 			lastSeenAtMs: Date.now(),
 			allowedTools: ["read"],
+			usesDefaultTools: false,
+			rpcGrant: RPC_GRANT,
 		}));
 		const backend = new FakeBackend({ kind: "online", status: status({ clients }) });
 		const { component } = createComponent(backend, 24);
@@ -870,7 +850,7 @@ describe("RemoteControlCenterComponent", () => {
 		await component.start();
 		let text = component.render(100).lines.map(stripAnsi).join("\n");
 		expect(text).toContain("Regenerate daemon state…");
-		expect(text).toContain("preserves validated settings/identity when possible");
+		expect(text).toContain("backs up the invalid file and starts empty state");
 
 		component.handleInput("\n");
 		expect(backend.regenerateCalls).toBe(0);
@@ -885,7 +865,7 @@ describe("RemoteControlCenterComponent", () => {
 		expect(backend.startCalls).toBe(1);
 		text = component.render(100).lines.map(stripAnsi).join("\n");
 		expect(text).toContain(
-			"Daemon state regenerated; backup saved to /tmp/state.json.invalid-1 · Iroh identity preserved",
+			"Daemon state regenerated; backup saved to /tmp/state.json.invalid-1 · new Iroh identity created",
 		);
 	});
 
@@ -1088,11 +1068,11 @@ describe("RemoteControlCenterComponent", () => {
 		expect(backend.recoverCalls).toEqual([]);
 		text = component.render(100).lines.map(stripAnsi).join("\n");
 		expect(text).toContain("Confirm recover and restart");
-		expect(text).toContain("Legacy access records are dropped");
+		expect(text).toContain("The backup's identity, paired devices, workspaces, and settings will be restored.");
 
 		component.handleInput("\n");
 		await settle();
-		expect(backend.recoverCalls).toEqual(["/tmp/state.json.corrupt-1"]);
+		expect(backend.recoverCalls).toEqual(["/tmp/state.json.invalid-1"]);
 		text = component.render(100).lines.map(stripAnsi).join("\n");
 		expect(text).toContain("Recovered daemon state and preserved the Iroh identity");
 	});
@@ -1430,6 +1410,7 @@ describe("RemoteControlCenterComponent", () => {
 						pairedAtMs: Date.now() - 60_000,
 						lastSeenAtMs: Date.now() - 30_000,
 						revokedAtMs: Date.now() - 5_000,
+						rpcGrant: RPC_GRANT,
 					},
 				],
 			}),
@@ -1462,6 +1443,8 @@ describe("RemoteControlCenterComponent", () => {
 					pairedAtMs: Date.now(),
 					lastSeenAtMs: Date.now(),
 					allowedTools: ["read"],
+					usesDefaultTools: false,
+					rpcGrant: RPC_GRANT,
 				},
 			],
 		});

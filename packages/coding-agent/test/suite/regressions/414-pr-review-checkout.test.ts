@@ -964,7 +964,7 @@ describe("#414 prepared PR checkouts", () => {
 			store: {
 				read: () => initial,
 				write: (snapshot) => {
-					if ((snapshot.worktrees?.length ?? 0) > 0) throw new Error("disk unavailable");
+					if (snapshot.worktrees.length > 0) throw new Error("disk unavailable");
 				},
 			},
 		});

@@ -22,6 +22,7 @@ import {
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
 import { admitControlRequest } from "../src/daemon/control-protocol.ts";
 import { createHostHarness, type HostHarness } from "./suite/host-harness.ts";
+import { createIrohRemoteHostStateFixture } from "./utilities/iroh-host-state.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
 import {
 	connectRemotePhone,
@@ -84,7 +85,7 @@ describe("Iroh remote RPC grants", () => {
 	});
 
 	it("requires grants on every persisted active, revoked, and pending record", () => {
-		const base = { workspaces: [], worktrees: [], pendingPairingTickets: [], clients: [], revokedClients: [] };
+		const base = createIrohRemoteHostStateFixture();
 		expect(() =>
 			parseIrohRemoteHostState({
 				...base,
@@ -137,10 +138,10 @@ describe("Iroh remote RPC grants", () => {
 			allowTools: chat.allowedTools,
 			rpcGrant: chat.rpcGrant,
 		});
-		const tickets = (await manager.getState()).pendingPairingTickets ?? [];
+		const tickets = (await manager.getState()).pendingPairingTickets;
 		expect(tickets).toHaveLength(2);
 		expect(tickets.map((ticket) => ticket.allowedTools)).toEqual(["read,grep,find,ls", ""]);
-		expect(tickets.map((ticket) => ticket.rpcGrant?.capabilities)).toEqual([
+		expect(tickets.map((ticket) => ticket.rpcGrant.capabilities)).toEqual([
 			review.rpcGrant.capabilities,
 			chat.rpcGrant.capabilities,
 		]);
@@ -151,20 +152,22 @@ describe("Iroh remote RPC grants", () => {
 		temporaryDirectories.push(path);
 		const statePath = join(path, "state.json");
 		const coding = createIrohRemotePresetAccess("coding");
-		await writeIrohRemoteHostState(statePath, {
-			workspaces: [],
-			clients: [
-				{
-					nodeId: "n",
-					label: "phone",
-					allowedWorkspaces: [],
-					allowedTools: coding.allowedTools,
-					rpcGrant: coding.rpcGrant,
-					pairedAt: 1,
-					lastSeenAt: 1,
-				},
-			],
-		});
+		await writeIrohRemoteHostState(
+			statePath,
+			createIrohRemoteHostStateFixture({
+				clients: [
+					{
+						nodeId: "n",
+						label: "phone",
+						allowedWorkspaces: [],
+						allowedTools: coding.allowedTools,
+						rpcGrant: coding.rpcGrant,
+						pairedAt: 1,
+						lastSeenAt: 1,
+					},
+				],
+			}),
+		);
 		const manager = new IrohRemoteHostStateManager({ statePath });
 		const engine = new IrohRemoteHostEngine({
 			stateManager: manager,
@@ -191,8 +194,7 @@ describe("Iroh remote RPC grants", () => {
 	it("fails safely before incrementing an exhausted revision", async () => {
 		const full = createIrohRemotePresetAccess("full", Number.MAX_SAFE_INTEGER);
 		const manager = new IrohRemoteHostStateManager({
-			initialState: {
-				workspaces: [],
+			initialState: createIrohRemoteHostStateFixture({
 				clients: [
 					{
 						nodeId: "n",
@@ -204,7 +206,7 @@ describe("Iroh remote RPC grants", () => {
 						lastSeenAt: 1,
 					},
 				],
-			},
+			}),
 		});
 
 		await expect(

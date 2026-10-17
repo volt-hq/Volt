@@ -80,7 +80,8 @@ function daemonProbeFromSocketProbe(
 
 /**
  * Probe the pidfile-published daemon endpoint first, then fall back to the
- * legacy default socket path for older daemons and pre-start diagnostics.
+ * default socket path, which a daemon binds before it publishes its pidfile
+ * (except on Windows, where each daemon picks a fresh pipe).
  */
 export async function probeDaemon(agentDir: string = getAgentDir(), timeoutMs?: number): Promise<DaemonProbeResult> {
 	const startedAtMs = Date.now();
@@ -90,7 +91,7 @@ export async function probeDaemon(agentDir: string = getAgentDir(), timeoutMs?: 
 		const pidfileProbe = await probeControlSocket(pidfile.socketPath, {
 			version: VERSION,
 			timeoutMs,
-			...(pidfile.token === undefined ? {} : { authToken: pidfile.token }),
+			authToken: pidfile.token,
 		});
 		const pidfileResult = daemonProbeFromSocketProbe(pidfile.socketPath, pidfileProbe, pidfile.token);
 		if (pidfileResult.state !== "not-running") {
@@ -246,23 +247,6 @@ export async function startInstalledDaemon(
 	}
 }
 
-export interface PublishedDaemonEndpoint {
-	socketPath: string;
-	authToken?: string;
-}
-
-/** Read the latest complete pidfile endpoint without probing or auto-starting. */
-export function readPublishedDaemonEndpoint(agentDir: string = getAgentDir()): PublishedDaemonEndpoint | undefined {
-	const pidfile = readPidfile(getDaemonPaths(agentDir).pidfilePath);
-	if (!pidfile) {
-		return undefined;
-	}
-	return {
-		socketPath: pidfile.socketPath,
-		...(pidfile.token === undefined ? {} : { authToken: pidfile.token }),
-	};
-}
-
 export interface WaitForDaemonExitOptions {
 	agentDir?: string;
 	pid?: number;
@@ -279,9 +263,6 @@ export function classifyPublishedDaemonGeneration(
 	current: PidfileContents | undefined,
 ): PublishedDaemonGenerationState {
 	if (!current) {
-		return "unverifiable";
-	}
-	if (!target.token || !current.token) {
 		return "unverifiable";
 	}
 	if (target.token !== current.token) {
@@ -322,7 +303,7 @@ export async function waitForDaemonExit(options: WaitForDaemonExitOptions = {}):
 		const socketProbe = await probeControlSocket(socketPath, {
 			version: VERSION,
 			timeoutMs: 500,
-			...(options.pidfile?.token === undefined ? {} : { authToken: options.pidfile.token }),
+			...(options.pidfile === undefined ? {} : { authToken: options.pidfile.token }),
 		});
 		if (processIsGone(targetPid) && socketProbe.kind === "no-listener") {
 			return "exited";

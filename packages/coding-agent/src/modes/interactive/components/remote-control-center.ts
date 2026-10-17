@@ -35,7 +35,6 @@ import { theme } from "../../../core/theme/runtime.ts";
 import { formatDuration } from "../../../core/tools/render-utils.ts";
 import { createDaemonClient, type DaemonClient } from "../../../daemon/control-client.ts";
 import {
-	CONTROL_PAIR_CANCEL_CAPABILITY,
 	type ControlEvent,
 	type ControlRelayCredentialStatus,
 	type ControlResponse,
@@ -44,7 +43,6 @@ import {
 } from "../../../daemon/control-protocol.ts";
 import type { DaemonProbeState } from "../../../daemon/spawn.ts";
 import {
-	DEFAULT_DETACHED_RUNTIME_TTL_MS,
 	findRecoverableVoltdStateBackup,
 	inspectVoltdStateFiles,
 	recoverVoltdStateFromBackup,
@@ -105,7 +103,7 @@ export interface RemotePairingHandle {
 export interface RemoteControlBackend {
 	load(): Promise<RemoteControlSnapshot>;
 	startDaemon(): Promise<void>;
-	regenerateState(): Promise<{ backupPath: string; preservedIdentity: boolean }>;
+	regenerateState(): Promise<{ backupPath: string }>;
 	findRecoveryBackup(): Promise<{ path: string; preservedIdentity: boolean } | undefined>;
 	recoverStateBackup(path: string): Promise<{ preservedIdentity: boolean }>;
 	registerCurrentWorkspace(path: string): Promise<{ name: string; path: string }>;
@@ -458,8 +456,7 @@ function supportsSafePairing(status: RemoteStatus): boolean {
 		status.relayCredential?.state !== "subscription_inactive" &&
 		status.relayCredential?.state !== "revocation_pending" &&
 		status.relayCredential?.state !== "pairing" &&
-		isRemoteTransportPairingAvailable(status.remoteTransport) &&
-		status.capabilities?.includes(CONTROL_PAIR_CANCEL_CAPABILITY) === true
+		isRemoteTransportPairingAvailable(status.remoteTransport)
 	);
 }
 
@@ -711,7 +708,7 @@ export class RemoteControlCenterComponent implements Component {
 			await this.backend.startDaemon();
 			if (this.disposed || generation !== this.generation) return;
 			await this.refresh(
-				`Daemon state regenerated; backup saved to ${result.backupPath}${result.preservedIdentity ? " · Iroh identity preserved" : " · new Iroh identity created"}`,
+				`Daemon state regenerated; backup saved to ${result.backupPath} · new Iroh identity created`,
 			);
 		} catch (error) {
 			if (this.disposed || generation !== this.generation) return;
@@ -1242,7 +1239,7 @@ export class RemoteControlCenterComponent implements Component {
 				...(this.view.snapshot.invalidState
 					? [
 							{
-								text: "Regeneration creates a backup, preserves validated settings/identity when possible, and may require phones to pair again.",
+								text: "Regeneration backs up the invalid file and starts empty state; every phone must pair again.",
 								tone: "warning" as const,
 							},
 							{ key: "regenerate-state", text: "Regenerate daemon state…", tone: "warning" as const },
@@ -1256,8 +1253,8 @@ export class RemoteControlCenterComponent implements Component {
 				{ text: "REGENERATE DAEMON STATE", tone: "warning" },
 				{ text: this.view.snapshot.invalidState?.path ?? "Unknown state file", tone: "dim" },
 				{ text: "The invalid file will be kept as a timestamped backup.", tone: "text" },
-				{ text: "Validated identity, workspace, and settings data will be preserved when safe.", tone: "text" },
-				{ text: "Invalid access records are dropped; phones may need to pair again.", tone: "warning" },
+				{ text: "The daemon starts with empty state and a new Iroh identity.", tone: "text" },
+				{ text: "Every paired phone must pair again.", tone: "warning" },
 				{ key: "confirm-regenerate-state", text: "Confirm regenerate state", tone: "warning" },
 			];
 		}
@@ -1266,8 +1263,7 @@ export class RemoteControlCenterComponent implements Component {
 				{ text: "RECOVER PREVIOUS DAEMON STATE", tone: "warning" },
 				{ text: this.view.backupPath, tone: "dim" },
 				{ text: "The current daemon will stop and its state will be backed up.", tone: "text" },
-				{ text: "Validated identity, workspace, and settings data will be restored.", tone: "text" },
-				{ text: "Legacy access records are dropped; phones may need to pair again.", tone: "warning" },
+				{ text: "The backup's identity, paired devices, workspaces, and settings will be restored.", tone: "text" },
 				{ key: "confirm-recover-state", text: "Confirm recover and restart", tone: "warning" },
 			];
 		}
@@ -1355,7 +1351,7 @@ export class RemoteControlCenterComponent implements Component {
 		}
 		if (this.view.kind === "confirm-repair") {
 			const repairView = this.view;
-			const client = repairView.status.revokedClients?.find(
+			const client = repairView.status.revokedClients.find(
 				(candidate) => candidate.clientNodeId === repairView.clientNodeId,
 			);
 			return [
@@ -1370,10 +1366,7 @@ export class RemoteControlCenterComponent implements Component {
 		if (this.view.kind === "pairing") return this.buildPairingRows(width, height);
 
 		const status = this.view.status;
-		const remotePolicy = status.remotePolicy ?? {
-			allowTools: null,
-			detachedRuntimeTtlMs: DEFAULT_DETACHED_RUNTIME_TTL_MS,
-		};
+		const remotePolicy = status.remotePolicy;
 		const relayCredential = status.relayCredential;
 		const relayDetails = relayCredential === undefined ? undefined : RELAY_CREDENTIAL_DETAILS[relayCredential.state];
 		const credentialBlocksPairing =
@@ -1425,7 +1418,7 @@ export class RemoteControlCenterComponent implements Component {
 					]
 				: []),
 			{
-				text: `${status.phoneConnections} attached phone${status.phoneConnections === 1 ? "" : "s"} · ${status.clients.length} paired device${status.clients.length === 1 ? "" : "s"}${status.revokedClients === undefined ? "" : ` · ${status.revokedClients.length} revoked`}`,
+				text: `${status.phoneConnections} attached phone${status.phoneConnections === 1 ? "" : "s"} · ${status.clients.length} paired device${status.clients.length === 1 ? "" : "s"} · ${status.revokedClients.length} revoked`,
 				tone: status.phoneConnections > 0 ? "success" : "muted",
 			},
 			{
@@ -1446,9 +1439,7 @@ export class RemoteControlCenterComponent implements Component {
 					? [{ text: "Pairing needs a registered workspace.", tone: "warning" as const }]
 					: credentialBlocksPairing
 						? []
-						: supportsSafePairing(status)
-							? [{ key: "pair", text: "Pair a phone", tone: "text" as const }]
-							: [{ text: "Restart voltd to pair with explicit access grants.", tone: "warning" as const }]),
+						: [{ key: "pair", text: "Pair a phone", tone: "text" as const }]),
 			...(relayCredential !== undefined && relayCredential.state !== "unpaired"
 				? [
 						{
@@ -1462,25 +1453,18 @@ export class RemoteControlCenterComponent implements Component {
 					]
 				: []),
 			{ text: "HEADLESS POLICY", tone: "accent" },
-			...(status.remotePolicy
-				? [
-						{
-							text: `Tools: ${policyTools(remotePolicy, currentWorkspace?.allowedTools)}`,
-							tone: "text" as const,
-						},
-						{
-							text: `Source: ${remotePolicy.allowTools !== null ? "daemon override" : currentWorkspace?.allowedTools ? `workspace ${currentWorkspace.name}` : "paired device grant"}`,
-							tone: "dim" as const,
-						},
-						{
-							text: `Detached runtime retention: ${formatDuration(remotePolicy.detachedRuntimeTtlMs, { wholeSeconds: true })}`,
-							tone: "text" as const,
-						},
-					]
-				: [
-						{ text: "Tools: not reported by this running daemon", tone: "muted" as const },
-						{ text: "Detached runtime retention: not reported", tone: "muted" as const },
-					]),
+			{
+				text: `Tools: ${policyTools(remotePolicy, currentWorkspace?.allowedTools)}`,
+				tone: "text",
+			},
+			{
+				text: `Source: ${remotePolicy.allowTools !== null ? "daemon override" : currentWorkspace?.allowedTools ? `workspace ${currentWorkspace.name}` : "paired device grant"}`,
+				tone: "dim",
+			},
+			{
+				text: `Detached runtime retention: ${formatDuration(remotePolicy.detachedRuntimeTtlMs, { wholeSeconds: true })}`,
+				tone: "text",
+			},
 			{ text: "PAIRED DEVICES", tone: "accent" },
 		];
 		if (status.clients.length === 0) rows.push({ text: "No paired devices.", tone: "muted" });
@@ -1491,29 +1475,23 @@ export class RemoteControlCenterComponent implements Component {
 				tone: "text",
 			});
 			rows.push({
-				text: `  Tools: ${
-					client.allowedTools
-						? `${client.allowedTools.join(", ") || "none"}${client.usesDefaultTools ? " (default)" : ""}`
-						: "not reported"
-				}`,
+				text: `  Tools: ${client.allowedTools.join(", ") || "none"}${client.usesDefaultTools ? " (default)" : ""}`,
 				tone: "dim",
 			});
 		}
-		if (status.revokedClients !== undefined) {
-			rows.push({ text: "REVOKED DEVICES", tone: "accent" });
-			if (status.revokedClients.length === 0) rows.push({ text: "No revoked devices.", tone: "muted" });
-			for (const client of status.revokedClients) {
-				const approved = client.rePairApprovedAtMs !== undefined;
-				rows.push({
-					...(approved ? {} : { key: `revoked:${client.clientNodeId}` }),
-					text: `${client.label || "Unnamed phone"} · ${abbreviatedId(client.clientNodeId, width < 60 ? 10 : 20)} · revoked ${formatDuration(Date.now() - client.revokedAtMs, { wholeSeconds: true })} ago`,
-					tone: approved ? "success" : "warning",
-				});
-				rows.push({
-					text: approved ? "  Re-pair approved · scan a fresh QR" : "  Select to allow fresh pairing",
-					tone: approved ? "success" : "dim",
-				});
-			}
+		rows.push({ text: "REVOKED DEVICES", tone: "accent" });
+		if (status.revokedClients.length === 0) rows.push({ text: "No revoked devices.", tone: "muted" });
+		for (const client of status.revokedClients) {
+			const approved = client.rePairApprovedAtMs !== undefined;
+			rows.push({
+				...(approved ? {} : { key: `revoked:${client.clientNodeId}` }),
+				text: `${client.label || "Unnamed phone"} · ${abbreviatedId(client.clientNodeId, width < 60 ? 10 : 20)} · revoked ${formatDuration(Date.now() - client.revokedAtMs, { wholeSeconds: true })} ago`,
+				tone: approved ? "success" : "warning",
+			});
+			rows.push({
+				text: approved ? "  Re-pair approved · scan a fresh QR" : "  Select to allow fresh pairing",
+				tone: approved ? "success" : "dim",
+			});
 		}
 		rows.push({ text: "WORKSPACES", tone: "accent" });
 		if (status.workspaces.length === 0) rows.push({ text: "No registered workspaces.", tone: "muted" });

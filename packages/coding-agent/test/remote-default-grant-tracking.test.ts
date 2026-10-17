@@ -19,6 +19,7 @@ import {
 	writeIrohRemoteHostState,
 } from "../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
+import { createIrohRemoteHostStateFixture } from "./utilities/iroh-host-state.ts";
 
 const WORKSPACE = { name: "volt", path: "/workspace" };
 const CODING_GRANT = createIrohRemotePresetAccess("coding").rpcGrant;
@@ -62,7 +63,9 @@ function makeState(): IrohRemoteHostState {
 }
 
 function parseRawState(raw: Record<string, unknown>): IrohRemoteHostState {
-	return parseIrohRemoteHostState(JSON.parse(JSON.stringify({ workspaces: [WORKSPACE], clients: [], ...raw })));
+	return parseIrohRemoteHostState(
+		JSON.parse(JSON.stringify({ ...createIrohRemoteHostStateFixture({ workspaces: [WORKSPACE] }), ...raw })),
+	);
 }
 
 function pairClient(state: IrohRemoteHostState, allowTools: string, nodeId = "client-node") {
@@ -215,8 +218,8 @@ describe("default grant tracking: state load and round-trip", () => {
 				},
 			],
 		});
-		expect(state.pendingPairingTickets?.[0]).not.toHaveProperty("allowedTools");
-		expect(state.pendingPairingTickets?.[1]?.allowedTools).toBe("read");
+		expect(state.pendingPairingTickets[0]).not.toHaveProperty("allowedTools");
+		expect(state.pendingPairingTickets[1]?.allowedTools).toBe("read");
 	});
 
 	it("applies the same rules to revoked-client records", () => {
@@ -226,8 +229,8 @@ describe("default grant tracking: state load and round-trip", () => {
 				{ ...RAW_CLIENT_BASE, nodeId: "custom-node", allowedTools: "read", revokedAt: 150 },
 			],
 		});
-		expect(state.revokedClients?.[0]).not.toHaveProperty("allowedTools");
-		expect(state.revokedClients?.[1]?.allowedTools).toBe("read");
+		expect(state.revokedClients[0]).not.toHaveProperty("allowedTools");
+		expect(state.revokedClients[1]?.allowedTools).toBe("read");
 	});
 });
 
@@ -247,7 +250,7 @@ describe("default grant tracking: pairing ticket mint", () => {
 			expiresAt: 100,
 			...(options.allowTools === undefined ? {} : { allowTools: options.allowTools }),
 		});
-		const ticket = (await manager.getState()).pendingPairingTickets?.[0];
+		const ticket = (await manager.getState()).pendingPairingTickets[0];
 		expect(ticket).toBeDefined();
 		return ticket;
 	}
@@ -366,7 +369,10 @@ describe("default grant tracking: cross-default upgrades", () => {
 	});
 
 	it("a snapshot of default A loads as pinned under default B but heals under default A", () => {
-		const raw = { workspaces: [WORKSPACE], clients: [{ ...RAW_CLIENT_BASE, allowedTools: DEFAULT_A }] };
+		const raw = createIrohRemoteHostStateFixture({
+			workspaces: [WORKSPACE],
+			clients: [{ ...RAW_CLIENT_BASE, allowedTools: DEFAULT_A }],
+		});
 		const underB = parseIrohRemoteHostState(JSON.parse(JSON.stringify(raw)), { defaultAllowTools: DEFAULT_B });
 		expect(underB.clients[0]?.allowedTools).toBe("read,grep,ls");
 		const underA = parseIrohRemoteHostState(JSON.parse(JSON.stringify(raw)), { defaultAllowTools: DEFAULT_A });
@@ -408,7 +414,7 @@ describe("default grant tracking: cross-default upgrades", () => {
 			expiresAt: 100,
 		});
 		const state = await manager.getState();
-		expect(state.pendingPairingTickets?.[0]).not.toHaveProperty("allowedTools");
+		expect(state.pendingPairingTickets[0]).not.toHaveProperty("allowedTools");
 
 		const consumed = authorizeIrohRemoteClient(state, makeHello(WORKSPACE.name, "one-time-secret"), "client-node", {
 			allowTools: DEFAULT_B,
@@ -498,11 +504,13 @@ describe("default grant tracking: cross-default upgrades", () => {
 		const dir = await mkdtemp(join(tmpdir(), "volt-grant-tracking-"));
 		try {
 			const statePath = join(dir, "state.json");
-			await writeIrohRemoteHostState(statePath, {
-				...createEmptyIrohRemoteHostState(),
-				workspaces: [{ ...WORKSPACE }],
-				clients: [{ ...RAW_CLIENT_BASE, allowedTools: DEFAULT_A }],
-			});
+			await writeIrohRemoteHostState(
+				statePath,
+				createIrohRemoteHostStateFixture({
+					workspaces: [{ ...WORKSPACE }],
+					clients: [{ ...RAW_CLIENT_BASE, allowedTools: DEFAULT_A }],
+				}),
+			);
 			const underB = new IrohRemoteHostStateManager({ statePath, defaultAllowTools: DEFAULT_B });
 			expect((await underB.getState()).clients[0]?.allowedTools).toBe("read,grep,ls");
 			const underA = new IrohRemoteHostStateManager({ statePath, defaultAllowTools: DEFAULT_A });

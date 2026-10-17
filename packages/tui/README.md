@@ -65,7 +65,7 @@ tui.start();
 - `TuiMainScreen` renders into the main terminal buffer and preserves terminal-owned native scrollback.
 - `TuiAltScreen` renders a fixed-height viewport in the alternate terminal buffer with application-owned scrolling. By default, stopping it restores the main buffer and prints the complete final document; pass `{ preserveScreen: true }` to restore the previous main-buffer contents instead.
 
-`TUI` is no longer constructible. Migrate `new TUI(terminal)` to `new TuiMainScreen(terminal)` and keep `TUI` only as the renderer-neutral type.
+`TUI` is a type only; construct one of the renderers and use it through `TUI`.
 
 ```typescript
 import { type TUI, TuiAltScreen, TuiMainScreen } from "@hansjm10/volt-tui";

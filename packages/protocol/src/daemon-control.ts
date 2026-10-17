@@ -128,10 +128,10 @@ export const ControlClientStatusSchema = Type.Object(
 		pairedAtMs: RpcEpochMillisecondsSchema,
 		lastSeenAtMs: Type.Optional(RpcEpochMillisecondsSchema),
 		/** Resolved device grant, before workspace and daemon ceilings apply. */
-		allowedTools: Type.Optional(Type.Array(Type.String())),
+		allowedTools: Type.Array(Type.String()),
 		/** True when the device has no customized grant and tracks the daemon's current default. */
-		usesDefaultTools: Type.Optional(Type.Boolean()),
-		rpcGrant: Type.Optional(RemoteGrantSchema),
+		usesDefaultTools: Type.Boolean(),
+		rpcGrant: RemoteGrantSchema,
 	},
 	closed,
 );
@@ -146,7 +146,7 @@ export const ControlRevokedClientStatusSchema = Type.Object(
 		revokedAtMs: RpcEpochMillisecondsSchema,
 		/** Present after the desktop explicitly allows this identity to use a fresh pairing ticket. */
 		rePairApprovedAtMs: Type.Optional(RpcEpochMillisecondsSchema),
-		rpcGrant: Type.Optional(RemoteGrantSchema),
+		rpcGrant: RemoteGrantSchema,
 	},
 	closed,
 );
@@ -1124,18 +1124,16 @@ export const CONTROL_RESPONSE_SCHEMAS = {
 		pid: Type.Number(),
 		startedAtMs: RpcEpochMillisecondsSchema,
 		environment: DaemonEnvironmentStatusSchema,
-		/** Optional feature flags. */
-		capabilities: Type.Optional(Type.Array(Type.String())),
 		phoneConnections: NonNegativeIntegerSchema,
 		workspaces: Type.Array(ControlWorkspaceStatusSchema),
 		clients: Type.Array(ControlClientStatusSchema),
 		/** Revoked identities retained for explicit repair approval. */
-		revokedClients: Type.Optional(Type.Array(ControlRevokedClientStatusSchema)),
+		revokedClients: Type.Array(ControlRevokedClientStatusSchema),
 		/** Phone-transport readiness; local daemon functions stay available when not ready. */
 		remoteTransport: RemoteTransportHealthSchema,
 		/** Omitted for non-managed relay setups. */
 		relayCredential: Type.Optional(ControlRelayCredentialStatusSchema),
-		remotePolicy: Type.Optional(DaemonRemotePolicyStatusSchema),
+		remotePolicy: DaemonRemotePolicyStatusSchema,
 		keepAwake: ControlKeepAwakeStatusSchema,
 		/** Conversation workers the daemon supervises. */
 		workers: Type.Array(ControlWorkerStatusSchema),

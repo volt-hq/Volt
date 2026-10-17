@@ -1,7 +1,6 @@
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { createHarness as createSuiteHarness } from "./suite/harness.ts";
-import { createHarness } from "./test-harness.ts";
+import { createHarness } from "./suite/harness.ts";
 import { createTestSession } from "./utilities.ts";
 
 const cleanups: Array<() => void> = [];
@@ -11,21 +10,9 @@ afterEach(() => {
 });
 
 describe("test factory system prompts", () => {
-	it("forwards explicit prompts through the general harness resource loader", async () => {
-		const harness = await createHarness({
-			systemPrompt: "GENERAL_PROMPT_SENTINEL",
-			responses: ["ok"],
-		});
-		cleanups.push(harness.cleanup);
-
-		await harness.session.prompt("hello");
-
-		expect(harness.faux.contexts[0]?.systemPrompt).toContain("GENERAL_PROMPT_SENTINEL");
-	});
-
 	it("forwards explicit prompts through the suite harness resource loader", async () => {
 		let capturedPrompt: string | undefined;
-		const harness = await createSuiteHarness({ systemPrompt: "SUITE_PROMPT_SENTINEL" });
+		const harness = await createHarness({ systemPrompt: "SUITE_PROMPT_SENTINEL" });
 		cleanups.push(harness.cleanup);
 		harness.setResponses([
 			(context) => {

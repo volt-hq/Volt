@@ -41,12 +41,7 @@ import type {
 	HelloProof,
 	RemoteTransportHealth,
 } from "./control-protocol.ts";
-import {
-	CONTROL_PAIR_CANCEL_CAPABILITY,
-	createControlClientStatus,
-	PROTOCOL_VERSION,
-	REMOTE_TRANSPORT_REASON_MESSAGES,
-} from "./control-protocol.ts";
+import { createControlClientStatus, PROTOCOL_VERSION, REMOTE_TRANSPORT_REASON_MESSAGES } from "./control-protocol.ts";
 import {
 	type ControlConnection,
 	type ControlServer,
@@ -123,22 +118,28 @@ export interface PidfileContents {
 	version: string;
 	startedAtMs: number;
 	socketPath: string;
-	/** Per-daemon instance token; optional for pidfiles written by older versions. */
-	token?: string;
+	/** Per-daemon instance token. */
+	token: string;
 }
 
 export function readPidfile(pidfilePath: string): PidfileContents | undefined {
 	try {
 		const parsed = JSON.parse(readFileSync(pidfilePath, "utf8")) as Partial<PidfileContents>;
-		if (typeof parsed.pid !== "number" || typeof parsed.socketPath !== "string") {
+		if (
+			typeof parsed.pid !== "number" ||
+			typeof parsed.version !== "string" ||
+			typeof parsed.startedAtMs !== "number" ||
+			typeof parsed.socketPath !== "string" ||
+			typeof parsed.token !== "string"
+		) {
 			return undefined;
 		}
 		return {
 			pid: parsed.pid,
-			version: typeof parsed.version === "string" ? parsed.version : "unknown",
-			startedAtMs: typeof parsed.startedAtMs === "number" ? parsed.startedAtMs : 0,
+			version: parsed.version,
+			startedAtMs: parsed.startedAtMs,
 			socketPath: parsed.socketPath,
-			...(typeof parsed.token === "string" ? { token: parsed.token } : {}),
+			token: parsed.token,
 		};
 	} catch {
 		return undefined;
@@ -282,7 +283,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 	// cannot keep the lock held.
 	const verifyLockOwner = async (owner: DaemonLockOwner) => {
 		const pidfile = readPidfile(paths.pidfilePath);
-		if (pidfile?.pid === owner.pid && pidfile.token !== undefined) {
+		if (pidfile?.pid === owner.pid) {
 			const socketProbe = await probeControlSocket(pidfile.socketPath, {
 				version: VERSION,
 				timeoutMs: 500,
@@ -301,7 +302,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			const socketProbe = await probeControlSocket(pidfile.socketPath, {
 				version: VERSION,
 				timeoutMs: 500,
-				...(pidfile.token === undefined ? {} : { authToken: pidfile.token }),
+				authToken: pidfile.token,
 			});
 			if (socketProbe.kind === "healthy") {
 				log("info", `another daemon is healthy (pid ${socketProbe.status.pid}); exiting`);
@@ -379,25 +380,9 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		log("info", `using inherited environment: ${environmentStatus.reason ?? "unknown"}`);
 	}
 
-	const state = new VoltdStateStore({ agentDir, statePath: paths.statePath });
-	let migratedFromLegacyState = false;
-	let legacyDroppedAccess: { clients: number; revokedClients: number; pendingPairingTickets: number } | undefined;
+	const state = new VoltdStateStore({ statePath: paths.statePath });
 	try {
-		const loadResult = await state.load();
-		migratedFromLegacyState = loadResult.migratedFromLegacyState;
-		legacyDroppedAccess = loadResult.legacyDroppedAccess;
-		if (
-			legacyDroppedAccess !== undefined &&
-			legacyDroppedAccess.clients + legacyDroppedAccess.revokedClients + legacyDroppedAccess.pendingPairingTickets >
-				0
-		) {
-			log(
-				"warn",
-				"migrated pre-grant Iroh host state: preserved host identity and workspace metadata, " +
-					"dropped legacy clients, revocations, and pending tickets; all clients must pair again",
-				legacyDroppedAccess,
-			);
-		}
+		await state.load();
 	} catch (error) {
 		log("error", `failed to load state: ${error instanceof Error ? error.message : String(error)}`);
 		return finishBeforeServing(1);
@@ -493,8 +478,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		if (!current) {
 			return;
 		}
-		const owned = current.token === pidfileToken || (current.token === undefined && current.pid === process.pid);
-		if (owned) {
+		if (current.token === pidfileToken) {
 			rmSync(paths.pidfilePath, { force: true });
 		}
 	};
@@ -522,7 +506,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		currentGeneration: (workspaceName) => {
 			const hostState = state.getHostState();
 			if (!hostState.workspaces.some((workspace) => workspace.name === workspaceName)) return undefined;
-			return hostState.workspaceGenerations?.find((record) => record.workspaceName === workspaceName)?.generation;
+			return hostState.workspaceGenerations.find((record) => record.workspaceName === workspaceName)?.generation;
 		},
 		detachedRuntimeTtlMs: () => state.state.settings.detachedRuntimeTtlMs,
 		sessionInWorkspace: async (workspaceName, sessionId, sessionDirectory) =>
@@ -548,7 +532,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		currentGeneration: (workspaceName) => {
 			const hostState = state.getHostState();
 			if (!hostState.workspaces.some((workspace) => workspace.name === workspaceName)) return undefined;
-			return hostState.workspaceGenerations?.find((record) => record.workspaceName === workspaceName)?.generation;
+			return hostState.workspaceGenerations.find((record) => record.workspaceName === workspaceName)?.generation;
 		},
 		registerWorkspace: async (name, path, localOnly) => {
 			if (
@@ -709,8 +693,8 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		state.state.revokedClients.map((client) => ({
 			clientNodeId: client.nodeId,
 			...(client.label === undefined ? {} : { label: client.label }),
-			pairedAtMs: client.pairedAt ?? 0,
-			lastSeenAtMs: client.lastSeenAt ?? 0,
+			pairedAtMs: client.pairedAt,
+			lastSeenAtMs: client.lastSeenAt,
 			revokedAtMs: client.revokedAt,
 			rpcGrant: parseIrohRemoteRpcGrant(client.rpcGrant, "revoked client rpcGrant"),
 			...(client.rePairApprovedAt === undefined ? {} : { rePairApprovedAtMs: client.rePairApprovedAt }),
@@ -798,7 +782,6 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 					pid: process.pid,
 					startedAtMs,
 					environment: environmentStatus,
-					capabilities: [CONTROL_PAIR_CANCEL_CAPABILITY],
 					phoneConnections,
 					remoteTransport,
 					...(relayCredential === undefined ? {} : { relayCredential }),
@@ -841,7 +824,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 					return;
 				}
 				const generationOf = () =>
-					state.getHostState().workspaceGenerations?.find((record) => record.workspaceName === request.name)
+					state.getHostState().workspaceGenerations.find((record) => record.workspaceName === request.name)
 						?.generation;
 				const previousGeneration = generationOf();
 				// An explicit registration shares the workspace, a local-only one included (D17).
@@ -1112,9 +1095,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			const pidfile = readPidfile(paths.pidfilePath);
 			const probeOptions = {
 				version: VERSION,
-				...(pidfile?.socketPath === paths.socketPath && pidfile.token !== undefined
-					? { authToken: pidfile.token }
-					: {}),
+				...(pidfile?.socketPath === paths.socketPath ? { authToken: pidfile.token } : {}),
 			};
 			let socketProbe = await probeControlSocket(paths.socketPath, probeOptions);
 			let loggedShutdownWait = false;
@@ -1268,23 +1249,11 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 	};
 	processLifecycle.addShutdownSignalHandler(onSignal);
 
-	if (
-		legacyDroppedAccess !== undefined &&
-		legacyDroppedAccess.clients + legacyDroppedAccess.revokedClients + legacyDroppedAccess.pendingPairingTickets > 0
-	) {
-		await auditLogger
-			.log({
-				type: "legacy_remote_access_dropped",
-				success: true,
-				details: { ...legacyDroppedAccess, requiresRePair: true },
-			})
-			.catch(() => {});
-	}
 	await auditLogger
 		.log({
 			type: "daemon_started",
 			success: true,
-			details: { version: VERSION, migratedFromLegacyState, legacyDroppedAccess },
+			details: { version: VERSION },
 		})
 		.catch(() => {});
 	log("info", `voltd ${VERSION} listening`, { socketPath: paths.socketPath, pid: process.pid });
