@@ -13,7 +13,7 @@ import {
 import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
 import { restoreStdout } from "../../../src/core/output-guard.ts";
 import { IrohRemoteAuditLogger } from "../../../src/core/remote/iroh/audit.ts";
-import { createEmptyIrohRemoteHostState, writeIrohRemoteHostState } from "../../../src/core/remote/iroh/state.ts";
+import { writeIrohRemoteHostState } from "../../../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../../../src/core/remote/iroh/state-manager.ts";
 import { getDefaultSessionDirPath, SessionManager } from "../../../src/core/session-manager.ts";
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
@@ -37,6 +37,7 @@ import {
 } from "../../../src/daemon/worktree-manager.ts";
 import { main } from "../../../src/main.ts";
 import { connectTestClient, openTestHost, type TestClient } from "../../utilities/host-client.ts";
+import { createIrohRemoteHostStateFixture } from "../../utilities/iroh-host-state.ts";
 import { registerOnCreatedModelRegistries } from "../../utilities.ts";
 import { createHarness } from "../harness.ts";
 import { createPrReviewGitSeed } from "../pr-review-git-fixture.ts";
@@ -72,7 +73,7 @@ async function fixture(archive = true) {
 	ensureDaemonDirs(paths);
 	const statePath = join(root, "state.json");
 	const workspace = { name: "project", path: source };
-	await writeIrohRemoteHostState(statePath, { ...createEmptyIrohRemoteHostState(), workspaces: [workspace] });
+	await writeIrohRemoteHostState(statePath, createIrohRemoteHostStateFixture({ workspaces: [workspace] }));
 	const state = new IrohRemoteHostStateManager({ statePath });
 	const manager = new WorktreeManager({
 		agentDir,

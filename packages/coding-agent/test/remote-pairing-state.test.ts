@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { hashIrohRemotePairingSecret } from "../src/core/remote/iroh/authorization.ts";
 import { IrohRemoteHostEngine } from "../src/core/remote/iroh/engine.ts";
 import { createEmptyIrohRemoteHostState } from "../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
+
+const RPC_GRANT = createIrohRemotePresetAccess("coding").rpcGrant;
 
 describe("remote pairing ticket cancellation", () => {
 	it("removes only the cancelled pending ticket", async () => {
@@ -11,6 +14,7 @@ describe("remote pairing ticket cancellation", () => {
 			secretHash: "cancelled-hash",
 			workspace: "volt",
 			allowedTools: "read",
+			rpcGrant: RPC_GRANT,
 			createdAt: 1,
 			expiresAt: 100,
 		});
@@ -18,6 +22,7 @@ describe("remote pairing ticket cancellation", () => {
 			secretHash: "kept-hash",
 			workspace: "volt",
 			allowedTools: "read",
+			rpcGrant: RPC_GRANT,
 			createdAt: 2,
 			expiresAt: 100,
 		});
@@ -29,6 +34,7 @@ describe("remote pairing ticket cancellation", () => {
 				secretHash: "kept-hash",
 				workspace: "volt",
 				allowedTools: "read",
+				rpcGrant: RPC_GRANT,
 				createdAt: 2,
 				expiresAt: 100,
 			},

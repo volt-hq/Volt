@@ -370,7 +370,9 @@ describe("managed relay credential recovery", () => {
 			phoneConnections: 0,
 			workspaces: [],
 			clients: [],
+			revokedClients: [],
 			remoteTransport: { state: "ready" },
+			remotePolicy: { allowTools: null, detachedRuntimeTtlMs: 1_800_000 },
 			keepAwake: { enabled: false, state: "disabled" },
 			workers: [],
 		};
@@ -452,6 +454,8 @@ describe("managed relay credential recovery", () => {
 		const original = credential(-1);
 		state.settings.relayCredential = original;
 		state.workspaces = [{ name: "saved", path: tmpdir() }];
+		state.workspaceGenerationCounter = 1;
+		state.workspaceGenerations = [{ workspaceName: "saved", generation: 1 }];
 		state.worktrees = [
 			{
 				id: "saved-tree",
@@ -858,7 +862,7 @@ describe("managed relay credential recovery", () => {
 				// Identity and grants are unchanged; only presence metadata may update on connect.
 				expect(await pairedClientGrants(fixture.control)).toEqual(grantsBefore);
 				const persisted = fixture.readState();
-				expect(persisted.pendingPairingTickets ?? []).toEqual([]);
+				expect(persisted.pendingPairingTickets).toEqual([]);
 				expect(persisted.settings.relayCredentialClaim).toBeUndefined();
 				expect(persisted.settings.relayCredential).toMatchObject({
 					grantId: original.grantId,

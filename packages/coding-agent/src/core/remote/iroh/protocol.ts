@@ -194,7 +194,7 @@ export interface IrohRemoteRuntimeToolPolicy {
 export interface ResolveIrohRemoteRuntimeToolPolicyOptions {
 	/** Persisted pair-time grant. This is always the maximum authority. */
 	clientAllowTools: string;
-	/** Optional legacy workspace ceiling. Missing means no additional restriction. */
+	/** Optional workspace ceiling. Missing means no additional restriction. */
 	workspaceAllowTools?: string;
 	/** Exact daemon ceiling. Null means unrestricted; an empty array denies every tool. */
 	daemonAllowTools: readonly string[] | null;

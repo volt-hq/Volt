@@ -154,7 +154,7 @@ describe("openai-completions cacheControlFormat", () => {
 	});
 
 	it("omits cache markers for routed models without cache metadata", async () => {
-		const model = getModel("openrouter", "anthropic/claude-sonnet-4");
+		const model = getModel("openrouter", "anthropic/claude-sonnet-4.5");
 		const params = await capturePayload(model);
 		const instructionMessage = getInstructionMessage(params);
 

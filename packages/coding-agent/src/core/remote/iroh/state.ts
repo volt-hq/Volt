@@ -77,14 +77,12 @@ export interface IrohRemoteClient {
 	allowedWorkspaces: string[];
 	/** Explicitly customized tool grant. Absent means the client tracks the current default grant. */
 	allowedTools?: string;
-	rpcGrant?: IrohRemoteRpcGrant;
+	rpcGrant: IrohRemoteRpcGrant;
 	pairedAt: number;
 	lastSeenAt: number;
 	lastSessionIdByWorkspace?: Record<string, string>;
 	pushTargets?: IrohRemotePushTarget[];
 }
-
-export type IrohRemoteGrantedClient = IrohRemoteClient & { rpcGrant: IrohRemoteRpcGrant };
 
 export interface IrohRemoteRevokedClient {
 	nodeId: string;
@@ -92,7 +90,7 @@ export interface IrohRemoteRevokedClient {
 	allowedWorkspaces: string[];
 	/** Explicitly customized tool grant. Absent means the client tracked the current default grant. */
 	allowedTools?: string;
-	rpcGrant?: IrohRemoteRpcGrant;
+	rpcGrant: IrohRemoteRpcGrant;
 	pairedAt: number;
 	lastSeenAt: number;
 	revokedAt: number;
@@ -100,24 +98,18 @@ export interface IrohRemoteRevokedClient {
 	rePairApprovedAt?: number;
 }
 
-export type IrohRemoteGrantedRevokedClient = IrohRemoteRevokedClient & { rpcGrant: IrohRemoteRpcGrant };
-
 export interface IrohRemotePendingPairingTicket {
 	secretHash: string;
 	workspace: string;
 	/** Explicitly customized tool grant to apply on consume. Absent means default-grant intent. */
 	allowedTools?: string;
-	rpcGrant?: IrohRemoteRpcGrant;
+	rpcGrant: IrohRemoteRpcGrant;
 	expiresAt: number;
 	createdAt: number;
 	labelHint?: string;
 	/** One-time managed relay claim that must approve the consuming client node. */
 	relayCredentialClaimId?: string;
 }
-
-export type IrohRemoteGrantedPendingPairingTicket = IrohRemotePendingPairingTicket & {
-	rpcGrant: IrohRemoteRpcGrant;
-};
 
 export type IrohRemotePairingSecretTombstoneOutcome = "pairing_secret_consumed" | "pairing_secret_expired";
 
@@ -136,14 +128,14 @@ export interface IrohRemotePairingSecretTombstone {
 
 export interface IrohRemoteHostState {
 	hostSecretKey?: number[];
-	pairingSecretTombstones?: IrohRemotePairingSecretTombstone[];
-	workspaceGenerationCounter?: number;
-	workspaceGenerations?: IrohRemoteWorkspaceGeneration[];
+	pairingSecretTombstones: IrohRemotePairingSecretTombstone[];
+	workspaceGenerationCounter: number;
+	workspaceGenerations: IrohRemoteWorkspaceGeneration[];
 	workspaces: IrohRemoteWorkspace[];
-	worktrees?: IrohRemoteWorkspaceWorktree[];
+	worktrees: IrohRemoteWorkspaceWorktree[];
 	clients: IrohRemoteClient[];
-	revokedClients?: IrohRemoteRevokedClient[];
-	pendingPairingTickets?: IrohRemotePendingPairingTicket[];
+	revokedClients: IrohRemoteRevokedClient[];
+	pendingPairingTickets: IrohRemotePendingPairingTicket[];
 }
 
 export function createEmptyIrohRemoteHostState(): IrohRemoteHostState {
@@ -161,14 +153,14 @@ export function createEmptyIrohRemoteHostState(): IrohRemoteHostState {
 }
 
 export function allocateIrohRemoteWorkspaceGeneration(state: IrohRemoteHostState, workspaceName: string): void {
-	const currentGeneration = state.workspaceGenerationCounter ?? 0;
+	const currentGeneration = state.workspaceGenerationCounter;
 	if (currentGeneration === Number.MAX_SAFE_INTEGER) {
 		throw new Error("Workspace generation counter is exhausted");
 	}
 	const generation = currentGeneration + 1;
 	state.workspaceGenerationCounter = generation;
 	state.workspaceGenerations = [
-		...(state.workspaceGenerations ?? []).filter((record) => record.workspaceName !== workspaceName),
+		...state.workspaceGenerations.filter((record) => record.workspaceName !== workspaceName),
 		{ workspaceName, generation },
 	];
 }
@@ -202,25 +194,25 @@ export function parseIrohRemoteHostState(value: unknown, options?: IrohRemoteSta
 	const state = expectRecord(value, "Iroh remote host state");
 	const parsed: IrohRemoteHostState = {
 		hostSecretKey: parseOptionalByteArray(state.hostSecretKey, "hostSecretKey"),
-		pairingSecretTombstones: parseOptionalArray(
+		pairingSecretTombstones: parseArray(
 			state.pairingSecretTombstones,
 			"pairingSecretTombstones",
 			parseIrohRemotePairingSecretTombstone,
 		),
 		...parseWorkspaceGenerationState(state),
 		workspaces: parseArray(state.workspaces, "workspaces", parseIrohRemoteWorkspace),
-		worktrees: parseOptionalArray(state.worktrees, "worktrees", parseIrohRemoteWorkspaceWorktree),
+		worktrees: parseArray(state.worktrees, "worktrees", parseIrohRemoteWorkspaceWorktree),
 		clients: parseArray(state.clients, "clients", (entry) => parseIrohRemoteClient(entry, options)),
-		revokedClients: parseOptionalArray(state.revokedClients, "revokedClients", (entry) =>
+		revokedClients: parseArray(state.revokedClients, "revokedClients", (entry) =>
 			parseIrohRemoteRevokedClient(entry, options),
 		),
-		pendingPairingTickets: parseOptionalArray(state.pendingPairingTickets, "pendingPairingTickets", (entry) =>
+		pendingPairingTickets: parseArray(state.pendingPairingTickets, "pendingPairingTickets", (entry) =>
 			parseIrohRemotePendingPairingTicket(entry, options),
 		),
 	};
 	for (const workspace of parsed.workspaces) {
-		if (!(parsed.workspaceGenerations ?? []).some((record) => record.workspaceName === workspace.name)) {
-			allocateIrohRemoteWorkspaceGeneration(parsed, workspace.name);
+		if (!parsed.workspaceGenerations.some((record) => record.workspaceName === workspace.name)) {
+			throw new Error(`workspace ${workspace.name} has no workspace generation`);
 		}
 	}
 	return parsed;
@@ -229,31 +221,31 @@ export function parseIrohRemoteHostState(value: unknown, options?: IrohRemoteSta
 function serializeIrohRemoteHostState(state: IrohRemoteHostState): IrohRemoteHostState {
 	return {
 		hostSecretKey: state.hostSecretKey ? [...state.hostSecretKey] : undefined,
-		pairingSecretTombstones: (state.pairingSecretTombstones ?? []).map((tombstone) => ({ ...tombstone })),
-		workspaceGenerationCounter: state.workspaceGenerationCounter ?? 0,
-		workspaceGenerations: (state.workspaceGenerations ?? []).map((record) => ({ ...record })),
+		pairingSecretTombstones: state.pairingSecretTombstones.map((tombstone) => ({ ...tombstone })),
+		workspaceGenerationCounter: state.workspaceGenerationCounter,
+		workspaceGenerations: state.workspaceGenerations.map((record) => ({ ...record })),
 		workspaces: state.workspaces.map((workspace) => ({ ...workspace })),
-		worktrees: (state.worktrees ?? []).map((worktree) => ({ ...worktree, sessionIds: [...worktree.sessionIds] })),
+		worktrees: state.worktrees.map((worktree) => ({ ...worktree, sessionIds: [...worktree.sessionIds] })),
 		clients: state.clients.map((client) => ({
 			...client,
 			allowedWorkspaces: [...client.allowedWorkspaces],
-			...(client.rpcGrant === undefined ? {} : { rpcGrant: cloneIrohRemoteRpcGrant(client.rpcGrant) }),
+			rpcGrant: cloneIrohRemoteRpcGrant(client.rpcGrant),
 			...(client.lastSessionIdByWorkspace
 				? { lastSessionIdByWorkspace: { ...client.lastSessionIdByWorkspace } }
 				: {}),
 			...(client.pushTargets ? { pushTargets: client.pushTargets.map((target) => ({ ...target })) } : {}),
 		})),
-		revokedClients: (state.revokedClients ?? []).map((client) => ({
+		revokedClients: state.revokedClients.map((client) => ({
 			...client,
 			allowedWorkspaces: [...client.allowedWorkspaces],
-			...(client.rpcGrant === undefined ? {} : { rpcGrant: cloneIrohRemoteRpcGrant(client.rpcGrant) }),
+			rpcGrant: cloneIrohRemoteRpcGrant(client.rpcGrant),
 			...(client.lastSessionIdByWorkspace
 				? { lastSessionIdByWorkspace: { ...client.lastSessionIdByWorkspace } }
 				: {}),
 		})),
-		pendingPairingTickets: (state.pendingPairingTickets ?? []).map((ticket) => ({
+		pendingPairingTickets: state.pendingPairingTickets.map((ticket) => ({
 			...ticket,
-			...(ticket.rpcGrant === undefined ? {} : { rpcGrant: cloneIrohRemoteRpcGrant(ticket.rpcGrant) }),
+			rpcGrant: cloneIrohRemoteRpcGrant(ticket.rpcGrant),
 		})),
 	};
 }
@@ -262,11 +254,11 @@ function parseWorkspaceGenerationState(state: Record<string, unknown>): {
 	workspaceGenerationCounter: number;
 	workspaceGenerations: IrohRemoteWorkspaceGeneration[];
 } {
-	const workspaceGenerationCounter =
-		state.workspaceGenerationCounter === undefined
-			? 0
-			: expectNonNegativeSafeInteger(state.workspaceGenerationCounter, "workspaceGenerationCounter");
-	const workspaceGenerations = parseOptionalArray(
+	const workspaceGenerationCounter = expectNonNegativeSafeInteger(
+		state.workspaceGenerationCounter,
+		"workspaceGenerationCounter",
+	);
+	const workspaceGenerations = parseArray(
 		state.workspaceGenerations,
 		"workspaceGenerations",
 		parseIrohRemoteWorkspaceGeneration,
@@ -510,13 +502,6 @@ function parseArray<T>(value: unknown, label: string, parseEntry: (value: unknow
 		throw new Error(`${label} must be an array`);
 	}
 	return value.map((entry) => parseEntry(entry));
-}
-
-function parseOptionalArray<T>(value: unknown, label: string, parseEntry: (value: unknown) => T): T[] {
-	if (value === undefined) {
-		return [];
-	}
-	return parseArray(value, label, parseEntry);
 }
 
 function parseOptionalByteArray(value: unknown, label: string): number[] | undefined {

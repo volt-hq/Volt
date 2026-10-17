@@ -509,14 +509,6 @@ Everything lives under `~/.volt/agent/daemon/` (mode `0700`):
 | `audit.jsonl` | Append-only audit log (pairing, revocation, workers, relays, lifecycle) |
 | `workers/` | One log per conversation worker (see [Worker logs](#worker-logs)) |
 
-On first start the daemon migrates the legacy `remote/iroh-host.json` state
-file automatically and renames it to `.migrated`. A pre-grant file keeps the
-Iroh secret key (so the saved host identity does not rotate) plus validated
-workspace/worktree metadata, but intentionally drops active clients, revoked
-clients, and pending pairing tickets. The daemon logs and audits this expected
-migration as `legacy_remote_access_dropped`; it is not corruption. Every old
-client must pair again to receive an explicit current grant.
-
 ## Session storage
 
 Conversation history uses the same authoritative SQLite storage as local Volt:

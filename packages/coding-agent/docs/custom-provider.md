@@ -235,9 +235,7 @@ Use `cacheControlFormat: "anthropic"` for OpenAI-compatible providers that expos
 
 For Anthropic-compatible providers using `api: "anthropic-messages"`, set `compat.forceAdaptiveThinking: true` on models or providers whose upstream model requires adaptive thinking (`thinking.type: "adaptive"` plus `output_config.effort`). Built-in adaptive Claude models set this automatically. Set `compat.allowEmptySignature: true` only for providers that emit empty thinking signatures and expect `signature: ""` on replay.
 
-> Migration note: Mistral moved from `openai-completions` to `mistral-conversations`.
-> Use `mistral-conversations` for native Mistral models.
-> If you intentionally route Mistral-compatible/custom endpoints through `openai-completions`, set `compat` flags explicitly as needed.
+Use `api: "mistral-conversations"` for native Mistral models. If you route a Mistral-compatible endpoint through `openai-completions`, set its `compat` flags explicitly.
 
 ### Auth Header
 

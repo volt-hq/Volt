@@ -331,7 +331,7 @@ export interface SubagentToolManager {
 	startRun?(agentName: string, task: string, options?: SubagentRunOptions): Promise<SubagentRun>;
 	/** Cancel a subagent run that is work of the conversation. */
 	cancelRun?(workId: string): Promise<void>;
-	/** Definitions this runtime is currently allowed to invoke. Omit for unrestricted legacy managers. */
+	/** Definitions this runtime is currently allowed to invoke. Omit when the manager does not restrict definitions. */
 	listAvailableDefinitions?(): readonly SubagentDefinition[];
 	/**
 	 * Definitions permitted by delegation policy, ignoring exhaustible start budgets.

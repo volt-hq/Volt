@@ -111,6 +111,7 @@ import {
 	resolveConversationOpen,
 } from "./conversation-open.ts";
 import type { IntegratedConversationSessionSelection } from "./handshake-responses.ts";
+import { getHostDisplayName } from "./host-display-name.ts";
 import { IrohConnectionSupervisor } from "./iroh-connection-supervisor.ts";
 import { createIrohEndpointTicket } from "./iroh-endpoint-ticket.ts";
 import {
@@ -1265,7 +1266,7 @@ class IrohDaemonService {
 				key.workspaceName === request.workspaceName &&
 				this.services.state
 					.getHostState()
-					.workspaceGenerations?.find((record) => record.workspaceName === request.workspaceName)?.generation ===
+					.workspaceGenerations.find((record) => record.workspaceName === request.workspaceName)?.generation ===
 					key.workspaceGeneration
 			);
 		};
@@ -1301,7 +1302,7 @@ class IrohDaemonService {
 		const state = await this.stateManager.getState();
 		if (await finishIfSuperseded()) return;
 		const workspace = state.workspaces.find((candidate) => candidate.name === request.workspaceName);
-		const workspaceGeneration = (state.workspaceGenerations ?? []).find(
+		const workspaceGeneration = state.workspaceGenerations.find(
 			(candidate) => candidate.workspaceName === request.workspaceName,
 		)?.generation;
 		if (!workspace || workspaceGeneration === undefined) {
@@ -1337,7 +1338,7 @@ class IrohDaemonService {
 		const sessionCwd = stored.cwd;
 		// The worktree it is bound to, else the one its directory is in.
 		const worktree =
-			(state.worktrees ?? []).find(
+			state.worktrees.find(
 				(candidate) =>
 					candidate.workspaceName === request.workspaceName && candidate.sessionIds.includes(request.sessionId),
 			) ?? stored.placement.worktree;
@@ -1374,7 +1375,7 @@ class IrohDaemonService {
 		const currentWorkspace = currentState.workspaces.find(
 			(candidate) => candidate.name === request.workspaceName && candidate.path === workspace.path,
 		);
-		const currentGeneration = (currentState.workspaceGenerations ?? []).find(
+		const currentGeneration = currentState.workspaceGenerations.find(
 			(candidate) => candidate.workspaceName === request.workspaceName,
 		)?.generation;
 		if (!assertHosted() || !currentWorkspace || currentGeneration !== workspaceGeneration) {
@@ -1433,7 +1434,7 @@ class IrohDaemonService {
 		try {
 			const state = await this.stateManager.getState();
 			if (signal.aborted) return;
-			const workspacesWithRecords = new Set((state.worktrees ?? []).map((worktree) => worktree.workspaceName));
+			const workspacesWithRecords = new Set(state.worktrees.map((worktree) => worktree.workspaceName));
 			for (const workspace of state.workspaces) {
 				if (signal.aborted) return;
 				// Skip workspaces with neither records nor checkout directories: no git
@@ -2133,7 +2134,7 @@ class IrohDaemonService {
 					error: "Relay credential reset cancelled pairing.",
 				});
 			}
-			for (const ticket of (await this.stateManager.getState()).pendingPairingTickets ?? []) {
+			for (const ticket of (await this.stateManager.getState()).pendingPairingTickets) {
 				if (this.engine) await this.engine.cancelPairingSecretByHash(ticket.secretHash);
 				else await this.stateManager.removePendingPairingTicket(ticket.secretHash);
 			}
@@ -2582,6 +2583,7 @@ class IrohDaemonService {
 					this.authorizeRelayCredentialPairing(claimId, remoteNodeId),
 				classifyWorkspaceAvailability: getIrohRemoteWorkspaceAvailabilityStatus,
 				hostNodeId,
+				hostName: getHostDisplayName(),
 				relayMode: this.relayMode,
 				...(this.relayMode === "production" ? { relayUrls: this.relayUrls } : {}),
 				stateManager: this.stateManager,
@@ -3394,12 +3396,12 @@ class IrohDaemonService {
 				const state = this.services.state.getHostState();
 				const client = state.clients.find((entry) => entry.nodeId === authorization.client.nodeId);
 				const workspace = state.workspaces.find((entry) => entry.name === authorization.workspace.name);
-				const generation = state.workspaceGenerations?.find(
+				const generation = state.workspaceGenerations.find(
 					(entry) => entry.workspaceName === authorization.workspace.name,
 				)?.generation;
 				if (
 					!this.admission.isOpen ||
-					client?.rpcGrant?.revision !== authorization.client.rpcGrant.revision ||
+					client?.rpcGrant.revision !== authorization.client.rpcGrant.revision ||
 					!isIrohRemoteClientAllowedForWorkspace(client, authorization.workspace.name, state.workspaces) ||
 					client.allowedTools !== authorization.client.allowedTools ||
 					workspace?.path !== authorization.workspace.path ||

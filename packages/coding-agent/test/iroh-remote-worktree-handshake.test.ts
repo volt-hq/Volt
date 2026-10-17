@@ -326,4 +326,15 @@ describe("integrated conversation handshake response echo", () => {
 		);
 		expect(unbound.conversation).not.toHaveProperty("worktreeId");
 	});
+
+	test("carries the daemon's host name in remote host metadata", () => {
+		const response = createIntegratedConversationHandshakeResponse(
+			{ hello, response: handshakeResponse },
+			authorization,
+			"abc123",
+			{ kind: "created", sessionId: "abc123" },
+			{ hostName: "Jordan's MacBook Pro" },
+		);
+		expect(response.remoteHost?.hostName).toBe("Jordan's MacBook Pro");
+	});
 });

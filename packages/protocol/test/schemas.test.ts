@@ -238,7 +238,14 @@ describe("shared schemas", () => {
 			],
 			[
 				ControlClientStatusSchema,
-				{ clientNodeId: "node-1", pairedAtMs: startedAt, lastSeenAtMs: startedAt + 60_000 },
+				{
+					clientNodeId: "node-1",
+					pairedAtMs: startedAt,
+					lastSeenAtMs: startedAt + 60_000,
+					allowedTools: [],
+					usesDefaultTools: false,
+					rpcGrant: { schemaVersion: 1, revision: 1, capabilities: [] },
+				},
 				["pairedAtMs", "lastSeenAtMs"],
 			],
 			[
@@ -249,6 +256,7 @@ describe("shared schemas", () => {
 					lastSeenAtMs: startedAt + 60_000,
 					revokedAtMs: startedAt + 120_000,
 					rePairApprovedAtMs: startedAt + 180_000,
+					rpcGrant: { schemaVersion: 1, revision: 1, capabilities: [] },
 				},
 				["pairedAtMs", "lastSeenAtMs", "revokedAtMs", "rePairApprovedAtMs"],
 			],
@@ -265,7 +273,9 @@ describe("shared schemas", () => {
 					phoneConnections: 0,
 					workspaces: [],
 					clients: [],
+					revokedClients: [],
 					remoteTransport: { state: "ready" },
+					remotePolicy: { allowTools: null, detachedRuntimeTtlMs: 1_800_000 },
 					keepAwake: { enabled: false, state: "disabled" },
 					workers: [],
 				},

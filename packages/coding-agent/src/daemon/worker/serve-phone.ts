@@ -34,7 +34,7 @@ import {
 	type IntegratedConversationSessionSelection,
 } from "../handshake-responses.ts";
 import { adaptRelaySocketToIrohStream } from "../relay-stream.ts";
-import { getWorktreesRoot } from "../worktree-manager.ts";
+import { getWorktreesRootSpellings } from "../worktree-manager.ts";
 
 /** Rehydrate the daemon-authorized relay snapshot without recomputing its workspace scope. */
 export function createRelayAuthorization(
@@ -79,7 +79,7 @@ export function getRelaySanitizerOptions(
 			? {}
 			: { remoteWorkspacePath: `/workspace/${authorization.worktreeSourceRootRelativePath}` }),
 		workspacePath: authorization.worktreePath,
-		additionalRedactedPaths: [authorization.workspacePath, getWorktreesRoot(agentDir)],
+		additionalRedactedPaths: [authorization.workspacePath, ...getWorktreesRootSpellings(agentDir)],
 	};
 }
 
@@ -167,7 +167,13 @@ export async function servePhoneRelay(options: ServePhoneRelayOptions): Promise<
 			authorization,
 			conversation.id,
 			sessionSelection,
-			{ hostNodeId, relayMode: preamble.relayMode, relayUrls: preamble.relayUrls },
+			{
+				hostNodeId,
+				relayMode: preamble.relayMode,
+				relayUrls: preamble.relayUrls,
+				// Resolved once by the daemon and carried in the relayed engine response.
+				hostName: handshake.response.remoteHost?.hostName,
+			},
 			preamble.resolvedTarget.worktreeId,
 			preamble.resolvedTarget.workingDirectory,
 		);

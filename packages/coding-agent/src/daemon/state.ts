@@ -27,12 +27,11 @@ export const DEFAULT_DETACHED_RUNTIME_TTL_MS = 30 * 60 * 1000;
 
 /**
  * Persistent daemon state. The pairing/client sections reuse the remote host
- * state shapes verbatim, including push targets. The Iroh identity survives
- * migration; pre-grant client authority is intentionally not imported.
+ * state shapes verbatim, including push targets.
  */
 export interface VoltdStateFileV1 {
 	version: 1;
-	/** Iroh secret key bytes; MUST survive migration so the saved host identity remains stable. */
+	/** Iroh secret key bytes; the saved host identity paired phones dial. */
 	irohSecretKey?: number[];
 	clients: IrohRemoteClient[];
 	revokedClients: IrohRemoteRevokedClient[];
@@ -176,13 +175,13 @@ export function hostStateToVoltdState(
 		version: 1,
 		irohSecretKey: hostState.hostSecretKey,
 		clients: hostState.clients,
-		revokedClients: hostState.revokedClients ?? [],
-		workspaceGenerationCounter: hostState.workspaceGenerationCounter ?? 0,
-		workspaceGenerations: hostState.workspaceGenerations ?? [],
+		revokedClients: hostState.revokedClients,
+		workspaceGenerationCounter: hostState.workspaceGenerationCounter,
+		workspaceGenerations: hostState.workspaceGenerations,
 		workspaces: hostState.workspaces,
-		worktrees: hostState.worktrees ?? [],
-		pendingPairingTickets: hostState.pendingPairingTickets ?? [],
-		pairingSecretTombstones: hostState.pairingSecretTombstones ?? [],
+		worktrees: hostState.worktrees,
+		pendingPairingTickets: hostState.pendingPairingTickets,
+		pairingSecretTombstones: hostState.pairingSecretTombstones,
 		settings,
 	};
 }
@@ -254,95 +253,12 @@ export function parseVoltdState(value: unknown): VoltdStateFileV1 {
 	});
 }
 
-export function getLegacyRemoteStatePath(agentDir: string): string {
-	return join(agentDir, "remote", "iroh-host.json");
-}
-
-export interface LegacyRemoteStateMigration {
-	state: VoltdStateFileV1;
-	droppedAccess: {
-		clients: number;
-		revokedClients: number;
-		pendingPairingTickets: number;
-	};
-}
-
-/**
- * One-time migration from remote/iroh-host.json. A pre-grant file keeps the
- * Iroh identity plus validated workspace/worktree metadata, but deliberately
- * drops every old authority-bearing record. Those clients must pair again
- * under an explicit RPC grant; expected pre-grant migration is not corruption.
- */
-export function migrateLegacyRemoteState(agentDir: string, statePath: string): LegacyRemoteStateMigration | null {
-	if (existsSync(statePath)) {
-		return null;
-	}
-	const legacyPath = getLegacyRemoteStatePath(agentDir);
-	if (!existsSync(legacyPath)) {
-		return null;
-	}
-	const parsedJson: unknown = JSON.parse(readFileSync(legacyPath, "utf8"));
-	let legacyState: IrohRemoteHostState;
-	let droppedAccess = { clients: 0, revokedClients: 0, pendingPairingTickets: 0 };
-	try {
-		legacyState = parseIrohRemoteHostState(parsedJson);
-	} catch (error) {
-		if (!isPreGrantLegacyHostState(parsedJson)) {
-			throw error;
-		}
-		const record = parsedJson as Record<string, unknown>;
-		droppedAccess = {
-			clients: Array.isArray(record.clients) ? record.clients.length : 0,
-			revokedClients: Array.isArray(record.revokedClients) ? record.revokedClients.length : 0,
-			pendingPairingTickets: Array.isArray(record.pendingPairingTickets) ? record.pendingPairingTickets.length : 0,
-		};
-		legacyState = parseIrohRemoteHostState({
-			...record,
-			clients: [],
-			revokedClients: [],
-			pendingPairingTickets: [],
-		});
-	}
-	return {
-		state: hostStateToVoltdState(legacyState, createEmptyVoltdState().settings),
-		droppedAccess,
-	};
-}
-
-function isPreGrantLegacyHostState(value: unknown): value is Record<string, unknown> {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) {
-		return false;
-	}
-	const record = value as Record<string, unknown>;
-	for (const field of ["clients", "revokedClients", "pendingPairingTickets"] as const) {
-		const entries = record[field];
-		if (!Array.isArray(entries)) {
-			continue;
-		}
-		if (
-			entries.some(
-				(entry) => typeof entry === "object" && entry !== null && !Array.isArray(entry) && !("rpcGrant" in entry),
-			)
-		) {
-			return true;
-		}
-	}
-	return false;
-}
-
 export interface VoltdStateStoreOptions {
-	agentDir: string;
 	statePath: string;
 	/** Debounce for coalescing writes; flushes synchronously on close(). */
 	debounceMs?: number;
 	/** Durable writer seam for deterministic persistence-concurrency tests. */
 	writeStateFile?: (path: string, content: string) => Promise<void>;
-}
-
-export interface LoadVoltdStateResult {
-	state: VoltdStateFileV1;
-	migratedFromLegacyState: boolean;
-	legacyDroppedAccess?: LegacyRemoteStateMigration["droppedAccess"];
 }
 
 const DEFAULT_STATE_DEBOUNCE_MS = 250;
@@ -364,54 +280,23 @@ function invalidStateFileError(path: string, error: unknown): Error {
 	);
 }
 
-/** Inspect persisted daemon state without modifying or migrating it. */
+/** Inspect persisted daemon state without modifying it. */
 export function inspectVoltdStateFiles(agentDir: string): InvalidVoltdStateFile | undefined {
 	const statePath = join(agentDir, "daemon", "state.json");
-	if (existsSync(statePath)) {
-		try {
-			parseVoltdState(JSON.parse(readFileSync(statePath, "utf8")));
-			return undefined;
-		} catch (error) {
-			return { path: statePath, error: stateFileErrorMessage(statePath, error) };
-		}
-	}
-	const legacyPath = getLegacyRemoteStatePath(agentDir);
-	if (!existsSync(legacyPath)) {
+	if (!existsSync(statePath)) {
 		return undefined;
 	}
 	try {
-		migrateLegacyRemoteState(agentDir, statePath);
+		parseVoltdState(JSON.parse(readFileSync(statePath, "utf8")));
 		return undefined;
 	} catch (error) {
-		return { path: legacyPath, error: stateFileErrorMessage(legacyPath, error) };
-	}
-}
-
-function regeneratePreGrantVoltdState(value: unknown): VoltdStateFileV1 | undefined {
-	if (!isPreGrantLegacyHostState(value)) {
-		return undefined;
-	}
-	const record = value as Record<string, unknown>;
-	try {
-		return parseVoltdState({
-			...record,
-			clients: [],
-			revokedClients: [],
-			pendingPairingTickets: [],
-		});
-	} catch {
-		return undefined;
+		return { path: statePath, error: stateFileErrorMessage(statePath, error) };
 	}
 }
 
 function readRecoverableVoltdState(path: string): VoltdStateFileV1 | undefined {
 	try {
-		const value: unknown = JSON.parse(readFileSync(path, "utf8"));
-		try {
-			return parseVoltdState(value);
-		} catch {
-			return regeneratePreGrantVoltdState(value);
-		}
+		return parseVoltdState(JSON.parse(readFileSync(path, "utf8")));
 	} catch {
 		return undefined;
 	}
@@ -422,14 +307,14 @@ export interface RecoverableVoltdStateBackup {
 	preservedIdentity: boolean;
 }
 
-/** Find the newest validated daemon-state backup that can be safely regenerated. */
+/** Find the newest daemon-state backup that parses as current state. */
 export function findRecoverableVoltdStateBackup(agentDir: string): RecoverableVoltdStateBackup | undefined {
 	const daemonDir = join(agentDir, "daemon");
 	if (!existsSync(daemonDir)) {
 		return undefined;
 	}
 	const candidates = readdirSync(daemonDir)
-		.filter((name) => /^state\.json\.(?:corrupt|invalid)-\d+$/.test(name))
+		.filter((name) => /^state\.json\.invalid-\d+$/.test(name))
 		.map((name) => {
 			const path = join(daemonDir, name);
 			return { path, modifiedAtMs: statSync(path).mtimeMs, state: readRecoverableVoltdState(path) };
@@ -468,34 +353,20 @@ export async function recoverVoltdStateFromBackup(
 	};
 }
 
-/** Back up invalid state and regenerate validated non-authority data when possible. */
-export async function regenerateInvalidVoltdState(
-	agentDir: string,
-): Promise<{ backupPath: string; preservedIdentity: boolean }> {
+/** Back up invalid state; the daemon starts with empty state and a new Iroh identity. */
+export async function regenerateInvalidVoltdState(agentDir: string): Promise<{ backupPath: string }> {
 	const invalid = inspectVoltdStateFiles(agentDir);
 	if (!invalid) {
 		throw new Error("Daemon state is valid; regeneration is not needed.");
 	}
-	let regenerated: VoltdStateFileV1 | undefined;
-	if (invalid.path === join(agentDir, "daemon", "state.json")) {
-		try {
-			regenerated = regeneratePreGrantVoltdState(JSON.parse(readFileSync(invalid.path, "utf8")));
-		} catch {
-			// Malformed JSON cannot be partially recovered. The original is still backed up below.
-		}
-	}
 	const backupPath = `${invalid.path}.invalid-${Date.now()}`;
 	await rename(invalid.path, backupPath);
-	if (regenerated) {
-		await writeDurableAtomicFile(invalid.path, `${JSON.stringify(regenerated, null, 2)}\n`);
-	}
-	return { backupPath, preservedIdentity: regenerated?.irohSecretKey !== undefined };
+	return { backupPath };
 }
 
 /** Debounced, atomic (tmp + rename, 0600) persistence for VoltdStateFileV1. */
 export class VoltdStateStore {
 	private readonly statePath: string;
-	private readonly agentDir: string;
 	private readonly debounceMs: number;
 	private readonly writeStateFile: (path: string, content: string) => Promise<void>;
 	private current: VoltdStateFileV1 | undefined;
@@ -503,54 +374,16 @@ export class VoltdStateStore {
 	private pendingFlush: Promise<void> = Promise.resolve();
 	private stateRevision = 0;
 	private persistedRevision = 0;
-	private migrated = false;
-	private legacyDroppedAccess: LegacyRemoteStateMigration["droppedAccess"] | undefined;
 
 	constructor(options: VoltdStateStoreOptions) {
 		this.statePath = options.statePath;
-		this.agentDir = options.agentDir;
 		this.debounceMs = options.debounceMs ?? DEFAULT_STATE_DEBOUNCE_MS;
 		this.writeStateFile = options.writeStateFile ?? writeDurableAtomicFile;
 	}
 
-	async load(): Promise<LoadVoltdStateResult> {
+	async load(): Promise<VoltdStateFileV1> {
 		if (this.current) {
-			return {
-				state: this.current,
-				migratedFromLegacyState: this.migrated,
-				...(this.legacyDroppedAccess === undefined ? {} : { legacyDroppedAccess: this.legacyDroppedAccess }),
-			};
-		}
-		let migration: LegacyRemoteStateMigration | null;
-		try {
-			migration = migrateLegacyRemoteState(this.agentDir, this.statePath);
-		} catch (error) {
-			throw invalidStateFileError(getLegacyRemoteStatePath(this.agentDir), error);
-		}
-		if (migration) {
-			this.current = migration.state;
-			this.markStateChanged();
-			this.migrated = true;
-			this.legacyDroppedAccess = migration.droppedAccess;
-			await this.enqueueWrite();
-			const legacyPath = getLegacyRemoteStatePath(this.agentDir);
-			try {
-				await rename(legacyPath, `${legacyPath}.migrated`);
-			} catch (error) {
-				// A daemon started concurrently (before the single-instance socket bind)
-				// may have already migrated and renamed the legacy file. Its absence is
-				// benign: the migrated content is identical and already persisted, so a
-				// racing start must not crash here — it will fail cleanly at the socket
-				// bind instead.
-				if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-					throw error;
-				}
-			}
-			return {
-				state: this.current,
-				migratedFromLegacyState: true,
-				legacyDroppedAccess: migration.droppedAccess,
-			};
+			return this.current;
 		}
 		if (existsSync(this.statePath)) {
 			try {
@@ -563,7 +396,7 @@ export class VoltdStateStore {
 			this.markStateChanged();
 			await this.enqueueWrite();
 		}
-		return { state: this.current, migratedFromLegacyState: false };
+		return this.current;
 	}
 
 	get state(): VoltdStateFileV1 {

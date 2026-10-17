@@ -193,6 +193,8 @@ describe("resolveDaemonWorkspaceForCwd (§5.2.2)", () => {
 					remoteTransport: { state: "ready" },
 					workspaces: handlers.workspaces,
 					clients: [],
+					revokedClients: [],
+					remotePolicy: { allowTools: null, detachedRuntimeTtlMs: 1_800_000 },
 					keepAwake: { enabled: false, state: "disabled" },
 					workers: [],
 				};
@@ -300,6 +302,8 @@ function statusResult(id: string, workspaces: Array<{ name: string; path: string
 		remoteTransport: { state: "ready" },
 		workspaces,
 		clients: [],
+		revokedClients: [],
+		remotePolicy: { allowTools: null, detachedRuntimeTtlMs: 1_800_000 },
 		keepAwake: { enabled: false, state: "disabled" },
 		workers: [],
 	};

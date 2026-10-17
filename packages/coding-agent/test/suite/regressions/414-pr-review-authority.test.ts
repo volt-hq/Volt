@@ -239,7 +239,7 @@ async function fixture(grant = capabilities) {
 	const provider = vi
 		.spyOn(githubCliCodeHostProvider, "resolvePullRequestCheckout")
 		.mockImplementation(async () => ({ ok: true, target: structuredClone(target) }));
-	const state = new VoltdStateStore({ agentDir, statePath: join(agentDir, "state.json") });
+	const state = new VoltdStateStore({ statePath: join(agentDir, "state.json") });
 	await state.load();
 	state.updateSettings({ worktreeCleanup: { pruneOnStart: false }, relayAuthToken: SECRET });
 	state.setHostState({

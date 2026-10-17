@@ -26,6 +26,7 @@ import {
 	WorktreeManager,
 	WorktreeRetentionSweeper,
 } from "../src/daemon/worktree-manager.ts";
+import { createIrohRemoteHostStateFixture } from "./utilities/iroh-host-state.ts";
 
 const realpathSync = nodeRealpathSync.native;
 
@@ -90,11 +91,7 @@ describe("worktree manager (fake git)", () => {
 		mkdirSync(workspaceDir, { recursive: true });
 		workspace = { name: "repo", path: workspaceDir };
 		stateManager = new IrohRemoteHostStateManager({
-			initialState: {
-				workspaces: [workspace],
-				worktrees: [],
-				clients: [],
-			},
+			initialState: createIrohRemoteHostStateFixture({ workspaces: [workspace] }),
 		});
 		flushState = vi.fn(async () => {});
 	});
@@ -210,16 +207,12 @@ describe("worktree manager (fake git)", () => {
 	});
 
 	it("preserves a created checkout and rolls state back when child persistence fails", async () => {
-		let persistedState: IrohRemoteHostState = {
-			workspaces: [workspace],
-			worktrees: [],
-			clients: [],
-		};
+		let persistedState: IrohRemoteHostState = createIrohRemoteHostStateFixture({ workspaces: [workspace] });
 		const failingStateManager = new IrohRemoteHostStateManager({
 			store: {
 				read: () => structuredClone(persistedState),
 				write: (nextState) => {
-					if ((nextState.worktrees ?? []).length > 0) {
+					if (nextState.worktrees.length > 0) {
 						throw new Error("simulated durable write failure");
 					}
 					persistedState = structuredClone(nextState);
@@ -1136,7 +1129,7 @@ describe("worktree manager (real git integration)", () => {
 			git(["commit", "-m", "init"]);
 
 			const stateManager = new IrohRemoteHostStateManager({
-				initialState: { workspaces: [{ name: "repo", path: repoDir }], worktrees: [], clients: [] },
+				initialState: createIrohRemoteHostStateFixture({ workspaces: [{ name: "repo", path: repoDir }] }),
 			});
 			const workspace: IrohRemoteWorkspace = { name: "repo", path: repoDir };
 			const manager = new WorktreeManager({
@@ -1199,7 +1192,7 @@ describe("worktree manager (real git integration)", () => {
 			git(["commit", "-m", "init"]);
 
 			const stateManager = new IrohRemoteHostStateManager({
-				initialState: { workspaces: [{ name: "repo", path: repoDir }], worktrees: [], clients: [] },
+				initialState: createIrohRemoteHostStateFixture({ workspaces: [{ name: "repo", path: repoDir }] }),
 			});
 			const workspace: IrohRemoteWorkspace = { name: "repo", path: repoDir };
 			const manager = new WorktreeManager({
@@ -1244,7 +1237,7 @@ describe("worktree manager (real git integration)", () => {
 			git(["commit", "-m", "init"]);
 
 			const stateManager = new IrohRemoteHostStateManager({
-				initialState: { workspaces: [{ name: "workspace", path: workspaceDir }], worktrees: [], clients: [] },
+				initialState: createIrohRemoteHostStateFixture({ workspaces: [{ name: "workspace", path: workspaceDir }] }),
 			});
 			const workspace: IrohRemoteWorkspace = { name: "workspace", path: workspaceDir };
 			const manager = new WorktreeManager({
@@ -1295,7 +1288,7 @@ describe("worktree manager (real git integration)", () => {
 			git(["commit", "-m", "init"]);
 
 			const stateManager = new IrohRemoteHostStateManager({
-				initialState: { workspaces: [{ name: "repo", path: repoDir }], worktrees: [], clients: [] },
+				initialState: createIrohRemoteHostStateFixture({ workspaces: [{ name: "repo", path: repoDir }] }),
 			});
 			const workspace: IrohRemoteWorkspace = { name: "repo", path: repoDir };
 			const manager = new WorktreeManager({

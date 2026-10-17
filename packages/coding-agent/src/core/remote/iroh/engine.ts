@@ -71,6 +71,8 @@ export interface IrohRemoteHostEngineOptions {
 	auditLogger?: IrohRemoteAuditLogger;
 	authorizeRelayCredentialPairing?: (claimId: string, remoteNodeId: string) => Promise<boolean>;
 	hostNodeId?: string;
+	/** The computer's display name, sent to clients in handshake host metadata. */
+	hostName?: string;
 	now?: () => number;
 	pairingExpiresAt?: number;
 	pairingSecret?: string;
@@ -169,9 +171,9 @@ function isEmptyIrohRemoteHostStateForRuntimePairingBootstrap(state: IrohRemoteH
 	return (
 		state.workspaces.length === 0 &&
 		state.clients.length === 0 &&
-		(state.revokedClients ?? []).length === 0 &&
-		(state.pendingPairingTickets ?? []).length === 0 &&
-		(state.pairingSecretTombstones ?? []).length === 0
+		state.revokedClients.length === 0 &&
+		state.pendingPairingTickets.length === 0 &&
+		state.pairingSecretTombstones.length === 0
 	);
 }
 
@@ -182,6 +184,7 @@ export class IrohRemoteHostEngine {
 		| undefined;
 	private readonly classifyWorkspaceAvailability: IrohRemoteWorkspaceAvailabilityClassifier | undefined;
 	private readonly hostNodeId: string | undefined;
+	private readonly hostName: string | undefined;
 	private readonly relayMode: IrohRemoteRelayMode | undefined;
 	private readonly relayUrls: string[] | undefined;
 	private readonly now: () => number;
@@ -207,6 +210,7 @@ export class IrohRemoteHostEngine {
 		this.authorizeRelayCredentialPairing = options.authorizeRelayCredentialPairing;
 		this.classifyWorkspaceAvailability = options.classifyWorkspaceAvailability;
 		this.hostNodeId = options.hostNodeId;
+		this.hostName = options.hostName;
 		this.relayMode = options.relayMode;
 		this.relayUrls = options.relayUrls;
 		this.now = options.now ?? Date.now;
@@ -438,7 +442,7 @@ export class IrohRemoteHostEngine {
 		const pendingPairingTicket =
 			secretHash === undefined
 				? undefined
-				: (await this.stateManager.getState()).pendingPairingTickets?.find(
+				: (await this.stateManager.getState()).pendingPairingTickets.find(
 						(ticket) => ticket.secretHash === secretHash,
 					);
 		if (pendingPairingTicket?.relayCredentialClaimId !== undefined && pendingPairingTicket.expiresAt >= this.now()) {
@@ -636,6 +640,7 @@ export class IrohRemoteHostEngine {
 				hostNodeId: this.hostNodeId,
 				relayMode: this.relayMode,
 				relayUrls: this.relayUrls,
+				hostName: this.hostName,
 				features: [...IROH_REMOTE_HOST_FEATURES],
 			}),
 			workspace: authorization.workspace.name,

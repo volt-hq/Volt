@@ -238,9 +238,9 @@ export async function verifyPidfileProcess(
 		return "mismatch";
 	}
 	// A match REQUIRES verifying the process start time against the pidfile, not
-	// just a voltd-looking command line. Without that check (a legacy pidfile
-	// missing startedAtMs, or the OS not reporting a start time) a recycled pid
-	// whose command line merely contains a voltd marker must not be signalled.
+	// just a voltd-looking command line. Without that check (the OS not reporting
+	// a start time) a recycled pid whose command line merely contains a voltd
+	// marker must not be signalled.
 	const toleranceMs = options.toleranceMs ?? DEFAULT_START_TIME_TOLERANCE_MS;
 	if (!processStartTimeMatches(pidfile.startedAtMs, lookup.identity, toleranceMs)) {
 		return "mismatch";

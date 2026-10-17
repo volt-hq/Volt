@@ -5,6 +5,8 @@ import { parseIrohRemoteHostState } from "../../../src/core/remote/iroh/state.ts
 const RPC_GRANT = createIrohRemotePresetAccess("coding").rpcGrant;
 
 const STATE = {
+	pairingSecretTombstones: [],
+	pendingPairingTickets: [],
 	workspaceGenerationCounter: 1,
 	workspaceGenerations: [{ workspaceName: "volt", generation: 1 }],
 	workspaces: [{ name: "volt", path: "/workspace" }],

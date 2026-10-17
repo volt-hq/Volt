@@ -794,8 +794,8 @@ describe("Generate E2E Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.NVIDIA_API_KEY)("NVIDIA NIM Provider (Nemotron 3 Super via OpenAI Completions)", () => {
-		const llm = getModel("nvidia", "nvidia/nemotron-3-super-120b-a12b");
+	describe.skipIf(!process.env.NVIDIA_API_KEY)("NVIDIA NIM Provider (Nemotron 3.5 Super VL)", () => {
+		const llm = getModel("nvidia", "nvidia/nemotron-3.5-super-vl-120b-a12b");
 
 		it("should complete basic text generation", { retry: 3 }, async () => {
 			await basicTextGeneration(llm);

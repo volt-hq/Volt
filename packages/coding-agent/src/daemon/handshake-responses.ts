@@ -1,4 +1,4 @@
-import { hostname, userInfo } from "node:os";
+import { userInfo } from "node:os";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
 import {
 	createIrohRemoteHandshakeSuccess,
@@ -20,6 +20,8 @@ export interface RemoteHostResponseContext {
 	hostNodeId?: string;
 	relayMode?: IrohRemoteRelayMode;
 	relayUrls?: string[];
+	/** The daemon's resolved computer display name. */
+	hostName?: string;
 }
 
 function getCurrentUserName(): string | undefined {
@@ -39,7 +41,7 @@ export function createRemoteHostMetadata(
 		hostNodeId: context.hostNodeId,
 		relayMode: context.relayMode,
 		relayUrls: context.relayUrls,
-		hostName: hostname(),
+		hostName: context.hostName,
 		userName: getCurrentUserName(),
 		cwd: "/workspace",
 	});

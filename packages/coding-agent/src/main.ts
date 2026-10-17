@@ -50,7 +50,6 @@ import { handleRemoteControlCommand } from "./daemon/remote-cli.ts";
 import { closeLocalSessionManager, restoreLocalSessionWorktree } from "./daemon/session-worktree.ts";
 import { isPathUnderWorktreesRoot, resolveWorktreeParentCheckout } from "./daemon/worktree-manager.ts";
 import { handleMcpCommand } from "./mcp-cli.ts";
-import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
 import { DaemonConnector } from "./modes/interactive/daemon-connector.ts";
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
@@ -440,8 +439,6 @@ interface InteractiveStartupContext {
 	readonly startupSettingsManager: SettingsManager;
 	readonly requestedProfile: string | undefined;
 	readonly requestedSessionName: string | undefined;
-	readonly migratedProviders: string[];
-	readonly deprecationWarnings: string[];
 	readonly extensionFactories: ExtensionDefinition[] | undefined;
 }
 
@@ -484,7 +481,6 @@ async function runInteractive(parsed: Args, context: InteractiveStartupContext):
 	const displaySettings = SettingsManager.create(startup.cwd, agentDir, { projectTrusted, profile: requestedProfile });
 	reportDiagnostics(collectSettingsDiagnostics(displaySettings, "interactive startup"));
 	const { initialMessage, initialImages } = await prepareInitialMessage(parsed, displaySettings.getImageAutoResize());
-	if (context.deprecationWarnings.length > 0) await showDeprecationWarnings(context.deprecationWarnings);
 	const connector = new DaemonConnector({
 		agentDir,
 		startup,
@@ -496,7 +492,6 @@ async function runInteractive(parsed: Args, context: InteractiveStartupContext):
 		...(sessionDir === undefined ? {} : { sessionDir }),
 	});
 	const interactiveMode = new InteractiveMode(connector, {
-		migratedProviders: context.migratedProviders,
 		// The TUI reads its own settings where its conversation starts, then with the trust its worker decided.
 		settingsScope: {
 			cwd: startup.cwd,
@@ -655,10 +650,6 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(1);
 	}
 
-	// Run migrations (pass cwd for project-local migrations)
-	const { migratedAuthProviders: migratedProviders, deprecationWarnings } = runMigrations(cwd);
-	time("runMigrations");
-
 	const startupSettingsManager = SettingsManager.create(cwd, agentDir, { profile: requestedProfile });
 	reportDiagnostics(collectSettingsDiagnostics(startupSettingsManager, "startup session lookup"));
 
@@ -688,8 +679,6 @@ export async function main(args: string[], options?: MainOptions) {
 			startupSettingsManager,
 			requestedProfile,
 			requestedSessionName,
-			migratedProviders,
-			deprecationWarnings,
 			extensionFactories: options?.extensionFactories,
 		});
 		return;
