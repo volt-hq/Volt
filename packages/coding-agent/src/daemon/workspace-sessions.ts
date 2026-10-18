@@ -256,15 +256,16 @@ export class WorkspaceSessions {
 		return undefined;
 	}
 
-	/** The session `sessionId` of the default store, whatever owns it, with where it runs when anything does. */
-	async locate(
-		sessionId: string,
-	): Promise<{ readonly location: SessionLocation; readonly placement?: SessionPlacement } | undefined> {
+	/** The session `sessionId` of the default store, whatever owns it: its summary, never its log. */
+	async locate(sessionId: string): Promise<SessionLocation | undefined> {
 		await this.retainStore();
-		const location = await findStoredSessionLocation(this.sessionDir, sessionId);
-		if (location === undefined) return undefined;
-		const placement = (await this.placements()).place(location.cwdKey);
-		return placement === undefined ? { location } : { location, placement };
+		return findStoredSessionLocation(this.sessionDir, sessionId);
+	}
+
+	/** The stored session `location` with where it runs, when `workspaceName` owns it now. */
+	async place(workspaceName: string, location: SessionLocation): Promise<WorkspaceSession | undefined> {
+		const placement = (await this.placements()).placeFor(workspaceName, location.cwdKey);
+		return placement === undefined ? undefined : { ...location, placement };
 	}
 
 	/** Which of `sessionIds` `workspaceName` owns in the default store. */
