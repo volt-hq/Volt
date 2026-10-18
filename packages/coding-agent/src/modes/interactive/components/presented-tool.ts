@@ -6,8 +6,9 @@
  * (tool-call-row.ts).
  *
  * Streaming arguments and partial results present again at most every
- * {@link STREAMING_RENDER_INTERVAL_MS}; a running call's elapsed time ticks
- * every second.
+ * {@link STREAMING_RENDER_INTERVAL_MS}. A live call is timed here, by this
+ * process's clock, from when it starts running until it is done; its elapsed
+ * time ticks every second.
  */
 
 import type { ImageContent, TextContent } from "@hansjm10/volt-ai";
@@ -64,6 +65,10 @@ export class PresentedToolComponent implements Component {
 	private argsComplete = false;
 	private executionStarted = false;
 	private result: ToolPresentResult | undefined;
+	private readonly liveProgress: boolean;
+	/** When the live call started running, and when it was done, by this process's clock. */
+	private startedAt: number | undefined;
+	private endedAt: number | undefined;
 	private readonly row: ToolCallRow;
 	private disposed = false;
 	private readonly coalescer: StreamingRenderCoalescer<void>;
@@ -80,10 +85,10 @@ export class PresentedToolComponent implements Component {
 		this.args = isRecord(args) ? args : {};
 		this.presenters = presenters;
 		this.cwd = cwd;
+		this.liveProgress = options.liveProgress === true;
 		this.row = new ToolCallRow(toolName, ui, {
 			...(options.showImages === undefined ? {} : { showImages: options.showImages }),
 			...(options.imageWidthCells === undefined ? {} : { imageWidthCells: options.imageWidthCells }),
-			timed: options.liveProgress === true,
 			...(options.work === undefined ? {} : { work: options.work }),
 			...(options.intents === undefined ? {} : { intents: options.intents }),
 		});
@@ -176,6 +181,10 @@ export class PresentedToolComponent implements Component {
 	private present(): void {
 		if (this.disposed) return;
 		const state = this.state();
+		if (this.liveProgress) {
+			if (state === "running") this.startedAt ??= Date.now();
+			if (state === "done" && this.startedAt !== undefined) this.endedAt ??= Date.now();
+		}
 		const input: ToolPresentInput = {
 			args: this.args,
 			argsComplete: this.argsComplete || state !== "pending",
@@ -193,6 +202,8 @@ export class PresentedToolComponent implements Component {
 			state,
 			isError: this.result?.isError === true,
 			...(this.result === undefined || this.result.partial ? {} : { content: this.result.content }),
+			...(this.startedAt === undefined ? {} : { startedAt: this.startedAt }),
+			...(this.endedAt === undefined ? {} : { endedAt: this.endedAt }),
 		});
 	}
 }
