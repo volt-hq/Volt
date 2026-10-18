@@ -23,6 +23,8 @@ import {
 
 export const RELAY_TOKEN_TTL_MS = 10_000;
 export const RELAY_OFFER_RETRY_AFTER_MS = 1_000;
+/** How long an active relay outlives its worker's exit for the bytes the worker wrote before it. */
+export const RELAY_WORKER_EXIT_GRACE_MS = 2_000;
 
 const RELAY_READ_LIMIT = 64 * 1024;
 /** Bytes a relayed socket's adapter holds unread before it stops reading the socket. */
@@ -257,6 +259,25 @@ export class RelayLifecycleOwner {
 			() => Promise.resolve(),
 		);
 		this.fencePhysicalWaits();
+		return this.settled;
+	}
+
+	/**
+	 * The worker serving this relay exited (D19). An offer closes now. An active
+	 * relay still delivers what the worker wrote before it exited: the exit and
+	 * those bytes arrive apart, and the bytes (its last frame among them) wait
+	 * unread ahead of the socket's EOF, after which the relay finishes the
+	 * phone's stream as on any worker EOF. A socket still open `graceMs` later
+	 * (a descendant holding it) closes abortively.
+	 */
+	workerExited(options: RelayCloseOptions = {}, graceMs = RELAY_WORKER_EXIT_GRACE_MS): Promise<RelayOutcome> {
+		if (this.lifecyclePhase !== "active") {
+			return this.close("worker_exited", options);
+		}
+		this.closeReason ??= "worker_exited";
+		const timer = setTimeout(() => void this.close("worker_exited"), graceMs);
+		timer.unref?.();
+		void this.settled.finally(() => clearTimeout(timer));
 		return this.settled;
 	}
 

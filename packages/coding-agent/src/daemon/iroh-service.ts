@@ -1091,11 +1091,11 @@ class IrohDaemonService {
 		this.trustStore = new ProjectTrustStore(services.agentDir);
 		this.pushRelayClient = createDaemonPushRelayClient(config, () => this.managedRelayCredential?.accessToken);
 		this.workers = services.workers;
-		// A worker that exited ends its relays (D19): their clients reconnect with resume.
+		// A worker that exited ends its relays (D19), after what it wrote: their clients reconnect with resume.
 		this.workers.onWorkerExited((workerId) => {
 			for (const [relayId, entry] of this.workerRelays) {
 				if (entry.workerId !== workerId) continue;
-				void entry.relay.close("worker_exited", { pendingMessage: "conversation host exited; retry" });
+				void entry.relay.workerExited({ pendingMessage: "conversation host exited; retry" });
 				this.workerRelays.delete(relayId);
 			}
 		});
