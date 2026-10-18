@@ -84,7 +84,12 @@ export interface IrohRemoteProjectionSanitizer {
 interface IrohRemoteOutboundSanitizerContext {
 	remoteWorkspacePath: string;
 	workspacePath: string;
-	workspacePathPatterns: string[];
+	/**
+	 * Every redacted root's occurrences, longest root first. A root ends where
+	 * no name character follows: `/root-old` is another directory, `/root|x`
+	 * is the root.
+	 */
+	workspacePathOccurrences: RegExp[];
 	/** Every redacted root as text may spell it: NFC and NFD, and on Windows with either separator. */
 	rootForms: string[];
 }
@@ -126,12 +131,12 @@ function createSanitizerContext(redaction: IrohRemoteRedaction): IrohRemoteOutbo
 	const workspacePath = redaction.workspacePath.normalize("NFC");
 	const redactedRoots = redaction.roots;
 	// On Windows, match either separator so mixed paths cannot bypass redaction.
-	const workspacePathPatterns = [
+	const workspacePathOccurrences = [
 		...new Set(redactedRoots.flatMap((root) => [root.normalize("NFC"), root.normalize("NFD")])),
 	]
 		.filter((value) => value.length > 0)
 		.sort((left, right) => right.length - left.length)
-		.map(createWorkspacePathPattern);
+		.map((root) => new RegExp(`${createWorkspacePathPattern(root)}(?![\\w-])`, sep === "\\" ? "gi" : "g"));
 	const rootForms = [
 		...new Set(
 			redactedRoots.flatMap((root) =>
@@ -144,7 +149,7 @@ function createSanitizerContext(redaction: IrohRemoteRedaction): IrohRemoteOutbo
 	return {
 		remoteWorkspacePath: redaction.remoteWorkspacePath,
 		workspacePath,
-		workspacePathPatterns,
+		workspacePathOccurrences,
 		rootForms,
 	};
 }
@@ -334,12 +339,9 @@ function normalizeWorkspacePath(value: string, context: IrohRemoteOutboundSaniti
 function normalizeWorkspacePathOccurrences(value: string, context: IrohRemoteOutboundSanitizerContext): string {
 	let normalized = value;
 	let redacted = false;
-	for (const workspacePathPattern of context.workspacePathPatterns) {
-		const next = normalized.replace(
-			// A root ends where no name character follows: `/root-old` is another directory, `/root|x` is the root.
-			new RegExp(`${workspacePathPattern}(?![\\w-])`, sep === "\\" ? "gi" : "g"),
-			context.remoteWorkspacePath,
-		);
+	for (const occurrences of context.workspacePathOccurrences) {
+		// A global expression's `replace` starts from the beginning and leaves `lastIndex` at 0: it is reused.
+		const next = normalized.replace(occurrences, context.remoteWorkspacePath);
 		redacted ||= next !== normalized;
 		normalized = next;
 	}
@@ -354,14 +356,36 @@ function redactPathOccurrences(
 	return sanitizePathOccurrences(value, context, mode);
 }
 
+/**
+ * The first index from `from` where a path may start: a `/`, `~`, or `\`; an
+ * ASCII letter followed by `:` (a Windows drive); or an `f` four characters
+ * before a `:` (`file:`). Every start the path predicates accept is one of
+ * these, so the text between two candidates holds no path start.
+ */
+function nextPathCandidate(value: string, from: number): number {
+	for (let index = from; index < value.length; index++) {
+		const code = value.charCodeAt(index);
+		if (code === 0x2f || code === 0x7e || code === 0x5c) return index;
+		const lower = code | 0x20;
+		if (lower >= 0x61 && lower <= 0x7a) {
+			if (value.charCodeAt(index + 1) === 0x3a) return index;
+			if (lower === 0x66 && value.charCodeAt(index + 4) === 0x3a) return index;
+		}
+	}
+	return -1;
+}
+
 function sanitizePathOccurrences(
 	value: string,
 	context: IrohRemoteOutboundSanitizerContext,
 	mode: PathContinuationMode,
 ): string {
+	let index = nextPathCandidate(value, 0);
+	if (index === -1) return value;
 	let sanitized = "";
-	let index = 0;
-	while (index < value.length) {
+	/** Where the text not yet copied starts. */
+	let copied = 0;
+	while (index !== -1) {
 		if (
 			startsFileUrlAt(value, index) ||
 			startsTildePathAt(value, index) ||
@@ -372,14 +396,14 @@ function sanitizePathOccurrences(
 		) {
 			const tokenMode = mode === "delimited" || isDelimitedPathToken(value, index) ? "delimited" : "text";
 			const tokenEnd = findPathTokenEnd(value, index, context, tokenMode);
-			sanitized += sanitizePathToken(value.slice(index, tokenEnd), context);
-			index = tokenEnd;
-			continue;
+			sanitized += value.slice(copied, index) + sanitizePathToken(value.slice(index, tokenEnd), context);
+			copied = tokenEnd;
+			index = nextPathCandidate(value, tokenEnd);
+		} else {
+			index = nextPathCandidate(value, index + 1);
 		}
-		sanitized += value[index];
-		index++;
 	}
-	return sanitized;
+	return sanitized + value.slice(copied);
 }
 
 function sanitizePathToken(value: string, context: IrohRemoteOutboundSanitizerContext): string {
