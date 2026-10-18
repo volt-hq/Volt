@@ -653,6 +653,78 @@ describe("relay framing (§12.2.3)", () => {
 	});
 });
 
+describe("relay worker exit (D19)", () => {
+	it("delivers the last frame a worker wrote before its exit reached the daemon, then finishes the phone's stream", async () => {
+		const { socketPath, registry } = await startRelayHarness();
+		const phone = new FakePhoneIrohStream();
+		const writeGate = createDeferred<void>();
+		const writtenChunks: Buffer[] = [];
+		let bytesBeforeFin: Buffer | undefined;
+		const finish = vi.fn(async () => {
+			bytesBeforeFin = Buffer.concat(writtenChunks);
+		});
+		const reset = vi.fn(async () => {});
+		phone.send.writeAll = vi.fn((bytes: Array<number>) => {
+			writtenChunks.push(Buffer.from(bytes));
+			return writeGate.promise;
+		});
+		phone.send.finish = finish;
+		phone.send.reset = reset;
+		const relay = mintTestRelay(registry, phone, vi.fn());
+
+		const client = connectRawRelayClient(socketPath, relay);
+		await vi.waitFor(() => expect(client.messages).toHaveLength(2));
+		// A frame still on its way to the phone holds the daemon's reads of the worker socket.
+		const live = Buffer.from(`${JSON.stringify({ type: "live" })}\n`, "utf8");
+		client.socket.write(live);
+		await vi.waitFor(() => expect(phone.send.writeAll).toHaveBeenCalledTimes(1));
+		// The worker writes its last frame and exits: its socket closes with that frame unread.
+		const fatal = Buffer.from(`${JSON.stringify({ type: "fatal", code: "workspace_unregistered" })}\n`, "utf8");
+		await new Promise<void>((resolve) => client.socket.end(fatal, resolve));
+		client.socket.destroy();
+		await client.closed;
+
+		// The exit reaches the daemon first.
+		const settled = relay.workerExited();
+		writeGate.resolve(undefined);
+		await vi.waitFor(() => expect(finish).toHaveBeenCalledTimes(1));
+		const lastBytes = Buffer.concat([live, fatal]);
+		expect(bytesBeforeFin).toEqual(lastBytes);
+		expect(reset).not.toHaveBeenCalled();
+		expect(await settled).toMatchObject({ reason: "worker_exited", bytesUp: lastBytes.length });
+		expect(registry.get(relay.relayId)).toBeUndefined();
+	});
+
+	it("resets the phone's stream when the worker's socket outlives its exit by the grace", async () => {
+		const { socketPath, registry } = await startRelayHarness();
+		const phone = new FakePhoneIrohStream();
+		const finish = vi.fn(async () => {});
+		const reset = vi.fn(async () => {});
+		phone.send.finish = finish;
+		phone.send.reset = reset;
+		const relay = mintTestRelay(registry, phone, vi.fn());
+		const client = connectRawRelayClient(socketPath, relay);
+		await vi.waitFor(() => expect(client.messages).toHaveLength(2));
+
+		// Something the exited worker started still holds its socket open.
+		expect(await relay.workerExited({}, 50)).toMatchObject({ reason: "worker_exited" });
+		expect(reset).toHaveBeenCalledTimes(1);
+		expect(finish).not.toHaveBeenCalled();
+		await client.closed;
+	});
+
+	it("closes an offer the worker never redeemed at once", async () => {
+		const registry = new RelayRegistry();
+		const rejectPending = vi.fn(async () => {});
+		const relay = mintTestRelay(registry, new FakePhoneIrohStream(), vi.fn(), undefined, rejectPending);
+
+		const settled = relay.workerExited({ pendingMessage: "conversation host exited; retry" });
+		expect(relay.phase).toBe("closed");
+		expect(await settled).toEqual({ reason: "worker_exited", bytesUp: 0, bytesDown: 0, durationMs: 0 });
+		expect(rejectPending).toHaveBeenCalledWith({ message: "conversation host exited; retry" });
+	});
+});
+
 describe("relay socket adapter", () => {
 	it("stops reading its socket while a megabyte waits unread, and reads again as it is consumed", async () => {
 		const socket = new PassThrough();
