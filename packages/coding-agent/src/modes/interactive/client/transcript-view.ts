@@ -8,7 +8,9 @@
  * `presentation` as its `patch`es left it, a call whose arguments still
  * stream as the host presents them as they stand, a custom message's
  * `view.presentation`. The view runs no presenter; a call the host has not
- * presented yet shows its tool's name.
+ * presented yet shows its tool's name. A call's duration is the host's too: a
+ * running call's live `startedAt` and `endedAt`, a committed call's result's
+ * `durationMs`.
  *
  * A user shell command the live `bash` value shows has a row from when it
  * starts: at the end of the transcript, or below it while a turn holds the
@@ -364,6 +366,7 @@ export class TranscriptView {
 					state: "done",
 					isError: message.isError,
 					content: message.content,
+					...(message.durationMs === undefined ? {} : { durationMs: message.durationMs }),
 				});
 				return;
 			}
@@ -531,7 +534,13 @@ export class TranscriptView {
 		const row = this.tools.get(message.toolCallId);
 		const presentation = toolPresentation(entry.view);
 		if (!row || presentation === undefined) return;
-		row.update({ presentation, state: "done", isError: message.isError, content: message.content });
+		row.update({
+			presentation,
+			state: "done",
+			isError: message.isError,
+			content: message.content,
+			...(message.durationMs === undefined ? {} : { durationMs: message.durationMs }),
+		});
 	}
 
 	private createRow(toolName: string, toolCallId: string): ToolCallRow {
@@ -598,6 +607,8 @@ export class TranscriptView {
 				...this.presentationOf(row, tool.presentation),
 				state: tool.ended ? "done" : "running",
 				...(tool.isError === undefined ? {} : { isError: tool.isError }),
+				...(tool.startedAt === undefined ? {} : { startedAt: tool.startedAt }),
+				...(tool.endedAt === undefined ? {} : { endedAt: tool.endedAt }),
 			});
 		}
 	}

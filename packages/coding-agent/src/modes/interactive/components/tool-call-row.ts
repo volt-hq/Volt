@@ -1,9 +1,11 @@
 /**
  * A tool call in the TUI transcript (RFC §8.3, Q9): the generic tool card
  * around the call's presentation, which the host presents and the TUI only
- * draws. The card shows the call's state, its elapsed time while it runs (a
- * timed row ticks every second), its result's images once it is done, and the
- * work the call started, read at every render.
+ * draws. The card shows the call's state, how long it ran as the host timed it
+ * (a running call's time since the host started it, ticking every second), its
+ * result's images once it is done, and the work the call started, read at
+ * every render. The row keeps no clock of its own: without the host's times it
+ * shows no duration.
  */
 
 import type { ImageContent, TextContent } from "@hansjm10/volt-ai";
@@ -16,8 +18,6 @@ import { ToolCard, type ToolCardImage, type ToolCardState, type ToolCardWork } f
 export interface ToolCallRowOptions {
 	readonly showImages?: boolean;
 	readonly imageWidthCells?: number;
-	/** The row times the call: from when it first runs until it is done. True by default. */
-	readonly timed?: boolean;
 	/** The work the call started, read at every render. */
 	readonly work?: () => readonly ToolCardWork[];
 	/** Where the presentation's actions send their intents. */
@@ -33,6 +33,12 @@ export interface ToolCallRowUpdate {
 	readonly isError?: boolean;
 	/** The result's content: its images show under the card once the call is done. */
 	readonly content?: readonly (TextContent | ImageContent)[];
+	/** When the host started the call, in Unix epoch milliseconds: a running call's time counts from it. */
+	readonly startedAt?: number;
+	/** When the host ended the call, in Unix epoch milliseconds. */
+	readonly endedAt?: number;
+	/** How long the call ran as the host timed it, in milliseconds; preferred over `startedAt` and `endedAt`. */
+	readonly durationMs?: number;
 }
 
 const IMAGE_MIME_TYPES: ReadonlySet<string> = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
@@ -46,8 +52,6 @@ export class ToolCallRow implements Component {
 	private expandHint = true;
 	private showImages: boolean;
 	private imageWidthCells: number;
-	private startedAt: number | undefined;
-	private endedAt: number | undefined;
 	private card: ToolCard;
 	/** PNG versions of the result's other images, for terminals that place PNG only, by source data. */
 	private readonly converted = new Map<string, ToolCardImage>();
@@ -82,19 +86,17 @@ export class ToolCallRow implements Component {
 	update(update: ToolCallRowUpdate): void {
 		if (this.disposed) return;
 		this.current = update;
-		if (update.state === "running" && this.options.timed !== false && this.startedAt === undefined) {
-			this.startedAt = Date.now();
+		// A running call's time ticks from when the host started it.
+		if (update.state !== "running" || update.startedAt === undefined) {
+			this.stopTicker();
+		} else if (this.ticker === undefined) {
 			this.ticker = setInterval(() => {
 				this.sync();
 				this.ui.requestRender();
 			}, 1000);
 			this.ticker.unref?.();
 		}
-		if (update.state === "done") {
-			if (this.startedAt !== undefined) this.endedAt ??= Date.now();
-			this.stopTicker();
-			this.convertImages();
-		}
+		if (update.state === "done") this.convertImages();
 		this.sync();
 	}
 
@@ -168,8 +170,7 @@ export class ToolCallRow implements Component {
 
 	private props() {
 		const { presentation, state, isError } = this.current;
-		const elapsedMs =
-			this.startedAt === undefined ? undefined : Math.max(0, (this.endedAt ?? Date.now()) - this.startedAt);
+		const elapsedMs = this.elapsedMs();
 		const work = this.options.work?.() ?? [];
 		return {
 			presentation: presentation ?? { title: this.toolName },
@@ -181,6 +182,15 @@ export class ToolCallRow implements Component {
 			images: this.showImages ? this.images() : [],
 			...(work.length === 0 ? {} : { work }),
 		};
+	}
+
+	/** How long the call ran as the host timed it, or runs so far; none without the host's times. */
+	private elapsedMs(): number | undefined {
+		const { state, startedAt, endedAt, durationMs } = this.current;
+		if (durationMs !== undefined) return Math.max(0, durationMs);
+		if (startedAt === undefined) return undefined;
+		if (endedAt !== undefined) return Math.max(0, endedAt - startedAt);
+		return state === "running" ? Math.max(0, Date.now() - startedAt) : undefined;
 	}
 
 	/** The result's images the terminal can show: other formats as PNG where it places PNG only. */
