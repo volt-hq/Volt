@@ -20,7 +20,8 @@ import {
 	type ClientSnapshot,
 	clientActiveBranch,
 	clientFold,
-	clientSnapshot,
+	clientSnapshotWith,
+	type FoldEntry,
 	type HostFrame,
 	type HostRequestKind,
 	type LiveItem,
@@ -31,7 +32,12 @@ import type { LiveUpdate } from "../../host/live-state.ts";
 import type { SessionManager } from "../../session-manager.ts";
 import { plainNoticeText } from "../../ui/extension-ui.ts";
 import type { Profile } from "../profiles.ts";
-import { conversationProjectionSource, projectEntry, sessionProjectionSource } from "../projection/entries.ts";
+import {
+	conversationProjectionSource,
+	projectEntry,
+	projectFoldEntry,
+	sessionProjectionSource,
+} from "../projection/entries.ts";
 import type { ProjectionSource } from "../projection/transcript.ts";
 
 /** Where a subscription writes its frames, in order. */
@@ -73,24 +79,12 @@ export function projectLog(
 	afterOrdinal: number,
 	throughOrdinal: number,
 ): ProjectedEntry[] {
-	return projectEntries(
-		conversation.session.sessionManager,
-		conversationProjectionSource(conversation.session),
-		profile,
-		afterOrdinal,
-		throughOrdinal,
-	);
-}
-
-function projectEntries(
-	sessionManager: SessionManager,
-	source: ProjectionSource,
-	profile: Profile,
-	afterOrdinal: number,
-	throughOrdinal: number,
-): ProjectedEntry[] {
+	const source = conversationProjectionSource(conversation.session);
 	const projected: ProjectedEntry[] = [];
-	for (const entry of sessionManager.committedEntriesAfter(afterOrdinal, throughOrdinal - afterOrdinal)) {
+	for (const entry of conversation.session.sessionManager.committedEntriesAfter(
+		afterOrdinal,
+		throughOrdinal - afterOrdinal,
+	)) {
 		const entryFrame = projectEntry(entry, source, profile);
 		if (entryFrame) projected.push(entryFrame);
 	}
@@ -99,7 +93,9 @@ function projectEntries(
 
 /**
  * A snapshot of a log at `ordinal` for `profile`: the fold of its projection,
- * with at most the profile's tail of entries. A log read without its runtime
+ * with at most the profile's tail of entries. The fold reads every entry's
+ * fold entry; only the entries the snapshot carries are projected in full, so
+ * a snapshot costs its tail, not the log. A log read without its runtime
  * presents with the built-in presenters.
  */
 export function logSnapshot(
@@ -108,12 +104,22 @@ export function logSnapshot(
 	ordinal: number,
 	source: ProjectionSource = sessionProjectionSource(sessionManager),
 ): ClientSnapshot {
-	const projected = projectEntries(sessionManager, source, profile, 0, ordinal);
-	const state = clientFold(projected);
+	const folded: FoldEntry[] = [];
+	for (const entry of sessionManager.committedEntriesAfter(0, ordinal)) {
+		const foldEntry = projectFoldEntry(entry, source, profile);
+		if (foldEntry) folded.push(foldEntry);
+	}
+	const state = clientFold(folded);
 	const tail = profile.limits.snapshotTail;
-	return projected.length <= tail
-		? clientSnapshot(state)
-		: { ...clientSnapshot(state), entries: clientActiveBranch(state).slice(-tail), earlier: true };
+	const bounded = state.entries.length > tail;
+	const carried = bounded ? clientActiveBranch(state).slice(-tail) : state.entries;
+	const entries = carried.map(({ id }) => {
+		const entry = source.entry(id);
+		const projected = entry && projectEntry(entry, source, profile);
+		if (!projected) throw new Error(`Snapshot entry ${id} does not project from the log`);
+		return projected;
+	});
+	return clientSnapshotWith(state, entries, bounded);
 }
 
 /** Whether a subscription from `after` starts with a snapshot: from `snapshot`, past the log, or further back than the profile replays. */
