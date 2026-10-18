@@ -403,7 +403,7 @@ describe("protocol subagents", () => {
 			type: "snapshot",
 			conversation,
 		});
-		// A read costs its log's length in snapshot tails: a device short of reads is cut off before it gets one.
+		// A read costs its log's length in reads of `entriesPerRead` entries: a device short of reads is cut off before it gets one.
 		const tight = await connect(
 			harness,
 			parent,
@@ -411,7 +411,7 @@ describe("protocol subagents", () => {
 				grant: GRANT,
 				redaction: { workspacePath: tmpdir(), remoteWorkspacePath: "/workspace" },
 				bound: parent.id,
-				limits: { snapshotTail: 1, readBurst: 2 },
+				limits: { entriesPerRead: 1, readBurst: 2 },
 			}),
 		);
 		cleanups.push(() => tight.close());

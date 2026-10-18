@@ -272,7 +272,7 @@ describe("protocol server on the remote profile", () => {
 		expect(pager.frames.find((frame) => frame.type === "result" && frame.queryId === "h-1")).toBeDefined();
 	});
 
-	it("charges a resume one read per snapshot tail it replays, and costly queries one read each", async () => {
+	it("charges a resume one read per entriesPerRead entries it replays, and costly queries one read each", async () => {
 		const { harness, conversation } = await setup({ responses: ["one", "two", "three"] });
 		for (const text of ["first", "second", "third"]) {
 			await conversation.session.prompt(text);
@@ -283,7 +283,7 @@ describe("protocol server on the remote profile", () => {
 		// A replay of `head` entries at two entries per read costs ceil(head / 2) reads.
 		const cost = Math.ceil(head / 2);
 		const resumer = phone(harness, conversation, {
-			limits: { snapshotTail: 2, readBurst: cost + 1, readRefillMs: 60_000 },
+			limits: { entriesPerRead: 2, readBurst: cost + 1, readRefillMs: 60_000 },
 		});
 		await welcomed(resumer);
 		resumer.send({ type: "subscribe", subscriptionId: "a", conversation: conversation.id, after: 0, live: false });

@@ -134,7 +134,7 @@ export function subscriptionSnapshots(
 
 /**
  * What a subscription from `after` costs of its connection's read budget: one
- * read for a snapshot or a live start, and one per snapshot tail of entries a
+ * read for a snapshot or a live start, and one per `entriesPerRead` entries a
  * resume replays.
  */
 export function subscriptionReads(
@@ -144,7 +144,7 @@ export function subscriptionReads(
 ): number {
 	if (subscriptionSnapshots(conversation, profile, after) || after === "snapshot") return 1;
 	const replayed = conversation.session.sessionManager.getOrdinal() - after;
-	return Math.max(1, Math.ceil(replayed / profile.limits.snapshotTail));
+	return Math.max(1, Math.ceil(replayed / profile.limits.entriesPerRead));
 }
 
 export class Subscription {

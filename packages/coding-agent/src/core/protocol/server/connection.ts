@@ -986,14 +986,14 @@ export function serveConnection(
 
 	/** Links to closed children found from the client's conversation, by that conversation and the child. */
 	const closedLinks = new Map<string, ClosedChildLink>();
-	/** Snapshot tails of the closed logs read last, by conversation: a read of one again charges as much before it loads. */
+	/** Reads charged for the closed logs read last, by conversation: a read of one again charges as much before it loads. */
 	const closedPages = new Map<string, number>();
 	/** Open children whose close ends their subscriptions here. */
 	const watchedChildren = new WeakSet<HostedConversation>();
 
 	/**
 	 * A closed child's log, read-only, charged as a replay that long: one read
-	 * per snapshot tail of entries it holds, one of them (or as many as it held
+	 * per `entriesPerRead` entries it holds, one of them (or as many as it held
 	 * when this connection read it last) before it loads, the rest after.
 	 * Undefined when the log cannot be read, or is not the subagent
 	 * conversation of the conversation whose work links it. Throws
@@ -1011,7 +1011,7 @@ export function serveConnection(
 		}
 		let kept = false;
 		try {
-			const pages = Math.max(1, Math.ceil(manager.getOrdinal() / profile.limits.snapshotTail));
+			const pages = Math.max(1, Math.ceil(manager.getOrdinal() / profile.limits.entriesPerRead));
 			closedPages.delete(link.conversation);
 			closedPages.set(link.conversation, pages);
 			for (const oldest of closedPages.keys()) {
