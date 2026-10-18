@@ -5,6 +5,8 @@
  *   middle of a written batch included, ends where an uninterrupted
  *   subscription ends, which is the client fold of the projected log;
  * - a snapshot at N plus the entries after N equals the fold of every entry;
+ * - a log snapshot, which projects in full only the entries it carries, is the
+ *   bytes of the snapshot of the whole log's projection, bounded to its tail;
  * - an entry's frame bytes depend only on the log before it and the profile;
  * - every live frame follows the entries it builds on (invariant W), and a
  *   subscriber's live view equals the host's live state.
@@ -16,7 +18,9 @@
 
 import { randomUUID } from "node:crypto";
 import {
+	type ClientSnapshot,
 	type ClientState,
+	clientActiveBranch,
 	clientAdvance,
 	clientFold,
 	clientRestore,
@@ -29,14 +33,15 @@ import {
 	type LiveFoldState,
 	type LiveItem,
 	liveCommitOf,
+	REMOTE_CAPABILITIES,
 } from "@hansjm10/volt-protocol";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
 import { LiveState } from "../../src/core/host/live-state.ts";
-import { localProfile, type Profile } from "../../src/core/protocol/profiles.ts";
+import { localProfile, type Profile, remoteProfile } from "../../src/core/protocol/profiles.ts";
 import { projectEntry, sessionProjectionSource } from "../../src/core/protocol/projection/entries.ts";
-import { projectLog, Subscription } from "../../src/core/protocol/server/subscription.ts";
+import { logSnapshot, projectLog, Subscription } from "../../src/core/protocol/server/subscription.ts";
 import { type CommittedSessionEntry, SessionManager } from "../../src/core/session-manager.ts";
 import { type LogSeed, seedSession } from "../utilities/seed-log.ts";
 import { builtinSessionPresenters } from "../utilities/test-presenters.ts";
@@ -66,6 +71,23 @@ const PROFILES = [
 	["local", localProfile],
 	["transcript", transcriptProfile],
 ] as const;
+
+const HOST_CWD = "/tmp/volt-subscription-property";
+
+/** Each profile with a snapshot tail of `tail` entries: the local and transcript profiles, and the real remote one. */
+const TAILED_PROFILES: ReadonlyArray<readonly [string, (tail: number) => Profile]> = [
+	["local", (tail) => ({ ...localProfile, limits: { ...localProfile.limits, snapshotTail: tail } })],
+	["transcript", (tail) => ({ ...transcriptProfile, limits: { ...transcriptProfile.limits, snapshotTail: tail } })],
+	[
+		"remote",
+		(tail) =>
+			remoteProfile({
+				grant: { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] },
+				redaction: { workspacePath: HOST_CWD },
+				limits: { snapshotTail: tail },
+			}),
+	],
+];
 
 // ============================================================================
 // Operations
@@ -232,7 +254,7 @@ interface Host {
 }
 
 function createHost(): Host {
-	const manager = SessionManager.inMemory("/tmp/volt-subscription-property");
+	const manager = SessionManager.inMemory(HOST_CWD);
 	const live = new LiveState({ head: () => manager.getOrdinal() });
 	// The live feed's commit rule: an entry that commits a streaming message or tool result ends it.
 	manager.subscribeEntries((entry) => {
@@ -447,6 +469,51 @@ function clientView(live: LiveFoldState): { values: unknown; assistant: unknown;
 function comparable(state: ClientState): unknown {
 	return { ordinal: state.ordinal, snapshot: clientSnapshot(state) };
 }
+
+/** The snapshot of a log at `ordinal` as the fold of every projected entry, bounded to the profile's tail. */
+function foldedLogSnapshot(manager: SessionManager, profile: Profile, ordinal: number): ClientSnapshot {
+	const source = sessionProjectionSource(manager);
+	const projected = manager
+		.committedEntriesAfter(0, ordinal)
+		.flatMap((entry) => projectEntry(entry, source, profile) ?? []);
+	const state = clientFold(projected);
+	const tail = profile.limits.snapshotTail;
+	return projected.length <= tail
+		? clientSnapshot(state)
+		: { ...clientSnapshot(state), entries: clientActiveBranch(state).slice(-tail), earlier: true };
+}
+
+describe.each(TAILED_PROFILES)("log snapshots on the %s profile", (_name, profileWithTail) => {
+	it("carry the bytes of the whole log's folded projection, bounded to the tail", async () => {
+		await fc.assert(
+			fc.asyncProperty(
+				fc.array(fc.array(entryOp, { minLength: 1, maxLength: 4 }), { minLength: 1, maxLength: 10 }),
+				fc.integer({ min: 1, max: 8 }),
+				fc.nat(),
+				async (batches, tail, cut) => {
+					const host = createHost();
+					const run: RunState = {
+						toolCall: 0,
+						openToolCalls: [],
+						streamingTool: undefined,
+						requests: [],
+						hiddenWritten: false,
+					};
+					for (const batch of batches) await commit(host, batch, run);
+					const profile = profileWithTail(tail);
+					const head = host.manager.getOrdinal();
+					for (const ordinal of [head, cut % (head + 1)]) {
+						const snapshot = logSnapshot(host.manager, profile, ordinal, sessionProjectionSource(host.manager));
+						expect(JSON.stringify(snapshot)).toBe(
+							JSON.stringify(foldedLogSnapshot(host.manager, profile, ordinal)),
+						);
+					}
+				},
+			),
+			{ numRuns: 60 },
+		);
+	});
+});
 
 describe.each(PROFILES)("subscription writer on the %s profile", (_name, profile) => {
 	it("resumes, snapshots, and live views end where the uninterrupted subscription ends", async () => {

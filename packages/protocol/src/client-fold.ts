@@ -21,6 +21,11 @@
  * snapshot)` followed by the entries after N equals the fold of every entry.
  * States are immutable: a returned state shares unchanged parts with its basis,
  * and entries are shared by reference, never copied.
+ *
+ * The fold reads an entry's envelope and payload, and of its transcript view
+ * only the submitting client's id: a {@link FoldEntry}. A host folds such
+ * entries for a whole log and projects in full only the entries a snapshot
+ * carries ({@link clientSnapshotWith}).
  */
 
 import { type Static, Type } from "typebox";
@@ -44,7 +49,12 @@ import {
 import { stringEnum } from "./helpers.ts";
 import { type PlanningState, RpcPlanningStateSchema } from "./planning.ts";
 import { RpcClientMessageIdSchema, RpcThinkingLevelSchema } from "./primitives.ts";
-import { isPublicProjectedEntryType, type ProjectedEntry, ProjectedEntrySchema } from "./projected.ts";
+import {
+	isPublicProjectedEntryType,
+	type ProjectedEntry,
+	ProjectedEntrySchema,
+	type TranscriptItem,
+} from "./projected.ts";
 import { UiNodeSchema } from "./ui-node.ts";
 import {
 	WorkDeliverySchema,
@@ -181,6 +191,21 @@ export type ClientSnapshot = Static<typeof ClientSnapshotSchema>;
 
 type ThinkingLevel = Static<typeof RpcThinkingLevelSchema>;
 
+/** What the fold reads of a transcript view. */
+export type FoldView = Pick<TranscriptItem, "clientMessageId">;
+
+type Folded<Entry> = Entry extends unknown
+	? "view" extends keyof Entry
+		? Omit<Entry, "view"> & { view?: FoldView }
+		: Entry
+	: never;
+
+/**
+ * A projected entry as the fold reads it: its envelope and payload, and of
+ * its view only the submitting client's id. Every projected entry is one.
+ */
+export type FoldEntry = Folded<ProjectedEntry>;
+
 /** The values the active branch's change entries determine. */
 export interface ClientBranchValues {
 	readonly model: ClientModelRef | null;
@@ -194,12 +219,12 @@ export interface ClientLabelValue {
 	readonly timestamp: string;
 }
 
-export interface ClientState extends ClientBranchValues {
+export interface ClientState<Entry extends FoldEntry = ProjectedEntry> extends ClientBranchValues {
 	/** The client's position: the newest ordinal it saw in an entry, a head frame, or a snapshot. */
 	readonly ordinal: number;
 	/** Every entry the client holds, in ordinal order. */
-	readonly entries: readonly ProjectedEntry[];
-	readonly byId: ReadonlyMap<string, ProjectedEntry>;
+	readonly entries: readonly Entry[];
+	readonly byId: ReadonlyMap<string, Entry>;
 	readonly earlier: boolean;
 	readonly leafId: string | null;
 	readonly name: string | null;
@@ -233,10 +258,10 @@ export class ClientFoldError extends Error {
 	}
 }
 
-const EMPTY_STATE: ClientState = Object.freeze({
+const EMPTY_STATE: ClientState<never> = Object.freeze({
 	ordinal: 0,
 	entries: Object.freeze([]),
-	byId: new Map(),
+	byId: new Map<string, never>(),
 	earlier: false,
 	leafId: null,
 	...DEFAULT_CLIENT_BRANCH_VALUES,
@@ -249,7 +274,7 @@ const EMPTY_STATE: ClientState = Object.freeze({
 });
 
 /** The state of a client that holds nothing yet. */
-export function emptyClientState(): ClientState {
+export function emptyClientState<Entry extends FoldEntry = ProjectedEntry>(): ClientState<Entry> {
 	return EMPTY_STATE;
 }
 
@@ -258,8 +283,8 @@ function modelRef(provider: string, modelId: string): ClientModelRef {
 }
 
 /** The held entries from the root of the held path to `leafId`; stops at an entry the client does not hold. */
-function heldBranch(byId: ReadonlyMap<string, ProjectedEntry>, leafId: string | null): ProjectedEntry[] {
-	const path: ProjectedEntry[] = [];
+function heldBranch<Entry extends FoldEntry>(byId: ReadonlyMap<string, Entry>, leafId: string | null): Entry[] {
+	const path: Entry[] = [];
 	const seen = new Set<string>();
 	for (let id = leafId; id !== null && !seen.has(id); ) {
 		seen.add(id);
@@ -276,12 +301,12 @@ function heldBranch(byId: ReadonlyMap<string, ProjectedEntry>, leafId: string | 
  * and owned copies are changed in place, so folding a batch costs one copy of
  * each collection it touches, and the basis state is never touched.
  */
-class ClientStateBuilder {
-	private readonly basis: ClientState;
+class ClientStateBuilder<Entry extends FoldEntry> {
+	private readonly basis: ClientState<Entry>;
 	private readonly owned = new Set<object>();
 	private ordinal: number;
-	private entries: readonly ProjectedEntry[];
-	private byId: ReadonlyMap<string, ProjectedEntry>;
+	private entries: readonly Entry[];
+	private byId: ReadonlyMap<string, Entry>;
 	private leafId: string | null;
 	private model: ClientModelRef | null;
 	private thinkingLevel: ThinkingLevel;
@@ -293,7 +318,7 @@ class ClientStateBuilder {
 	private forkedFrom: ForkedFromEntryPayload | null;
 	private work: ReadonlyMap<string, ClientWorkItem>;
 
-	constructor(basis: ClientState) {
+	constructor(basis: ClientState<Entry>) {
 		this.basis = basis;
 		this.ordinal = basis.ordinal;
 		this.entries = basis.entries;
@@ -310,15 +335,17 @@ class ClientStateBuilder {
 		this.work = basis.work;
 	}
 
-	apply(entry: ProjectedEntry): void {
+	apply(held: Entry): void {
+		// What the fold reads of the entry: nothing of its view but the client's id.
+		const entry: FoldEntry = held;
 		if (entry.ordinal <= this.ordinal) {
 			throw new ClientFoldError(entry.ordinal, `expected an ordinal after ${this.ordinal}`);
 		}
 		if (this.byId.has(entry.id)) throw new ClientFoldError(entry.ordinal, `duplicate entry id ${entry.id}`);
-		this.entries = this.appended(this.entries, entry);
+		this.entries = this.appended(this.entries, held);
 		const byId = this.writableMap(this.byId);
 		this.byId = byId;
-		byId.set(entry.id, entry);
+		byId.set(entry.id, held);
 		this.applyRecords(entry);
 		if (entry.type === "leaf") {
 			if (entry.payload) this.moveLeaf(entry.payload.targetId);
@@ -333,7 +360,7 @@ class ClientStateBuilder {
 		this.ordinal = ordinal;
 	}
 
-	finish(): ClientState {
+	finish(): ClientState<Entry> {
 		const basis = this.basis;
 		for (const value of this.owned) {
 			if (Array.isArray(value)) Object.freeze(value);
@@ -372,7 +399,7 @@ class ClientStateBuilder {
 	}
 
 	/** Name, labels, lineage, client inputs, and work: the records that do not depend on the branch. */
-	private applyRecords(entry: ProjectedEntry): void {
+	private applyRecords(entry: FoldEntry): void {
 		switch (entry.type) {
 			case "client_input_receipt":
 				if (entry.payload) this.receive(entry.payload, entry.ordinal);
@@ -418,14 +445,14 @@ class ClientStateBuilder {
 	}
 
 	/** A public entry becomes the leaf; extending the branch updates the branch values in place. */
-	private appendToBranch(entry: ProjectedEntry): void {
+	private appendToBranch(entry: FoldEntry): void {
 		const extendsBranch = entry.parentId === this.leafId;
 		this.leafId = entry.id;
 		if (extendsBranch) this.applyBranchValue(entry);
 		else this.rederive();
 	}
 
-	private applyBranchValue(entry: ProjectedEntry): void {
+	private applyBranchValue(entry: FoldEntry): void {
 		switch (entry.type) {
 			case "model_change":
 				if (entry.payload) this.model = modelRef(entry.payload.provider, entry.payload.modelId);
@@ -622,14 +649,20 @@ class ClientStateBuilder {
 // ============================================================================
 
 /** Fold projected entries, in ordinal order, onto `initial` (an empty client by default). */
-export function clientFold(entries: Iterable<ProjectedEntry>, initial: ClientState = emptyClientState()): ClientState {
+export function clientFold<Entry extends FoldEntry = ProjectedEntry>(
+	entries: Iterable<Entry>,
+	initial: ClientState<Entry> = emptyClientState(),
+): ClientState<Entry> {
 	const builder = new ClientStateBuilder(initial);
 	for (const entry of entries) builder.apply(entry);
 	return builder.finish();
 }
 
 /** Advance the position over entries the profile hides (a `head` frame). */
-export function clientAdvance(state: ClientState, ordinal: number): ClientState {
+export function clientAdvance<Entry extends FoldEntry = ProjectedEntry>(
+	state: ClientState<Entry>,
+	ordinal: number,
+): ClientState<Entry> {
 	const builder = new ClientStateBuilder(state);
 	builder.advance(ordinal);
 	return builder.finish();
@@ -637,10 +670,23 @@ export function clientAdvance(state: ClientState, ordinal: number): ClientState 
 
 /** Serialize a state; a snapshot frame carries it with the state's ordinal. */
 export function clientSnapshot(state: ClientState): ClientSnapshot {
+	return clientSnapshotWith(state, state.entries, state.earlier);
+}
+
+/**
+ * A snapshot of `state` that carries `entries`, in ordinal order: the state's
+ * own, or projected entries standing in for the ones it holds, such as the
+ * newest of its active branch with `earlier: true`.
+ */
+export function clientSnapshotWith(
+	state: ClientState<FoldEntry>,
+	entries: readonly ProjectedEntry[],
+	earlier: boolean,
+): ClientSnapshot {
 	return {
 		leafId: state.leafId,
-		entries: [...state.entries],
-		earlier: state.earlier,
+		entries: [...entries],
+		earlier,
 		model: state.model,
 		thinkingLevel: state.thinkingLevel,
 		fastMode: state.fastMode,
@@ -706,6 +752,6 @@ export function clientRestore(ordinal: number, snapshot: ClientSnapshot): Client
 }
 
 /** The entries of the active branch the client holds, root first. */
-export function clientActiveBranch(state: ClientState): ProjectedEntry[] {
+export function clientActiveBranch<Entry extends FoldEntry = ProjectedEntry>(state: ClientState<Entry>): Entry[] {
 	return heldBranch(state.byId, state.leafId);
 }

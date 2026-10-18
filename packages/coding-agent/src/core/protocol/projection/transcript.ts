@@ -304,6 +304,17 @@ function bashItem(
 }
 
 /**
+ * The submitting client's id the transcript view of `entry` carries: a
+ * client-submitted user message's, as the profile's source of it.
+ */
+export function transcriptClientMessageId(entry: CommittedSessionEntry, profile: Profile): string | undefined {
+	if (entry.type !== "message" || entry.message.role !== "user" || entry.clientMessageId === undefined) {
+		return undefined;
+	}
+	return profile.source(entry.clientMessageId);
+}
+
+/**
  * The transcript view of a message-like entry, or none for an entry no
  * transcript shows. The view is projected from the profile's source of the
  * entry, so the remote profile's paths are redacted before any text is cut.
@@ -314,12 +325,18 @@ export function projectTranscriptItem(
 	profile: Profile,
 ): TranscriptItem | undefined {
 	const notice = transcriptWorkNoticeText(entry, profile);
-	if (notice === undefined) return viewOf(profile.source(entry), source, profile);
+	if (notice === undefined) return viewOf(entry, profile.source(entry), source, profile);
 	const text = boundScalars(notice, profile.limits.textScalars);
 	return { role: customRole(WORK_NOTICE_CUSTOM_TYPE), text: text.text, truncated: text.truncated };
 }
 
-function viewOf(entry: CommittedSessionEntry, source: ProjectionSource, profile: Profile): TranscriptItem | undefined {
+/** The view of `raw` from `entry`, the profile's source of it. */
+function viewOf(
+	raw: CommittedSessionEntry,
+	entry: CommittedSessionEntry,
+	source: ProjectionSource,
+	profile: Profile,
+): TranscriptItem | undefined {
 	switch (entry.type) {
 		case "compaction": {
 			const summary = boundScalars(entry.summary, profile.limits.textScalars);
@@ -334,11 +351,13 @@ function viewOf(entry: CommittedSessionEntry, source: ProjectionSource, profile:
 		case "message": {
 			const message = entry.message;
 			switch (message.role) {
-				case "user":
+				case "user": {
+					const clientMessageId = transcriptClientMessageId(raw, profile);
 					return {
 						...textItem("user", message.content, profile),
-						...(entry.clientMessageId === undefined ? {} : { clientMessageId: entry.clientMessageId }),
+						...(clientMessageId === undefined ? {} : { clientMessageId }),
 					};
+				}
 				case "assistant":
 					return assistantItem(message.content, message.stopReason, profile);
 				case "toolResult":

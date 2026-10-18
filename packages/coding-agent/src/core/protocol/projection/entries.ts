@@ -9,11 +9,17 @@
  * full-fidelity profile sends payloads whole; a transcript profile sends
  * message-like entries as their transcript view only, and work entries
  * without input, locators, output, or result data.
+ *
+ * An entry's envelope (its position, parent, type, timestamp, and payload) is
+ * projected apart from its view: the client fold reads the envelope and only
+ * the view's client id, so a fold entry ({@link projectFoldEntry}) skips
+ * presenting the entry.
  */
 
 import {
 	type ClientInputQueuedEntryPayload,
 	type ClientInputReceiptEntryPayload,
+	type FoldEntry,
 	type ProjectedEntry,
 	type TranscriptItem,
 	WORK_CHECKPOINT_MAX_SERIALIZED_BYTES,
@@ -31,7 +37,7 @@ import { redactedWorkPhase } from "../../work/phase.ts";
 import { workText } from "../../work/registry.ts";
 import type { Profile } from "../profiles.ts";
 import type { PresentationCache } from "./presentation.ts";
-import { type ProjectionSource, projectTranscriptItem } from "./transcript.ts";
+import { type ProjectionSource, projectTranscriptItem, transcriptClientMessageId } from "./transcript.ts";
 
 export type { ProjectionSource } from "./transcript.ts";
 
@@ -134,6 +140,16 @@ export function visibleAncestor(id: string | null, source: ProjectionSource, pro
 	return null;
 }
 
+/** A projected entry without its view. */
+interface ProjectedEnvelope {
+	readonly ordinal: number;
+	readonly id: string;
+	readonly parentId: string | null;
+	readonly type: CommittedSessionEntry["type"];
+	readonly timestamp: string;
+	readonly payload?: unknown;
+}
+
 /** The projected form of `entry` for `profile`, or none when the profile hides it. */
 export function projectEntry(
 	entry: CommittedSessionEntry,
@@ -141,10 +157,32 @@ export function projectEntry(
 	profile: Profile,
 ): ProjectedEntry | undefined {
 	if (!profile.includes(entry)) return undefined;
-	const log = toLogEntry(entry);
 	const view: TranscriptItem | undefined = VIEW_ENTRY_TYPES.has(entry.type)
 		? projectTranscriptItem(entry, source, profile)
 		: undefined;
+	return { ...projectEnvelope(entry, source, profile), ...(view === undefined ? {} : { view }) } as ProjectedEntry;
+}
+
+/**
+ * `entry` as the client fold reads it for `profile`, or none when the profile
+ * hides it: its projected envelope, and of its view only the client id the
+ * view carries. Folding these equals folding the projected entries.
+ */
+export function projectFoldEntry(
+	entry: CommittedSessionEntry,
+	source: ProjectionSource,
+	profile: Profile,
+): FoldEntry | undefined {
+	if (!profile.includes(entry)) return undefined;
+	const clientMessageId = transcriptClientMessageId(entry, profile);
+	return {
+		...projectEnvelope(entry, source, profile),
+		...(clientMessageId === undefined ? {} : { view: { clientMessageId } }),
+	} as FoldEntry;
+}
+
+function projectEnvelope(entry: CommittedSessionEntry, source: ProjectionSource, profile: Profile): ProjectedEnvelope {
+	const log = toLogEntry(entry);
 	const sendsPayload = profile.fidelity === "full" || !VIEW_ENTRY_TYPES.has(entry.type);
 	let payload: unknown;
 	if (sendsPayload) {
@@ -182,6 +220,5 @@ export function projectEntry(
 		type: entry.type,
 		timestamp: entry.timestamp,
 		...(payload === undefined ? {} : { payload }),
-		...(view === undefined ? {} : { view }),
-	} as ProjectedEntry;
+	};
 }

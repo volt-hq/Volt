@@ -11,7 +11,9 @@ import {
 	clientFold,
 	clientRestore,
 	clientSnapshot,
+	clientSnapshotWith,
 	emptyClientState,
+	type FoldEntry,
 } from "../src/client-fold.ts";
 import { type ProjectedEntry, ProjectedEntrySchema } from "../src/projected.ts";
 import {
@@ -52,6 +54,32 @@ function expectMatches(state: ClientState, expected: ExpectedClientState): void 
 	expect(state.queue).toEqual(expected.queue);
 	expect(state.forkedFrom).toEqual(expected.forkedFrom);
 	expect([...state.work.values()]).toEqual(expected.work);
+}
+
+/** `entry` as a host folds it for a snapshot: of its view only the client id. */
+function foldEntryOf(entry: ProjectedEntry): FoldEntry {
+	if (!("view" in entry) || entry.view === undefined) return entry;
+	const { view, ...envelope } = entry;
+	return {
+		...envelope,
+		...(view.clientMessageId === undefined ? {} : { view: { clientMessageId: view.clientMessageId } }),
+	} as FoldEntry;
+}
+
+/** `entry` as a transcript profile sends it: a message as its view only, with the submitting client's id. */
+function transcriptEntryOf(entry: ProjectedEntry): ProjectedEntry {
+	if (entry.type !== "message" || entry.payload === undefined) return entry;
+	const { payload, ...envelope } = entry;
+	const role = payload.message.role;
+	return {
+		...envelope,
+		view: {
+			role: role === "assistant" ? "assistant" : role === "toolResult" ? "tool" : "user",
+			text: `view ${entry.ordinal}`,
+			truncated: false,
+			...(payload.clientMessageId === undefined ? {} : { clientMessageId: payload.clientMessageId }),
+		},
+	};
 }
 
 /** A log and a cut point inside it. */
@@ -97,6 +125,23 @@ describe("clientFold", () => {
 					expect(state).toEqual(once);
 				},
 			),
+			RUNS,
+		);
+	});
+
+	it("folds entries reduced to what it reads into the state of the entries themselves", () => {
+		fc.assert(
+			fc.property(projectedLogArbitrary, fc.boolean(), (log, transcript) => {
+				const entries = transcript ? log.entries.map(transcriptEntryOf) : log.entries;
+				const full = clientFold(entries);
+				const reduced = clientFold(entries.map(foldEntryOf));
+				expect(reduced.ordinal).toBe(full.ordinal);
+				expect(reduced.entries.map((entry) => entry.id)).toEqual(full.entries.map((entry) => entry.id));
+				expect(clientActiveBranch(reduced).map((entry) => entry.id)).toEqual(
+					clientActiveBranch(full).map((entry) => entry.id),
+				);
+				expect(clientSnapshotWith(reduced, full.entries, full.earlier)).toEqual(clientSnapshot(full));
+			}),
 			RUNS,
 		);
 	});
