@@ -1,11 +1,12 @@
 /**
  * The transcript view of a message-like entry (RFC §4.3): one shape for every
- * profile, a pure function of the entry, the log before it, and the
- * presenter set. Text is bounded per entry by the profile (`truncated` says
- * the `content` query has the rest); a tool item carries its presentation,
- * presented with its tool call's arguments from the entry's ancestors; a
- * custom message whose type has a presenter carries its presentation. On a transcript profile, a work notice's text is rebuilt from
- * its details.
+ * projection, a pure function of the entry, the log before it, the
+ * projection, and the presenter set. Text is bounded per entry by the
+ * projection (`truncated` says the `content` query has the rest); a tool
+ * item carries its presentation, presented with its tool call's arguments
+ * from the entry's ancestors; a custom message whose type has a presenter
+ * carries its presentation. On a transcript projection, a work notice's text
+ * is rebuilt from its details.
  */
 
 import type { ImageContent, JsonValue, TextContent, ToolCall } from "@hansjm10/volt-ai";
@@ -20,15 +21,18 @@ import { Check } from "typebox/value";
 import { extractVisibleTextContent } from "../../messages.ts";
 import type { CommittedSessionEntry } from "../../session-manager.ts";
 import { workText } from "../../work/registry.ts";
-import { getRemoteVisibleCustomMessageRole, type Profile } from "../profiles.ts";
+import { getRemoteVisibleCustomMessageRole, type Projection } from "../profiles.ts";
+import type { ProjectionCache } from "./cache.ts";
 import { type PresentationSource, projectMessagePresentation, projectToolPresentation } from "./presentation.ts";
 
 /**
  * The log before a projected entry (lookups by id, host-only records
- * included), and what presents its tool calls and custom messages.
+ * included), what presents its tool calls and custom messages, and the cache
+ * of its projected entries.
  */
 export interface ProjectionSource extends PresentationSource {
 	entry(id: string): CommittedSessionEntry | undefined;
+	readonly cache?: ProjectionCache;
 }
 
 type AssistantPart = NonNullable<TranscriptItem["parts"]>[number];
@@ -85,36 +89,34 @@ function findToolCall(
 	return undefined;
 }
 
-/** A text view with the profile's bound, and its image count. */
+/** A text view with the projection's bound, and its image count. */
 function textItem(
 	role: TranscriptItem["role"],
 	content: unknown,
-	profile: Profile,
+	projection: Projection,
 ): Pick<TranscriptItem, "role" | "text" | "truncated" | "imageCount"> {
-	const text = boundScalars(extractVisibleTextContent(content), profile.limits.textScalars);
+	const text = boundScalars(extractVisibleTextContent(content), projection.textScalars);
 	const imageCount = messageImages(content).length;
 	return { role, text: text.text, truncated: text.truncated, ...(imageCount > 0 ? { imageCount } : {}) };
 }
 
 /** A displayed custom message's view: its text, and its presentation when its type has a presenter. */
 function customItem(
-	id: string,
 	message: { customType: string; content: string | (TextContent | ImageContent)[]; details?: unknown },
 	source: ProjectionSource,
-	profile: Profile,
+	projection: Projection,
 ): TranscriptItem {
 	const presentation = projectMessagePresentation(
-		id,
 		{
 			customType: message.customType,
 			content: message.content,
 			...(message.details === undefined ? {} : { details: message.details as JsonValue }),
 		},
 		source,
-		profile,
+		projection,
 	);
 	return {
-		...textItem(customRole(message.customType), message.content, profile),
+		...textItem(customRole(message.customType), message.content, projection),
 		...(presentation === undefined ? {} : { presentation }),
 	};
 }
@@ -125,16 +127,16 @@ function customRole(customType: string): TranscriptItem["role"] {
 }
 
 /**
- * The text of a work notice as a transcript profile sends it, or undefined
- * for any other entry and on a full-fidelity profile. The notice's content
+ * The text of a work notice as a transcript projection sends it, or undefined
+ * for any other entry and on a full-fidelity projection. The notice's content
  * is not sent: it holds titles and results the host cut to a bound, where a
  * cut can leave the start of a root that redaction cannot match, or a kind's
  * own text. The text is rebuilt from the notice's details instead, each cut
  * field losing such a start; a notice whose details are not a work notice's
  * has no text.
  */
-export function transcriptWorkNoticeText(entry: CommittedSessionEntry, profile: Profile): string | undefined {
-	if (profile.fidelity !== "transcript") return undefined;
+export function transcriptWorkNoticeText(entry: CommittedSessionEntry, projection: Projection): string | undefined {
+	if (projection.fidelity !== "transcript") return undefined;
 	const notice =
 		entry.type === "custom_message"
 			? entry
@@ -144,7 +146,7 @@ export function transcriptWorkNoticeText(entry: CommittedSessionEntry, profile: 
 	if (notice?.customType !== WORK_NOTICE_CUSTOM_TYPE || !notice.display) return undefined;
 	const details = notice.details;
 	if (!Check(WorkNoticeDetailsSchema, details)) return "";
-	const cut = (text: string, max?: number): string => workText(profile.sourceCut(text), max);
+	const cut = (text: string, max?: number): string => workText(projection.sourceCut(text), max);
 	const lines = [
 		`${cut(details.title, WORK_TITLE_MAX_CHARS)} (${details.kind} ${details.workId}) ${details.outcome}.`,
 	];
@@ -156,9 +158,9 @@ export function transcriptWorkNoticeText(entry: CommittedSessionEntry, profile: 
 function assistantItem(
 	content: ReadonlyArray<TextContent | { type: "thinking"; thinking: string; redacted?: boolean } | ToolCall>,
 	stopReason: TranscriptItem["stopReason"],
-	profile: Profile,
+	projection: Projection,
 ): TranscriptItem {
-	let budget = profile.limits.textScalars;
+	let budget = projection.textScalars;
 	let truncated = false;
 	const parts: AssistantPart[] = [];
 	for (const block of content) {
@@ -184,7 +186,7 @@ function assistantItem(
 		parts
 			.flatMap((part) => (part.type === "text" && part.text.length > 0 ? [part.text] : []))
 			.join(ASSISTANT_TEXT_BLOCK_SEPARATOR),
-		profile.limits.textScalars,
+		projection.textScalars,
 	);
 	return {
 		role: "assistant",
@@ -221,15 +223,14 @@ function toolResultItem(
 		durationMs?: number;
 	},
 	source: ProjectionSource,
-	profile: Profile,
+	projection: Projection,
 ): TranscriptItem {
 	const toolName = message.toolName;
 	const call = findToolCall(entry, message.toolCallId, source);
-	const args = call === undefined ? undefined : profile.source(call).arguments;
+	const args = call === undefined ? undefined : projection.source(call).arguments;
 	const status = message.isError ? "failed" : "completed";
 	const imageCount = messageImages(message.content).length;
 	const presentation = projectToolPresentation(
-		entry.id,
 		toolName,
 		{
 			args: args ?? {},
@@ -242,10 +243,10 @@ function toolResultItem(
 				partial: false,
 			},
 		},
-		// The generic presentation shows a call's arguments only on a full-fidelity profile.
-		profile.fidelity === "full" ? (args ?? {}) : {},
+		// The generic presentation shows a call's arguments only on a full-fidelity projection.
+		projection.fidelity === "full" ? (args ?? {}) : {},
 		source,
-		profile,
+		projection,
 	);
 	const text = toolText(presentation, status);
 	return {
@@ -262,10 +263,9 @@ function toolResultItem(
 }
 
 function bashItem(
-	id: string,
 	message: { command: string; output: string; exitCode?: number; cancelled: boolean; truncated: boolean },
 	source: ProjectionSource,
-	profile: Profile,
+	projection: Projection,
 ): TranscriptItem {
 	const failed = message.cancelled || (message.exitCode !== undefined && message.exitCode !== 0);
 	// A user's command presents as the bash tool's would: its output, then how it ended.
@@ -275,7 +275,6 @@ function bashItem(
 			? `Command exited with code ${message.exitCode}`
 			: "";
 	const presentation = projectToolPresentation(
-		id,
 		"bash",
 		{
 			args: { command: message.command },
@@ -289,7 +288,7 @@ function bashItem(
 		},
 		{ command: message.command },
 		source,
-		profile,
+		projection,
 	);
 	const status = failed ? "failed" : "completed";
 	const text = toolText(presentation, status);
@@ -305,67 +304,68 @@ function bashItem(
 
 /**
  * The submitting client's id the transcript view of `entry` carries: a
- * client-submitted user message's, as the profile's source of it.
+ * client-submitted user message's, as the projection's source of it.
  */
-export function transcriptClientMessageId(entry: CommittedSessionEntry, profile: Profile): string | undefined {
+export function transcriptClientMessageId(entry: CommittedSessionEntry, projection: Projection): string | undefined {
 	if (entry.type !== "message" || entry.message.role !== "user" || entry.clientMessageId === undefined) {
 		return undefined;
 	}
-	return profile.source(entry.clientMessageId);
+	return projection.source(entry.clientMessageId);
 }
 
 /**
  * The transcript view of a message-like entry, or none for an entry no
- * transcript shows. The view is projected from the profile's source of the
- * entry, so the remote profile's paths are redacted before any text is cut.
+ * transcript shows. The view is projected from the projection's source of
+ * the entry, so the remote projection's paths are redacted before any text
+ * is cut.
  */
 export function projectTranscriptItem(
 	entry: CommittedSessionEntry,
 	source: ProjectionSource,
-	profile: Profile,
+	projection: Projection,
 ): TranscriptItem | undefined {
-	const notice = transcriptWorkNoticeText(entry, profile);
-	if (notice === undefined) return viewOf(entry, profile.source(entry), source, profile);
-	const text = boundScalars(notice, profile.limits.textScalars);
+	const notice = transcriptWorkNoticeText(entry, projection);
+	if (notice === undefined) return viewOf(entry, projection.source(entry), source, projection);
+	const text = boundScalars(notice, projection.textScalars);
 	return { role: customRole(WORK_NOTICE_CUSTOM_TYPE), text: text.text, truncated: text.truncated };
 }
 
-/** The view of `raw` from `entry`, the profile's source of it. */
+/** The view of `raw` from `entry`, the projection's source of it. */
 function viewOf(
 	raw: CommittedSessionEntry,
 	entry: CommittedSessionEntry,
 	source: ProjectionSource,
-	profile: Profile,
+	projection: Projection,
 ): TranscriptItem | undefined {
 	switch (entry.type) {
 		case "compaction": {
-			const summary = boundScalars(entry.summary, profile.limits.textScalars);
+			const summary = boundScalars(entry.summary, projection.textScalars);
 			return { role: "system", text: summary.text, truncated: summary.truncated };
 		}
 		case "branch_summary": {
-			const summary = boundScalars(entry.summary, profile.limits.textScalars);
+			const summary = boundScalars(entry.summary, projection.textScalars);
 			return { role: "system", text: summary.text, truncated: summary.truncated };
 		}
 		case "custom_message":
-			return entry.display ? customItem(entry.id, entry, source, profile) : undefined;
+			return entry.display ? customItem(entry, source, projection) : undefined;
 		case "message": {
 			const message = entry.message;
 			switch (message.role) {
 				case "user": {
-					const clientMessageId = transcriptClientMessageId(raw, profile);
+					const clientMessageId = transcriptClientMessageId(raw, projection);
 					return {
-						...textItem("user", message.content, profile),
+						...textItem("user", message.content, projection),
 						...(clientMessageId === undefined ? {} : { clientMessageId }),
 					};
 				}
 				case "assistant":
-					return assistantItem(message.content, message.stopReason, profile);
+					return assistantItem(message.content, message.stopReason, projection);
 				case "toolResult":
-					return toolResultItem(entry, message, source, profile);
+					return toolResultItem(entry, message, source, projection);
 				case "bashExecution":
-					return bashItem(entry.id, message, source, profile);
+					return bashItem(message, source, projection);
 				case "custom":
-					return message.display ? customItem(entry.id, message, source, profile) : undefined;
+					return message.display ? customItem(message, source, projection) : undefined;
 				default:
 					return undefined;
 			}

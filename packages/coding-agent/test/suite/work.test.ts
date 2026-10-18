@@ -563,7 +563,7 @@ describe("work in hosted conversations", () => {
 		);
 		// A local client is sent the notice's own text.
 		const source = sessionProjectionSource(conversation.session.sessionManager);
-		expect(projectTranscriptItem(seeded, source, localProfile)?.text).toBe(`Wrote ${workspace}/out.txt`);
+		expect(projectTranscriptItem(seeded, source, localProfile.projection)?.text).toBe(`Wrote ${workspace}/out.txt`);
 
 		const lead = (max: number) => "x".repeat(max - workspace.length + name.length - 3);
 		const expected = new Map([

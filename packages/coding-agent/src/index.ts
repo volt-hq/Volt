@@ -390,7 +390,14 @@ export type {
 export { DefaultPackageManager } from "./core/package-manager.ts";
 export type { Personality } from "./core/personality.ts";
 export type { PromptCacheStatus } from "./core/prompt-cache-status.ts";
-export { localProfile, type Profile, type ProfileLimits } from "./core/protocol/profiles.ts";
+export {
+	localProfile,
+	type Profile,
+	type ProfileLimits,
+	type Projection,
+	type ProjectionBounds,
+	type RemoteProfileLimits,
+} from "./core/protocol/profiles.ts";
 export {
 	type ProtocolConnection,
 	type ProtocolPeer,

@@ -1,18 +1,18 @@
 /**
  * Presentations in the projected log (RFC §4.3, amended): a tool item's and
  * a presented custom message's `view.presentation` is a pure function of the
- * log, the profile, and the presenter set, computed when the entry is
- * projected and never stored. A call whose tool has no presenter (a disabled
- * extension's) presents generically.
+ * log, the projection, and the presenter set, computed when the entry is
+ * projected and never stored in the log; the projection cache keeps the
+ * projected entry while the presenters stay the same. A call whose tool has
+ * no presenter (a disabled extension's) presents generically.
  */
 
 import type { AssistantMessage, JsonObject, ToolResultMessage } from "@hansjm10/volt-ai";
-import type { ToolPresentation } from "@hansjm10/volt-protocol";
+import type { ProjectedEntry, ToolPresentation } from "@hansjm10/volt-protocol";
 import { describe, expect, test, vi } from "vitest";
 import { localProfile, type Profile, remoteProfile } from "../../src/core/protocol/profiles.ts";
-import { sessionProjectionSource } from "../../src/core/protocol/projection/entries.ts";
-import { PresentationCache } from "../../src/core/protocol/projection/presentation.ts";
-import { projectTranscriptItem } from "../../src/core/protocol/projection/transcript.ts";
+import { ProjectionCache } from "../../src/core/protocol/projection/cache.ts";
+import { projectEntry, sessionProjectionSource } from "../../src/core/protocol/projection/entries.ts";
 import { SessionPresenters } from "../../src/core/session/presenters.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import type { MessagePresenter, ToolPresenter } from "../../src/core/ui/presentation.ts";
@@ -77,7 +77,20 @@ function presenters(tools: Record<string, Registered>, messages: Record<string, 
 function view(session: SessionManager, id: string, set: SessionPresenters, profile: Profile = localProfile) {
 	const entry = session.getCommittedEntry(id);
 	if (!entry) throw new Error("Expected the entry");
-	return projectTranscriptItem(entry, sessionProjectionSource(session, set, set.cache), profile);
+	const projected = projectEntry(entry, sessionProjectionSource(session, set, set.cache), profile.projection);
+	return projected !== undefined && "view" in projected ? projected.view : undefined;
+}
+
+/** A projected message entry whose view's text is `text`. */
+function projected(id: string, text: string): ProjectedEntry {
+	return {
+		ordinal: 1,
+		id,
+		parentId: null,
+		type: "message",
+		timestamp: "2026-01-01T00:00:00.000Z",
+		view: { role: "assistant", text, truncated: false },
+	};
 }
 
 const demoPresenter: ToolPresenter = (input) => ({
@@ -188,26 +201,39 @@ describe("presentations of projected entries", () => {
 		expect(view(session, id, presenters({}))?.text).toBe("plain text");
 	});
 
-	test("keeps a cache bounded per profile", () => {
-		const cache = new PresentationCache();
-		for (let index = 0; index < 5_000; index++)
-			cache.resolve(localProfile, `e${index}`, 0, undefined, () => undefined);
-		const compute = vi.fn(() => undefined);
-		cache.resolve(localProfile, "e0", 0, undefined, compute);
+	test("keeps a cache bounded per projection, the least recently used evicted first", () => {
+		const projection = localProfile.projection;
+		const cache = new ProjectionCache();
+		for (let index = 0; index < 5_000; index++) {
+			cache.resolve(projection, `e${index}`, 0, undefined, () => projected(`e${index}`, "x"));
+		}
+		const compute = vi.fn(() => projected("e", "x"));
+		cache.resolve(projection, "e0", 0, undefined, compute);
 		expect(compute).toHaveBeenCalledOnce();
-		cache.resolve(localProfile, "e4999", 0, undefined, compute);
+		cache.resolve(projection, "e4999", 0, undefined, compute);
 		expect(compute).toHaveBeenCalledOnce();
-		// Large presentations are evicted by size: 8 MiB of them at most.
-		const large = (): ToolPresentation => ({
-			title: "t",
-			body: [{ type: "code", key: "c", code: "x".repeat(60_000) }],
-		});
-		const sized = new PresentationCache();
-		for (let index = 0; index < 200; index++) sized.resolve(localProfile, `l${index}`, 0, undefined, large);
-		const recompute = vi.fn(large);
-		sized.resolve(localProfile, "l199", 0, undefined, recompute);
+		// A hit is used again: it outlives entries cached after it.
+		cache.resolve(projection, "e1000", 0, undefined, compute);
+		expect(compute).toHaveBeenCalledOnce();
+		for (let index = 5_000; index < 9_000; index++) {
+			cache.resolve(projection, `e${index}`, 0, undefined, () => projected(`e${index}`, "x"));
+		}
+		cache.resolve(projection, "e1000", 0, undefined, compute);
+		expect(compute).toHaveBeenCalledOnce();
+		// Another generation or presenter projects again.
+		cache.resolve(projection, "e1000", 1, undefined, compute);
+		cache.resolve(projection, "e1000", 1, demoPresenter, compute);
+		expect(compute).toHaveBeenCalledTimes(3);
+
+		// Large views are evicted by size: 8 MiB of them at most.
+		const large = (id: string) => (): ProjectedEntry => projected(id, "x".repeat(60_000));
+		const sized = new ProjectionCache();
+		for (let index = 0; index < 200; index++)
+			sized.resolve(projection, `l${index}`, 0, undefined, large(`l${index}`));
+		const recompute = vi.fn(large("l"));
+		sized.resolve(projection, "l199", 0, undefined, recompute);
 		expect(recompute).not.toHaveBeenCalled();
-		sized.resolve(localProfile, "l0", 0, undefined, recompute);
+		sized.resolve(projection, "l0", 0, undefined, recompute);
 		expect(recompute).toHaveBeenCalledOnce();
 	});
 });

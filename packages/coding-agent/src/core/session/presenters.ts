@@ -11,7 +11,7 @@
  * projection cache keys on it.
  */
 
-import { PresentationCache } from "../protocol/projection/presentation.ts";
+import { ProjectionCache } from "../protocol/projection/cache.ts";
 import { BUILTIN_TOOL_PRESENTERS } from "../tools/presenters.ts";
 import { BUILTIN_MESSAGE_PRESENTERS, HOST_CUSTOM_MESSAGE_TYPES } from "../ui/message-presenters.ts";
 import type { UiActionPolicy } from "../ui/normalize.ts";
@@ -43,8 +43,8 @@ export interface SessionPresentersHost {
 export class SessionPresenters implements PresenterSet {
 	private readonly host: SessionPresentersHost;
 	private currentGeneration = 0;
-	/** The presentations of projected entries, by profile and entry id. */
-	readonly cache = new PresentationCache();
+	/** The projected entries of the session's log, by projection and entry id. */
+	readonly cache = new ProjectionCache();
 
 	constructor(host: SessionPresentersHost) {
 		this.host = host;
