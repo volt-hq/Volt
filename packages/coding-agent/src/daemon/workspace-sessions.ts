@@ -15,7 +15,9 @@
  *
  * Every daemon lookup of a workspace's sessions goes through here: a
  * phone's listing and open, change observation, session contexts, worker
- * claims, and a TUI's placement.
+ * claims, and a TUI's placement. The daemon's instance holds the default
+ * store open (`retainStore`), so its lookups share one store worker instead
+ * of starting one each (#934).
  */
 
 import { existsSync } from "node:fs";
@@ -29,7 +31,11 @@ import {
 	type SessionListOptions,
 	type SessionLocation,
 } from "../core/session-manager.ts";
-import { SESSION_STORE_DATABASE_FILENAME } from "../core/session-store/index.ts";
+import {
+	acquireSharedSQLiteSessionStore,
+	SESSION_STORE_DATABASE_FILENAME,
+	type SQLiteSessionStoreLease,
+} from "../core/session-store/index.ts";
 import { isPathInside } from "./workspace-directory.ts";
 
 /** Where a directory runs: its workspace, and the root it stays inside. */
@@ -51,6 +57,11 @@ export interface WorkspaceSessionsOptions {
 	workspaces(): readonly IrohRemoteWorkspace[];
 	/** The daemon-managed worktrees now. */
 	worktrees(): Promise<readonly IrohRemoteWorkspaceWorktree[]>;
+	/**
+	 * Hold the default store open from the first lookup after it exists until
+	 * `close()`: every lookup in the process then reuses its store worker.
+	 */
+	readonly retainStore?: boolean;
 }
 
 /** A path's real path; the resolved path when it cannot be read (an archived checkout, a moved workspace). */
@@ -154,10 +165,55 @@ export class WorkspaceSessions {
 	private readonly options: WorkspaceSessionsOptions;
 	/** The default store's directory: every working directory's sessions. */
 	readonly sessionDir: string;
+	/** The default store's lease this instance holds, with `retainStore`. */
+	private retained: SQLiteSessionStoreLease | undefined;
+	private retaining: Promise<void> | undefined;
+	private closed = false;
 
 	constructor(options: WorkspaceSessionsOptions) {
 		this.options = options;
 		this.sessionDir = getDefaultSessionDirPath(options.agentDir);
+	}
+
+	/**
+	 * With `retainStore`, hold a lease of the default store once it exists, and
+	 * replace it once its store worker failed. A lookup reports its own failure:
+	 * one here is not reported.
+	 */
+	private retainStore(): Promise<void> {
+		if (this.options.retainStore !== true || this.closed) return Promise.resolve();
+		this.retaining ??= this.renewRetainedStore().finally(() => {
+			this.retaining = undefined;
+		});
+		return this.retaining;
+	}
+
+	private async renewRetainedStore(): Promise<void> {
+		if (!existsSync(join(this.sessionDir, SESSION_STORE_DATABASE_FILENAME))) return;
+		let lease: SQLiteSessionStoreLease;
+		try {
+			lease = await acquireSharedSQLiteSessionStore(this.sessionDir);
+		} catch {
+			return;
+		}
+		const held = this.retained;
+		// The same client: the held one is still the store's.
+		if (held?.client === lease.client) {
+			await lease.release().catch(() => undefined);
+			return;
+		}
+		// None held, or the held client's worker failed and the store opened another.
+		this.retained = lease;
+		await held?.release().catch(() => undefined);
+	}
+
+	/** Release the default store's lease; later lookups open the store each. */
+	async close(): Promise<void> {
+		this.closed = true;
+		await this.retaining;
+		const held = this.retained;
+		this.retained = undefined;
+		await held?.release();
 	}
 
 	/** The placements of what is registered now. */
@@ -167,6 +223,7 @@ export class WorkspaceSessions {
 
 	/** The sessions of the default store `workspaceName` owns, most recently modified first. */
 	async list(workspaceName: string, options?: SessionListOptions): Promise<WorkspaceSession[]> {
+		await this.retainStore();
 		const placements = await this.placements();
 		const roots = placements.roots(workspaceName);
 		if (roots.length === 0 || !existsSync(join(this.sessionDir, SESSION_STORE_DATABASE_FILENAME))) return [];
@@ -188,6 +245,7 @@ export class WorkspaceSessions {
 		sessionId: string,
 		sessionDirectory?: string,
 	): Promise<WorkspaceSession | undefined> {
+		await this.retainStore();
 		const placements = await this.placements();
 		const directories = new Set([sessionDirectory, this.sessionDir].flatMap((dir) => (dir ? [resolve(dir)] : [])));
 		for (const directory of directories) {
@@ -202,6 +260,7 @@ export class WorkspaceSessions {
 	async locate(
 		sessionId: string,
 	): Promise<{ readonly location: SessionLocation; readonly placement?: SessionPlacement } | undefined> {
+		await this.retainStore();
 		const location = await findStoredSessionLocation(this.sessionDir, sessionId);
 		if (location === undefined) return undefined;
 		const placement = (await this.placements()).place(location.cwdKey);
@@ -210,6 +269,7 @@ export class WorkspaceSessions {
 
 	/** Which of `sessionIds` `workspaceName` owns in the default store. */
 	async owned(workspaceName: string, sessionIds: readonly string[]): Promise<Set<string>> {
+		await this.retainStore();
 		const placements = await this.placements();
 		const owned = new Set<string>();
 		for (const sessionId of sessionIds) {
