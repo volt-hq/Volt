@@ -41,8 +41,8 @@ function transcript(session: SessionManager, profile: Profile = localProfile): T
 	const source = sessionProjectionSource(session);
 	return session.getBranch().flatMap((branchEntry) => {
 		const entry = session.getCommittedEntry(branchEntry.id);
-		if (!entry || !profile.includes(entry)) return [];
-		const item = projectTranscriptItem(entry, source, profile);
+		if (!entry || !profile.projection.includes(entry)) return [];
+		const item = projectTranscriptItem(entry, source, profile.projection);
 		return item ? [item] : [];
 	});
 }

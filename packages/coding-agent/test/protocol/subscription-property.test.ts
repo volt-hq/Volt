@@ -63,8 +63,11 @@ const HIDDEN_BY_TRANSCRIPT: ReadonlySet<string> = new Set([
 const transcriptProfile: Profile = {
 	...localProfile,
 	name: "remote",
-	fidelity: "transcript",
-	includes: (entry) => !HIDDEN_BY_TRANSCRIPT.has(entry.type),
+	projection: {
+		...localProfile.projection,
+		fidelity: "transcript",
+		includes: (entry) => !HIDDEN_BY_TRANSCRIPT.has(entry.type),
+	},
 };
 
 const PROFILES = [
@@ -475,7 +478,7 @@ function foldedLogSnapshot(manager: SessionManager, profile: Profile, ordinal: n
 	const source = sessionProjectionSource(manager);
 	const projected = manager
 		.committedEntriesAfter(0, ordinal)
-		.flatMap((entry) => projectEntry(entry, source, profile) ?? []);
+		.flatMap((entry) => projectEntry(entry, source, profile.projection) ?? []);
 	const state = clientFold(projected);
 	const tail = profile.limits.snapshotTail;
 	return projected.length <= tail
@@ -565,7 +568,7 @@ describe.each(PROFILES)("subscription writer on the %s profile", (_name, profile
 				// The bytes of every entry frame are those of the entry projected from the log alone.
 				const source = sessionProjectionSource(host.manager);
 				for (const entry of host.manager.committedEntriesAfter(0) as CommittedSessionEntry[]) {
-					const projected = projectEntry(entry, source, profile);
+					const projected = projectEntry(entry, source, profile.projection);
 					for (const subscriber of [steady, resuming, snapshotting]) {
 						const bytes = subscriber.entryBytes.get(entry.ordinal);
 						if (bytes !== undefined) expect(bytes).toBe(JSON.stringify(projected));

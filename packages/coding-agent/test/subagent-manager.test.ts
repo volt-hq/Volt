@@ -101,7 +101,7 @@ function childTranscript(handle: SubagentHandle): TranscriptItem[] {
 	const sessionManager = handle.conversation.session.sessionManager;
 	const source = sessionProjectionSource(sessionManager);
 	return sessionManager.committedEntriesAfter(0).flatMap((entry) => {
-		const item = projectTranscriptItem(entry, source, localProfile);
+		const item = projectTranscriptItem(entry, source, localProfile.projection);
 		return item === undefined ? [] : [item];
 	});
 }

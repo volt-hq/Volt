@@ -364,12 +364,12 @@ export const workOutputQuery = defineQuery({
 		let plain = stripVTControlCharacters(output.text)
 			.replace(/\r\n?/g, "\n")
 			.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
-		if (output.truncated && ctx.subscriber?.fidelity === "transcript") {
-			// The kept tail starts mid-line, where a root may have been cut: a transcript profile starts at the next line.
+		if (output.truncated && ctx.subscriber?.projection.fidelity === "transcript") {
+			// The kept tail starts mid-line, where a root may have been cut: a transcript projection starts at the next line.
 			const lineEnd = plain.indexOf("\n");
 			plain = lineEnd === -1 ? "" : plain.slice(lineEnd + 1);
 		}
-		const scalars = Array.from(ctx.subscriber ? ctx.subscriber.source(plain) : plain);
+		const scalars = Array.from(ctx.subscriber ? ctx.subscriber.projection.source(plain) : plain);
 		const offset = Math.min(params.offset ?? 0, scalars.length);
 		const end = Math.min(scalars.length, offset + CONTENT_TEXT_MAX_SCALARS);
 		return {

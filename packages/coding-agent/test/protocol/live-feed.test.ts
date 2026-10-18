@@ -155,7 +155,7 @@ describe("live feed", () => {
 			? projectEntry(
 					harness.sessionManager.getCommittedEntry(result.id)!,
 					conversationProjectionSource(harness.session),
-					localProfile,
+					localProfile.projection,
 				)
 			: undefined;
 		expect(committed && "view" in committed ? committed.view?.presentation : undefined).toEqual(live);
@@ -190,7 +190,7 @@ describe("live feed", () => {
 			? projectEntry(
 					harness.sessionManager.getCommittedEntry(result.id)!,
 					conversationProjectionSource(harness.session),
-					localProfile,
+					localProfile.projection,
 				)
 			: undefined;
 		const durationMs = committed && "view" in committed ? committed.view?.durationMs : undefined;

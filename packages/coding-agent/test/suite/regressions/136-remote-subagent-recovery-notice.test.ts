@@ -37,7 +37,7 @@ test("remote transcripts surface subagent recovery notices as system text", asyn
 		const localView = (id: string) => {
 			const entry = session.sessionManager.getCommittedEntry(id);
 			if (!entry) throw new Error(`No entry ${id}`);
-			return projectTranscriptItem(entry, source, localProfile);
+			return projectTranscriptItem(entry, source, localProfile.projection);
 		};
 		expect(localView(recoveryEntryId)).toMatchObject({ role: "system", text: noticeText });
 		expect(localView(reviewEntryId)).toMatchObject({ role: "assistant", text: "Review result" });

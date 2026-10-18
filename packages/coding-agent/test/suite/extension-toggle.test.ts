@@ -320,7 +320,7 @@ describe("extension runtime toggle", () => {
 				.flatMap((entry) => {
 					const committed = session.sessionManager.getCommittedEntry(entry.id);
 					const projected = committed
-						? projectEntry(committed, conversationProjectionSource(session), localProfile)
+						? projectEntry(committed, conversationProjectionSource(session), localProfile.projection)
 						: undefined;
 					return projected && "view" in projected && projected.view ? [projected.view] : [];
 				})

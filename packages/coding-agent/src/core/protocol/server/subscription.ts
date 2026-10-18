@@ -85,7 +85,7 @@ export function projectLog(
 		afterOrdinal,
 		throughOrdinal - afterOrdinal,
 	)) {
-		const entryFrame = projectEntry(entry, source, profile);
+		const entryFrame = projectEntry(entry, source, profile.projection);
 		if (entryFrame) projected.push(entryFrame);
 	}
 	return projected;
@@ -106,7 +106,7 @@ export function logSnapshot(
 ): ClientSnapshot {
 	const folded: FoldEntry[] = [];
 	for (const entry of sessionManager.committedEntriesAfter(0, ordinal)) {
-		const foldEntry = projectFoldEntry(entry, source, profile);
+		const foldEntry = projectFoldEntry(entry, source, profile.projection);
 		if (foldEntry) folded.push(foldEntry);
 	}
 	const state = clientFold(folded);
@@ -115,7 +115,7 @@ export function logSnapshot(
 	const carried = bounded ? clientActiveBranch(state).slice(-tail) : state.entries;
 	const entries = carried.map(({ id }) => {
 		const entry = source.entry(id);
-		const projected = entry && projectEntry(entry, source, profile);
+		const projected = entry && projectEntry(entry, source, profile.projection);
 		if (!projected) throw new Error(`Snapshot entry ${id} does not project from the log`);
 		return projected;
 	});
@@ -340,7 +340,7 @@ export class Subscription {
 		if (entries.length === 0) return;
 		let written = this.cursor;
 		for (const entry of entries) {
-			const projected = projectEntry(entry, this.source, this.options.profile);
+			const projected = projectEntry(entry, this.source, this.options.profile.projection);
 			if (!projected) continue;
 			this.options.sink.send({ type: "entry", subscriptionId: this.id, entry: projected });
 			written = entry.ordinal;

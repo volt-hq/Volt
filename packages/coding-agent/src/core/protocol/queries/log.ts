@@ -96,7 +96,7 @@ export const historyQuery = defineQuery({
 		let earlier = false;
 		const take = (entry: CommittedSessionEntry): boolean => {
 			if (entry.ordinal >= before) return true;
-			const projected = projectEntry(entry, source, profile);
+			const projected = projectEntry(entry, source, profile.projection);
 			if (!projected) return true;
 			if (newestFirst.length === params.limit) {
 				earlier = true;
@@ -110,7 +110,7 @@ export const historyQuery = defineQuery({
 			for (let index = entries.length - 1; index >= 0 && take(entries[index]!); index--);
 		} else {
 			const start = sessionManager.getCommittedEntry(params.branch);
-			if (!start || !profile.includes(start)) {
+			if (!start || !profile.projection.includes(start)) {
 				throw new QueryRejectedError("invalid_input", `Unknown entry: ${params.branch}`);
 			}
 			const seen = new Set<string>();
@@ -134,13 +134,13 @@ export const contentQuery = defineQuery({
 		const profile = subscriberOf(ctx, "content");
 		const { sessionManager } = logOf(ctx);
 		const entry = sessionManager.getCommittedEntry(params.entryId);
-		if (!entry || !profile.includes(entry)) {
+		if (!entry || !profile.projection.includes(entry)) {
 			throw new QueryRejectedError("invalid_input", `Unknown entry: ${params.entryId}`);
 		}
 		// A work notice's content is its view's text, as the subscription projects it.
-		const notice = transcriptWorkNoticeText(entry, profile);
+		const notice = transcriptWorkNoticeText(entry, profile.projection);
 		const parts: ContentPart[] =
-			notice === undefined ? contentParts(profile.source(entry)) : [{ type: "text", text: notice }];
+			notice === undefined ? contentParts(profile.projection.source(entry)) : [{ type: "text", text: notice }];
 		const index = params.part ?? 0;
 		const part = parts[index];
 		if (!part) throw new QueryRejectedError("invalid_input", `Entry ${params.entryId} has no content part ${index}`);

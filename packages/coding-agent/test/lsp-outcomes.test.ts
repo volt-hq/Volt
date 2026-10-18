@@ -307,7 +307,7 @@ it("persists failed explicit calls and successful writes with bounded evidence a
 		const source = sessionProjectionSource(reopened);
 		expect(
 			reopened.committedEntriesAfter(0).flatMap((entry) => {
-				const item = projectTranscriptItem(entry, source, localProfile);
+				const item = projectTranscriptItem(entry, source, localProfile.projection);
 				return item?.role === "tool" ? [item.status] : [];
 			}),
 		).toEqual(["failed", "completed"]);

@@ -48,8 +48,22 @@ export type IrohRemoteSanitizerValuePreserver = (
 	value: unknown,
 ) => boolean;
 
+/**
+ * What a sanitizer redacts, as it resolved its options when it was made: the
+ * workspace root paths are relative to, every redacted root (each configured
+ * root and its real path), and the path that replaces them. Two sanitizers
+ * with equal redaction redact every value alike.
+ */
+export interface IrohRemoteRedaction {
+	readonly workspacePath: string;
+	readonly roots: readonly string[];
+	readonly remoteWorkspacePath: string;
+}
+
 /** Path redaction of text and of whole values, field-aware. */
 export interface IrohRemoteProjectionSanitizer {
+	/** What the sanitizer redacts. */
+	readonly redaction: IrohRemoteRedaction;
 	sanitizeText(value: string): string;
 	sanitizeValue(value: unknown, preserveEntry?: IrohRemoteSanitizerValuePreserver): unknown;
 	/** Whether `value` holds a redacted root: whether text redaction would rewrite it. */
@@ -81,8 +95,10 @@ type PathContinuationMode = "text" | "delimited";
 export function createIrohRemoteProjectionSanitizer(
 	options: IrohRemoteSanitizerOptions,
 ): IrohRemoteProjectionSanitizer {
-	const context = createSanitizerContext(options);
+	const redaction = resolveRedaction(options);
+	const context = createSanitizerContext(redaction);
 	return {
+		redaction,
 		sanitizeText: (value) => sanitizeRemoteText(value, context),
 		sanitizeValue: (value, preserveEntry) => sanitizeValue(value, context, undefined, preserveEntry),
 		containsRoot: (value) => containsRoot(value, context),
@@ -91,23 +107,25 @@ export function createIrohRemoteProjectionSanitizer(
 	};
 }
 
-function createSanitizerContext(options: IrohRemoteSanitizerOptions): IrohRemoteOutboundSanitizerContext {
-	const resolvedWorkspacePath = resolve(options.workspacePath);
+function resolveRedaction(options: IrohRemoteSanitizerOptions): IrohRemoteRedaction {
+	const workspacePath = resolve(options.workspacePath);
+	// Additional roots (worktree parent checkout, worktrees root) fold into the
+	// same pattern list: every occurrence maps to remoteWorkspacePath.
+	const configuredRoots = [workspacePath, ...(options.additionalRedactedPaths ?? []).map((value) => resolve(value))];
+	// A root reached through a symlink also appears as its real path, in file system errors for one.
+	const roots = [...new Set(configuredRoots.flatMap((root) => [root, realRoot(root)]))];
+	return { workspacePath, roots, remoteWorkspacePath: options.remoteWorkspacePath ?? "/workspace" };
+}
+
+function createSanitizerContext(redaction: IrohRemoteRedaction): IrohRemoteOutboundSanitizerContext {
 	// Compare and redact in a Unicode-normalization-insensitive way: macOS surfaces
 	// on-disk paths in NFD while a configured root may be NFC (or vice versa), and a
 	// byte-exact compare would let a differently-composed form of an in-workspace path
 	// bypass redaction and leak the real host path. Canonicalize the compared root to
 	// NFC, and match embedded occurrences against both NFC and NFD forms.
-	const workspacePath = resolvedWorkspacePath.normalize("NFC");
-	// Additional roots (worktree parent checkout, worktrees root) fold into the
-	// same pattern list: every occurrence maps to remoteWorkspacePath. On Windows,
-	// match either separator so mixed paths cannot bypass redaction.
-	const configuredRoots = [
-		resolvedWorkspacePath,
-		...(options.additionalRedactedPaths ?? []).map((value) => resolve(value)),
-	];
-	// A root reached through a symlink also appears as its real path, in file system errors for one.
-	const redactedRoots = [...new Set(configuredRoots.flatMap((root) => [root, realRoot(root)]))];
+	const workspacePath = redaction.workspacePath.normalize("NFC");
+	const redactedRoots = redaction.roots;
+	// On Windows, match either separator so mixed paths cannot bypass redaction.
 	const workspacePathPatterns = [
 		...new Set(redactedRoots.flatMap((root) => [root.normalize("NFC"), root.normalize("NFD")])),
 	]
@@ -124,7 +142,7 @@ function createSanitizerContext(options: IrohRemoteSanitizerOptions): IrohRemote
 		),
 	].filter((value) => value.length > 0);
 	return {
-		remoteWorkspacePath: options.remoteWorkspacePath ?? "/workspace",
+		remoteWorkspacePath: redaction.remoteWorkspacePath,
 		workspacePath,
 		workspacePathPatterns,
 		rootForms,

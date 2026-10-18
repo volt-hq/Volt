@@ -182,7 +182,7 @@ describe("profile redaction", () => {
 				const manager = await seed(steps);
 				const source = sessionProjectionSource(manager);
 				for (const entry of manager.committedEntriesAfter(0)) {
-					const projected = projectEntry(entry, source, localProfile);
+					const projected = projectEntry(entry, source, localProfile.projection);
 					// Review records are host state: even the local profile never sends them.
 					expect(projected === undefined).toBe(REVIEW_RECORD.test(entry.type));
 					if (!projected) continue;
@@ -257,7 +257,7 @@ describe("profile redaction", () => {
 					const redactor = profile.redactor();
 					const projected = manager
 						.committedEntriesAfter(0)
-						.flatMap((entry) => projectEntry(entry, source, profile) ?? []);
+						.flatMap((entry) => projectEntry(entry, source, profile.projection) ?? []);
 					expect(projected.filter((entry) => REVIEW_RECORD.test(entry.type))).toEqual([]);
 					for (const entry of projected) {
 						expect(leaks(redactor.redact({ type: "entry", subscriptionId: "s", entry }))).toEqual([]);

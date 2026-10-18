@@ -9,7 +9,7 @@
 import type { RemoteGrant } from "@hansjm10/volt-protocol";
 import type { ConversationHost } from "../../host/conversation-host.ts";
 import type { HostedConversation } from "../../host/hosted-conversation.ts";
-import { type ProfileLimits, remoteProfile } from "../../protocol/profiles.ts";
+import { type RemoteProfileLimits, remoteProfile } from "../../protocol/profiles.ts";
 import type { RemoteRedactionOptions } from "../../protocol/remote-redaction.ts";
 import {
 	type ProtocolConnection,
@@ -47,7 +47,7 @@ export interface IrohRemoteConnectionOptions
 	/** Completion notifications for the device's own prompts; none without a conversation. */
 	readonly notifications?: CompletionNotificationsOptions;
 	/** Overrides of the remote profile's bounds, for tests. */
-	readonly limits?: Partial<ProfileLimits>;
+	readonly limits?: RemoteProfileLimits;
 }
 
 /** Bytes all streams of one device may queue together; each stream also keeps its profile's bound. */

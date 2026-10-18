@@ -134,7 +134,7 @@ describe("background jobs on the protocol", () => {
 		const project = (id: string) => {
 			const entry = manager.getCommittedEntry(id);
 			if (!entry) throw new Error(`No entry ${id}`);
-			const projected = projectEntry(entry, sessionProjectionSource(manager), profile);
+			const projected = projectEntry(entry, sessionProjectionSource(manager), profile.projection);
 			if (!projected) throw new Error(`The remote profile hides ${id}`);
 			const redacted = redactor.redact({ type: "entry", subscriptionId: "s1", entry: projected });
 			if (redacted?.type !== "entry") throw new Error("Expected an entry frame");

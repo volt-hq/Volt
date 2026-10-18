@@ -77,7 +77,7 @@ function createAuthorization(workspacePath: string): IrohRemoteClientAuthorizati
 function subscriberSnapshot(manager: SessionManager, profile: Profile): ClientSnapshot {
 	const source = sessionProjectionSource(manager);
 	const projected = manager.committedEntriesAfter(0).flatMap((entry): ProjectedEntry[] => {
-		const projectedEntry = projectEntry(entry, source, profile);
+		const projectedEntry = projectEntry(entry, source, profile.projection);
 		return projectedEntry === undefined ? [] : [projectedEntry];
 	});
 	return clientSnapshot(clientFold(projected));

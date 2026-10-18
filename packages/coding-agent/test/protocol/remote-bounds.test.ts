@@ -24,7 +24,7 @@ import {
 } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
-import { type ProfileLimits, remoteProfile } from "../../src/core/protocol/profiles.ts";
+import { type RemoteProfileLimits, remoteProfile } from "../../src/core/protocol/profiles.ts";
 import type { ProtocolConnection } from "../../src/core/protocol/server/connection.ts";
 import { Subscription } from "../../src/core/protocol/server/subscription.ts";
 import type { IrohBiStreamLike } from "../../src/core/protocol/transport/iroh-transport.ts";
@@ -146,7 +146,7 @@ describe("remote profile bounds", () => {
 	function serve(
 		harness: HostHarness,
 		conversation: HostedConversation,
-		options: { limits?: Partial<ProfileLimits>; stream?: ControlledStream } = {},
+		options: { limits?: RemoteProfileLimits; stream?: ControlledStream } = {},
 	): { phone: RemotePhone; connection: ProtocolConnection } {
 		const pair = createIrohStreamPair();
 		const connection = serveIrohRemoteConnection({
@@ -443,7 +443,7 @@ describe("remote profile bounds", () => {
 
 	it("drops queued live frames past the live queue bound and resets from the live state, never dropping entries", async () => {
 		const { conversation } = await setup();
-		const profile = (limits: Partial<ProfileLimits> = {}) =>
+		const profile = (limits: RemoteProfileLimits = {}) =>
 			remoteProfile({ grant: ALL, redaction: { workspacePath: conversation.cwd }, bound: conversation.id, limits });
 
 		// The size of a reset of the current live state, as the queue measures it.

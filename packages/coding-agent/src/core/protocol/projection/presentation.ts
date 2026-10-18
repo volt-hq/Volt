@@ -1,18 +1,20 @@
 /**
  * Presentations of projected entries (RFC §4.3, amended): a tool item's and
  * a presented custom message's `view.presentation` is a pure function of the
- * log, the profile, and the presenter set. It is computed when the entry is
- * projected and never stored; a cache keeps it per profile and entry id while
- * the presenter set's generation and the entry's presenter stay the same.
+ * log, the projection, and the presenter set. It is computed when the entry
+ * is projected and never stored in the log; the projection cache keeps the
+ * projected entry while the presenter set's generation and the entry's
+ * presenter ({@link entryPresenter}) stay the same.
  *
- * A profile bounds presentations (`limits.presentationBytes`). On the remote
- * profile the presenter sees the entry with its paths redacted, image nodes
- * are replaced by their description (images are fetched with the `content`
- * query), and extension message presenters do not run: the custom messages
- * a paired device sees are the host's own.
+ * A projection bounds presentations (`presentationBytes`). On the remote
+ * projection the presenter sees the entry with its paths redacted, image
+ * nodes are replaced by their description (images are fetched with the
+ * `content` query), and extension message presenters do not run: the custom
+ * messages a paired device sees are the host's own.
  */
 
 import type { MessagePresentation, ToolPresentation, UiNode } from "@hansjm10/volt-protocol";
+import type { CommittedSessionEntry } from "../../session-manager.ts";
 import {
 	fitPresentation,
 	type MessagePresentInput,
@@ -21,70 +23,53 @@ import {
 	presentToolCall,
 	type ResolvedMessagePresenter,
 	type ResolvedToolPresenter,
-	serializedBytes,
 	type ToolPresentInput,
 } from "../../ui/presentation.ts";
-import type { Profile } from "../profiles.ts";
+import type { Projection } from "../profiles.ts";
 
-/** Most presentations one profile keeps cached in one conversation. */
-const PRESENTATION_CACHE_MAX_ENTRIES = 4_096;
-/** Most serialized bytes of presentations one profile keeps cached in one conversation. */
-const PRESENTATION_CACHE_MAX_BYTES = 8 * 1024 * 1024;
-
-interface Cached {
-	readonly generation: number;
-	readonly presenter: unknown;
-	readonly value: ToolPresentation | MessagePresentation | undefined;
-	readonly bytes: number;
-}
-
-interface ProfileCache {
-	readonly entries: Map<string, Cached>;
-	bytes: number;
-}
-
-/** The presentations computed for projected entries, by profile and entry id, the least recently computed evicted first. */
-export class PresentationCache {
-	private readonly byProfile = new WeakMap<Profile, ProfileCache>();
-
-	/**
-	 * The presentation of entry `id` for `profile`: the cached one while the
-	 * generation and presenter are the same, else `compute()`'s.
-	 */
-	resolve<T extends ToolPresentation | MessagePresentation | undefined>(
-		profile: Profile,
-		id: string,
-		generation: number,
-		presenter: unknown,
-		compute: () => T,
-	): T {
-		let cache = this.byProfile.get(profile);
-		const cached = cache?.entries.get(id);
-		if (cached && cached.generation === generation && cached.presenter === presenter) return cached.value as T;
-		const value = compute();
-		if (!cache) {
-			cache = { entries: new Map(), bytes: 0 };
-			this.byProfile.set(profile, cache);
-		}
-		const bytes = value === undefined ? 0 : serializedBytes(value);
-		if (cached) cache.bytes -= cached.bytes;
-		cache.entries.delete(id);
-		cache.entries.set(id, { generation, presenter, value, bytes });
-		cache.bytes += bytes;
-		for (const [oldest, entry] of cache.entries) {
-			if (cache.entries.size <= PRESENTATION_CACHE_MAX_ENTRIES && cache.bytes <= PRESENTATION_CACHE_MAX_BYTES) break;
-			cache.entries.delete(oldest);
-			cache.bytes -= entry.bytes;
-		}
-		return value;
-	}
-}
-
-/** What presenting a projected entry reads: the presenters, the working directory, and the cache. */
+/** What presenting a projected entry reads: the presenters and the working directory. */
 export interface PresentationSource {
 	readonly presenters: PresenterSet;
 	readonly cwd: string;
-	readonly cache?: PresentationCache;
+}
+
+/** The presenter calls of tool `toolName` present with, if any. */
+function toolPresenter(source: PresentationSource, toolName: string): ResolvedToolPresenter | undefined {
+	return source.presenters.tool(toolName);
+}
+
+/** The presenter custom messages of `customType` present with on `projection`, if it runs one. */
+function messagePresenter(
+	source: PresentationSource,
+	customType: string,
+	projection: Projection,
+): ResolvedMessagePresenter | undefined {
+	const found = source.presenters.message(customType);
+	return found !== undefined && (projection.fidelity === "full" || found.policy.owner === "host") ? found : undefined;
+}
+
+/**
+ * The presenter function the view of `entry` presents with on `projection`,
+ * if any: a projection of the entry is valid while it stays the same.
+ */
+export function entryPresenter(
+	entry: CommittedSessionEntry,
+	source: PresentationSource,
+	projection: Projection,
+): unknown {
+	if (entry.type === "custom_message") return messagePresenter(source, entry.customType, projection)?.present;
+	if (entry.type !== "message") return undefined;
+	const message = entry.message;
+	switch (message.role) {
+		case "toolResult":
+			return toolPresenter(source, message.toolName)?.present;
+		case "bashExecution":
+			return toolPresenter(source, "bash")?.present;
+		case "custom":
+			return messagePresenter(source, message.customType, projection)?.present;
+		default:
+			return undefined;
+	}
 }
 
 /** `nodes` with each image node replaced by its description: what a paired device is sent instead of image data. */
@@ -117,9 +102,13 @@ export function withoutImages(nodes: UiNode[] | undefined): UiNode[] | undefined
 	});
 }
 
-/** A presentation as `profile` sends it: without image data on the remote profile. */
-function forProfile<T extends ToolPresentation | MessagePresentation>(presentation: T, profile: Profile, unfit: T): T {
-	if (profile.fidelity === "full") return presentation;
+/** A presentation as `projection` sends it: without image data on the remote projection. */
+function forProjection<T extends ToolPresentation | MessagePresentation>(
+	presentation: T,
+	projection: Projection,
+	unfit: T,
+): T {
+	if (projection.fidelity === "full") return presentation;
 	const summary = withoutImages(presentation.summary);
 	const body = withoutImages(presentation.body);
 	const shaped = {
@@ -128,59 +117,44 @@ function forProfile<T extends ToolPresentation | MessagePresentation>(presentati
 		...(body === undefined ? {} : { body }),
 	} as T;
 	// Image descriptions can outgrow tiny image data: a presentation that no longer fits is `unfit`.
-	return fitPresentation(shaped, profile.limits.presentationBytes) ?? unfit;
+	return fitPresentation(shaped, projection.presentationBytes) ?? unfit;
 }
 
 /**
  * The presentation of a tool call that ended with a committed result. The
  * generic presentation shows `genericArgs`: the arguments the transcript
- * view itself carries, never more than the profile sends.
+ * view itself carries, never more than the projection sends.
  */
 export function projectToolPresentation(
-	id: string,
 	toolName: string,
 	input: Omit<ToolPresentInput, "cwd">,
 	genericArgs: Record<string, unknown>,
 	source: PresentationSource,
-	profile: Profile,
+	projection: Projection,
 ): ToolPresentation {
-	const presenter: ResolvedToolPresenter | undefined = source.presenters.tool(toolName);
-	const compute = (): ToolPresentation => {
-		const presentation = presentToolCall(
-			presenter,
-			toolName,
-			{ ...input, cwd: profile.source(source.cwd) },
-			profile.limits.presentationBytes,
-			genericArgs,
-		);
-		return forProfile(presentation, profile, { title: presentation.title });
-	};
-	return source.cache
-		? source.cache.resolve(profile, id, source.presenters.generation, presenter?.present, compute)
-		: compute();
+	const presentation = presentToolCall(
+		toolPresenter(source, toolName),
+		toolName,
+		{ ...input, cwd: projection.source(source.cwd) },
+		projection.presentationBytes,
+		genericArgs,
+	);
+	return forProjection(presentation, projection, { title: presentation.title });
 }
 
-/** The presentation of a custom message, when its type has a presenter the profile runs. */
+/** The presentation of a custom message, when its type has a presenter the projection runs. */
 export function projectMessagePresentation(
-	id: string,
 	message: MessagePresentInput,
 	source: PresentationSource,
-	profile: Profile,
+	projection: Projection,
 ): MessagePresentation | undefined {
-	const found: ResolvedMessagePresenter | undefined = source.presenters.message(message.customType);
-	const presenter =
-		found !== undefined && (profile.fidelity === "full" || found.policy.owner === "host") ? found : undefined;
+	const presenter = messagePresenter(source, message.customType, projection);
 	if (presenter === undefined) return undefined;
-	const compute = (): MessagePresentation | undefined => {
-		const presentation = presentCustomMessage(presenter, message, profile.limits.presentationBytes);
-		return presentation === undefined
-			? undefined
-			: forProfile(presentation, profile, {
-					...(presentation.title === undefined ? {} : { title: presentation.title }),
-					body: [],
-				});
-	};
-	return source.cache
-		? source.cache.resolve(profile, id, source.presenters.generation, presenter.present, compute)
-		: compute();
+	const presentation = presentCustomMessage(presenter, message, projection.presentationBytes);
+	return presentation === undefined
+		? undefined
+		: forProjection(presentation, projection, {
+				...(presentation.title === undefined ? {} : { title: presentation.title }),
+				body: [],
+			});
 }
