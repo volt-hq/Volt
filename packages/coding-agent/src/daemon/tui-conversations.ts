@@ -497,7 +497,7 @@ export class TuiConversations {
 		return true;
 	}
 
-	/** A worker exited: its TUIs' streams close (D19), and their unredeemed ends expire now. */
+	/** A worker exited: its TUIs' streams close after what it wrote (D19), and their unredeemed ends expire now. */
 	workerExited(workerId: string): void {
 		for (const [relayId, ticket] of this.tickets) {
 			if (ticket.worker.workerId !== workerId) continue;
@@ -506,7 +506,7 @@ export class TuiConversations {
 			ticket.release();
 		}
 		for (const [owner, owningWorker] of this.relayWorkers) {
-			if (owningWorker === workerId) void owner.close("worker_exited");
+			if (owningWorker === workerId) void owner.workerExited();
 		}
 	}
 
