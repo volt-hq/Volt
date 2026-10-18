@@ -158,7 +158,7 @@ describe("worktree conversation placement (conversation open)", () => {
 		const hello = createConversationHello({ target: "new", worktreeId: "fix-login" });
 
 		const opened = await resolveConversationOpen(hello, authorization, services);
-		expect(resolveWorktree).toHaveBeenCalledExactlyOnceWith("ws", hello, "new-session-1");
+		expect(resolveWorktree).toHaveBeenCalledExactlyOnceWith("ws", hello, "new-session-1", null);
 		expect(opened).toMatchObject({
 			sessionId: "new-session-1",
 			selection: { kind: "created", sessionId: "new-session-1" },
@@ -348,7 +348,13 @@ describe("worktree conversation placement (conversation open)", () => {
 		const hello = createConversationHello({ target: "session", sessionId: "s-resume" });
 
 		const resumed = await resolveConversationOpen(hello, authorization, services);
-		expect(resolveWorktree).toHaveBeenCalledExactlyOnceWith("ws", hello, "s-resume");
+		// The stored session's summary places it in the worktree.
+		expect(resolveWorktree).toHaveBeenCalledExactlyOnceWith(
+			"ws",
+			hello,
+			"s-resume",
+			expect.objectContaining({ root: worktreePath, worktree }),
+		);
 		expect(resumed).toMatchObject({
 			selection: { kind: "resumed", requestedSessionId: "s-resume", sessionId: "s-resume" },
 			worktree: { id: "fix-login" },
@@ -369,7 +375,7 @@ describe("worktree conversation placement (conversation open)", () => {
 		const { services } = createServices({ resolveWorktree });
 		const hello = createConversationHello({ target: "last" });
 		await resolveConversationOpen(hello, authorization, services);
-		expect(resolveWorktree).toHaveBeenCalledExactlyOnceWith("ws", hello, "s-last");
+		expect(resolveWorktree).toHaveBeenCalledExactlyOnceWith("ws", hello, "s-last", null);
 	});
 
 	it("created_after_missing under a resolved worktree binds the replacement session id (#83)", async () => {
@@ -380,7 +386,7 @@ describe("worktree conversation placement (conversation open)", () => {
 
 		const opened = await resolveConversationOpen(hello, authorization, services);
 
-		expect(resolveWorktree).toHaveBeenCalledExactlyOnceWith("ws", hello, "s-last");
+		expect(resolveWorktree).toHaveBeenCalledExactlyOnceWith("ws", hello, "s-last", null);
 		expect(opened.selection).toMatchObject({ kind: "created_after_missing", requestedSessionId: "s-last" });
 		expect(opened.sessionId).not.toBe("s-last");
 		await opened.prepare(1);

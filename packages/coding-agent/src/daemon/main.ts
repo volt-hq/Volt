@@ -493,6 +493,8 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		agentDir,
 		workspaces: () => state.getHostState().workspaces,
 		worktrees: () => stateManager.listWorktrees(),
+		// One store worker serves the daemon's session lookups until shutdown (#934).
+		retainStore: true,
 	});
 	const workers = new WorkerRegistry({
 		launcher: config.workerLauncher ?? {
@@ -676,6 +678,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				details: { reason, extensionDisposalTimedOut },
 			})
 			.catch(() => {});
+		await workspaceSessions.close().catch(() => {});
 		await controlServer?.close().catch(() => {});
 		removeOwnedPidfile();
 		releaseDaemonLock();

@@ -220,13 +220,13 @@ async function fixture(nested = false, workspaceName = "project") {
 			}),
 			toolPolicy: () => ({ tools: ["read", "write"], allowUnlistedExtensionTools: false }),
 			projectTrusted: () => true,
-			resolveWorktree: async (name, hello, id) => {
+			resolveWorktree: async (name, hello, id, placement) => {
 				if (hello.mode === "conversation" && hello.conversation.target === "new") {
 					return hello.conversation.worktreeId
 						? worktrees.findWorktree(name, hello.conversation.worktreeId)
 						: undefined;
 				}
-				return id ? worktrees.resolveSessionWorktree(name, id) : undefined;
+				return id ? worktrees.resolveSessionWorktree(name, id, { placement }) : undefined;
 			},
 			resolveWorkingDirectory: async ({ workspace, worktree, workingDirectory }) => {
 				const result = worktree

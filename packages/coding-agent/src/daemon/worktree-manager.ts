@@ -27,6 +27,7 @@ import type { ControlRequest, ControlWorktreeStatus } from "./control-protocol.t
 import { type ControlConnection, retainControlConnectionResource } from "./control-server.ts";
 import { runPrReviewGit } from "./pr-review-git.ts";
 import { resolveWorkspaceDirectory, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
+import { findStoredSessionLocation, type SessionPlacement, WorkspacePlacementIndex } from "./workspace-sessions.ts";
 import { hasRetainedWorktreeCheckout, WorktreeLifecycle, WorktreeRestorePreflightError } from "./worktree-lifecycle.ts";
 import { tryAcquireWorktreeLock } from "./worktree-lock.ts";
 
@@ -209,6 +210,18 @@ export type WorktreeGitRunner = (
 	cwd: string,
 	options?: { signal?: AbortSignal },
 ) => Promise<{ ok: boolean; code: number | null; stdout: string; stderr: string }>;
+
+/** How `resolveSessionWorktree` finds a session's worktree. */
+export interface SessionWorktreeLookupOptions {
+	/** A cwd the worktree must contain. */
+	readonly expectedCwd?: string;
+	/**
+	 * Where the session runs for the workspace, from its summary, for when it
+	 * has no binding; null when the workspace owns no such session. Read from
+	 * the default store when not given.
+	 */
+	readonly placement?: SessionPlacement | null;
+}
 
 export interface WorktreeManagerOptions {
 	agentDir: string;
@@ -1434,11 +1447,12 @@ export class WorktreeManager {
 	private async findSessionWorktree(
 		workspaceName: string,
 		sessionId: string,
-		expectedCwd?: string,
+		options: SessionWorktreeLookupOptions,
 	): Promise<IrohRemoteWorkspaceWorktree | undefined> {
 		const bound = await this.stateManager.findWorktreeForSession(workspaceName, sessionId);
-		const record = bound ?? (await this.resolveSessionWorktreeByStoredCwd(workspaceName, sessionId));
-		if (record && expectedCwd !== undefined && !isPathContained(record.path, expectedCwd)) {
+		const record =
+			bound ?? (await this.resolveSessionWorktreeByStoredCwd(workspaceName, sessionId, options.placement));
+		if (record && options.expectedCwd !== undefined && !isPathContained(record.path, options.expectedCwd)) {
 			throw new Error("Stored session cwd does not match its managed worktree binding");
 		}
 		return record;
@@ -1448,9 +1462,9 @@ export class WorktreeManager {
 	async resolveSessionWorktree(
 		workspaceName: string,
 		sessionId: string,
-		expectedCwd?: string,
+		options: SessionWorktreeLookupOptions = {},
 	): Promise<IrohRemoteWorkspaceWorktree | undefined> {
-		const record = await this.findSessionWorktree(workspaceName, sessionId, expectedCwd);
+		const record = await this.findSessionWorktree(workspaceName, sessionId, options);
 		return record?.checkoutArchive ? this.restoreForResume(workspaceName, record.id) : record;
 	}
 
@@ -1520,57 +1534,44 @@ export class WorktreeManager {
 	 * Binding-miss fallback (#83): worktrees[].sessionIds historically only
 	 * recorded ids bound at creation, so descendants (fork/new) of older hosts,
 	 * subagent sessions, and pre-fix stranded sessions can live under a
-	 * checkout without a binding. Resolve those from the authoritative session
-	 * store's cwd in the default store, then self-heal the durable binding.
-	 * Missing, ambiguous, or unreadable state fails closed.
+	 * checkout without a binding. Resolve those from where the default store's
+	 * summary of the session places it for the workspace (the rule its
+	 * ownership follows, #722), then self-heal the durable binding. A caller
+	 * that read the summary already supplies `placement` (null: none). The
+	 * session's log is never loaded (#934). Missing, ambiguous, or unreadable
+	 * state fails closed.
 	 */
 	private async resolveSessionWorktreeByStoredCwd(
 		workspaceName: string,
 		sessionId: string,
+		suppliedPlacement: SessionPlacement | null | undefined,
 	): Promise<IrohRemoteWorkspaceWorktree | undefined> {
-		const worktrees = await this.stateManager.listWorktrees(workspaceName);
-		if (worktrees.length === 0) {
-			return undefined;
-		}
-		const state = await this.stateManager.getState();
-		const workspace = state.workspaces.find((entry) => entry.name === workspaceName);
-		if (!workspace) {
-			return undefined;
-		}
-		const sessionDir = getDefaultSessionDirPath(this.agentDir);
-		let storedCwd: string;
-		try {
-			const sessionRef = await SessionManager.findForResume(sessionDir, sessionId);
-			if (sessionRef === undefined) return undefined;
-			const manager = await SessionManager.openReadOnly(sessionRef);
+		let placement: SessionPlacement | undefined;
+		if (suppliedPlacement !== undefined) {
+			placement = suppliedPlacement ?? undefined;
+		} else {
 			try {
-				storedCwd = manager.getCwd();
-			} finally {
-				await manager.closePersistence();
-			}
-		} catch {
-			return undefined;
-		}
-		const cwdReal = await realpathOrResolve(storedCwd);
-		let match: { worktree: IrohRemoteWorkspaceWorktree; checkoutPath: string } | undefined;
-		for (const worktree of worktrees) {
-			const checkoutPath = await realpathOrResolve(worktree.path);
-			if (!isPathContained(checkoutPath, cwdReal)) {
-				continue;
-			}
-			// Adopted worktrees may nest; prefer the most specific containing checkout.
-			if (match === undefined || checkoutPath.length > match.checkoutPath.length) {
-				match = { worktree, checkoutPath };
+				const location = await findStoredSessionLocation(getDefaultSessionDirPath(this.agentDir), sessionId);
+				if (location === undefined) return undefined;
+				const state = await this.stateManager.getState();
+				const placements = await WorkspacePlacementIndex.build(
+					state.workspaces,
+					await this.stateManager.listWorktrees(),
+				);
+				placement = placements.placeFor(workspaceName, location.cwdKey);
+			} catch {
+				return undefined;
 			}
 		}
-		if (match === undefined) {
+		const worktree = placement?.worktree;
+		if (worktree === undefined || worktree.workspaceName !== workspaceName) {
 			return undefined;
 		}
 		// Self-heal so future lookups, session badging, and worktree busy checks
 		// hit the persisted binding. Resolution must not fail because this durable
 		// write did; the next lookup simply falls back again.
-		await this.bindSession(workspaceName, match.worktree.id, sessionId).catch(() => undefined);
-		return match.worktree;
+		await this.bindSession(workspaceName, worktree.id, sessionId).catch(() => undefined);
+		return worktree;
 	}
 
 	/** Pin an existing review source before async resolution, serialized against reclamation. */

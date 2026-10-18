@@ -173,7 +173,7 @@ import { resolveWorktreeCleanupPolicy } from "./state.ts";
 import { sanitizeHostThemeTokens } from "./theme-push.ts";
 import { type LiveWorker, MAX_WORKER_HOSTED_SESSIONS, type WorkerRegistry } from "./worker-registry.ts";
 import { isPathInside, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
-import type { WorkspaceSession } from "./workspace-sessions.ts";
+import type { SessionPlacement, WorkspaceSession } from "./workspace-sessions.ts";
 import {
 	getWorkspaceWorktreesDir,
 	handleWorktreeControlRequest,
@@ -3492,12 +3492,14 @@ class IrohDaemonService {
 	 * Worktree resolution for conversation opens: explicit worktreeId on "new"
 	 * (must exist AND be on disk), persisted binding on resume (missing checkout
 	 * fails with session_unavailable). Availability is an open-time failure, not
-	 * an authorization failure.
+	 * an authorization failure. `placement`, read from the target session's
+	 * summary, stands in for the binding when there is none.
 	 */
 	private async resolveConversationWorktree(
 		workspaceName: string,
 		hello: IrohRemoteHello,
 		targetSessionId: string | undefined,
+		placement: SessionPlacement | null,
 	): Promise<IrohRemoteWorkspaceWorktree | undefined> {
 		if (hello.mode !== "conversation") {
 			return undefined;
@@ -3507,7 +3509,7 @@ class IrohDaemonService {
 			const boundWorktree =
 				targetSessionId === undefined
 					? undefined
-					: await this.worktrees.resolveSessionWorktree(workspaceName, targetSessionId);
+					: await this.worktrees.resolveSessionWorktree(workspaceName, targetSessionId, { placement });
 			if (boundWorktree !== undefined && boundWorktree.id !== requestedWorktreeId) {
 				throw createConversationOpenError(
 					"invalid_conversation_target",
@@ -3527,7 +3529,7 @@ class IrohDaemonService {
 		if (targetSessionId === undefined) {
 			return undefined;
 		}
-		const worktree = await this.worktrees.resolveSessionWorktree(workspaceName, targetSessionId);
+		const worktree = await this.worktrees.resolveSessionWorktree(workspaceName, targetSessionId, { placement });
 		if (worktree === undefined) {
 			return undefined;
 		}
@@ -3783,8 +3785,8 @@ class IrohDaemonService {
 				}),
 			projectTrusted: (workspace) =>
 				resolveIrohRemoteWorkspaceProjectTrusted(workspace, { trustStore: this.trustStore }),
-			resolveWorktree: (workspaceName, hello, targetSessionId) =>
-				this.resolveConversationWorktree(workspaceName, hello, targetSessionId),
+			resolveWorktree: (workspaceName, hello, targetSessionId, placement) =>
+				this.resolveConversationWorktree(workspaceName, hello, targetSessionId, placement),
 			resolveWorkingDirectory: (options) => this.resolveConversationWorkingDirectory(options),
 			prepareWorktreeRuntime: (workspaceName, worktreeId, sessionId) =>
 				this.worktrees.beginRuntimePreparation(workspaceName, worktreeId, sessionId),
