@@ -26,6 +26,7 @@ import {
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_SNAPSHOT_SERIALIZED_BYTES,
 	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_BYTES,
 	DEFAULT_IROH_RPC_MAX_LINE_BYTES,
+	HISTORY_PAGE_MAX_ENTRIES,
 	type HostRequestKind,
 	IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS,
 	PRESENTATION_MAX_SERIALIZED_BYTES,
@@ -47,6 +48,11 @@ import {
 export interface ProfileLimits {
 	/** Most entries a snapshot carries; older ones are paged with `history`. */
 	readonly snapshotTail: number;
+	/**
+	 * Entries one read covers: a resume costs a read per this many entries it
+	 * replays, and a closed child's log a read per this many entries it holds.
+	 */
+	readonly entriesPerRead: number;
 	/** Most entries a resume replays before it is answered with a snapshot instead. */
 	readonly maxReplay: number;
 	/** Queued live bytes past which a subscription drops its queued live frames and resets. */
@@ -147,6 +153,7 @@ export const localProfile: Profile = Object.freeze({
 	sourceCut: (text: string): string => text,
 	limits: Object.freeze({
 		snapshotTail: UNBOUNDED,
+		entriesPerRead: UNBOUNDED,
 		maxReplay: UNBOUNDED,
 		liveQueueBytes: 64 * 1024 * 1024,
 		assistantSnapshotBytes: UNBOUNDED,
@@ -243,7 +250,8 @@ function hostRequestCapability(kind: HostRequestKind): RemoteCapability | undefi
 
 /** The remote profile's bounds. */
 export const REMOTE_PROFILE_LIMITS: ProfileLimits = Object.freeze({
-	snapshotTail: 200,
+	snapshotTail: 100,
+	entriesPerRead: HISTORY_PAGE_MAX_ENTRIES,
 	maxReplay: 1_000,
 	liveQueueBytes: DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_BYTES,
 	assistantSnapshotBytes: DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_SNAPSHOT_SERIALIZED_BYTES,

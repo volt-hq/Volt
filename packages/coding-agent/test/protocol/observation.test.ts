@@ -564,8 +564,12 @@ describe("closed descendants read from their logs", () => {
 			phone.query("history", { before: 1_000_000, limit: 5 }, { conversation: grandchild }),
 		).resolves.toMatchObject({ type: "result" });
 
-		// Reading the grandchild reads its parent's log for the link, then its own, a read per snapshot tail.
-		const tight = await connect(harness, parent, remote(parent, harness.tempDir, { snapshotTail: 1, readBurst: 4 }));
+		// Reading the grandchild reads its parent's log for the link, then its own, a read per entry here.
+		const tight = await connect(
+			harness,
+			parent,
+			remote(parent, harness.tempDir, { entriesPerRead: 1, readBurst: 4 }),
+		);
 		cleanups.push(() => tight.close());
 		const reads = vi.spyOn(SessionManager, "openReadOnly");
 		// A query the profile refuses, or with invalid parameters, reads no log.
