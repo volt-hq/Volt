@@ -30,6 +30,7 @@ vi.mock("../src/core/compaction/index.js", () => ({
 		cacheWrite: number;
 		totalTokens?: number;
 	}) => usage.totalTokens ?? usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
+	checkpointHostBlocks: () => undefined,
 	collectEntriesForBranchSummary: () => ({ entries: [], commonAncestorId: null }),
 	compact: async () => ({
 		summary: "compacted",
@@ -40,6 +41,7 @@ vi.mock("../src/core/compaction/index.js", () => ({
 	estimateTokens: (message: { content?: unknown }) => Math.ceil(JSON.stringify(message.content ?? "").length / 4),
 	estimateMessagesTokens: (messages: Array<{ content?: unknown }>) =>
 		messages.reduce((total, message) => total + Math.ceil(JSON.stringify(message.content ?? "").length / 4), 0),
+	estimateRequestTokens: () => 0,
 	estimateContextTokens: (
 		messages: Array<{
 			role: string;
@@ -72,9 +74,9 @@ vi.mock("../src/core/compaction/index.js", () => ({
 		return { tokens, usageTokens: 0, trailingTokens: tokens, lastUsageIndex: null };
 	},
 	generateBranchSummary: async () => ({ summary: "", aborted: false, readFiles: [], modifiedFiles: [] }),
-	prepareCompaction: (branchEntries: Array<{ id: string }>) => {
+	planCompaction: (branchEntries: Array<{ id: string }>) => {
 		compactionMockState.firstKeptEntryId = branchEntries.at(-1)?.id;
-		return { dummy: true };
+		return { preparation: { dummy: true }, keepsOversizedSuffix: false };
 	},
 	shouldCompact: (
 		contextTokens: number,
@@ -84,6 +86,8 @@ vi.mock("../src/core/compaction/index.js", () => ({
 }));
 
 vi.mock("../src/core/compaction/context-compaction.ts", () => ({
+	COMPACTION_REQUEST_TIMEOUT_MS: 600_000,
+	COMPACTION_TOTAL_TIMEOUT_MS: 1_800_000,
 	compactContext: async () => ({
 		summary: "compacted",
 		firstKeptEntryId: compactionMockState.firstKeptEntryId ?? "missing-first-kept-entry",

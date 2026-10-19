@@ -9,6 +9,7 @@ import {
 	type SimpleStreamOptions,
 } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
+import { composeCheckpoint, formatHostBlocks } from "../../src/core/compaction/checkpoint.ts";
 import { type CompactionDetails, prepareCompaction } from "../../src/core/compaction/compaction.ts";
 import { convertToLlm } from "../../src/core/messages.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
@@ -156,14 +157,18 @@ describe("AgentSession cache-preserving compaction", () => {
 		expect(details.requests).toEqual([
 			{
 				strategy: "native",
+				purpose: "native",
 				attempt: 1,
 				provider: harness.getModel().provider,
 				model: "large",
 				startedAt: expect.any(Number),
+				targetChars: 9830,
+				maxChars: 16_384,
 				timeToFirstEventMs: expect.any(Number),
 				timeToFirstTextMs: expect.any(Number),
 				durationMs: expect.any(Number),
 				stopReason: "stop",
+				textChars: "## Goal\nPRIOR-ONLY-CONSTRAINT\nPreserve the current task".length,
 				usage: {
 					input: expect.any(Number),
 					output: expect.any(Number),
@@ -339,23 +344,33 @@ describe("AgentSession cache-preserving compaction", () => {
 			await harness.session.setSessionName("compaction test");
 			const entries = harness.sessionManager.getEntries();
 			const leaf = harness.sessionManager.getLeafId();
-			harness.setResponses([
-				failure === "toolUse"
-					? fauxAssistantMessage([fauxToolCall("bash", { command: "must never execute" })], {
-							stopReason: "toolUse",
-						})
-					: fauxAssistantMessage(failure === "empty" ? "" : "partial summary", {
-							stopReason: failure === "length" ? "length" : "stop",
-						}),
-			]);
+			// A summary cut off at the output limit is regenerated shorter, at most twice.
+			const attempts = failure === "length" ? 3 : 1;
+			harness.setResponses(
+				Array.from({ length: attempts }, () =>
+					failure === "toolUse"
+						? fauxAssistantMessage([fauxToolCall("bash", { command: "must never execute" })], {
+								stopReason: "toolUse",
+							})
+						: fauxAssistantMessage(failure === "empty" ? "" : "partial summary", {
+								stopReason: failure === "length" ? "length" : "stop",
+							}),
+				),
+			);
 			await expect(harness.session.compact()).rejects.toThrow();
 			const record = JSON.parse(await readFile(join(harness.tempDir, "debug", "compaction-latest.json"), "utf8"));
 			expect(record).toMatchObject({
 				sessionId: harness.sessionManager.getSessionId(),
 				error: expect.any(String),
-				phase: "after native request 1 finished",
-				requests: [{ strategy: "native", attempt: 1, durationMs: expect.any(Number) }],
+				phase: `after native request ${attempts} finished`,
+				requests: Array.from({ length: attempts }, (_, index) => ({
+					strategy: "native",
+					attempt: index + 1,
+					durationMs: expect.any(Number),
+				})),
 			});
+			if (failure === "length")
+				expect(record.error).toContain("truncated at the output token limit after 3 attempts");
 			expect(harness.sessionManager.getLeafId()).toBe(leaf);
 			expect(harness.sessionManager.getEntries()).toEqual(entries);
 			expect(harness.eventsOfType("tool_execution_start")).toHaveLength(0);
@@ -397,7 +412,10 @@ describe("AgentSession cache-preserving compaction", () => {
 			aborted: false,
 			willRetry: false,
 			result: {
-				summary: "automatic checkpoint",
+				// The user's earlier messages follow the generated checkpoint verbatim.
+				summary: expect.stringMatching(
+					/^automatic checkpoint\n\n<user-messages>\n[\s\S]*\n\(1\) Original\n<\/user-messages>$/,
+				),
 				details: {
 					requests: [
 						{
@@ -534,8 +552,20 @@ describe("AgentSession cache-preserving compaction", () => {
 		expect(result.firstKeptEntryId).toBe(retainedEntry.id);
 		expect(result.details).toMatchObject({ readFiles: ["older-read.ts"], modifiedFiles: ["older-edit.ts"] });
 		expect(result.summary).toBe(
-			"file checkpoint\n\n<read-files>\nolder-read.ts\n</read-files>\n\n<modified-files>\nolder-edit.ts\n</modified-files>",
+			composeCheckpoint(
+				"file checkpoint",
+				formatHostBlocks(
+					{
+						userMessages: ["Inspect and update files"],
+						readFiles: ["older-read.ts"],
+						modifiedFiles: ["older-edit.ts"],
+					},
+					harness.getModel().contextWindow,
+				),
+			),
 		);
+		expect(result.summary).not.toContain("retained-read.ts");
+		expect(result.summary).not.toContain("retained-write.ts");
 		expect(harness.session.messages.slice(1)).toEqual(originalHistory.slice(-3));
 		expect(harness.sessionManager.getEntries().slice(0, savedEntries.length)).toEqual(savedEntries);
 		expect(harness.eventsOfType("tool_execution_start")).toHaveLength(0);

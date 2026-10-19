@@ -16,12 +16,14 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	createPilotDirectory,
+	createSuiteFixtures,
 	getPilotSubscriptionKey,
 	PILOT_CONDITIONS,
 	parsePilotArgs,
+	plannedCompactions,
 	runPilotCase,
 } from "../benchmarks/compaction-quality.ts";
-import { createQualityFixtures } from "./compaction-quality/fixtures.ts";
+import { createQualityFixtures, createTrajectoryFixtures } from "./compaction-quality/fixtures.ts";
 
 const model = getModels("openai-codex").find((candidate) => candidate.id === "gpt-5.6-luna")!;
 const directories: string[] = [];
@@ -355,6 +357,7 @@ describe("compaction quality pilot admission", () => {
 			model: "openai-codex/gpt-5.6-luna",
 			thinking: "low",
 			providerEffort: "low",
+			suite: "seeds",
 			plannedCases: 36,
 			networkRequests: 0,
 		});
@@ -450,5 +453,49 @@ server.listen(0, "127.0.0.1", async () => {
 		const alias = join(root, "alias");
 		await symlink(repo, alias, process.platform === "win32" ? "junction" : "dir");
 		await expect(createPilotDirectory(join(alias, "artifacts"), repo)).rejects.toThrow("outside the repository");
+	});
+});
+
+describe("multi-compaction trajectories (offline injected streams only)", () => {
+	it.each(
+		createTrajectoryFixtures().flatMap((fixture) =>
+			PILOT_CONDITIONS.map((condition) => ({ fixture, condition, name: `${fixture.id}/${condition}` })),
+		),
+	)("runs $name through every planned compaction", async ({ fixture, condition }) => {
+		const calls: Array<{ context: Context; options?: SimpleStreamOptions }> = [];
+		const result = await runPilotCase(fixture, condition, 1, {
+			model,
+			thinking: "low",
+			streamFn: captureStream(calls),
+		});
+		expect(result.status).toBe("completed");
+		const compactions = condition === "full" ? 0 : plannedCompactions(fixture);
+		expect(result.compactionCount).toBe(compactions);
+		expect(result.requests.filter((request) => request.stage === "summary")).toHaveLength(compactions);
+		expect(result.requests.at(-1)?.stage).toBe("continuation");
+		const continuation = calls.at(-1)!.context;
+		expect(continuation.messages.at(-1)?.content).toBe(fixture.input.continuationPrompt);
+		// The injected summarizer answers generically every time; the first request still reaches the continuation.
+		expect(JSON.stringify(continuation)).toContain("Keep parseConfig(source: string): Config synchronous.");
+		expect(JSON.stringify(continuation)).toContain("Do not publish a release.");
+		if (condition !== "full") {
+			expect(result.summary).toContain("Preserve the task.");
+			expect(result.summary).toContain("<user-messages>");
+			// The final epoch's retained message follows the checkpoint; earlier assistant work was summarized away.
+			const finalEpoch = fixture.input.epochs!.at(-1)!;
+			const retained = finalEpoch.messages.find(({ id }) => id === finalEpoch.firstKeptMessageId)!.message;
+			expect(retained.role).toBe("user");
+			if (retained.role === "user") expect(continuation.messages).toContainEqual(retained);
+			expect(JSON.stringify(continuation)).not.toContain("Understood: JSONL snapshots");
+		}
+	});
+
+	it("selects the trajectory suite explicitly", () => {
+		const args = ["--model", "openai-codex/gpt-5.6-luna", "--thinking", "low"];
+		expect(parsePilotArgs(args).suite).toBe("seeds");
+		expect(parsePilotArgs([...args, "--suite", "trajectories"]).suite).toBe("trajectories");
+		expect(() => parsePilotArgs([...args, "--suite", "all"])).toThrow("--suite");
+		expect(createSuiteFixtures("seeds")).toEqual(createQualityFixtures());
+		expect(createSuiteFixtures("trajectories")).toEqual(createTrajectoryFixtures());
 	});
 });

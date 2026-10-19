@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall, type ToolCall } from "@hansjm10/volt-ai";
-import type { QualityCriterion, QualityFixture, QualityInput, QualityLayer } from "./scoring.ts";
+import type { QualityCriterion, QualityEpoch, QualityFixture, QualityInput, QualityLayer } from "./scoring.ts";
 
 type SourceMessage = QualityInput["messages"][number];
 
@@ -488,5 +488,174 @@ export function createQualityFixtures(): QualityFixture[] {
 				),
 			],
 		),
+	];
+}
+
+/**
+ * One synthetic multi-compaction trajectory: the original request carries an
+ * API constraint and a release prohibition, a later decision is superseded,
+ * and an approach fails before the work is verified. Each later epoch is new
+ * work after a compaction; the probes continue after compactions three and five.
+ */
+function trajectoryEpochs(): QualityEpoch[] {
+	return [
+		{
+			messages: [
+				assistant("decision", "Decision: cache tokenized configs in SQLite."),
+				user(
+					"correction",
+					"Correction: do not add SQLite. Cache tokenized configs as JSONL snapshots only; no live database.",
+				),
+				assistant("correction-ack", "Understood: JSONL snapshots, no SQLite dependency."),
+				user("epoch-2-recent", "Now implement the cache key."),
+			],
+			firstKeptMessageId: "epoch-2-recent",
+		},
+		{
+			messages: [
+				...tool(
+					"key-test",
+					"bash",
+					{ command: "node --test test/config-cache.test.js" },
+					"FAIL changed-config: expected revision 2, received cached revision 1. The path-only key did not change.",
+					true,
+				),
+				assistant(
+					"key-conclusion",
+					"A path-only cache key cannot distinguish revisions. The key needs the content hash.",
+				),
+				user("epoch-3-recent", "Continue with a content-hash key."),
+			],
+			firstKeptMessageId: "epoch-3-recent",
+		},
+		{
+			messages: [
+				...tool(
+					"key-edit",
+					"edit",
+					{ path: "src/config-cache.ts", oldText: "key(path)", newText: "key(path, contentHash)" },
+					"Applied 1 edit to src/config-cache.ts.",
+				),
+				assistant("key-status", "Added the content hash to the cache key. The tests have not run yet."),
+				user("epoch-4-recent", "Run the focused cache tests."),
+			],
+			firstKeptMessageId: "epoch-4-recent",
+		},
+		{
+			messages: [
+				...tool(
+					"focused-tests",
+					"bash",
+					{ command: "node --test test/config-cache.test.js" },
+					"tests 9\npass 9\nfail 0\n",
+				),
+				assistant("verification", "The focused cache tests pass. The full suite and type check have not run."),
+				user("epoch-5-recent", "Prepare the change for review."),
+			],
+			firstKeptMessageId: "epoch-5-recent",
+		},
+	];
+}
+
+function trajectoryFixture(compactions: 3 | 5, criteria: QualityCriterion[]): QualityFixture {
+	return {
+		id: `streaming-config-migration-after-${compactions}`,
+		input: {
+			messages: [
+				user(
+					"request",
+					"Migrate configuration parsing in packages/config to streaming input. Keep parseConfig(source: string): Config synchronous. Do not publish a release.",
+				),
+				...tool(
+					"read",
+					"read",
+					{ path: "packages/config/src/parse.ts" },
+					"export function parseConfig(source: string): Config { return parse(source); }",
+				),
+				assistant("plan", "I will add an internal streaming tokenizer behind the synchronous API."),
+				user("recent", "Start with the tokenizer."),
+			],
+			firstKeptMessageId: "recent",
+			continuationPrompt: "State the next justified action and the evidence supporting it. Do not perform it yet.",
+			epochs: trajectoryEpochs().slice(0, compactions - 1),
+		},
+		criteria,
+	};
+}
+
+/**
+ * Multi-compaction diagnostic seeds: the same trajectory probed after three
+ * and five compactions. Early facts must survive repeated checkpoints.
+ */
+export function createTrajectoryFixtures(): QualityFixture[] {
+	return [
+		trajectoryFixture(3, [
+			criterion(
+				"early-constraint-delivered",
+				"delivery",
+				"The synchronous parseConfig contract from the first request reaches the third compaction's request.",
+				["request"],
+			),
+			criterion(
+				"signature-preserved",
+				"summary",
+				"The third checkpoint preserves parseConfig(source: string): Config as synchronous.",
+				["request"],
+			),
+			criterion(
+				"superseded-storage",
+				"summary",
+				"JSONL snapshots are the current cache decision; SQLite is superseded, not current.",
+				["decision", "correction"],
+			),
+			criterion(
+				"failed-key",
+				"summary",
+				"The checkpoint records that the path-only cache key failed to distinguish revisions.",
+				["key-test", "key-conclusion"],
+			),
+			criterion(
+				"next-action-after-3",
+				"continuation",
+				"The next action implements a content-hash key without SQLite and without changing the synchronous API.",
+				["request", "correction", "key-conclusion"],
+			),
+		]),
+		trajectoryFixture(5, [
+			criterion(
+				"early-constraint-delivered",
+				"delivery",
+				"The synchronous contract and release prohibition from the first request reach the fifth compaction's request.",
+				["request"],
+			),
+			criterion(
+				"signature-preserved",
+				"summary",
+				"The fifth checkpoint still preserves parseConfig(source: string): Config as synchronous.",
+				["request"],
+			),
+			criterion(
+				"superseded-storage",
+				"summary",
+				"SQLite is not presented as a current or approved decision after five compactions.",
+				["decision", "correction"],
+			),
+			criterion("failed-key", "summary", "The path-only key failure is still recorded so it is not repeated.", [
+				"key-test",
+				"key-conclusion",
+			]),
+			criterion(
+				"verification-status",
+				"summary",
+				"The checkpoint reports nine passing focused tests and that the full suite and type check have not run.",
+				["focused-tests", "verification"],
+			),
+			criterion(
+				"review-without-release",
+				"continuation",
+				"The next action prepares the review without publishing a release or claiming full validation passed.",
+				["request", "verification"],
+			),
+		]),
 	];
 }

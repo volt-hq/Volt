@@ -11,7 +11,8 @@ import {
 	type Usage,
 } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CompactionPreparation } from "../src/core/compaction/compaction.ts";
+import { NATIVE_INSTRUCTION_TOKENS } from "../src/core/compaction/budget.ts";
+import { type CompactionPreparation, estimateRequestTokens } from "../src/core/compaction/compaction.ts";
 import {
 	COMPACTION_REQUEST_TIMEOUT_MS,
 	COMPACTION_TOTAL_TIMEOUT_MS,
@@ -67,6 +68,10 @@ function streamResponse(
 	return stream;
 }
 const retry = { maxRetries: 3, baseDelayMs: 0, maxDelayMs: 30_000 };
+/** Limits of a native checkpoint request on a model with the full 4,096-token checkpoint budget. */
+const nativeLimits = { purpose: "native", targetChars: 9830, maxChars: 16_384 } as const;
+/** Limits of a chunked fallback request, whose budget follows the chunk's token plan. */
+const chunkedLimits = { purpose: "history", targetChars: expect.any(Number), maxChars: expect.any(Number) };
 const MINUTE = 60_000;
 /** Timing for a request whose stream produced events but no text deltas. */
 const timing = {
@@ -102,8 +107,13 @@ function delayedResponse(
 	}, doneAfterMs);
 	return stream;
 }
+/** The session-side estimate of a request with this context, as compactContext receives it. */
+function estimateFor(source: Context): number {
+	return estimateRequestTokens({ messages: source.messages, tools: source.tools, systemPrompt: source.systemPrompt });
+}
 const options = (streamFn: StreamFn, signal = new AbortController().signal) => ({
 	context: async () => context,
+	estimatedContextTokens: estimateFor(context),
 	sourceMessageCount: context.messages.length,
 	retainedMessageCount: 0,
 	streamFn,
@@ -135,6 +145,7 @@ describe("cache-preserving compaction", () => {
 				});
 			}),
 			context: async () => source,
+			estimatedContextTokens: estimateFor(source),
 			customInstructions: "Keep the active deadline",
 		});
 		expect(calls).toHaveLength(1);
@@ -148,15 +159,18 @@ describe("cache-preserving compaction", () => {
 			tokensBefore: 580_000,
 			details: { readFiles: ["src/example.ts"], modifiedFiles: [] },
 		});
-		expect(result.summary).toContain("<read-files>");
+		// The session composes the host-owned blocks; this returns the generated text.
+		expect(result.summary).toBe("## Goal\nPreserve original goal");
 		expect(result.details.requests).toEqual([
 			{
 				strategy: "native",
+				...nativeLimits,
 				attempt: 1,
 				provider: model.provider,
 				model: model.id,
 				...timing,
 				stopReason: "stop",
+				textChars: "## Goal\nPreserve original goal".length,
 				usage: { input: 1000, output: 300, cacheRead: 68000, cacheWrite: 1000, totalTokens: 70300 },
 			},
 		]);
@@ -195,7 +209,8 @@ describe("cache-preserving compaction", () => {
 		expect(instruction).toContain("last 1 saved conversation messages");
 		expect(instruction).toContain("RETAINED-BEGIN");
 		expect(instruction).not.toContain("RETAINED-END");
-		expect(instruction!.length).toBeLessThan(4096);
+		// The trigger reserves this much for the instruction; the excerpt is bounded.
+		expect(instruction!.length).toBeLessThanOrEqual(NATIVE_INSTRUCTION_TOKENS * 4);
 	});
 
 	it.each(["preflight", "provider"] as const)(
@@ -222,6 +237,7 @@ describe("cache-preserving compaction", () => {
 							: streamResponse("Older-only checkpoint");
 					}),
 					context: async () => source,
+					estimatedContextTokens: estimateFor(source),
 					sourceMessageCount: source.messages.length,
 					retainedMessageCount: 1,
 				},
@@ -367,7 +383,16 @@ describe("cache-preserving compaction", () => {
 		);
 		expect(result.summary).toContain("valid checkpoint");
 		expect(result.details.requests).toEqual([
-			{ strategy: "native", attempt: 1, provider: model.provider, model: model.id, ...timing, stopReason: "stop" },
+			{
+				strategy: "native",
+				...nativeLimits,
+				attempt: 1,
+				provider: model.provider,
+				model: model.id,
+				...timing,
+				stopReason: "stop",
+				textChars: "valid checkpoint".length,
+			},
 		]);
 	});
 
@@ -400,6 +425,7 @@ describe("cache-preserving compaction", () => {
 		expect(result.details.requests).toEqual([
 			{
 				strategy: "native",
+				...nativeLimits,
 				attempt: 1,
 				provider: model.provider,
 				model: model.id,
@@ -410,6 +436,7 @@ describe("cache-preserving compaction", () => {
 			},
 			{
 				strategy: "native",
+				...nativeLimits,
 				attempt: 2,
 				provider: model.provider,
 				model: model.id,
@@ -418,11 +445,13 @@ describe("cache-preserving compaction", () => {
 			},
 			{
 				strategy: "native",
+				...nativeLimits,
 				attempt: 3,
 				provider: model.provider,
 				model: model.id,
 				...timing,
 				stopReason: "stop",
+				textChars: "retry checkpoint".length,
 				usage: { input: 20, output: 0, cacheRead: 80, cacheWrite: 0, totalTokens: 100 },
 				diagnostics: [{ type: "codex_request", timestamp: 3, details: { sseAttempts: 1 } }],
 			},
@@ -456,11 +485,13 @@ describe("cache-preserving compaction", () => {
 		expect(result.details.requests).toEqual(
 			Array.from({ length: 4 }, (_, index) => ({
 				strategy: "chunked",
+				...chunkedLimits,
 				attempt: index + 1,
 				provider: model.provider,
 				model: model.id,
 				...timing,
 				stopReason: index === 0 ? "error" : "stop",
+				...(index === 0 ? {} : { textChars: `checkpoint ${index + 1}`.length }),
 				usage: {
 					input: (index + 1) * 10,
 					output: 0,
@@ -601,12 +632,13 @@ describe("cache-preserving compaction", () => {
 	});
 
 	it.each([
-		{ input: model.contextWindow * 0.99 - 1, output: 0 },
-		{ input: model.contextWindow, output: 1 },
-	])("rejects non-overflow length stops with usage %j without changing strategies", async (usage) => {
+		{ usage: { input: model.contextWindow * 0.99 - 1, output: 0 }, calls: 1 },
+		// Visible text at the output limit is an oversized checkpoint: it is regenerated shorter, twice.
+		{ usage: { input: model.contextWindow, output: 1 }, calls: 3 },
+	])("rejects non-overflow length stops with usage $usage without changing strategies", async ({ usage, calls }) => {
 		const stream = vi.fn(() => streamResponse(usage.output === 0 ? "" : "partial", "length", undefined, usage));
 		await expect(compactContext(preparation(), model, options(stream))).rejects.toThrow("truncated");
-		expect(stream).toHaveBeenCalledTimes(1);
+		expect(stream).toHaveBeenCalledTimes(calls);
 	});
 
 	it("keeps split context in a single request", async () => {
@@ -646,20 +678,24 @@ describe("cache-preserving compaction", () => {
 		expect(calls[2]).toEqual(calls[0]);
 	});
 
-	it.each(["length", "toolUse", "aborted"] as const)(
-		"rejects %s results instead of committing partial context",
-		async (stopReason) => {
-			const stream = vi.fn(() => streamResponse("partial", stopReason));
-			await expect(compactContext(preparation(), model, options(stream))).rejects.toThrow();
-			expect(stream).toHaveBeenCalledTimes(1);
-		},
-	);
+	it.each([
+		{ stopReason: "length", calls: 3 },
+		{ stopReason: "toolUse", calls: 1 },
+		{ stopReason: "aborted", calls: 1 },
+	] as const)("rejects $stopReason results instead of committing partial context", async ({ stopReason, calls }) => {
+		const stream = vi.fn(() => streamResponse("partial", stopReason));
+		await expect(compactContext(preparation(), model, options(stream))).rejects.toThrow();
+		expect(stream).toHaveBeenCalledTimes(calls);
+	});
 
 	it("rejects empty text and overlong terminal text even if the provider ignores maxTokens", async () => {
-		for (const text of ["", "x".repeat(16_385)]) {
+		for (const [text, calls, error] of [
+			["", 1, "empty summary"],
+			["x".repeat(16_385), 3, "character limit after 3 attempts; original context was kept"],
+		] as const) {
 			const stream = vi.fn(() => streamResponse(text));
-			await expect(compactContext(preparation(), model, options(stream))).rejects.toThrow();
-			expect(stream).toHaveBeenCalledTimes(1);
+			await expect(compactContext(preparation(), model, options(stream))).rejects.toThrow(error);
+			expect(stream).toHaveBeenCalledTimes(calls);
 		}
 	});
 
@@ -703,14 +739,21 @@ describe("cache-preserving compaction", () => {
 	});
 
 	it.each([
-		{ name: "truncated", text: "partial", stopReason: "length", input: 0, error: "truncated" },
-		{ name: "length-stop overflow", text: "", stopReason: "length", input: 16_384, error: "truncated" },
-		{ name: "empty", text: "", stopReason: "stop", input: 0, error: "empty summary" },
-		{ name: "tool-calling", text: "", stopReason: "toolUse", input: 0, error: "tool call" },
-		{ name: "overlong", text: "x".repeat(16_385), stopReason: "stop", input: 0, error: "character limit" },
+		{ name: "truncated", text: "partial", stopReason: "length", input: 0, error: "truncated", attempts: 3 },
+		{ name: "length-stop overflow", text: "", stopReason: "length", input: 16_384, error: "truncated", attempts: 1 },
+		{ name: "empty", text: "", stopReason: "stop", input: 0, error: "empty summary", attempts: 1 },
+		{ name: "tool-calling", text: "", stopReason: "toolUse", input: 0, error: "tool call", attempts: 1 },
+		{
+			name: "overlong",
+			text: "x".repeat(16_385),
+			stopReason: "stop",
+			input: 0,
+			error: "character limit",
+			attempts: 3,
+		},
 	] as const)(
 		"rejects $name summaries in the bounded chunked fallback",
-		async ({ text, stopReason, input, error }) => {
+		async ({ text, stopReason, input, error, attempts }) => {
 			const calls: SimpleStreamOptions[] = [];
 			await expect(
 				compactContext(
@@ -722,7 +765,7 @@ describe("cache-preserving compaction", () => {
 					}),
 				),
 			).rejects.toThrow(error);
-			expect(calls).toHaveLength(1);
+			expect(calls).toHaveLength(attempts);
 			expect(calls[0].maxTokens).toBeLessThanOrEqual(4096);
 		},
 	);
@@ -874,6 +917,7 @@ describe("cache-preserving compaction", () => {
 					expect.objectContaining({ attempt: 3, stopReason: "stop", durationMs: 9 * MINUTE }),
 					{
 						strategy: "chunked",
+						...chunkedLimits,
 						attempt: 4,
 						provider: model.provider,
 						model: model.id,
@@ -881,6 +925,8 @@ describe("cache-preserving compaction", () => {
 						durationMs: 3 * MINUTE - 1000,
 					},
 				],
+				budget: expect.objectContaining({ contextWindow: 16_384, estimatedContextTokens: expect.any(Number) }),
+				strategyReason: "preflight_overflow",
 			},
 		]);
 	});
@@ -916,5 +962,138 @@ describe("cache-preserving compaction", () => {
 		controller.abort();
 		await assertion;
 		expect(stream).toHaveBeenCalledTimes(1);
+	});
+});
+
+/** The text of a chunked fallback request's single prompt message. */
+function chunkPrompt(request: Context): string {
+	const content = request.messages[0]?.content;
+	return Array.isArray(content) ? content.map((block) => (block.type === "text" ? block.text : "")).join("") : "";
+}
+
+/** A stream that emits more visible text than any limit and never finishes, as a provider ignoring maxTokens does. */
+function runawayStream(chars: number) {
+	const output = createAssistantMessageEventStream();
+	output.push({
+		type: "text_delta",
+		seq: 1,
+		contentIndex: 0,
+		delta: "x".repeat(chars),
+		snapshot: fauxAssistantMessage(""),
+		toolState: [],
+	});
+	return output;
+}
+
+describe("bounded checkpoint recovery", () => {
+	it("recovers the incident: a fourth chunk that overruns its limit is regenerated alone", async () => {
+		// openai-codex/gpt-6-astra: a 272k window ~265k tokens full, which the native request cannot fit.
+		const astra = { ...model, contextWindow: 272_000, maxTokens: 128_000 };
+		const prepared = preparation();
+		prepared.messagesToSummarize = Array.from({ length: 4 }, (_, index) => ({
+			role: "user",
+			content: `chunk-${index} ${"source ".repeat(8_500)}`,
+			timestamp: index + 1,
+		}));
+		const calls: Context[] = [];
+		const reports: CompactionFailureReport[] = [];
+		const result = await compactContext(prepared, astra, {
+			...options((_model, request) => {
+				calls.push(request);
+				if (calls.length === 4) return runawayStream(16_385);
+				return streamResponse(calls.length === 5 ? "Checkpoint 4 corrected" : `Checkpoint ${calls.length}`);
+			}),
+			estimatedContextTokens: 265_095,
+			onFailure: async (report) => {
+				reports.push(report);
+			},
+		});
+		expect(reports).toEqual([]);
+		expect(calls).toHaveLength(5);
+		const prompts = calls.map(chunkPrompt);
+		// Chunks one to three were each summarized once; the correction reuses chunk four and checkpoint three.
+		for (const index of [0, 1, 2])
+			expect(prompts.filter((prompt) => prompt.includes(`chunk-${index} `))).toHaveLength(1);
+		expect(prompts.filter((prompt) => prompt.includes("chunk-3 "))).toHaveLength(2);
+		const source = (prompt: string) => prompt.slice(0, prompt.indexOf("</previous-summary>"));
+		expect(source(prompts[4])).toBe(source(prompts[3]));
+		expect(prompts[4]).toContain("<previous-summary>\nCheckpoint 3\n</previous-summary>");
+		expect(prompts[4]).toContain("A previous attempt reached 16,385 characters and was rejected");
+		const requests = result.details.requests ?? [];
+		expect(requests.map(({ strategy, purpose, rejected }) => ({ strategy, purpose, rejected }))).toEqual([
+			{ strategy: "chunked", purpose: "history", rejected: undefined },
+			{ strategy: "chunked", purpose: "history", rejected: undefined },
+			{ strategy: "chunked", purpose: "history", rejected: undefined },
+			{ strategy: "chunked", purpose: "history", rejected: "oversized" },
+			{ strategy: "chunked", purpose: "history", rejected: undefined },
+		]);
+		expect(requests[3]).toMatchObject({ maxChars: 16_384, targetChars: 9830, textChars: 16_385 });
+		expect(requests[4]).toMatchObject({ maxChars: 16_384, targetChars: 6553 });
+		expect(result.summary.startsWith("Checkpoint 4 corrected")).toBe(true);
+		expect(result.summary).not.toContain("xxxx");
+	});
+
+	it("recovers a terminal-only overrun natively, keeping the conversation prefix identical", async () => {
+		const calls: Context[] = [];
+		const result = await compactContext(
+			preparation(),
+			model,
+			options((_model, request) => {
+				calls.push(request);
+				return streamResponse(calls.length === 1 ? "x".repeat(20_000) : "## Goal\nShort checkpoint");
+			}),
+		);
+		expect(calls).toHaveLength(2);
+		expect(calls[1].messages.slice(0, -1)).toEqual(calls[0].messages.slice(0, -1));
+		expect(calls[1].systemPrompt).toBe(calls[0].systemPrompt);
+		expect(calls[1].tools).toEqual(calls[0].tools);
+		expect(calls[0].messages.at(-1)?.content).not.toContain("A previous attempt");
+		expect(calls[1].messages.at(-1)?.content).toContain("A previous attempt reached 20,000 characters");
+		expect(result.summary.startsWith("## Goal\nShort checkpoint")).toBe(true);
+		expect(result.details.requests).toMatchObject([
+			{ ...nativeLimits, textChars: 20_000, rejected: "oversized" },
+			{ ...nativeLimits, targetChars: 6553, textChars: "## Goal\nShort checkpoint".length },
+		]);
+		expect(result.details.requests?.[1]).not.toHaveProperty("rejected");
+	});
+
+	it("fails with the original context kept once corrections run out", async () => {
+		const reports: CompactionFailureReport[] = [];
+		const stream = vi.fn(() => streamResponse("x".repeat(16_385)));
+		await expect(
+			compactContext(preparation(), model, {
+				...options(stream),
+				onFailure: async (report) => {
+					reports.push(report);
+				},
+			}),
+		).rejects.toThrow(
+			"Compaction checkpoint exceeded the 16,384-character limit after 3 attempts; original context was kept",
+		);
+		expect(stream).toHaveBeenCalledTimes(3);
+		expect(reports).toHaveLength(1);
+		expect(reports[0].strategyReason).toBe("native");
+		expect(reports[0].requests.map(({ targetChars, rejected }) => ({ targetChars, rejected }))).toEqual([
+			{ targetChars: 9830, rejected: "oversized" },
+			{ targetChars: 6553, rejected: "oversized" },
+			{ targetChars: 4096, rejected: "oversized" },
+		]);
+		expect(JSON.stringify(reports[0])).not.toContain("xxxx");
+	});
+
+	it("issues no further requests when cancelled during a correction", async () => {
+		const controller = new AbortController();
+		let calls = 0;
+		const promise = compactContext(preparation(), model, {
+			...options(() => {
+				calls++;
+				if (calls === 1) return streamResponse("x".repeat(16_385));
+				controller.abort();
+				return createAssistantMessageEventStream();
+			}, controller.signal),
+		});
+		await expect(promise).rejects.toMatchObject({ name: "AbortError", message: "Compaction cancelled" });
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(calls).toBe(2);
 	});
 });

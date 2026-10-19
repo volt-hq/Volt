@@ -3,11 +3,24 @@ import type { AgentMessage } from "@hansjm10/volt-agent-core";
 export const QUALITY_LAYERS = ["delivery", "summary", "continuation"] as const;
 export type QualityLayer = (typeof QUALITY_LAYERS)[number];
 
+/** New work after a compaction, compacted in turn. */
+export interface QualityEpoch {
+	messages: Array<{ id: string; message: AgentMessage }>;
+	/** First message of this epoch the next compaction keeps verbatim. */
+	firstKeptMessageId: string;
+}
+
 export interface QualityInput {
 	messages: Array<{ id: string; message: AgentMessage }>;
 	/** First message that remains verbatim; an assistant/tool-result group must not be split. */
 	firstKeptMessageId: string;
 	continuationPrompt: string;
+	/**
+	 * Later epochs for a multi-compaction trajectory: each appends new work to
+	 * the previous checkpoint and retained messages, then compacts again. The
+	 * continuation follows the last compaction.
+	 */
+	epochs?: QualityEpoch[];
 }
 
 export interface QualityCriterion {
@@ -58,15 +71,21 @@ export function validateQualityFixture(fixture: QualityFixture): void {
 	requireText(fixture.id, "Fixture id");
 	requireText(fixture.input.continuationPrompt, "Continuation prompt");
 	const messageIds = new Set<string>();
-	for (const { id } of fixture.input.messages) {
-		requireText(id, "Message id");
-		if (messageIds.has(id)) throw new Error(`Duplicate message id: ${id}`);
-		messageIds.add(id);
-	}
-	const firstKeptIndex = fixture.input.messages.findIndex(({ id }) => id === fixture.input.firstKeptMessageId);
-	if (firstKeptIndex < 1) throw new Error("Fixture must have older history and a valid retained boundary");
-	if (fixture.input.messages[firstKeptIndex].message.role === "toolResult") {
-		throw new Error("Retained boundary cannot split a tool-call/result group");
+	const stages = [
+		{ messages: fixture.input.messages, firstKeptMessageId: fixture.input.firstKeptMessageId },
+		...(fixture.input.epochs ?? []),
+	];
+	for (const stage of stages) {
+		for (const { id } of stage.messages) {
+			requireText(id, "Message id");
+			if (messageIds.has(id)) throw new Error(`Duplicate message id: ${id}`);
+			messageIds.add(id);
+		}
+		const firstKeptIndex = stage.messages.findIndex(({ id }) => id === stage.firstKeptMessageId);
+		if (firstKeptIndex < 1) throw new Error("Fixture must have older history and a valid retained boundary");
+		if (stage.messages[firstKeptIndex].message.role === "toolResult") {
+			throw new Error("Retained boundary cannot split a tool-call/result group");
+		}
 	}
 	const criterionIds = new Set<string>();
 	for (const criterion of fixture.criteria) {
@@ -95,6 +114,7 @@ export function getQualityInput(fixture: QualityFixture): QualityInput {
 		messages: fixture.input.messages,
 		firstKeptMessageId: fixture.input.firstKeptMessageId,
 		continuationPrompt: fixture.input.continuationPrompt,
+		...(fixture.input.epochs === undefined ? {} : { epochs: fixture.input.epochs }),
 	});
 }
 

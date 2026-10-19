@@ -19,20 +19,41 @@ import type {
 	StreamFn,
 	ThinkingLevel,
 } from "@hansjm10/volt-agent-core";
-import { type Api, applyReplayPolicy, estimateToolDefinitionTokens, type Model } from "@hansjm10/volt-ai";
+import { type Api, applyReplayPolicy, estimateToolDefinitionTokens, type Model, type Tool } from "@hansjm10/volt-ai";
 import type { ActiveCompaction, AgentSessionConfig, AgentSessionEvent, CompactionReason } from "../agent-session.ts";
 import { formatNoModelSelectedMessage } from "../auth-guidance.ts";
 import { cloneCanonicalData } from "../canonical-data.ts";
-import { compactContext } from "../compaction/context-compaction.ts";
 import {
+	type CompactionBudgetSnapshot,
+	compactionResponseReserve,
+	compactionTriggerReserve,
+	installedCheckpointTokens,
+	maxComposedCheckpointChars,
+	maxInstalledCheckpointTokens,
+} from "../compaction/budget.ts";
+import { composeCheckpoint } from "../compaction/checkpoint.ts";
+import {
+	COMPACTION_REQUEST_TIMEOUT_MS,
+	COMPACTION_TOTAL_TIMEOUT_MS,
+	type CompactionFailureReport,
+	compactContext,
+} from "../compaction/context-compaction.ts";
+import {
+	type CompactionDetails,
 	type CompactionPreparation,
+	type CompactionRequestUsage,
 	type CompactionResult,
+	checkpointHostBlocks,
+	compactionBoundaryError,
 	estimateMessagesTokens,
-	prepareCompaction,
+	estimateRequestTokens,
+	estimateTokens,
+	planCompaction,
 	type SummarizationRetryOptions,
 } from "../compaction/index.ts";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "../extensions/index.ts";
 import { withoutExtensionServices } from "../extensions/services-runtime.ts";
+import { COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX, type CustomMessage } from "../messages.ts";
 import { PLAN_CHECKPOINT_CUSTOM_TYPE } from "../planning.ts";
 import { getLatestCompactionEntry, type SessionEntry, type SessionManager } from "../session-manager.ts";
 import type { SettingsManager } from "../settings-manager.ts";
@@ -44,6 +65,57 @@ import type { SessionPlanning } from "./planning.ts";
 
 const MAX_COMPACTION_SUMMARY_RETRIES = 2;
 const MAX_COMPACTION_RETRY_DELAY_MS = 30_000;
+
+export type CompactionAdmissionCode =
+	| "window_too_small"
+	| "cannot_fit"
+	| "context_too_large"
+	| "above_trigger"
+	| "checkpoint_too_large";
+
+/** A compaction whose result would not fit. Nothing is committed and the original context stays. */
+export class CompactionAdmissionError extends Error {
+	readonly code: CompactionAdmissionCode;
+
+	constructor(code: CompactionAdmissionCode, message: string) {
+		super(message);
+		this.name = "CompactionAdmissionError";
+		this.code = code;
+	}
+}
+
+function formatTokens(value: number): string {
+	return value.toLocaleString("en-US");
+}
+
+/** What a compaction keeps beside its checkpoint, measured before the summary exists. */
+interface CompactionFootprint {
+	readonly contextWindow: number;
+	readonly reserveTokens: number;
+	/** Context messages the compacted context keeps verbatim. */
+	readonly retainedCount: number;
+	readonly retainedTokens: number;
+	/** The context size automatic compaction triggers above; 0 or less when every response triggers it. */
+	readonly triggerTokens: number;
+	readonly systemPrompt: string;
+	readonly tools: readonly Tool[];
+	/** System prompt and tool definitions. */
+	readonly baseTokens: number;
+}
+
+/** Entries from the first kept entry onward that contribute a context message, as the fold counts them. */
+function retainedMessageCount(pathEntries: readonly SessionEntry[], firstKeptEntryId: string): number {
+	const firstKeptIndex = pathEntries.findIndex((entry) => entry.id === firstKeptEntryId);
+	if (firstKeptIndex < 0) return 0;
+	return pathEntries
+		.slice(firstKeptIndex)
+		.filter(
+			(entry) =>
+				entry.type === "message" ||
+				entry.type === "custom_message" ||
+				(entry.type === "branch_summary" && entry.summary),
+		).length;
+}
 
 /** A summary request stream that runs at the branch's inference speed, as its turns do. */
 export function withInferenceSpeed(stream: StreamFn, fastModeEnabled: () => boolean): StreamFn {
@@ -129,29 +201,187 @@ export class SessionCompaction {
 		};
 	}
 
+	/** Written before the error surfaces so the record exists when the user sees it. */
+	private captureFailure(report: CompactionFailureReport): Promise<void> {
+		return writeToolProgressCapture(
+			join(this.host.agentDir, "debug", "compaction-latest.json"),
+			JSON.stringify(
+				{
+					sessionId: this.host.sessionManager.getSessionId(),
+					capturedAt: Date.now(),
+					thinkingLevel: this.host.thinkingLevel(),
+					...report,
+				},
+				null,
+				2,
+			),
+		);
+	}
+
+	/** Reject a compaction that cannot be admitted: capture the failure, then throw. Nothing commits. */
+	private async reject(
+		error: CompactionAdmissionError,
+		phase: string,
+		budget: CompactionBudgetSnapshot,
+		requests: readonly CompactionRequestUsage[] = [],
+	): Promise<never> {
+		try {
+			await this.captureFailure({
+				error: error.message,
+				phase,
+				elapsedMs: Math.max(0, Date.now() - (this.active?.startedAt ?? Date.now())),
+				requestTimeoutMs: COMPACTION_REQUEST_TIMEOUT_MS,
+				totalTimeoutMs: COMPACTION_TOTAL_TIMEOUT_MS,
+				requests: [...requests],
+				budget,
+			});
+		} catch {
+			// Failure diagnostics must never replace the compaction error.
+		}
+		throw error;
+	}
+
+	/**
+	 * Fail before any request when what the compaction must keep cannot fit:
+	 * the retained messages, system prompt, tools, plan checkpoint and response
+	 * reserve, plus room for the checkpoint itself when one is generated. A
+	 * window that cannot fit them without any retained message is too small.
+	 */
+	private async assertCanFit(
+		footprint: CompactionFootprint,
+		planTokens: number,
+		checkpointTokens: number,
+	): Promise<void> {
+		const { contextWindow, reserveTokens, retainedTokens, baseTokens } = footprint;
+		const fixedTokens = baseTokens + planTokens;
+		const needed = retainedTokens + fixedTokens + checkpointTokens + reserveTokens;
+		if (!(contextWindow > 0) || needed <= contextWindow) return;
+		const checkpoint = checkpointTokens > 0 ? `, the checkpoint (up to ~${formatTokens(checkpointTokens)})` : "";
+		const budget = { contextWindow, reserveTokens, retainedTokens, fixedTokens };
+		const withoutRetained = needed - retainedTokens;
+		if (withoutRetained > contextWindow) {
+			await this.reject(
+				new CompactionAdmissionError(
+					"window_too_small",
+					`The ${formatTokens(contextWindow)}-token context window is too small to compact: the system prompt, tools and plan (~${formatTokens(fixedTokens)} tokens)${checkpoint}, and the ${formatTokens(reserveTokens)}-token response reserve need ~${formatTokens(withoutRetained)} tokens before any recent messages are kept; use a model with a larger context window; original context was kept`,
+				),
+				"preflight",
+				budget,
+			);
+		}
+		await this.reject(
+			new CompactionAdmissionError(
+				"cannot_fit",
+				`Compaction cannot fit the context window: the recent messages it must keep (~${formatTokens(retainedTokens)} tokens), the system prompt, tools and plan (~${formatTokens(fixedTokens)})${checkpoint}, and the ${formatTokens(reserveTokens)}-token response reserve need ~${formatTokens(needed)} of ${formatTokens(contextWindow)} tokens; original context was kept`,
+			),
+			"preflight",
+			budget,
+		);
+	}
+
+	/**
+	 * Admit a checkpoint before it commits: the rebuilt context (the wrapped
+	 * checkpoint, retained messages, plan checkpoint, system prompt and tools)
+	 * plus the response reserve must fit the window, an automatic compaction
+	 * must land below its trigger, and a built-in checkpoint must respect its
+	 * composed size limit. Extension summaries are admitted the same way.
+	 */
+	private async admit(
+		compaction: CompactionResult,
+		builtIn: CompactionRequestUsage[] | undefined,
+		footprint: CompactionFootprint,
+		/** The boundary keeps no more than the newest indivisible suffix it was forced to keep whole. */
+		keepsForcedSuffix: boolean,
+		planningCheckpoint: CustomMessage | undefined,
+		cause: ConversationCompactionCause,
+		model: Model<Api>,
+	): Promise<void> {
+		const { contextWindow, reserveTokens, retainedTokens, baseTokens } = footprint;
+		const fixedTokens = baseTokens + (planningCheckpoint ? estimateTokens(planningCheckpoint) : 0);
+		const summaryTokens = Math.ceil(
+			(COMPACTION_SUMMARY_PREFIX.length + compaction.summary.length + COMPACTION_SUMMARY_SUFFIX.length) / 4,
+		);
+		const compactedTokens = summaryTokens + retainedTokens + fixedTokens;
+		const budget: CompactionBudgetSnapshot = {
+			contextWindow,
+			reserveTokens,
+			retainedTokens,
+			fixedTokens,
+			compactedTokens,
+		};
+		const requests = builtIn ?? [];
+		const maxChars = maxComposedCheckpointChars(contextWindow);
+		if (builtIn && compaction.summary.length > maxChars) {
+			await this.reject(
+				new CompactionAdmissionError(
+					"checkpoint_too_large",
+					`Compaction checkpoint (${formatTokens(compaction.summary.length)} characters) exceeds the ${formatTokens(maxChars)}-character limit; original context was kept`,
+				),
+				"admission",
+				budget,
+				requests,
+			);
+		}
+		if (contextWindow > 0 && compactedTokens + reserveTokens > contextWindow) {
+			await this.reject(
+				new CompactionAdmissionError(
+					"context_too_large",
+					`Compacted context (~${formatTokens(compactedTokens)} tokens) and the ${formatTokens(reserveTokens)}-token response reserve would exceed the ${formatTokens(contextWindow)}-token context window; original context was kept`,
+				),
+				"admission",
+				budget,
+				requests,
+			);
+		}
+		// Landing below the trigger is required only when compaction chose what to keep. When it keeps only
+		// the newest indivisible suffix, which alone exceeds the allowance, the next compaction summarizes it.
+		if (cause === "manual" || keepsForcedSuffix) return;
+		const { triggerTokens } = footprint;
+		if (contextWindow > 0 && triggerTokens > 0 && compactedTokens > triggerTokens) {
+			await this.reject(
+				new CompactionAdmissionError(
+					"above_trigger",
+					`Compacted context (~${formatTokens(compactedTokens)} tokens) would still be above the ${formatTokens(triggerTokens)}-token auto-compaction trigger; lower compaction.keepRecentTokens or use a model with a larger context window; original context was kept`,
+				),
+				"admission",
+				{ ...budget, triggerTokens },
+				requests,
+			);
+		}
+		const threshold = this.host.settingsManager.getCompactionSettings(model).thresholdTokens ?? 0;
+		if (threshold > 0 && compactedTokens >= threshold) {
+			await this.reject(
+				new CompactionAdmissionError(
+					"above_trigger",
+					`Compacted context (~${formatTokens(compactedTokens)} tokens) would still reach the ${formatTokens(threshold)}-token compaction threshold for ${model.provider}/${model.id}; raise the threshold or lower compaction.keepRecentTokens; original context was kept`,
+				),
+				"admission",
+				{ ...budget, triggerTokens: threshold },
+				requests,
+			);
+		}
+	}
+
 	private generate(
 		preparation: CompactionPreparation,
 		model: Model<Api>,
-		pathEntries: SessionEntry[],
 		messages: readonly AgentMessage[],
+		retainedCount: number,
+		footprint: CompactionFootprint,
 		operation: { readonly stream: StreamFn; readonly signal: AbortSignal },
 		customInstructions?: string,
-	): Promise<CompactionResult> {
-		const firstKeptIndex = pathEntries.findIndex((entry) => entry.id === preparation.firstKeptEntryId);
-		const retainedCount = pathEntries
-			.slice(firstKeptIndex)
-			.filter(
-				(entry) =>
-					entry.type === "message" ||
-					entry.type === "custom_message" ||
-					(entry.type === "branch_summary" && entry.summary),
-			).length;
+	): Promise<CompactionResult<CompactionDetails> & { details: CompactionDetails }> {
 		// Keep the full rebuilt conversation warm, including the latest response.
 		// Describe the retained suffix only in the appended checkpoint instruction. The history gets the
 		// replay policy a turn's request gets, so dropped errored turns leave no unmatched tool calls.
 		return compactContext(preparation, model, {
 			sourceMessageCount: messages.length,
 			retainedMessageCount: retainedCount,
+			estimatedContextTokens: estimateRequestTokens({
+				messages,
+				tools: footprint.tools,
+				systemPrompt: footprint.systemPrompt,
+			}),
 			context: async (signal) => {
 				const transformed = await withoutExtensionServices(() =>
 					this.host.extensionRunner().emitContext(cloneCanonicalData([...messages], "Agent message delivery")),
@@ -171,21 +401,7 @@ export class SessionCompaction {
 			thinkingBudgets: this.host.modelSettings.streamOptions.thinkingBudgets,
 			retry: this.summarizationRetryOptions(),
 			customInstructions,
-			// Written before the error surfaces so the record exists when the user sees it.
-			onFailure: (report) =>
-				writeToolProgressCapture(
-					join(this.host.agentDir, "debug", "compaction-latest.json"),
-					JSON.stringify(
-						{
-							sessionId: this.host.sessionManager.getSessionId(),
-							capturedAt: Date.now(),
-							thinkingLevel: this.host.thinkingLevel(),
-							...report,
-						},
-						null,
-						2,
-					),
-				),
+			onFailure: (report) => this.captureFailure(report),
 		});
 	}
 
@@ -217,7 +433,9 @@ export class SessionCompaction {
 	 * The conversation's summarizer for manual and automatic compaction: the
 	 * compaction boundary, the `session_before_compact` hook (which may cancel
 	 * or supply the summary), the summary itself, and the plan checkpoint that
-	 * commits with it. The conversation commits the result and resumes the turn.
+	 * commits with it. Every checkpoint, built-in or from an extension, gets the
+	 * host-owned blocks for its own boundary. The conversation commits the
+	 * result and resumes the turn.
 	 */
 	private async summarizeCompaction(
 		request: ConversationCompactionRequest,
@@ -231,19 +449,53 @@ export class SessionCompaction {
 		const pathEntries = this.host.sessionManager.getBranch();
 		const branchMessages = this.host.sessionManager.getConversationState().context.messages;
 		const settings = this.host.settingsManager.getCompactionSettings();
+		const contextWindow = model.contextWindow;
+		const tools = this.host.conversation().activeTools;
+		const systemPrompt = this.host.systemPrompt();
+		const baseTokens = Math.ceil(systemPrompt.length / 4) + estimateToolDefinitionTokens(tools);
+		const plannedCheckpoint = this.host.planning().createCheckpointMessage(this.host.planning().current);
+		const planTokensBefore = plannedCheckpoint ? estimateTokens(plannedCheckpoint) : 0;
+		const triggerReserve = compactionTriggerReserve(
+			model,
+			settings.reserveTokens,
+			this.host.thinkingLevel(),
+			this.host.modelSettings.streamOptions.thinkingBudgets,
+		);
+		// Retained messages leave room below the trigger for the system prompt, plan checkpoint and
+		// largest checkpoint, so a compaction does not trigger the next one by itself.
+		const fixedTokens =
+			Math.ceil(systemPrompt.length / 4) +
+			planTokensBefore +
+			maxInstalledCheckpointTokens(contextWindow) +
+			(triggerReserve - settings.reserveTokens);
+		const footprint = (firstKeptEntryId: string): CompactionFootprint => {
+			const retainedCount = retainedMessageCount(pathEntries, firstKeptEntryId);
+			return {
+				contextWindow,
+				reserveTokens: compactionResponseReserve(contextWindow, settings.reserveTokens),
+				retainedCount,
+				retainedTokens: estimateMessagesTokens(
+					branchMessages.slice(Math.max(0, branchMessages.length - retainedCount)),
+				),
+				triggerTokens: contextWindow - triggerReserve,
+				systemPrompt,
+				tools,
+				baseTokens,
+			};
+		};
 		// A branch of settings entries alone (its model selection) has nothing to compact.
-		const preparation =
+		const compactionPlan =
 			this.host.conversation().state.context.messages.length === 0
 				? undefined
-				: prepareCompaction(pathEntries, branchMessages, settings, {
-						tools: this.host.conversation().activeTools,
-						contextWindow: model.contextWindow,
-					});
-		if (!preparation) {
+				: planCompaction(pathEntries, branchMessages, settings, { tools, contextWindow, fixedTokens });
+		if (!compactionPlan) {
 			if (reason !== "manual") throw new Error("Auto-compaction could not find a safe compaction boundary");
 			if (pathEntries.at(-1)?.type === "compaction") throw new Error("Already compacted");
 			throw new Error("Nothing to compact (session too small)");
 		}
+		const { preparation } = compactionPlan;
+		const prepared = footprint(preparation.firstKeptEntryId);
+		await this.assertCanFit(prepared, planTokensBefore, 0);
 
 		let extensionCompaction: CompactionResult | undefined;
 		if (this.host.extensionRunner().hasHandlers("session_before_compact")) {
@@ -263,17 +515,58 @@ export class SessionCompaction {
 			}
 			extensionCompaction = result?.compaction;
 		}
-		const compaction =
-			extensionCompaction ??
-			(await this.generate(
+		let compaction: CompactionResult;
+		let builtInRequests: CompactionRequestUsage[] | undefined;
+		if (extensionCompaction) {
+			const boundaryError = compactionBoundaryError(pathEntries, extensionCompaction.firstKeptEntryId);
+			if (boundaryError) {
+				throw new Error(
+					`Extension compaction boundary ${JSON.stringify(extensionCompaction.firstKeptEntryId)} ${boundaryError}; original context was kept`,
+				);
+			}
+			compaction = {
+				...extensionCompaction,
+				summary: composeCheckpoint(
+					extensionCompaction.summary,
+					checkpointHostBlocks(pathEntries, extensionCompaction.firstKeptEntryId, contextWindow),
+				),
+			};
+		} else {
+			// The host-owned blocks are known before any request; only the generated text is reserved at its limit.
+			const hostBlocks = checkpointHostBlocks(pathEntries, preparation.firstKeptEntryId, contextWindow);
+			await this.assertCanFit(
+				prepared,
+				planTokensBefore,
+				installedCheckpointTokens(contextWindow, hostBlocks?.length ?? 0),
+			);
+			const generated = await this.generate(
 				preparation,
 				model,
-				pathEntries,
 				branchMessages,
+				prepared.retainedCount,
+				prepared,
 				{ stream: request.stream, signal: request.signal },
 				request.instructions,
-			));
+			);
+			compaction = { ...generated, summary: composeCheckpoint(generated.summary, hostBlocks) };
+			builtInRequests = generated.details.requests ?? [];
+		}
 		if (request.signal.aborted) throw new Error("Compaction cancelled");
+		const planningCheckpoint = this.host.planning().createCheckpointMessage(this.host.planning().current);
+		const kept =
+			compaction.firstKeptEntryId === preparation.firstKeptEntryId
+				? prepared
+				: footprint(compaction.firstKeptEntryId);
+		await this.admit(
+			compaction,
+			builtInRequests,
+			kept,
+			// An extension boundary that keeps more than the forced suffix chose what to keep.
+			compactionPlan.keepsOversizedSuffix && kept.retainedCount <= prepared.retainedCount,
+			planningCheckpoint,
+			reason,
+			model,
+		);
 		this.compactionSummary = {
 			result: {
 				summary: compaction.summary,
@@ -283,7 +576,6 @@ export class SessionCompaction {
 			},
 			fromExtension: extensionCompaction !== undefined,
 		};
-		const planningCheckpoint = this.host.planning().createCheckpointMessage(this.host.planning().current);
 		return {
 			summary: compaction.summary,
 			firstKeptEntryId: compaction.firstKeptEntryId,
@@ -425,7 +717,17 @@ export class SessionCompaction {
 		if (this.host.isDisposed()) return undefined;
 		const operationId = this.host.conversation().operation?.id;
 		const requested = operationId !== undefined && this.requestedOperationId === operationId;
-		const settings = this.host.settingsManager.getCompactionSettings(check.model);
+		// Trigger early enough that the native compaction request fits beside the conversation.
+		const configured = this.host.settingsManager.getCompactionSettings(check.model);
+		const settings = {
+			...configured,
+			reserveTokens: compactionTriggerReserve(
+				check.model,
+				configured.reserveTokens,
+				this.host.thinkingLevel(),
+				this.host.modelSettings.streamOptions.thinkingBudgets,
+			),
+		};
 		const messages = check.state.context.messages;
 		const tools = this.host.conversation().activeTools;
 		let decision: ConversationCompactionDecision;

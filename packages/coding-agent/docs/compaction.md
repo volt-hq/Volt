@@ -5,6 +5,8 @@ LLMs have limited context windows. When conversations grow too long, volt uses c
 **Source files**:
 - [`packages/coding-agent/src/core/compaction/context-compaction.ts`](../src/core/compaction/context-compaction.ts) - Cache-preserving session compaction
 - [`packages/coding-agent/src/core/compaction/compaction.ts`](../src/core/compaction/compaction.ts) - Cut-point preparation and chunked fallback
+- [`packages/coding-agent/src/core/compaction/budget.ts`](../src/core/compaction/budget.ts) - Checkpoint limits, the native request allowance, and the trigger
+- [`packages/coding-agent/src/core/compaction/checkpoint.ts`](../src/core/compaction/checkpoint.ts) - Checkpoint rules, bounded generation and corrections, and host-owned blocks
 - [`packages/coding-agent/src/core/compaction/branch-summarization.ts`](../src/core/compaction/branch-summarization.ts) - Branch summarization
 - [`packages/coding-agent/src/core/compaction/utils.ts`](../src/core/compaction/utils.ts) - Shared utilities (file tracking, serialization)
 - [`packages/coding-agent/src/core/session-manager.ts`](../src/core/session-manager.ts) - Entry types (`CompactionEntry`, `BranchSummaryEntry`)
@@ -21,7 +23,7 @@ Volt has two summarization mechanisms:
 | Compaction | Context exceeds threshold, or `/compact` | Summarize old messages to free up context |
 | Branch summarization | `/tree` navigation | Preserve context when switching branches |
 
-Both use the same structured summary format and track file operations cumulatively.
+Both write a structured summary and track file operations cumulatively. Compaction checkpoints are bounded rewrites that also carry the user's earlier messages verbatim.
 
 ## Compaction
 
@@ -30,10 +32,10 @@ Both use the same structured summary format and track file operations cumulative
 By default, auto-compaction triggers when:
 
 ```
-contextTokens > contextWindow - reserveTokens
+contextTokens > contextWindow - (reserveTokens + nativeAllowance)
 ```
 
-By default, `reserveTokens` is 16384 tokens (configurable in `~/.volt/agent/settings.json` or `<project-dir>/.volt/settings.json`). This leaves room for the LLM's response.
+`reserveTokens` (default 16384, configurable in `~/.volt/agent/settings.json` or `<project-dir>/.volt/settings.json`) is the room a compacted context leaves for the next response. `nativeAllowance` is the room the native compaction request itself needs: its 4,096 output tokens, the reasoning budget of the current thinking level (levels above `high` budget as `high`; `thinkingBudgets` apply), its instruction, and a margin. Compacting this early lets the one-request native summary run instead of the slower chunked fallback. For example, a 272,000-token model at `high` thinking compacts above about 232,500 tokens. The allowance never moves the trigger below half the context window; small windows use the chunked fallback more often instead.
 
 Set `compaction.modelThresholds["provider/model-id"]` to add an earlier absolute trigger for a specific model. For example, `"openai/gpt-6-astra": 350000` triggers when context usage reaches 350,000 tokens, without changing the model's context window. Configure the current model under **Compact at** in `/settings`, or use JSON for arbitrary counts. Omitted entries and `0` retain the default; invalid counts are ignored. Auto-compaction must be enabled, and the normal context-limit and overflow recovery triggers still apply.
 
@@ -43,11 +45,14 @@ You can also trigger manually with `/compact [instructions]`, where optional ins
 
 ### How It Works
 
-1. **Find cut point**: Walk backwards from the newest message, accumulating token estimates up to `keepRecentTokens` (default 20k). When active tool definitions would consume too much of the selected model's context, Volt lowers this message budget to leave the configured reserve and tool definitions room.
+1. **Find cut point**: Walk backwards from the newest message, accumulating token estimates up to `keepRecentTokens` (default 20k). The kept messages must leave room below the trigger for the system prompt, tool definitions, plan checkpoint, and the largest checkpoint compaction can install; small context windows therefore keep less.
 2. **Identify summary scope**: Collect the older messages from the previous kept boundary (or session start) up to the cut point, and identify the recent suffix that will remain verbatim.
-3. **Generate summary**: Make one request with the current system prompt, tool definitions, reasoning setting, and full native conversation, including the previous checkpoint and recent suffix. Append a checkpoint instruction defining the older summary scope using the saved suffix's message count and, when the context pipeline preserves message counts, a bounded, quoted excerpt of its transformed beginning. Do not insert boundary markers into, shorten, or rewrite the existing conversation. The recent suffix is available for corrections and continuity, not to duplicate its narrative in the summary.
-4. **Append entry**: Save `CompactionEntry` with summary and `firstKeptEntryId`
-5. **Reload**: Session reloads, using summary + messages from `firstKeptEntryId` onwards; the completion result reports a fresh token estimate for the rebuilt messages and active tool definitions
+3. **Check it can fit**: If the messages that must stay verbatim, the system prompt, tools, plan checkpoint, the checkpoint and the response reserve cannot fit the context window, compaction fails before any request.
+4. **Generate summary**: Make one request with the current system prompt, tool definitions, reasoning setting, and full native conversation, including the previous checkpoint and recent suffix. Append a checkpoint instruction defining the older summary scope using the saved suffix's message count and, when the context pipeline preserves message counts, a bounded, quoted excerpt of its transformed beginning. Do not insert boundary markers into, shorten, or rewrite the existing conversation. The recent suffix is available for corrections and continuity, not to duplicate its narrative in the summary.
+5. **Compose the checkpoint**: Append the user's earlier messages verbatim and the file lists after the generated text, or after an extension's custom summary (see [Summary Format](#summary-format)).
+6. **Admit it**: Estimate the rebuilt context and refuse a checkpoint that does not fit (see [Admission](#admission)).
+7. **Append entry**: Save `CompactionEntry` with summary and `firstKeptEntryId`
+8. **Reload**: Session reloads, using summary + messages from `firstKeptEntryId` onwards; the completion result reports a fresh token estimate for the rebuilt messages and active tool definitions
 
 ```
 Before compaction:
@@ -85,15 +90,31 @@ On repeated compactions, the summarized span starts at the previous compaction's
 
 ### Summary Budget and Failure Handling
 
-Built-in compaction requests at most 4096 summary tokens per request, independently of `reserveTokens`. It also stops and rejects generated text above 16,384 characters per response, including on providers that do not enforce the requested token limit. File-operation metadata is appended separately.
+Every built-in checkpoint request has a numeric length target and a hard character limit, at four characters per output token. The native request asks for at most 4,096 output tokens, so its limit is 16,384 characters and its first target 60% of that. The chunked fallback shares the same 4,096-token budget; a split turn gives 75% of it to the history summary and 25% to the turn-prefix summary, so the two together stay within it. Context windows below about 41,000 tokens scale these limits down to a tenth of the window, but never below 512 tokens, the shortest useful checkpoint. A window that cannot fit the system prompt, tools, plan checkpoint, that checkpoint and the response reserve cannot compact (see [Admission](#admission)).
+
+The checkpoint is a bounded rewrite, not an accumulation: each request carries the previous checkpoint's durable sections forward and rewrites the current state, within its target (see [Summary Format](#summary-format)).
+
+Volt holds every request to its limit while it streams, so a provider that ignores the requested token limit is stopped as soon as it runs past it. An oversized checkpoint, whether stopped while streaming, longer than the limit when it completes, or cut off at the output limit, is discarded, never truncated or reused, and the same request is sent again with a tighter target: 40%, then 25% of the limit. A native correction keeps the identical conversation and changes only the final instruction. A fallback correction regenerates the same chunk from the same source and the last accepted checkpoint; chunks already summarized are not sent again. After two corrections the compaction fails with the original context kept. Corrections are counted separately from the retries of transient provider failures.
 
 The normal single-pass request preserves the session's reasoning level, Fast mode, transport, routing identity and cache policy. Keeping the full conversation avoids relying on a shorter intermediate prefix having been cached, and can preserve append-only WebSocket continuation. Cache hits are not guaranteed, particularly after provider/extension transformations or cache expiry. Context hooks receive the full history once. Boundary excerpts use only content already present after context hooks and conversion, never saved raw content that they may have removed or redacted. If message counts change, the excerpt is omitted rather than guessed. Arbitrary reordering can still make the boundary reference less precise. Compaction never executes returned tool calls.
 
 If the full native request (including the recent suffix, checkpoint instruction, and output/thinking allowance) is estimated not to fit, or the provider reports a context overflow, Volt uses the existing chronological chunked summarizer with a small fixed output allowance and minimal supported reasoning. This fallback still summarizes only the older source; it does not add the retained suffix to its chunks. It sends one request at a time, so it also works with providers that permit only one active request. Other errors do not select the fallback. Each summarization request, including each retry and each fallback chunk, has a 10-minute deadline, so slow high-reasoning responses are not cut short by earlier attempts. A request that reaches its deadline ends the compaction instead of retrying. Built-in summary generation also has a 30-minute overall deadline covering context conversion, all requests, retry delays and any fallback. Stalled connections are still detected separately by the HTTP idle timeout (`httpIdleTimeoutMs`). Transient failures have at most two compaction-level retries per request; provider-level retries are disabled for session compaction.
 
-Cancellation, timeout, empty responses, truncated output and tool-calling responses do not install a checkpoint. The original conversation remains intact. Timeout errors name the step that was running, such as `native request 2 in progress`. Custom extension-provided summaries retain their extension hook behavior.
+The native preflight compares the session's estimate of the conversation's next request with the context window: the latest provider usage newer than the latest compaction plus later messages (retained responses carry usage of the larger pre-compaction context, so they are ignored), plus the checkpoint instruction, the output and reasoning allowance, and a margin.
 
-When built-in compaction fails or is cancelled, Volt writes a failure record to `~/.volt/agent/debug/compaction-latest.json` (or the configured agent directory), replacing the previous record. It contains the session ID, error, active step, elapsed time, deadlines, thinking level and every dispatched request's record as described below, including Codex request diagnostics when enabled. It contains no prompts or summary text. Writing it never changes the compaction outcome.
+Cancellation, timeout, empty responses, oversized output after its corrections, and tool-calling responses do not install a checkpoint. The original conversation remains intact. Timeout errors name the step that was running, such as `native request 2 in progress`.
+
+### Admission
+
+Before a checkpoint commits, built-in or extension-provided, Volt estimates the context it would rebuild: the wrapped checkpoint, the retained messages, the plan checkpoint, the system prompt and the tool definitions.
+
+- **Before any request**, the retained messages, system prompt, tools, plan checkpoint and response reserve must fit the context window, and for a built-in summary the checkpoint too: the longest generated text plus the host-owned blocks, which are rebuilt from the branch and so are counted at their actual size. Otherwise compaction fails without a request. `Compaction cannot fit the context window: ...` means the newest exchange that must stay verbatim, such as one huge tool result, is itself too large. `The N-token context window is too small to compact: ...` means the rest does not fit even without any retained message; use a model with a larger context window.
+- **After the summary exists**, the rebuilt context plus the response reserve must fit the window. A built-in checkpoint must also stay within its composed size limit.
+- **An automatic compaction** must land below the trigger it fired at, and below the model's `compaction.modelThresholds` entry when one is set; otherwise it would compact again at once. This applies when compaction chose what to keep. When it keeps only the newest indivisible exchange, which alone exceeds what may be kept, the next compaction summarizes it instead. An extension checkpoint that keeps more than that exchange chose what to keep, and must land below the trigger.
+
+The response reserve counts at most half the context window. A refused checkpoint commits nothing; its error ends with `original context was kept`.
+
+When built-in summary generation fails or is cancelled, or a compaction is refused before a request or at admission, Volt writes a failure record to `~/.volt/agent/debug/compaction-latest.json` (or the configured agent directory), replacing the previous record. It contains the session ID, error, active step (`preflight` and `admission` for refusals), elapsed time, deadlines, thinking level, every dispatched request's record as described below (including Codex request diagnostics when enabled), the token counts the strategy or admission decision used (`budget`), and why the native or chunked strategy ran (`strategyReason`: `native`, `preflight_overflow`, or `provider_overflow`). It contains no prompts or summary text. Writing it never changes the compaction outcome.
 
 ### Compaction Cache Usage
 
@@ -105,7 +126,7 @@ Native compaction request 1 (stop): 68,000 cached / 70,000 prompt tokens — 97.
 
 These are the compaction requests themselves, not the first conversation request after compaction or the footer's latest cache-hit rate. The percentage is `cacheRead / (input + cacheRead + cacheWrite) * 100`; output tokens are excluded. Missing, invalid, or zero-prompt usage is shown as unavailable, not as a cache miss.
 
-Built-in session compaction saves these records in `CompactionEntry.details.requests` and returns them in the completion result. Each record contains the strategy (`native` or `chunked`), a one-based `attempt` in dispatch order across all chunks and retries, the requested provider/model, timing (`startedAt` epoch milliseconds, then `timeToFirstEventMs`, `timeToFirstTextMs` and `durationMs` from dispatch; reasoning usually occurs between the first event and the first text), the terminal `stopReason`, and the provider-reported `input`, `output`, `cacheRead`, `cacheWrite`, and `totalTokens` under `usage`. A request that fails before a terminal response has neither `stopReason` nor `usage`; invalid token counts are omitted. Retries and fallback requests remain separate even when they finish out of order. See [session storage](session-format.md) for inspecting entries through `SessionManager` or a JSONL snapshot.
+Built-in session compaction saves these records in `CompactionEntry.details.requests` and returns them in the completion result. Each record contains the strategy (`native` or `chunked`), its `purpose` (`native`, a `history` chunk, or a split turn's `turn_prefix`), a one-based `attempt` in dispatch order across all chunks, retries and corrections, the requested provider/model, the length it asked for (`targetChars`) and its hard limit (`maxChars`), the visible text it produced or streamed before it was stopped (`textChars`), `rejected: "oversized"` when that text was discarded for a correction, timing (`startedAt` epoch milliseconds, then `timeToFirstEventMs`, `timeToFirstTextMs` and `durationMs` from dispatch; reasoning usually occurs between the first event and the first text), the terminal `stopReason`, and the provider-reported `input`, `output`, `cacheRead`, `cacheWrite`, and `totalTokens` under `usage`. A request that fails before a terminal response has neither `stopReason` nor `usage`; invalid token counts are omitted. Retries and fallback requests remain separate even when they finish out of order. See [session storage](session-format.md) for inspecting entries through `SessionManager` or a JSONL snapshot.
 
 Records cover only that compaction, including earlier failed attempts if it eventually succeeds. A failed or cancelled compaction still installs no entry. Custom extension summaries and the standalone chunked helper do not automatically collect these records. The metadata is not inserted into the summary or provider context, and does not change provider requests or footer totals.
 
@@ -166,7 +187,7 @@ Split turn (one huge turn exceeds budget):
   turnPrefixMessages = [usr, ass, tool, ass, tool, tool]
 ```
 
-The normal single-pass request summarizes older history and the turn prefix together, with the retained suffix visible for continuity and newer corrections. The cut point and verbatim retained messages are unchanged. The oversized-input fallback generates the history summary first and then the turn-prefix summary, and merges them; each processes its chunks chronologically. If the history summary fails or is cancelled, the turn-prefix request is never sent.
+The normal single-pass request summarizes older history and the turn prefix together, with the retained suffix visible for continuity and newer corrections. The cut point and verbatim retained messages are unchanged. The oversized-input fallback generates the history summary first and then the turn-prefix summary, and merges them; each processes its chunks chronologically, within its 75% or 25% share of one budget. If the history summary fails or is cancelled, the turn-prefix request is never sent. The turn's original request is also in the user-message record, verbatim.
 
 ### Cut Point Rules
 
@@ -197,8 +218,8 @@ interface CompactionEntry {
 
 // Default compaction uses this for details (from compaction.ts):
 interface CompactionDetails {
-  readFiles: string[];
-  modifiedFiles: string[];
+  readFiles: string[];     // Complete, cumulative; the summary lists a bounded subset
+  modifiedFiles: string[]; // Complete, cumulative; the summary lists a bounded subset
   requests?: CompactionRequestUsage[]; // Per-request usage from built-in session compaction
 }
 ```
@@ -275,18 +296,27 @@ See [`collectEntriesForBranchSummary()`](../src/core/compaction/branch-summariza
 
 ## Summary Format
 
-Both compaction and branch summarization use the same structured format:
+A compaction checkpoint is the generated text followed by blocks the host composes from the branch itself:
 
 ```markdown
 ## Goal
 [What the user is trying to accomplish]
 
-## Constraints & Preferences
-- [Requirements mentioned by user]
+## Constraints, Preferences & Authorization
+- [Requirements, preferences, and limits on what is authorized]
+
+## Key Decisions
+- **[Decision]**: [Rationale]. Replaced decisions are marked superseded
+
+## Failed Approaches
+- [What was tried, how it failed, and why not to repeat it]
+
+## History
+- [One line per completed phase of work, oldest first]
 
 ## Progress
 ### Done
-- [x] [Completed tasks]
+- [x] [Verified completed work and its evidence]
 
 ### In Progress
 - [ ] [Current work]
@@ -294,24 +324,38 @@ Both compaction and branch summarization use the same structured format:
 ### Blocked
 - [Issues, if any]
 
-## Key Decisions
-- **[Decision]**: [Rationale]
-
 ## Next Steps
 1. [What should happen next]
 
 ## Critical Context
-- [Data needed to continue]
+- [Exact data needed to continue]
 
-<read-files>
-path/to/file1.ts
-path/to/file2.ts
-</read-files>
+<user-messages>
+The user's earlier messages, verbatim and oldest first. ...
+(1) The first request, as the user wrote it
+[... 4 earlier messages omitted ...]
+(6) A later correction
+</user-messages>
 
 <modified-files>
 path/to/changed.ts
 </modified-files>
+
+<read-files>
+path/to/file1.ts
+</read-files>
 ```
+
+The generated text is rewritten on every compaction, not appended to. The durable sections (goal, constraints and authorization, key decisions, failed approaches) carry forward with their wording intact unless superseded, `## History` keeps one line per completed phase, and the current-state sections are rewritten from scratch. When space is short, the model shortens Critical Context, then Progress details, then older History lines, and never drops the goal, authorization limits, current constraints or latest decisions.
+
+The host-owned blocks never pass through a model, so repeated compactions cannot erode them:
+
+- **`<user-messages>`**: the user's messages from the whole branch before the retained suffix, including history earlier compactions already summarized. The first message is always kept; then the newest ones, within at most 4,096 tokens or 2% of the context window, and at least 1,024 characters. Each keeps up to 2,000 characters, and images appear as `[image]`. Newer messages, the retained conversation, and recorded decisions take precedence over older ones.
+- **`<modified-files>`, then `<read-files>`**: within 8,192 characters or 5% of the context window, counting the paths that do not fit. `details` keeps the complete lists.
+
+The two blocks share one budget, filled in that order, so on small windows, where the user-message record's 1,024-character minimum exceeds its share, the file lists get only what the record leaves. Every installed checkpoint gets these blocks for its own boundary, including an extension's custom summary; blocks a summary already ends with are replaced, not repeated.
+
+A fallback request reuses the previous checkpoint without these blocks; the host rebuilds them. These blocks and the chunked fallback are built from the saved session, not from what [`context`](extensions.md#context) hooks return: a hook shapes each request's view of the conversation and is not a redaction boundary. Branch summaries keep their own structure: Goal, Constraints & Preferences, Progress, Key Decisions, Next Steps, Critical Context, then `<read-files>` and `<modified-files>`.
 
 ### Message Serialization
 
@@ -335,7 +379,7 @@ Extensions can intercept and customize both compaction and branch summarization.
 
 ### session_before_compact
 
-Fired before auto-compaction or `/compact`. Can cancel or provide custom summary. See `SessionBeforeCompactEvent` and `CompactionPreparation` in the types file.
+Fired before auto-compaction or `/compact`. Can cancel or provide custom summary. See `SessionBeforeCompactEvent` and `CompactionPreparation` in the types file. Volt appends its user-message record and file lists for the custom summary's boundary, replacing any such blocks the summary already ends with, as it does for a built-in checkpoint (see [Summary Format](#summary-format)). The result passes the same [admission](#admission) as a built-in one: if its rebuilt context would not fit, nothing is committed. Its `firstKeptEntryId` must be a valid boundary: an entry on the branch, no earlier than the messages the previous compaction kept, whose first kept context message is not a tool result (entries that add no context, such as model changes, may precede that message). `preparation.firstKeptEntryId` always qualifies. Any other boundary fails the compaction without committing: `Extension compaction boundary "<id>" ...; original context was kept`. The `compact()` and `generateSummary()` helpers return only the generated text, leaving the host-owned blocks to Volt; they bound it to about 80% of the `reserveTokens` you pass, at four characters per token, and regenerate an oversized summary shorter.
 
 ```typescript
 volt.on("session_before_compact", async (event, ctx) => {
@@ -455,7 +499,7 @@ Configure compaction in `~/.volt/agent/settings.json` or `<project-dir>/.volt/se
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `enabled` | `true` | Enable auto-compaction |
-| `reserveTokens` | `16384` | Tokens to reserve for LLM response |
+| `reserveTokens` | `16384` | Tokens a compacted context leaves for the next response; the trigger also reserves room for the native compaction request |
 | `keepRecentTokens` | `20000` | Maximum recent message tokens to keep; active tool definitions can lower the effective budget |
 | `modelThresholds` | `{}` | Absolute token thresholds keyed by exact `provider/model-id`; `0` or omitted uses the context-limit default |
 

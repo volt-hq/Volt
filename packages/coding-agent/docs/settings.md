@@ -202,8 +202,8 @@ Volt records metadata-only prompt-cache audit logs (request token counts and gap
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `compaction.enabled` | boolean | `true` | Enable auto-compaction |
-| `compaction.reserveTokens` | number | `16384` | Tokens reserved for LLM response |
-| `compaction.keepRecentTokens` | number | `20000` | Recent tokens to keep (not summarized) |
+| `compaction.reserveTokens` | number | `16384` | Tokens a compacted context leaves free for the next response. Automatic compaction triggers this far below the context window plus the room the compaction request itself needs (see [When It Triggers](compaction.md#when-it-triggers)) |
+| `compaction.keepRecentTokens` | number | `20000` | Recent tokens to keep (not summarized); small context windows keep less so the compacted context lands below the trigger |
 | `compaction.modelThresholds` | object | `{}` | Absolute auto-compaction token counts keyed by exact `provider/model-id`. Omitted entries or `0` use the normal context-limit trigger |
 
 ```json
@@ -237,7 +237,7 @@ For an arbitrary count, use the phone's token-count control or edit `settings.js
 
 Use the exact provider/model reference from `/model`; `openai` and `openai-codex` are separate entries. Counts must be positive safe integers; invalid entries are ignored. `0` explicitly restores the default, including over an inherited profile setting. These thresholds do not change the model's real context window, response reserve, recent-message budget, or `warnings.contextTokens`.
 
-Compaction runs at the next safe turn boundary when usage reaches the configured count (including estimated trailing tool results), or earlier if the normal context-limit trigger fires. A single response or tool batch can overshoot the count; it is not a hard input cap. Keep thresholds comfortably above the retained context size to avoid frequent compactions. See [Compaction](compaction.md) for behavior and tradeoffs. Restart or `/reload` after editing JSON; `/settings` changes apply to subsequent checks immediately.
+Compaction runs at the next safe turn boundary when usage reaches the configured count (including estimated trailing tool results), or earlier if the normal context-limit trigger fires. A single response or tool batch can overshoot the count; it is not a hard input cap. Keep thresholds comfortably above the retained context size: an automatic compaction whose result would still reach the threshold fails with the original context kept, and its error names the threshold to raise. See [Compaction](compaction.md) for behavior and tradeoffs. Restart or `/reload` after editing JSON; `/settings` changes apply to subsequent checks immediately.
 
 ### Branch Summary
 
