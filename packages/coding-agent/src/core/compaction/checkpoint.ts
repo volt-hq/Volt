@@ -3,9 +3,9 @@
  * the reader that holds one request to its character limit, the request
  * loop that regenerates an oversized checkpoint with a tighter target, and
  * the host-owned blocks (the user's messages verbatim and the file lists)
- * composed after the generated text. Host-owned blocks are rebuilt from the
- * branch on every compaction and never pass through a model, so repeated
- * compactions cannot erode them.
+ * composed after every installed checkpoint's text, built-in or from an
+ * extension. Host-owned blocks are rebuilt from the branch on every compaction
+ * and never pass through a model, so repeated compactions cannot erode them.
  */
 
 import type { StreamFn } from "@hansjm10/volt-agent-core";
@@ -24,6 +24,8 @@ import type { SessionEntry } from "../session-manager.ts";
 import {
 	checkpointTargetChars,
 	FILE_LISTS_MAX_CHARS,
+	fileListsMaxChars,
+	hostBlocksMaxChars,
 	MAX_CHECKPOINT_CORRECTIONS,
 	USER_MESSAGE_MAX_CHARS,
 	userMessagesMaxChars,
@@ -447,22 +449,45 @@ export function formatUserMessages(messages: readonly string[], maxChars: number
 }
 
 /**
- * The user-message record for a compaction: every user message on the
- * branch before the first kept entry, including history earlier compactions
- * already summarized, rendered verbatim within the record's budget. The
- * retained messages stay in context and are not repeated.
+ * The text of every user message on the branch before the first kept entry,
+ * oldest first, including history earlier compactions already summarized.
+ * The retained messages stay in context and are not repeated.
  */
-export function userMessageRecord(
-	pathEntries: readonly SessionEntry[],
-	firstKeptEntryId: string,
-	contextWindow: number,
-): string | undefined {
+export function userMessagesBefore(pathEntries: readonly SessionEntry[], firstKeptEntryId: string): string[] {
 	const firstKeptIndex = pathEntries.findIndex((entry) => entry.id === firstKeptEntryId);
 	const texts: string[] = [];
 	for (const entry of pathEntries.slice(0, firstKeptIndex < 0 ? pathEntries.length : firstKeptIndex)) {
 		if (entry.type === "message" && entry.message.role === "user") texts.push(userMessageText(entry.message.content));
 	}
-	return formatUserMessages(texts, userMessagesMaxChars(contextWindow));
+	return texts;
+}
+
+/** What a checkpoint's host-owned blocks are rebuilt from. */
+export interface HostBlockSources {
+	/** The user's earlier messages, oldest first. */
+	readonly userMessages: readonly string[];
+	readonly readFiles: readonly string[];
+	readonly modifiedFiles: readonly string[];
+}
+
+/**
+ * The host-owned blocks composed after a checkpoint's text, within one budget
+ * for the context window filled in priority order: the user-message record
+ * (the first message, then the newest), then the file lists. Returns
+ * undefined when there is nothing to record.
+ */
+export function formatHostBlocks(sources: HostBlockSources, contextWindow: number): string | undefined {
+	const maxChars = hostBlocksMaxChars(contextWindow);
+	const userMessages = formatUserMessages(
+		sources.userMessages,
+		Math.min(maxChars, userMessagesMaxChars(contextWindow)),
+	);
+	const fileLists = formatFileLists(
+		sources.readFiles,
+		sources.modifiedFiles,
+		Math.min(fileListsMaxChars(contextWindow), maxChars - (userMessages === undefined ? 0 : userMessages.length + 2)),
+	);
+	return [userMessages, fileLists].filter((block) => block).join("\n\n") || undefined;
 }
 
 /**
@@ -514,9 +539,12 @@ export function formatFileLists(
 	return blocks.join("\n\n");
 }
 
-/** A checkpoint as installed: the generated text, then the user-message record, then the file lists. */
-export function composeCheckpoint(generated: string, blocks: { userMessages?: string; fileLists?: string }): string {
-	return [generated.trimEnd(), blocks.userMessages, blocks.fileLists].filter((part) => part).join("\n\n");
+/**
+ * A checkpoint as installed: its text, then the host-owned blocks. Host-owned
+ * blocks the text already ends with are replaced, never repeated.
+ */
+export function composeCheckpoint(text: string, hostBlocks: string | undefined): string {
+	return [stripHostBlocks(text), hostBlocks].filter((part) => part).join("\n\n");
 }
 
 /**

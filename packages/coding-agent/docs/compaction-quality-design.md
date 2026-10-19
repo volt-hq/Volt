@@ -115,7 +115,7 @@ Repeated compaction can lose what an early checkpoint captured: each checkpoint 
 
 `createTrajectoryFixtures()` probes one synthetic trajectory after three and after five compactions. The first request carries an API constraint and a release prohibition, a later decision is superseded by a correction, an approach fails, and work is then verified only partially. Criteria grade early facts long after the epoch that introduced them.
 
-`runPilotCase()` compacts a fixture once, then once more per epoch: each epoch's messages follow the previous checkpoint and retained messages, and the next compaction keeps the epoch's authored boundary. The native condition runs production `compactContext()` with the user-message record the session would build; the chunked-helper condition composes the same host-owned blocks around the `compact()` helper's text. The full-context control sends every message of every epoch. A case's deadline and request limit scale with its compaction count.
+`runPilotCase()` compacts a fixture once, then once more per epoch: each epoch's messages follow the previous checkpoint and retained messages, and the next compaction keeps the epoch's authored boundary. The native condition runs production `compactContext()` and the chunked-helper condition the `compact()` helper; both compose the host-owned blocks the session would build around the generated text. The full-context control sends every message of every epoch. A case's deadline and request limit scale with its compaction count.
 
 Select the trajectories explicitly; the default suite remains the twelve seeds:
 

@@ -9,7 +9,7 @@ import {
 	type SimpleStreamOptions,
 } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { composeCheckpoint, formatFileLists, formatUserMessages } from "../../src/core/compaction/checkpoint.ts";
+import { composeCheckpoint, formatHostBlocks } from "../../src/core/compaction/checkpoint.ts";
 import { type CompactionDetails, prepareCompaction } from "../../src/core/compaction/compaction.ts";
 import { convertToLlm } from "../../src/core/messages.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
@@ -552,10 +552,17 @@ describe("AgentSession cache-preserving compaction", () => {
 		expect(result.firstKeptEntryId).toBe(retainedEntry.id);
 		expect(result.details).toMatchObject({ readFiles: ["older-read.ts"], modifiedFiles: ["older-edit.ts"] });
 		expect(result.summary).toBe(
-			composeCheckpoint("file checkpoint", {
-				userMessages: formatUserMessages(["Inspect and update files"], 16_384),
-				fileLists: formatFileLists(["older-read.ts"], ["older-edit.ts"]),
-			}),
+			composeCheckpoint(
+				"file checkpoint",
+				formatHostBlocks(
+					{
+						userMessages: ["Inspect and update files"],
+						readFiles: ["older-read.ts"],
+						modifiedFiles: ["older-edit.ts"],
+					},
+					harness.getModel().contextWindow,
+				),
+			),
 		);
 		expect(result.summary).not.toContain("retained-read.ts");
 		expect(result.summary).not.toContain("retained-write.ts");

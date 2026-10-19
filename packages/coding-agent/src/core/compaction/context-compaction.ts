@@ -17,7 +17,6 @@ import {
 	checkpointOutputTokens,
 	checkpointTargetChars,
 	compactionReasoningLevel,
-	fileListsMaxChars,
 	nativeOutputAllowance,
 	REQUEST_MARGIN_TOKENS,
 } from "./budget.ts";
@@ -32,8 +31,6 @@ import {
 	type CheckpointTarget,
 	checkpointLengthRules,
 	checkpointVisibleText,
-	composeCheckpoint,
-	formatFileLists,
 	generateCheckpoint,
 	oversizedCheckpoint,
 	readCheckpointResponse,
@@ -141,8 +138,6 @@ interface ContextCompactionOptions {
 	/** Saved message counts, before the context/conversion pipeline. */
 	sourceMessageCount: number;
 	retainedMessageCount: number;
-	/** The rendered user-message record composed after the generated checkpoint. */
-	userMessages?: string;
 	streamFn: StreamFn;
 	signal: AbortSignal;
 	thinkingLevel: ThinkingLevel;
@@ -153,7 +148,11 @@ interface ContextCompactionOptions {
 	onFailure?: (report: CompactionFailureReport) => Promise<void>;
 }
 
-/** Built-in session compaction. No persistence or tool execution occurs here. */
+/**
+ * Built-in session compaction: the generated checkpoint text, which the
+ * session composes with its host-owned blocks. No persistence or tool
+ * execution occurs here.
+ */
 export async function compactContext(
 	preparation: CompactionPreparation,
 	model: Model<Api>,
@@ -396,10 +395,7 @@ export async function compactContext(
 		}
 		const { readFiles, modifiedFiles } = computeFileLists(preparation.fileOps);
 		return {
-			summary: composeCheckpoint(generated, {
-				...(options.userMessages ? { userMessages: options.userMessages } : {}),
-				fileLists: formatFileLists(readFiles, modifiedFiles, fileListsMaxChars(model.contextWindow)),
-			}),
+			summary: generated,
 			firstKeptEntryId: preparation.firstKeptEntryId,
 			tokensBefore: preparation.tokensBefore,
 			details: { readFiles, modifiedFiles, requests },

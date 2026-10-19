@@ -27,10 +27,11 @@ import {
 	type CompactionBudgetSnapshot,
 	compactionResponseReserve,
 	compactionTriggerReserve,
+	installedCheckpointTokens,
 	maxComposedCheckpointChars,
 	maxInstalledCheckpointTokens,
 } from "../compaction/budget.ts";
-import { userMessageRecord } from "../compaction/checkpoint.ts";
+import { composeCheckpoint } from "../compaction/checkpoint.ts";
 import {
 	COMPACTION_REQUEST_TIMEOUT_MS,
 	COMPACTION_TOTAL_TIMEOUT_MS,
@@ -42,6 +43,7 @@ import {
 	type CompactionPreparation,
 	type CompactionRequestUsage,
 	type CompactionResult,
+	checkpointHostBlocks,
 	compactionBoundaryError,
 	estimateMessagesTokens,
 	estimateRequestTokens,
@@ -64,7 +66,12 @@ import type { SessionPlanning } from "./planning.ts";
 const MAX_COMPACTION_SUMMARY_RETRIES = 2;
 const MAX_COMPACTION_RETRY_DELAY_MS = 30_000;
 
-export type CompactionAdmissionCode = "cannot_fit" | "context_too_large" | "above_trigger" | "checkpoint_too_large";
+export type CompactionAdmissionCode =
+	| "window_too_small"
+	| "cannot_fit"
+	| "context_too_large"
+	| "above_trigger"
+	| "checkpoint_too_large";
 
 /** A compaction whose result would not fit. Nothing is committed and the original context stays. */
 export class CompactionAdmissionError extends Error {
@@ -237,7 +244,8 @@ export class SessionCompaction {
 	/**
 	 * Fail before any request when what the compaction must keep cannot fit:
 	 * the retained messages, system prompt, tools, plan checkpoint and response
-	 * reserve, plus room for the checkpoint itself when one is generated.
+	 * reserve, plus room for the checkpoint itself when one is generated. A
+	 * window that cannot fit them without any retained message is too small.
 	 */
 	private async assertCanFit(
 		footprint: CompactionFootprint,
@@ -249,13 +257,25 @@ export class SessionCompaction {
 		const needed = retainedTokens + fixedTokens + checkpointTokens + reserveTokens;
 		if (!(contextWindow > 0) || needed <= contextWindow) return;
 		const checkpoint = checkpointTokens > 0 ? `, the checkpoint (up to ~${formatTokens(checkpointTokens)})` : "";
+		const budget = { contextWindow, reserveTokens, retainedTokens, fixedTokens };
+		const withoutRetained = needed - retainedTokens;
+		if (withoutRetained > contextWindow) {
+			await this.reject(
+				new CompactionAdmissionError(
+					"window_too_small",
+					`The ${formatTokens(contextWindow)}-token context window is too small to compact: the system prompt, tools and plan (~${formatTokens(fixedTokens)} tokens)${checkpoint}, and the ${formatTokens(reserveTokens)}-token response reserve need ~${formatTokens(withoutRetained)} tokens before any recent messages are kept; use a model with a larger context window; original context was kept`,
+				),
+				"preflight",
+				budget,
+			);
+		}
 		await this.reject(
 			new CompactionAdmissionError(
 				"cannot_fit",
 				`Compaction cannot fit the context window: the recent messages it must keep (~${formatTokens(retainedTokens)} tokens), the system prompt, tools and plan (~${formatTokens(fixedTokens)})${checkpoint}, and the ${formatTokens(reserveTokens)}-token response reserve need ~${formatTokens(needed)} of ${formatTokens(contextWindow)} tokens; original context was kept`,
 			),
 			"preflight",
-			{ contextWindow, reserveTokens, retainedTokens, fixedTokens },
+			budget,
 		);
 	}
 
@@ -348,7 +368,6 @@ export class SessionCompaction {
 		messages: readonly AgentMessage[],
 		retainedCount: number,
 		footprint: CompactionFootprint,
-		userMessages: string | undefined,
 		operation: { readonly stream: StreamFn; readonly signal: AbortSignal },
 		customInstructions?: string,
 	): Promise<CompactionResult<CompactionDetails> & { details: CompactionDetails }> {
@@ -363,7 +382,6 @@ export class SessionCompaction {
 				tools: footprint.tools,
 				systemPrompt: footprint.systemPrompt,
 			}),
-			...(userMessages === undefined ? {} : { userMessages }),
 			context: async (signal) => {
 				const transformed = await withoutExtensionServices(() =>
 					this.host.extensionRunner().emitContext(cloneCanonicalData([...messages], "Agent message delivery")),
@@ -415,7 +433,9 @@ export class SessionCompaction {
 	 * The conversation's summarizer for manual and automatic compaction: the
 	 * compaction boundary, the `session_before_compact` hook (which may cancel
 	 * or supply the summary), the summary itself, and the plan checkpoint that
-	 * commits with it. The conversation commits the result and resumes the turn.
+	 * commits with it. Every checkpoint, built-in or from an extension, gets the
+	 * host-owned blocks for its own boundary. The conversation commits the
+	 * result and resumes the turn.
 	 */
 	private async summarizeCompaction(
 		request: ConversationCompactionRequest,
@@ -504,20 +524,31 @@ export class SessionCompaction {
 					`Extension compaction boundary ${JSON.stringify(extensionCompaction.firstKeptEntryId)} ${boundaryError}; original context was kept`,
 				);
 			}
-			compaction = extensionCompaction;
+			compaction = {
+				...extensionCompaction,
+				summary: composeCheckpoint(
+					extensionCompaction.summary,
+					checkpointHostBlocks(pathEntries, extensionCompaction.firstKeptEntryId, contextWindow),
+				),
+			};
 		} else {
-			await this.assertCanFit(prepared, planTokensBefore, maxInstalledCheckpointTokens(contextWindow));
+			// The host-owned blocks are known before any request; only the generated text is reserved at its limit.
+			const hostBlocks = checkpointHostBlocks(pathEntries, preparation.firstKeptEntryId, contextWindow);
+			await this.assertCanFit(
+				prepared,
+				planTokensBefore,
+				installedCheckpointTokens(contextWindow, hostBlocks?.length ?? 0),
+			);
 			const generated = await this.generate(
 				preparation,
 				model,
 				branchMessages,
 				prepared.retainedCount,
 				prepared,
-				userMessageRecord(pathEntries, preparation.firstKeptEntryId, contextWindow),
 				{ stream: request.stream, signal: request.signal },
 				request.instructions,
 			);
-			compaction = generated;
+			compaction = { ...generated, summary: composeCheckpoint(generated.summary, hostBlocks) };
 			builtInRequests = generated.details.requests ?? [];
 		}
 		if (request.signal.aborted) throw new Error("Compaction cancelled");

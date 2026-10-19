@@ -159,7 +159,8 @@ describe("cache-preserving compaction", () => {
 			tokensBefore: 580_000,
 			details: { readFiles: ["src/example.ts"], modifiedFiles: [] },
 		});
-		expect(result.summary).toContain("<read-files>");
+		// The session composes the host-owned blocks; this returns the generated text.
+		expect(result.summary).toBe("## Goal\nPreserve original goal");
 		expect(result.details.requests).toEqual([
 			{
 				strategy: "native",

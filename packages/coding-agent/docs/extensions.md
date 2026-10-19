@@ -621,7 +621,7 @@ volt.on("session_compact", async (event, ctx) => {
 });
 ```
 
-Custom compaction and tree-summary results are validated and owned before Volt moves the branch leaf or appends an entry. Invalid JSON data fails the operation without creating a summary entry, as does a custom compaction whose `firstKeptEntryId` is not a [valid boundary](compaction.md#session_before_compact). Each `session_before_compact` and `session_before_tree` handler receives its own copy of the event's `preparation` (and of `branchEntries` for compaction): changing it affects neither the summary Volt generates nor later handlers.
+Custom compaction and tree-summary results are validated and owned before Volt moves the branch leaf or appends an entry. Invalid JSON data fails the operation without creating a summary entry, as does a custom compaction whose `firstKeptEntryId` is not a [valid boundary](compaction.md#session_before_compact). Volt appends its user-message record and file lists to a custom compaction summary, as it does for its own (see [Summary Format](compaction.md#summary-format)). Each `session_before_compact` and `session_before_tree` handler receives its own copy of the event's `preparation` (and of `branchEntries` for compaction): changing it affects neither the summary Volt generates nor later handlers.
 
 #### session_before_tree / session_tree
 

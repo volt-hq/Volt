@@ -8,6 +8,8 @@ import {
 	compactionResponseReserve,
 	compactionTriggerReserve,
 	fileListsMaxChars,
+	hostBlocksMaxChars,
+	installedCheckpointTokens,
 	maxComposedCheckpointChars,
 	maxInstalledCheckpointTokens,
 	NATIVE_INSTRUCTION_TOKENS,
@@ -110,12 +112,34 @@ describe("compaction budgets", () => {
 		expect(userMessagesMaxChars(4096)).toBe(1024);
 		expect(fileListsMaxChars(272_000)).toBe(8192);
 		expect(fileListsMaxChars(16_384)).toBe(3276);
+		expect(hostBlocksMaxChars(272_000)).toBe(16_384 + 8192);
+		expect(hostBlocksMaxChars(16_384)).toBe(userMessagesMaxChars(16_384) + fileListsMaxChars(16_384));
 		expect(maxComposedCheckpointChars(272_000)).toBe(16_384 + 16_384 + 8192 + 512);
 		expect(maxInstalledCheckpointTokens(272_000)).toBeLessThan(11_000);
 		// Even a small window keeps room for the conversation itself.
 		expect(maxInstalledCheckpointTokens(16_384)).toBeLessThan(16_384 * 0.25);
+		for (const contextWindow of [2048, 4096, 8192]) {
+			expect(maxInstalledCheckpointTokens(contextWindow)).toBeLessThan(contextWindow * 0.5);
+		}
 		expect(compactionResponseReserve(16_384, 16_384)).toBe(8192);
 		expect(compactionResponseReserve(272_000, 16_384)).toBe(16_384);
+	});
+
+	it("shares one host-block minimum on small windows instead of one per block", () => {
+		// The user-message record keeps its 1,024-character minimum; the file lists get what is left.
+		expect(userMessagesMaxChars(2048)).toBe(1024);
+		expect(fileListsMaxChars(2048)).toBe(408);
+		expect(hostBlocksMaxChars(2048)).toBe(1024);
+		// The record's and the file lists' shares: 324 + 816 characters.
+		expect(hostBlocksMaxChars(4096)).toBe(324 + 816);
+		expect(maxComposedCheckpointChars(2048)).toBe(2048 + 1024 + 512);
+	});
+
+	it("counts the host-owned blocks at their size and the generated text at its limit", () => {
+		const generatedChars = checkpointMaxTokens(16_384) * 4;
+		expect(installedCheckpointTokens(16_384, 0)).toBeGreaterThan(generatedChars / 4);
+		expect(installedCheckpointTokens(16_384, 400) - installedCheckpointTokens(16_384, 0)).toBe(100);
+		expect(installedCheckpointTokens(16_384, hostBlocksMaxChars(16_384))).toBe(maxInstalledCheckpointTokens(16_384));
 	});
 
 	it("reserves enough for the longest native instruction, boundary excerpt included", () => {

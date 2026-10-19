@@ -15,12 +15,7 @@ import {
 	createCustomMessage,
 } from "../messages.ts";
 import type { CompactionEntry, SessionEntry } from "../session-manager.ts";
-import {
-	CHECKPOINT_CHARS_PER_TOKEN,
-	fileListsMaxChars,
-	reasoningAllowanceTokens,
-	splitCheckpointTokens,
-} from "./budget.ts";
+import { CHECKPOINT_CHARS_PER_TOKEN, reasoningAllowanceTokens, splitCheckpointTokens } from "./budget.ts";
 import {
 	CHECKPOINT_FORMAT,
 	CHECKPOINT_RULES,
@@ -28,13 +23,13 @@ import {
 	type CheckpointRequester,
 	type CheckpointTarget,
 	checkpointLengthRules,
-	composeCheckpoint,
-	formatFileLists,
+	formatHostBlocks,
 	generateCheckpoint,
 	streamCheckpointRequester,
 	stripHostBlocks,
 	TURN_PREFIX_FORMAT,
 	TURN_PREFIX_RULES,
+	userMessagesBefore,
 } from "./checkpoint.ts";
 import {
 	computeFileLists,
@@ -862,6 +857,42 @@ export function compactionBoundaryError(pathEntries: SessionEntry[], firstKeptEn
 }
 
 /**
+ * File operations a compaction that keeps entries from `firstKeptIndex` on
+ * summarizes: those the branch's latest built-in compaction recorded, then
+ * those of the context messages from where that compaction's kept span starts.
+ */
+function summarizedFileOperations(pathEntries: SessionEntry[], firstKeptIndex: number): FileOperations {
+	const { previousIndex, start } = compactionSpan(pathEntries);
+	const messages: AgentMessage[] = [];
+	for (let i = start; i < firstKeptIndex; i++) {
+		const message = getMessageFromEntryForCompaction(pathEntries[i]);
+		if (message) messages.push(message);
+	}
+	return extractFileOperations(messages, pathEntries, previousIndex);
+}
+
+/**
+ * The host-owned blocks of a checkpoint that keeps entries from
+ * `firstKeptEntryId` on the branch `pathEntries`: the user's earlier messages
+ * verbatim, then the files the summarized history read and modified. Session
+ * compaction composes them after every checkpoint it installs.
+ */
+export function checkpointHostBlocks(
+	pathEntries: SessionEntry[],
+	firstKeptEntryId: string,
+	contextWindow: number,
+): string | undefined {
+	const firstKeptIndex = pathEntries.findIndex((entry) => entry.id === firstKeptEntryId);
+	const { readFiles, modifiedFiles } = computeFileLists(
+		summarizedFileOperations(pathEntries, firstKeptIndex < 0 ? pathEntries.length : firstKeptIndex),
+	);
+	return formatHostBlocks(
+		{ userMessages: userMessagesBefore(pathEntries, firstKeptEntryId), readFiles, modifiedFiles },
+		contextWindow,
+	);
+}
+
+/**
  * Prepare compacting the branch `pathEntries`, root first. `messages` is that
  * branch's model context (the fold's `context.messages` for it); it measures
  * `tokensBefore`.
@@ -933,15 +964,8 @@ export function planCompaction(
 		}
 	}
 
-	// Extract file operations from messages and previous compaction
-	const fileOps = extractFileOperations(messagesToSummarize, pathEntries, prevCompactionIndex);
-
-	// Also extract file ops from turn prefix if splitting
-	if (cutPoint.isSplitTurn) {
-		for (const msg of turnPrefixMessages) {
-			extractFileOpsFromMessage(msg, fileOps);
-		}
-	}
+	// File operations of the previous compaction, the summarized history and any turn prefix.
+	const fileOps = summarizedFileOperations(pathEntries, cutPoint.firstKeptEntryIndex);
 
 	return {
 		preparation: {
@@ -1149,6 +1173,8 @@ export async function summarizeCompactionHistory(
 /**
  * Generate summaries for compaction using prepared data.
  * Returns CompactionResult - SessionManager adds uuid/parentUuid when saving.
+ * The summary is the generated text only: session compaction composes the
+ * user-message record and file lists after it when it installs the result.
  *
  * @param preparation - Pre-calculated preparation from prepareCompaction()
  * @param streamFn - Stream function that sends the summary requests, such as an `AiClient`'s `streamSimple`
@@ -1177,9 +1203,7 @@ export async function compact(
 	}
 	const { readFiles, modifiedFiles } = computeFileLists(preparation.fileOps);
 	return {
-		summary: composeCheckpoint(summary, {
-			fileLists: formatFileLists(readFiles, modifiedFiles, fileListsMaxChars(model.contextWindow)),
-		}),
+		summary,
 		firstKeptEntryId: preparation.firstKeptEntryId,
 		tokensBefore: preparation.tokensBefore,
 		details: { readFiles, modifiedFiles },

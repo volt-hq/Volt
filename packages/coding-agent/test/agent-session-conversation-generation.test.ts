@@ -781,8 +781,9 @@ describe("AgentSession conversation generation commits", () => {
 			await runtime.session.waitForIdle();
 			expect(phone.frames.slice(from).some(isLeafEntry)).toBe(false);
 			expect(compactionHookCalls).toBe(1);
+			// The hook's summary commits, followed by the host's user-message record.
 			expect(manager.getBranch().flatMap((entry) => (entry.type === "compaction" ? [entry.summary] : []))).toEqual([
-				"hook compaction summary",
+				expect.stringMatching(/^hook compaction summary\n\n<user-messages>\n/),
 			]);
 			expect(
 				manager

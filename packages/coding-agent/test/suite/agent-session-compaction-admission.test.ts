@@ -5,12 +5,18 @@ import {
 	type AssistantMessage,
 	type Context,
 	createAssistantMessageEventStream,
+	estimateToolDefinitionTokens,
 	fauxAssistantMessage,
 	fauxToolCall,
 	type Message,
 } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { maxComposedCheckpointChars } from "../../src/core/compaction/budget.ts";
+import {
+	compactionResponseReserve,
+	maxComposedCheckpointChars,
+	maxInstalledCheckpointTokens,
+} from "../../src/core/compaction/budget.ts";
+import { composeCheckpoint, formatHostBlocks } from "../../src/core/compaction/checkpoint.ts";
 import type { CompactionDetails } from "../../src/core/compaction/compaction.ts";
 import type { ExtensionFactory } from "../../src/core/extensions/types.ts";
 import { bashResultOperations } from "../utilities/session-reads.ts";
@@ -144,6 +150,64 @@ describe("compaction admission", () => {
 		expect(turns).toHaveLength(0);
 		expect(harness.sessionManager.getEntries()).toEqual(entries);
 		expect(await failureRecord(harness)).toMatchObject({ phase: "preflight", requests: [] });
+	});
+
+	it("reserves the host-owned blocks at their size, not their limit, before any request", async () => {
+		const contextWindow = 16_384;
+		const reserveTokens = 4096;
+		const harness = await harnessFor({
+			models: [{ id: "small", contextWindow, maxTokens: 4096 }],
+			settings: { compaction: { keepRecentTokens: 1, reserveTokens } },
+			seed: (seed) => seed.user("Earlier request").assistant("Earlier answer").user("Recent request"),
+		});
+		const model = harness.getModel();
+		const baseTokens =
+			Math.ceil(harness.session.systemPrompt.length / 4) + estimateToolDefinitionTokens(harness.session.state.tools);
+		// The newest exchange, kept verbatim, leaves room for the checkpoint as composed but not for the largest one.
+		const room = contextWindow - compactionResponseReserve(contextWindow, reserveTokens) - baseTokens;
+		const retainedTokens = room - maxInstalledCheckpointTokens(contextWindow) + 200;
+		await harness.session.sessionWriter.appendMessage({
+			...fauxAssistantMessage("r".repeat(retainedTokens * 4)),
+			provider: model.provider,
+			model: model.id,
+		});
+		const { summaries } = routeRequests(
+			harness,
+			() => "Checkpoint",
+			() => "never",
+		);
+
+		const result = await harness.session.compact();
+		expect(summaries.length).toBeGreaterThan(0);
+		expect(compactions(harness)).toHaveLength(1);
+		expect(result.summary).toMatch(/^Checkpoint\n\n<user-messages>\n/);
+		expect(harness.session.messages.slice(1).map(getMessageText)).toEqual(["r".repeat(retainedTokens * 4)]);
+	});
+
+	it("reports a context window too small to compact before any request", async () => {
+		const harness = await harnessFor({
+			models: [{ id: "tiny", contextWindow: 2048, maxTokens: 1024 }],
+			seed: (seed) =>
+				seed.user("Earlier request").assistant("Earlier answer").user("Recent request").assistant("Done"),
+		});
+		const { summaries, turns } = routeRequests(
+			harness,
+			() => "never",
+			() => "never",
+		);
+		const entries = harness.sessionManager.getEntries();
+
+		await expect(harness.session.compact()).rejects.toThrow(
+			/The 2,048-token context window is too small to compact: the system prompt, tools and plan \(~[\d,]+ tokens\).*use a model with a larger context window; original context was kept/,
+		);
+		expect(summaries).toHaveLength(0);
+		expect(turns).toHaveLength(0);
+		expect(harness.sessionManager.getEntries()).toEqual(entries);
+		expect(await failureRecord(harness)).toMatchObject({
+			phase: "preflight",
+			error: expect.stringContaining("too small to compact"),
+			requests: [],
+		});
 	});
 
 	it("does not count bash output excluded from context toward the messages it must keep", async () => {
@@ -400,6 +464,56 @@ describe("extension compaction boundaries", () => {
 		);
 		expect(harness.sessionManager.getEntries()).toEqual(entries);
 		expect(compactions(harness)).toHaveLength(1);
+	});
+
+	it("appends the host-owned blocks for the extension's boundary, replacing any the summary ends with", async () => {
+		const keepRecentRequest: ExtensionFactory = (volt) => {
+			volt.on("session_before_compact", async (event) => ({
+				compaction: {
+					summary: "Extension checkpoint\n\n<read-files>\nstale.ts\n</read-files>",
+					// Keeps more than the prepared boundary, which keeps only the last answer.
+					firstKeptEntryId: event.branchEntries.find(
+						(entry) =>
+							entry.type === "message" &&
+							entry.message.role === "user" &&
+							entry.message.content === "Recent request",
+					)!.id,
+					tokensBefore: event.preparation.tokensBefore,
+					details: { custom: true },
+				},
+			}));
+		};
+		const older = fauxToolCall("read", { path: "older.ts" });
+		const recent = fauxToolCall("edit", { path: "recent.ts", oldText: "a", newText: "b" });
+		const harness = await harnessFor({
+			extensionFactories: [keepRecentRequest],
+			settings: { compaction: { keepRecentTokens: 1 } },
+			seed: (seed) =>
+				seed
+					.user("Older request")
+					.assistant("", { toolCalls: [older] })
+					.toolResult(older.id, "older contents")
+					.assistant("Older answer")
+					.user("Recent request")
+					.assistant("", { toolCalls: [recent] })
+					.toolResult(recent.id, "edited")
+					.assistant("Recent answer"),
+		});
+
+		const result = await harness.session.compact();
+		// The retained request and its edit stay out of the blocks; the stale list the summary ended with is replaced.
+		expect(result.summary).toBe(
+			composeCheckpoint(
+				"Extension checkpoint",
+				formatHostBlocks(
+					{ userMessages: ["Older request"], readFiles: ["older.ts"], modifiedFiles: [] },
+					harness.getModel().contextWindow,
+				),
+			),
+		);
+		expect(result.details).toEqual({ custom: true });
+		expect(compactions(harness)).toMatchObject([{ fromHook: true, summary: result.summary }]);
+		expect(harness.session.messages.slice(1).map(getMessageText)[0]).toBe("Recent request");
 	});
 
 	it("rejects a boundary that would keep a tool result without its call", async () => {

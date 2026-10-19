@@ -30,7 +30,11 @@ export const SPLIT_HISTORY_SHARE = 0.75;
 export const USER_MESSAGES_MAX_TOKENS = 4096;
 /** ...and at most this share of the context window... */
 export const USER_MESSAGES_WINDOW_SHARE = 0.02;
-/** ...but never fewer characters than this, so the first message always has room. */
+/**
+ * ...but never fewer characters than this, so the first message always has
+ * room. The record claims these characters from the host-owned blocks' shared
+ * budget, so on small windows the file lists get only what the record leaves.
+ */
 const MIN_USER_MESSAGES_CHARS = 1024;
 /** Characters one recorded user message keeps. */
 export const USER_MESSAGE_MAX_CHARS = 2000;
@@ -38,7 +42,6 @@ export const USER_MESSAGE_MAX_CHARS = 2000;
 export const FILE_LISTS_MAX_CHARS = 8192;
 /** Small context windows give the file lists at most this share of the window. */
 const FILE_LISTS_WINDOW_SHARE = 0.05;
-const MIN_FILE_LISTS_CHARS = 1024;
 /** Tokens the native checkpoint instruction takes (rules, scope, and boundary excerpt). */
 export const NATIVE_INSTRUCTION_TOKENS = 1536;
 /** Framing, provider-added tokens, and estimation slack for one request. */
@@ -78,12 +81,12 @@ export function checkpointMaxTokens(contextWindow: number): number {
 	);
 }
 
-/** Characters the rendered file lists may take for a context window. */
+/** Characters the rendered file lists may take for a context window, when the user-message record leaves room. */
 export function fileListsMaxChars(contextWindow: number): number {
 	if (!(contextWindow > 0)) return FILE_LISTS_MAX_CHARS;
 	return Math.min(
 		FILE_LISTS_MAX_CHARS,
-		Math.max(MIN_FILE_LISTS_CHARS, Math.floor(contextWindow * FILE_LISTS_WINDOW_SHARE) * CHECKPOINT_CHARS_PER_TOKEN),
+		Math.floor(contextWindow * FILE_LISTS_WINDOW_SHARE) * CHECKPOINT_CHARS_PER_TOKEN,
 	);
 }
 
@@ -113,20 +116,51 @@ export function userMessagesMaxChars(contextWindow: number): number {
 	);
 }
 
-/** The longest checkpoint built-in compaction composes: generated text, user messages, and file lists. */
+/**
+ * Characters the host-owned blocks take together for a context window: the
+ * user-message record's and the file lists' shares of the window, but at least
+ * the record's minimum. The record fills it first, then the file lists, so
+ * small windows do not stack one minimum per block.
+ */
+export function hostBlocksMaxChars(contextWindow: number): number {
+	const blocks = userMessagesMaxChars(contextWindow) + fileListsMaxChars(contextWindow);
+	if (!(contextWindow > 0)) return blocks;
+	const windowChars = (share: number): number => Math.floor(contextWindow * share) * CHECKPOINT_CHARS_PER_TOKEN;
+	return Math.min(
+		blocks,
+		Math.max(MIN_USER_MESSAGES_CHARS, windowChars(USER_MESSAGES_WINDOW_SHARE) + windowChars(FILE_LISTS_WINDOW_SHARE)),
+	);
+}
+
+/** The longest checkpoint built-in compaction composes: generated text, then the host-owned blocks. */
 export function maxComposedCheckpointChars(contextWindow: number): number {
 	return (
 		checkpointMaxTokens(contextWindow) * CHECKPOINT_CHARS_PER_TOKEN +
-		userMessagesMaxChars(contextWindow) +
-		fileListsMaxChars(contextWindow) +
+		hostBlocksMaxChars(contextWindow) +
 		CHECKPOINT_FRAMING_CHARS
+	);
+}
+
+/**
+ * Tokens a built-in checkpoint takes in the compacted context at most, given
+ * the length of its host-owned blocks: the longest generated text, those
+ * blocks, framing, and the summary wrapper. The blocks are rebuilt from the
+ * branch, so their length is known before any request.
+ */
+export function installedCheckpointTokens(contextWindow: number, hostBlocksChars: number): number {
+	const wrapperChars = COMPACTION_SUMMARY_PREFIX.length + COMPACTION_SUMMARY_SUFFIX.length;
+	return Math.ceil(
+		(checkpointMaxTokens(contextWindow) * CHECKPOINT_CHARS_PER_TOKEN +
+			hostBlocksChars +
+			CHECKPOINT_FRAMING_CHARS +
+			wrapperChars) /
+			CHECKPOINT_CHARS_PER_TOKEN,
 	);
 }
 
 /** Tokens the largest built-in checkpoint takes in the compacted context, summary wrapper included. */
 export function maxInstalledCheckpointTokens(contextWindow: number): number {
-	const wrapperChars = COMPACTION_SUMMARY_PREFIX.length + COMPACTION_SUMMARY_SUFFIX.length;
-	return Math.ceil((maxComposedCheckpointChars(contextWindow) + wrapperChars) / CHECKPOINT_CHARS_PER_TOKEN);
+	return installedCheckpointTokens(contextWindow, hostBlocksMaxChars(contextWindow));
 }
 
 /** The reasoning level a compaction request runs at for a model. */

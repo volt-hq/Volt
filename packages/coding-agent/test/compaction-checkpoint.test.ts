@@ -8,10 +8,11 @@ import {
 	type SimpleStreamOptions,
 } from "@hansjm10/volt-ai";
 import { describe, expect, it } from "vitest";
-import { userMessagesMaxChars } from "../src/core/compaction/budget.ts";
+import { fileListsMaxChars, hostBlocksMaxChars, userMessagesMaxChars } from "../src/core/compaction/budget.ts";
 import {
 	composeCheckpoint,
 	formatFileLists,
+	formatHostBlocks,
 	formatUserMessages,
 	stripHostBlocks,
 	userMessageText,
@@ -93,14 +94,55 @@ describe("user-message record", () => {
 		expect(formatUserMessages([], 20_000)).toBeUndefined();
 		expect(formatUserMessages(["  "], 20_000)).toBeUndefined();
 	});
+});
 
-	it("keeps the first message on small context windows", () => {
-		for (const contextWindow of [2048, 4000, 4096]) {
-			const maxChars = userMessagesMaxChars(contextWindow);
-			const record = formatUserMessages(["Original request", "Second", "Third"], maxChars);
-			expect(record).toContain("(1) Original request");
-			expect(record!.length).toBeLessThanOrEqual(maxChars);
+describe("host-owned blocks", () => {
+	const many = (label: string): string[] =>
+		Array.from({ length: 200 }, (_, index) => `src/some/long/path/${label}-${index}.ts`);
+
+	it("fill one budget on small windows, the first user message before the file lists", () => {
+		for (const contextWindow of [2048, 4000, 4096, 8192]) {
+			const blocks = formatHostBlocks(
+				{
+					userMessages: [`Original request ${"r".repeat(3000)}`, "Second", "Third"],
+					readFiles: many("read"),
+					modifiedFiles: many("modified"),
+				},
+				contextWindow,
+			);
+			expect(blocks).toContain("(1) Original request");
+			expect(blocks!.length).toBeLessThanOrEqual(hostBlocksMaxChars(contextWindow));
+			// One minimum for both blocks, not one per block.
+			expect(hostBlocksMaxChars(contextWindow)).toBeLessThan(
+				userMessagesMaxChars(contextWindow) + Math.max(1024, fileListsMaxChars(contextWindow)),
+			);
 		}
+		expect(hostBlocksMaxChars(2048)).toBe(1024);
+	});
+
+	it("keep each block within its own limit on normal windows", () => {
+		const contextWindow = 128_000;
+		const blocks = formatHostBlocks(
+			{
+				userMessages: Array.from({ length: 30 }, (_, index) => `message ${index} ${"m".repeat(1500)}`),
+				readFiles: many("read"),
+				modifiedFiles: many("modified"),
+			},
+			contextWindow,
+		)!;
+		const record = blocks.slice(0, blocks.indexOf("</user-messages>") + "</user-messages>".length);
+		const lists = blocks.slice(record.length + 2);
+		expect(record.length).toBeLessThanOrEqual(userMessagesMaxChars(contextWindow));
+		expect(lists.indexOf("<modified-files>")).toBe(0);
+		expect(lists.length).toBeLessThanOrEqual(fileListsMaxChars(contextWindow));
+		expect(lists).toMatch(/<read-files>\n/);
+	});
+
+	it("are omitted when there is nothing to record", () => {
+		expect(formatHostBlocks({ userMessages: [], readFiles: [], modifiedFiles: [] }, 128_000)).toBeUndefined();
+		expect(formatHostBlocks({ userMessages: [], readFiles: ["a.ts"], modifiedFiles: [] }, 128_000)).toBe(
+			"<read-files>\na.ts\n</read-files>",
+		);
 	});
 });
 
@@ -131,14 +173,17 @@ describe("file lists", () => {
 
 describe("composed checkpoints", () => {
 	it("composes generated text, user messages and file lists, and strips the host blocks for reuse", () => {
-		const userMessages = formatUserMessages(["Original goal"], 4000);
-		const composed = composeCheckpoint("## Goal\nShip it\n", {
-			userMessages,
-			fileLists: formatFileLists(["a.ts"], ["b.ts"]),
-		});
+		const blocks = formatHostBlocks(
+			{ userMessages: ["Original goal"], readFiles: ["a.ts"], modifiedFiles: ["b.ts"] },
+			128_000,
+		);
+		const composed = composeCheckpoint("## Goal\nShip it\n", blocks);
 		expect(composed.indexOf("## Goal")).toBeLessThan(composed.indexOf("<user-messages>"));
 		expect(composed.indexOf("<user-messages>")).toBeLessThan(composed.indexOf("<modified-files>"));
 		expect(stripHostBlocks(composed)).toBe("## Goal\nShip it");
+		// Host-owned blocks a summary already ends with are replaced, not repeated.
+		expect(composeCheckpoint(composed, blocks)).toBe(composed);
+		expect(composeCheckpoint("Custom\n\n<read-files>\nstale.ts\n</read-files>", blocks)).toBe(`Custom\n\n${blocks}`);
 		// Checkpoints written before user-message records end with read files, then modified files.
 		expect(
 			stripHostBlocks("Summary\n\n<read-files>\na.ts\n</read-files>\n\n<modified-files>\nb.ts\n</modified-files>"),
@@ -152,10 +197,10 @@ describe("bounded fallback summaries", () => {
 
 	it("rewrites the previous checkpoint within a numeric target instead of accumulating it", async () => {
 		const { streamFn, requests } = scripted([fauxAssistantMessage("## Goal\nUpdated")]);
-		const previous = composeCheckpoint("## Goal\nEarlier checkpoint", {
-			userMessages: formatUserMessages(["Earlier user message"], 4000),
-			fileLists: formatFileLists(["a.ts"], []),
-		});
+		const previous = composeCheckpoint(
+			"## Goal\nEarlier checkpoint",
+			formatHostBlocks({ userMessages: ["Earlier user message"], readFiles: ["a.ts"], modifiedFiles: [] }, 128_000),
+		);
 		await generateSummary(messages, model, 2000, streamFn, undefined, undefined, previous);
 		const prompt = promptText(requests[0]);
 		// 0.8 × 2,000 reserve = 1,600 tokens = 6,400 characters; the first target is 60% of that.
@@ -212,7 +257,7 @@ describe("bounded fallback summaries", () => {
 		expect(second.slice(0, second.indexOf("</conversation>"))).toBe(first.slice(0, first.indexOf("</conversation>")));
 	});
 
-	it("bounds a split turn's history and prefix together and appends bounded file lists", async () => {
+	it("bounds a split turn's history and prefix together and leaves the host-owned blocks to the session", async () => {
 		const preparation: CompactionPreparation = {
 			firstKeptEntryId: "kept",
 			messagesToSummarize: messages,
@@ -225,9 +270,7 @@ describe("bounded fallback summaries", () => {
 		const { streamFn, requests } = scripted([fauxAssistantMessage("History"), fauxAssistantMessage("Prefix")]);
 		const result = await compact(preparation, model, streamFn);
 		expect(requests.map((request) => request.options?.maxTokens)).toEqual([3072, 1024]);
-		expect(result.summary).toBe(
-			"History\n\n---\n\n**Turn Context (split turn):**\n\nPrefix\n\n<modified-files>\nb.ts\n</modified-files>\n\n<read-files>\na.ts\n</read-files>",
-		);
+		expect(result.summary).toBe("History\n\n---\n\n**Turn Context (split turn):**\n\nPrefix");
 		expect(result.details).toEqual({ readFiles: ["a.ts"], modifiedFiles: ["b.ts"] });
 	});
 });

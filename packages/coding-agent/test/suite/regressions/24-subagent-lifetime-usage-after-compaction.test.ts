@@ -90,7 +90,8 @@ describe("issue #24", () => {
 			await harness.session.compact();
 			expect(harness.sessionManager.getLeafEntry()).toMatchObject({
 				type: "compaction",
-				summary: "summary",
+				// The host appends the user's earlier messages to the extension's summary.
+				summary: expect.stringMatching(/^summary\n\n<user-messages>\n/),
 				firstKeptEntryId: keptUserId,
 			});
 			await harness.session.sessionWriter.appendMessage({ role: "user", content: "third", timestamp: 9 });

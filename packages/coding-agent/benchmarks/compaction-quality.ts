@@ -22,13 +22,8 @@ import { openaiCodexOAuthProvider } from "@hansjm10/volt-ai/oauth";
 import { createAiClient as createSourceAiClient } from "../../ai/src/client.ts";
 import { getModels as getSourceModels } from "../../ai/src/models.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { checkpointMaxTokens, fileListsMaxChars } from "../src/core/compaction/budget.ts";
-import {
-	composeCheckpoint,
-	formatFileLists,
-	stripHostBlocks,
-	userMessageRecord,
-} from "../src/core/compaction/checkpoint.ts";
+import { checkpointMaxTokens } from "../src/core/compaction/budget.ts";
+import { composeCheckpoint, formatHostBlocks, userMessagesBefore } from "../src/core/compaction/checkpoint.ts";
 import {
 	compact,
 	DEFAULT_COMPACTION_SETTINGS,
@@ -359,25 +354,22 @@ export async function runPilotCase(
 				);
 				if (!preparation || preparation.firstKeptEntryId !== item.firstKeptMessageId)
 					throw new PilotFailure("invalid-boundary");
-				const userMessages = userMessageRecord(historyEntries, item.firstKeptMessageId, window);
 				const sourceMessages = convertToLlm(source);
-				let summary: string;
+				let compacted: Awaited<ReturnType<typeof compact>>;
 				if (condition === "native") {
-					const compacted = await compactContext(preparation, options.model, {
+					compacted = await compactContext(preparation, options.model, {
 						context: async () => ({ systemPrompt: SYSTEM_PROMPT, messages: sourceMessages, tools: [] }),
 						estimatedContextTokens: estimateRequestTokens({ messages: source, tools: [], systemPrompt: SYSTEM_PROMPT }),
 						sourceMessageCount: source.length,
 						retainedMessageCount: retained.length,
-						...(userMessages === undefined ? {} : { userMessages }),
 						streamFn: trackedStream,
 						signal,
 						thinkingLevel: options.thinking,
 						retry: RETRY,
 					});
 					strategies.push(...(compacted.details.requests ?? []).map((request) => request.strategy));
-					summary = compacted.summary;
 				} else {
-					const compacted = await compact(
+					compacted = await compact(
 						{
 							...preparation,
 							settings: { ...preparation.settings, reserveTokens: checkpointMaxTokens(window) / 0.8 },
@@ -389,16 +381,19 @@ export async function runPilotCase(
 						clampThinkingLevel(options.model, "minimal"),
 						RETRY,
 					);
-					// The session composes the same host-owned blocks around the helper's text.
-					summary = composeCheckpoint(stripHostBlocks(compacted.summary), {
-						...(userMessages === undefined ? {} : { userMessages }),
-						fileLists: formatFileLists(
-							compacted.details.readFiles,
-							compacted.details.modifiedFiles,
-							fileListsMaxChars(window),
-						),
-					});
 				}
+				// The session composes the same host-owned blocks around either text.
+				const summary = composeCheckpoint(
+					compacted.summary,
+					formatHostBlocks(
+						{
+							userMessages: userMessagesBefore(historyEntries, item.firstKeptMessageId),
+							readFiles: compacted.details.readFiles,
+							modifiedFiles: compacted.details.modifiedFiles,
+						},
+						window,
+					),
+				);
 				result.summary = summary;
 				result.compactionCount++;
 				// The checkpoint replaces the history before the retained suffix.
