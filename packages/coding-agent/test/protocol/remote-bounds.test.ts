@@ -279,11 +279,18 @@ describe("remote profile bounds", () => {
 		const { harness, conversation } = await setup();
 		for (const text of ["first", "second"]) await prompt(conversation, text);
 		const head = conversation.session.sessionManager.getOrdinal();
+		const sessionGeneration = conversation.session.sessionManager.getSessionGeneration();
 
 		const resume = async (after: number): Promise<RemotePhone> => {
 			const { phone } = serve(harness, conversation, { limits: { maxReplay: 2 } });
 			await phone.hello();
-			phone.send({ type: "subscribe", subscriptionId: "r", conversation: conversation.id, after });
+			phone.send({
+				type: "subscribe",
+				subscriptionId: "r",
+				conversation: conversation.id,
+				after,
+				sessionGeneration,
+			});
 			await phone.waitFor(
 				(frame): frame is Frame<"live"> =>
 					frame.type === "live" && frame.subscriptionId === "r" && frame.reset === true,
@@ -301,7 +308,7 @@ describe("remote profile bounds", () => {
 
 		for (const after of [1, head + 5]) {
 			const far = await resume(after);
-			expect(snapshotOf(far)).toMatchObject({ ordinal: head });
+			expect(snapshotOf(far)).toMatchObject({ ordinal: head, sessionGeneration });
 			expect(far.frames.some((frame) => frame.type === "entry")).toBe(false);
 		}
 	});
@@ -457,7 +464,7 @@ describe("remote profile bounds", () => {
 			live: true,
 			accepts: () => false,
 		});
-		probe.start("snapshot");
+		probe.start({ after: "snapshot" });
 		const probeReset = measured.find(isFrame("live"));
 		probe.dispose();
 		if (!probeReset) throw new Error("Expected a live reset");
@@ -490,7 +497,7 @@ describe("remote profile bounds", () => {
 			accepts: () => false,
 		});
 		cleanups.push(async () => subscription.dispose());
-		subscription.start("snapshot");
+		subscription.start({ after: "snapshot" });
 		const start = frames.length;
 		await conversation.session.setSessionName("renamed");
 		await vi.waitFor(() => expect(flooded).toBe(true));

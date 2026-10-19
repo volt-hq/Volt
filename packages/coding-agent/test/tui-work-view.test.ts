@@ -98,6 +98,7 @@ function message(ordinal: number, parentId: string | null, role: "user" | "assis
 function observingClient(conversation: string, state: ClientState, older: ProjectedEntry[]) {
 	const observation: ConversationObservation = {
 		conversation,
+		sessionGeneration: "work-observation-generation",
 		received: true,
 		caughtUp: true,
 		state,

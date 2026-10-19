@@ -64,9 +64,11 @@ The client's first frame is `hello`; the host answers `welcome`:
 
 A subscription streams one conversation's projected log and, unless `live: false`, its live lane.
 
-- `after: "snapshot"`: the host sends `snapshot{ordinal: N, state}`, the client fold at the current position N, then every entry after N.
-- `after: P` (resume): the host sends every entry after P the profile shows, `head` when the last of them are hidden, then a live reset. P is the newest ordinal the client saw. A position past the log is answered with a snapshot instead.
+- `after: "snapshot"`: the host sends `snapshot{sessionGeneration: G, ordinal: N, state}`, the client fold of log generation G at position N, then every entry after N. Do not send `sessionGeneration` on a snapshot request.
+- `after: P, sessionGeneration: G` (resume): P and G must come from the same saved fold. If G matches the resolved log, the host sends every entry after P the profile shows, `head` when the last of them are hidden, then a live reset. A different generation, a position past the head, or a gap beyond the profile's replay bound returns a current snapshot instead. Numeric `after` without `sessionGeneration` is invalid.
 - `unsubscribe{subscriptionId}` ends it with `ended{reason: "unsubscribed"}`.
+
+`sessionGeneration` is an opaque log identity: stable when the same persisted log reopens, different when a log is recreated under the same conversation ID. Every snapshot includes it, including closed-child snapshots. Retain it alongside the fold and ordinal through every reconnect/resubscription; never infer it from the conversation ID or ordinal. A replacement-generation snapshot replaces the old fold and any entry-keyed overlays. This identity is not permission to act: retain the connection's authority and catch-up/live-reset barriers.
 
 `ended{subscriptionId, reason, target?}` ends a subscription:
 
@@ -84,7 +86,7 @@ A closed subagent child, at any depth (it ended, or a restart suspended it), is 
 
 ### Entries and positions
 
-Each committed log entry the profile shows arrives once as `entry{subscriptionId, entry}`. `entry.ordinal` is the log ordinal: entries are in ordinal order, and entries the profile hides leave gaps. `head{subscriptionId, ordinal}` advances the client's position over hidden entries at the end of a batch. The client's position is the newest ordinal it saw in a `snapshot`, an `entry`, or a `head`; resuming after it never repeats or misses an entry.
+Each committed log entry the profile shows arrives once as `entry{subscriptionId, entry}`. `entry.ordinal` is the log ordinal: entries are in ordinal order, and entries the profile hides leave gaps. `head{subscriptionId, ordinal}` advances the client's position over hidden entries at the end of a batch. The client's position is the newest ordinal it saw in a `snapshot`, an `entry`, or a `head`; resuming after it with the matching log generation never repeats or misses an entry.
 
 A projected entry is `{ordinal, id, parentId, type, timestamp, payload?, view?}`:
 
@@ -349,7 +351,7 @@ Every kind may be answered `{cancelled: true}`. The first valid answer wins; the
 → {"type":"hello","protocol":1,"client":{"name":"example","version":"1"},"accepts":{"hostRequests":["confirm"]}}
 ← {"type":"welcome","protocol":1,"connectionId":"c1","profile":"local","server":{"name":"volt","version":"0.2.3"},"conversation":"s1"}
 → {"type":"subscribe","subscriptionId":"main","conversation":"s1","after":"snapshot"}
-← {"type":"snapshot","subscriptionId":"main","conversation":"s1","ordinal":3,"state":{"leafId":"a1","entries":[…],"earlier":false,…}}
+← {"type":"snapshot","subscriptionId":"main","conversation":"s1","sessionGeneration":"g1","ordinal":3,"state":{"leafId":"a1","entries":[…],"earlier":false,…}}
 ← {"type":"live","subscriptionId":"main","basedOn":3,"seq":1,"reset":true,"items":[{"type":"set","key":"phase","value":{"kind":"phase","busy":false,"operation":null}},…]}
 → {"type":"prompt","intentId":"p1","input":{"message":"Hello"}}
 ← {"type":"entry","subscriptionId":"main","entry":{"ordinal":4,"type":"client_input_receipt",…}}
@@ -362,7 +364,7 @@ Every kind may be answered `{cancelled: true}`. The first valid answer wins; the
 ← {"type":"live","subscriptionId":"main","basedOn":7,"seq":5,"items":[{"type":"set","key":"phase","value":{"kind":"phase","busy":false,"operation":null}}]}
 ```
 
-A client that reconnects says hello again and subscribes with `after` set to the newest ordinal it saw (7 above); it receives what it missed and a live reset.
+A client that reconnects says hello again and subscribes with `after: 7, sessionGeneration: "g1"` above; it receives what it missed and a live reset, or a replacement snapshot if that log no longer exists. Update hosts and clients together for this required contract; a cache without a generation must request a fresh snapshot, not guess one.
 
 ## Clients
 
@@ -383,7 +385,7 @@ console.log(client.state.entries.length, client.phase?.busy);
 await client.stop();
 ```
 
-`client.intent(name, input)` and `client.query(name, params)` send any intent or query; `client.answer(requestId, response)` answers a host request; `client.waitForIdle()` resolves once no operation runs and no input is pending. [`test/rpc-example.ts`](../test/rpc-example.ts) is an interactive example, and [`examples/rpc-extension-ui.ts`](../examples/rpc-extension-ui.ts), with the [`examples/extensions/rpc-demo.ts`](../examples/extensions/rpc-demo.ts) extension, shows a raw-frame client that answers extension dialogs.
+`client.sessionGeneration` (and `ConversationObservation.sessionGeneration`) names the log the client fold belongs to; it is undefined before a snapshot. The client carries it on reconnects and live-gap resubscriptions. `client.intent(name, input)` and `client.query(name, params)` send any intent or query; `client.answer(requestId, response)` answers a host request; `client.waitForIdle()` resolves once no operation runs and no input is pending. [`test/rpc-example.ts`](../test/rpc-example.ts) is an interactive example, and [`examples/rpc-extension-ui.ts`](../examples/rpc-extension-ui.ts), with the [`examples/extensions/rpc-demo.ts`](../examples/extensions/rpc-demo.ts) extension, shows a raw-frame client that answers extension dialogs.
 
 A minimal Python client:
 

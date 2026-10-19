@@ -122,14 +122,25 @@ export function logSnapshot(
 	return clientSnapshotWith(state, entries, bounded);
 }
 
-/** Whether a subscription from `after` starts with a snapshot: from `snapshot`, past the log, or further back than the profile replays. */
+/** A resume position is meaningful only in the log generation that issued it. */
+export type SubscriptionPosition =
+	| { readonly after: "snapshot" }
+	| { readonly after: number; readonly sessionGeneration: string };
+
+/** Snapshot first for a different log, a position past its head, or a gap beyond the replay bound. */
 export function subscriptionSnapshots(
 	conversation: HostedConversation,
 	profile: Profile,
-	after: number | "snapshot",
+	position: SubscriptionPosition,
 ): boolean {
-	const head = conversation.session.sessionManager.getOrdinal();
-	return after === "snapshot" || after > head || head - after > profile.limits.maxReplay;
+	const manager = conversation.session.sessionManager;
+	const head = manager.getOrdinal();
+	return (
+		position.after === "snapshot" ||
+		position.sessionGeneration !== manager.getSessionGeneration() ||
+		position.after > head ||
+		head - position.after > profile.limits.maxReplay
+	);
 }
 
 /**
@@ -140,10 +151,10 @@ export function subscriptionSnapshots(
 export function subscriptionReads(
 	conversation: HostedConversation,
 	profile: Profile,
-	after: number | "snapshot",
+	position: SubscriptionPosition,
 ): number {
-	if (subscriptionSnapshots(conversation, profile, after) || after === "snapshot") return 1;
-	const replayed = conversation.session.sessionManager.getOrdinal() - after;
+	if (subscriptionSnapshots(conversation, profile, position) || position.after === "snapshot") return 1;
+	const replayed = conversation.session.sessionManager.getOrdinal() - position.after;
 	return Math.max(1, Math.ceil(replayed / profile.limits.entriesPerRead));
 }
 
@@ -184,16 +195,16 @@ export class Subscription {
 	}
 
 	/**
-	 * Start after the subscriber's position, or from a snapshot. A position
-	 * past the log, or further back than the profile replays, is answered with
-	 * a snapshot at the current position.
+	 * Start after the subscriber's generation-pinned position, or from a snapshot.
+	 * A different log, a position past its head, or a gap beyond the replay bound
+	 * is answered with a current snapshot before any live state.
 	 */
-	start(after: number | "snapshot"): void {
+	start(position: SubscriptionPosition): void {
 		const sessionManager = this.conversation.session.sessionManager;
-		if (subscriptionSnapshots(this.conversation, this.options.profile, after)) {
+		if (position.after === "snapshot" || subscriptionSnapshots(this.conversation, this.options.profile, position)) {
 			this.writeSnapshot(sessionManager.getOrdinal());
 		} else {
-			this.cursor = after as number;
+			this.cursor = position.after;
 		}
 		this.unsubscribeLog = sessionManager.subscribeOrdinal(() => this.pump());
 		if (this.options.live) {
@@ -324,6 +335,7 @@ export class Subscription {
 			type: "snapshot",
 			subscriptionId: this.id,
 			conversation: this.conversation.id,
+			sessionGeneration: this.conversation.session.sessionManager.getSessionGeneration(),
 			ordinal,
 			state: logSnapshot(this.conversation.session.sessionManager, this.options.profile, ordinal, this.source),
 		});

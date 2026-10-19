@@ -66,6 +66,7 @@ function welcomeAndSnapshot(frame) {
 			type: "snapshot",
 			subscriptionId: frame.subscriptionId,
 			conversation: "conv",
+			sessionGeneration: "conv-generation",
 			ordinal: 0,
 			state: { leafId: null, entries: [], earlier: false, model: null, thinkingLevel: "off", fastMode: false, planning: null, name: null, labels: [], queue: [] },
 		});

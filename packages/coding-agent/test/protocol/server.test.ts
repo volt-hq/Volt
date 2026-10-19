@@ -23,6 +23,27 @@ function rawClient(transport: RpcTransport): { frames: HostFrame[]; send(frame: 
 	return { frames, send: (frame) => void transport.write(frame) };
 }
 
+/** A client end that records what the client writes, and loses the host frames `loses` picks before the client reads them. */
+function tapped(
+	transport: RpcTransport,
+	loses: (frame: HostFrame) => boolean = () => false,
+): { transport: RpcTransport; sent: Array<Record<string, unknown>> } {
+	const sent: Array<Record<string, unknown>> = [];
+	return {
+		sent,
+		transport: {
+			write: (value) => {
+				sent.push(value as Record<string, unknown>);
+				return transport.write(value);
+			},
+			onLine: (handler) => transport.onLine(handler),
+			onValue: (handler) => transport.onValue!((value) => (loses(value as HostFrame) ? undefined : handler(value))),
+			onClose: (handler) => transport.onClose!(handler),
+			close: () => transport.close(),
+		},
+	};
+}
+
 const HELLO = { type: "hello", protocol: 1, client: { name: "test", version: "1" }, accepts: { hostRequests: [] } };
 
 describe("protocol server on the local profile", () => {
@@ -68,7 +89,11 @@ describe("protocol server on the local profile", () => {
 		raw.send({ type: "subscribe", subscriptionId: "s1", conversation: conversation.id, after: "snapshot" });
 		await vi.waitFor(() => expect(raw.frames.some((frame) => frame.type === "live")).toBe(true));
 		const snapshot = raw.frames.find((frame) => frame.type === "snapshot");
-		expect(snapshot).toMatchObject({ subscriptionId: "s1", conversation: conversation.id });
+		expect(snapshot).toMatchObject({
+			subscriptionId: "s1",
+			conversation: conversation.id,
+			sessionGeneration: conversation.session.sessionManager.getSessionGeneration(),
+		});
 		const live = raw.frames.find((frame) => frame.type === "live");
 		expect(live).toMatchObject({ seq: 1, reset: true });
 		if (live?.type !== "live") throw new Error("Expected a live frame");
@@ -84,13 +109,23 @@ describe("protocol server on the local profile", () => {
 
 	it("ends the connection with fatal on a frame before hello, a protocol mismatch, and a malformed frame", async () => {
 		const { harness, conversation } = await setup();
-		const cases: Array<{ frames: object[]; code: string }> = [
+		const sessionGeneration = conversation.session.sessionManager.getSessionGeneration();
+		const subscribe = { type: "subscribe", subscriptionId: "s", conversation: conversation.id };
+		const cases: Array<{ frames: object[]; code: string; message?: string }> = [
 			{
-				frames: [{ type: "subscribe", subscriptionId: "s", conversation: conversation.id, after: 0 }],
+				frames: [{ ...subscribe, after: 0, sessionGeneration }],
 				code: "invalid_frame",
+				message: "The first frame must be hello",
 			},
 			{ frames: [{ ...HELLO, protocol: 2 }], code: "protocol_mismatch" },
 			{ frames: [HELLO, { type: "subscribe", subscriptionId: "s" }], code: "invalid_frame" },
+			// A position without the log generation it belongs to, and a snapshot that names one.
+			{ frames: [HELLO, { ...subscribe, after: 0 }], code: "invalid_frame", message: "Invalid subscribe frame" },
+			{
+				frames: [HELLO, { ...subscribe, after: "snapshot", sessionGeneration }],
+				code: "invalid_frame",
+				message: "Invalid subscribe frame",
+			},
 			{ frames: [HELLO, { type: "welcome" }], code: "invalid_frame" },
 			{ frames: [HELLO, { type: "set_model", input: {} }], code: "invalid_frame" },
 		];
@@ -104,7 +139,11 @@ describe("protocol server on the local profile", () => {
 			const raw = rawClient(pair.client);
 			for (const frame of testCase.frames) raw.send(frame);
 			await connection.closed.catch(() => undefined);
-			expect(raw.frames.at(-1)).toMatchObject({ type: "fatal", code: testCase.code });
+			expect(raw.frames.at(-1)).toMatchObject({
+				type: "fatal",
+				code: testCase.code,
+				...(testCase.message === undefined ? {} : { message: testCase.message }),
+			});
 		}
 	});
 
@@ -157,6 +196,10 @@ describe("protocol server on the local profile", () => {
 		expect(accepted.conversation).not.toBe(conversation.id);
 		await vi.waitFor(() => expect(client.conversation).toBe(accepted.conversation));
 		await client.caughtUp();
+		// The client holds the target's log generation now, from its snapshot.
+		const target = harness.host.get(accepted.conversation!)!.session.sessionManager.getSessionGeneration();
+		expect(client.sessionGeneration).toBe(target);
+		expect(target).not.toBe(conversation.session.sessionManager.getSessionGeneration());
 		const acceptedIndex = frames.findIndex(
 			(frame) => frame.type === "accepted" && frame.intentId === accepted.intentId,
 		);
@@ -357,15 +400,121 @@ describe("protocol server on the local profile", () => {
 		});
 		const frames: HostFrame[] = [];
 		first.onFrame((frame) => frames.push(frame));
-		await first.connect(secondPair.client);
+		const secondEnd = tapped(secondPair.client);
+		await first.connect(secondEnd.transport);
 		cleanups.push(async () => {
 			await first.stop();
 			await resumed.closed.catch(() => undefined);
 		});
+		// It resumes after its position in the log generation that position belongs to.
+		const sessionGeneration = conversation.session.sessionManager.getSessionGeneration();
+		expect(secondEnd.sent.filter((frame) => frame.type === "subscribe")).toEqual([
+			{
+				type: "subscribe",
+				subscriptionId: expect.any(String),
+				conversation: conversation.id,
+				after: position,
+				sessionGeneration,
+			},
+		]);
+		expect(first.sessionGeneration).toBe(sessionGeneration);
 		expect(frames.some((frame) => frame.type === "snapshot")).toBe(false);
 		const resent = frames.flatMap((frame) => (frame.type === "entry" ? [frame.entry.ordinal] : []));
 		expect(Math.min(...resent)).toBeGreaterThan(position);
 		const texts = first.state.entries.flatMap((entry) => (entry.type === "message" ? [entry.view?.text] : []));
 		expect(texts).toEqual(["first", "one", "while away", "two"]);
+	});
+
+	it("resubscribes after a gap in the live lane at its position in its log generation, and so does an observation", async () => {
+		const { harness, conversation } = await setup({ whenUnattached: "keep" });
+		const other = await harness.openStartup();
+		const sessionGeneration = conversation.session.sessionManager.getSessionGeneration();
+		const otherGeneration = other.session.sessionManager.getSessionGeneration();
+		const pair = createLoopbackRpcTransportPair();
+		const connection = serveConnection(pair.server, localProfile, {
+			host: harness.host,
+			conversation,
+			anchor: false,
+		});
+		// The next frame `losing` picks is lost on the way to the client.
+		let losing: ((frame: HostFrame) => boolean) | undefined;
+		const end = tapped(pair.client, (frame) => {
+			if (losing?.(frame) !== true) return false;
+			losing = undefined;
+			return true;
+		});
+		const client = new ProtocolClient();
+		cleanups.push(async () => {
+			await client.stop();
+			await connection.closed.catch(() => undefined);
+		});
+		const frames: HostFrame[] = [];
+		client.onFrame((frame) => frames.push(frame));
+		const subscribes = (to: string) =>
+			end.sent.filter((frame) => frame.type === "subscribe" && frame.conversation === to);
+		const liveAfterReset = (subscriptionId: unknown) => (frame: HostFrame) =>
+			frame.type === "live" && frame.subscriptionId === subscriptionId && frame.reset !== true;
+		const served = (subscriptionId: unknown, type: HostFrame["type"]) =>
+			frames.some(
+				(frame) => frame.type === type && "subscriptionId" in frame && frame.subscriptionId === subscriptionId,
+			);
+
+		await client.connect(end.transport);
+		expect(subscribes(conversation.id)).toEqual([
+			{ type: "subscribe", subscriptionId: expect.any(String), conversation: conversation.id, after: "snapshot" },
+		]);
+		expect(client.sessionGeneration).toBe(sessionGeneration);
+		const position = client.state.ordinal;
+		losing = liveAfterReset(subscribes(conversation.id)[0]?.subscriptionId);
+		conversation.liveState.notice("info", "lost");
+		await vi.waitFor(() => expect(losing).toBeUndefined());
+		conversation.liveState.notice("info", "after the gap");
+		await vi.waitFor(() => expect(subscribes(conversation.id)).toHaveLength(2));
+		const resumed = subscribes(conversation.id)[1];
+		expect(resumed).toEqual({
+			type: "subscribe",
+			subscriptionId: expect.any(String),
+			conversation: conversation.id,
+			after: position,
+			sessionGeneration,
+		});
+		await client.caughtUp();
+		// The host resumed the position in that log: no snapshot.
+		expect(served(resumed?.subscriptionId, "snapshot")).toBe(false);
+		expect(client.sessionGeneration).toBe(sessionGeneration);
+
+		// An observation holds its own conversation's generation and resumes in it.
+		const observation = client.observe(other.id);
+		await vi.waitFor(() => expect(observation.caughtUp).toBe(true));
+		expect(subscribes(other.id)).toEqual([
+			{ type: "subscribe", subscriptionId: expect.any(String), conversation: other.id, after: "snapshot" },
+		]);
+		expect(observation.sessionGeneration).toBe(otherGeneration);
+		expect(otherGeneration).not.toBe(sessionGeneration);
+		const observed = observation.state.ordinal;
+		losing = liveAfterReset(subscribes(other.id)[0]?.subscriptionId);
+		other.liveState.notice("info", "lost");
+		await vi.waitFor(() => expect(losing).toBeUndefined());
+		other.liveState.notice("info", "after the gap");
+		await vi.waitFor(() => expect(subscribes(other.id)).toHaveLength(2));
+		const reobserved = subscribes(other.id)[1];
+		expect(reobserved).toEqual({
+			type: "subscribe",
+			subscriptionId: expect.any(String),
+			conversation: other.id,
+			after: observed,
+			sessionGeneration: otherGeneration,
+		});
+		await vi.waitFor(() =>
+			expect(
+				frames.some(
+					(frame) =>
+						frame.type === "live" && frame.subscriptionId === reobserved?.subscriptionId && frame.reset === true,
+				),
+			).toBe(true),
+		);
+		expect(served(reobserved?.subscriptionId, "snapshot")).toBe(false);
+		expect(observation.ended).toBeUndefined();
+		expect(observation.sessionGeneration).toBe(otherGeneration);
 	});
 });

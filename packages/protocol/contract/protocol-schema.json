@@ -9408,6 +9408,7 @@
 				"type",
 				"subscriptionId",
 				"conversation",
+				"sessionGeneration",
 				"ordinal",
 				"state"
 			],
@@ -9424,6 +9425,12 @@
 					"maxLength": 512,
 					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
 				},
+				"sessionGeneration": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
 				"ordinal": {
 					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
 				},
@@ -9434,42 +9441,76 @@
 			"additionalProperties": false
 		},
 		"Frame.subscribe": {
-			"type": "object",
-			"required": [
-				"type",
-				"subscriptionId",
-				"conversation",
-				"after"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "subscribe"
-				},
-				"subscriptionId": {
-					"$ref": "#/$defs/RpcConversationIdentifier"
-				},
-				"conversation": {
-					"type": "string",
-					"maxLength": 512,
-					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
-				},
-				"after": {
-					"anyOf": [
-						{
-							"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"subscriptionId",
+						"conversation",
+						"after"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "subscribe"
 						},
-						{
+						"subscriptionId": {
+							"$ref": "#/$defs/RpcConversationIdentifier"
+						},
+						"conversation": {
+							"type": "string",
+							"maxLength": 512,
+							"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+						},
+						"live": {
+							"type": "boolean"
+						},
+						"after": {
 							"type": "string",
 							"const": "snapshot"
 						}
-					]
+					},
+					"additionalProperties": false
 				},
-				"live": {
-					"type": "boolean"
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"subscriptionId",
+						"conversation",
+						"after",
+						"sessionGeneration"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "subscribe"
+						},
+						"subscriptionId": {
+							"$ref": "#/$defs/RpcConversationIdentifier"
+						},
+						"conversation": {
+							"type": "string",
+							"maxLength": 512,
+							"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+						},
+						"live": {
+							"type": "boolean"
+						},
+						"after": {
+							"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+						},
+						"sessionGeneration": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						}
+					},
+					"additionalProperties": false
 				}
-			},
-			"additionalProperties": false
+			]
 		},
 		"Frame.unsubscribe": {
 			"type": "object",

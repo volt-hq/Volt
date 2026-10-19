@@ -1,6 +1,7 @@
 import { Check } from "typebox/value";
 import { describe, expect, it } from "vitest";
 import { clientFold, clientSnapshot } from "../src/client-fold.ts";
+import { LOG_ENTRY_ID_MAX_CHARS } from "../src/entries.ts";
 import { ClientFrameSchema, HostFrameSchema, RESERVED_FRAME_TYPES } from "../src/frames.ts";
 import { BUILTIN_INTENT_NAMES, DYNAMIC_INTENT_PATTERN, INTENT_SCHEMAS } from "../src/intents.ts";
 import { LiveKeySchema } from "../src/live.ts";
@@ -23,12 +24,23 @@ describe("client frames", () => {
 		expect(client({ ...hello, accepts: { hostRequests: ["confirm", "confirm"] } })).toBe(false);
 	});
 
-	it("subscribe after a position or from a snapshot", () => {
+	it("subscribe after a position in one log generation, or from a snapshot", () => {
 		const subscribe = { type: "subscribe", subscriptionId: "s1", conversation: "session-1" };
-		expect(client({ ...subscribe, after: 0 })).toBe(true);
-		expect(client({ ...subscribe, after: 17, live: false })).toBe(true);
+		const sessionGeneration = "generation-1";
+		expect(client({ ...subscribe, after: 0, sessionGeneration })).toBe(true);
+		expect(client({ ...subscribe, after: 17, sessionGeneration, live: false })).toBe(true);
 		expect(client({ ...subscribe, after: "snapshot" })).toBe(true);
-		expect(client({ ...subscribe, after: -1 })).toBe(false);
+		// A position names an ordinal of the log that issued it: never one of the session ID alone.
+		expect(client({ ...subscribe, after: 0 })).toBe(false);
+		expect(client({ ...subscribe, after: 17, live: false })).toBe(false);
+		// A snapshot starts from no position, so it names no generation.
+		expect(client({ ...subscribe, after: "snapshot", sessionGeneration })).toBe(false);
+		expect(client({ ...subscribe, after: 0, sessionGeneration: "" })).toBe(false);
+		expect(client({ ...subscribe, after: 0, sessionGeneration: "generation\u0000-1" })).toBe(false);
+		expect(client({ ...subscribe, after: 0, sessionGeneration: "g".repeat(LOG_ENTRY_ID_MAX_CHARS) })).toBe(true);
+		expect(client({ ...subscribe, after: 0, sessionGeneration: "g".repeat(LOG_ENTRY_ID_MAX_CHARS + 1) })).toBe(false);
+		expect(client({ ...subscribe, after: 0, sessionGeneration: 1 })).toBe(false);
+		expect(client({ ...subscribe, after: -1, sessionGeneration })).toBe(false);
 		expect(client({ ...subscribe, after: "latest" })).toBe(false);
 		expect(client({ type: "unsubscribe", subscriptionId: "s1" })).toBe(true);
 	});
@@ -127,7 +139,13 @@ describe("host frames", () => {
 		expect(host({ type: "entry", subscriptionId: "s1", entry: { ...entry, visibility: "public" } })).toBe(false);
 		expect(host({ type: "head", subscriptionId: "s1", ordinal: 9 })).toBe(true);
 		const state = clientSnapshot(clientFold([entry]));
-		expect(host({ type: "snapshot", subscriptionId: "s1", conversation: "session-1", ordinal: 3, state })).toBe(true);
+		const snapshot = { type: "snapshot", subscriptionId: "s1", conversation: "session-1", ordinal: 3, state };
+		expect(host({ ...snapshot, sessionGeneration: "generation-1" })).toBe(true);
+		// A snapshot names the log generation its ordinal belongs to, for the client to resume in.
+		expect(host(snapshot)).toBe(false);
+		expect(host({ ...snapshot, sessionGeneration: "" })).toBe(false);
+		expect(host({ ...snapshot, sessionGeneration: "generation\u0000-1" })).toBe(false);
+		expect(host({ ...snapshot, sessionGeneration: "g".repeat(LOG_ENTRY_ID_MAX_CHARS + 1) })).toBe(false);
 	});
 
 	it("carry live items scoped by basedOn and seq", () => {

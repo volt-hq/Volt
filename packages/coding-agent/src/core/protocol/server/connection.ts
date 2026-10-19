@@ -1461,6 +1461,7 @@ export function serveConnection(
 					type: "snapshot",
 					subscriptionId: frame.subscriptionId,
 					conversation: log.getSessionId(),
+					sessionGeneration: log.getSessionGeneration(),
 					ordinal,
 					state: logSnapshot(log, profile, ordinal),
 				});
@@ -1489,7 +1490,7 @@ export function serveConnection(
 			write({ type: "ended", subscriptionId: frame.subscriptionId, reason: "closed" });
 			return;
 		}
-		if (!reads.take(subscriptionReads(conversation, profile, frame.after))) {
+		if (!reads.take(subscriptionReads(conversation, profile, frame))) {
 			void close({ code: "invalid_frame", message: "Too many subscriptions requested" });
 			return;
 		}
@@ -1516,7 +1517,7 @@ export function serveConnection(
 			void conversation.whenClosed().then(() => endSubscriptionsOn(conversation, { reason: "closed" }));
 		}
 		try {
-			subscription.start(frame.after);
+			subscription.start(frame);
 		} catch {
 			subscriptions.delete(frame.subscriptionId);
 			subscription.end({ reason: "closed" });
