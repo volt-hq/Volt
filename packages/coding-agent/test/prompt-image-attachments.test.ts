@@ -1,12 +1,18 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-	collectPromptImageAttachments,
-	extractPathTokens,
-	MAX_PROMPT_IMAGE_ATTACHMENTS,
-} from "../src/modes/interactive/prompt-image-attachments.ts";
+	RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES,
+	RPC_CONVERSATION_INPUT_IMAGES_MAX_UTF8_BYTES,
+	RPC_CONVERSATION_INPUT_MAX_IMAGES,
+} from "@hansjm10/volt-protocol/wire-limits";
+import { createJimp } from "@jimp/core";
+import jpeg from "@jimp/js-jpeg";
+import png from "@jimp/js-png";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { normalizeClientInputPayload } from "../src/core/session-entry-codec.ts";
+import { collectPromptImageAttachments, extractPathTokens } from "../src/modes/interactive/prompt-image-attachments.ts";
+import { decodeImage } from "../src/utils/image-codec.ts";
 
 // Small 2x2 red PNG image (base64) - generated with ImageMagick
 const TINY_PNG =
@@ -20,6 +26,8 @@ const visionModel = { input: ["text", "image"] as ("text" | "image")[] };
 const textOnlyModel = { input: ["text"] as ("text" | "image")[] };
 
 let dir: string;
+let noisyPng: Buffer;
+let noisyJpeg: Buffer;
 
 beforeAll(async () => {
 	dir = await mkdtemp(path.join(os.tmpdir(), "volt-prompt-images-"));
@@ -29,6 +37,33 @@ beforeAll(async () => {
 	await writeFile(path.join(dir, "notes.txt"), "just text");
 	await writeFile(path.join(dir, "fake.png"), "not actually an image");
 	await writeFile(path.join(dir, "empty.png"), "");
+
+	// Deterministic, poorly compressible pixels reproduce a screenshot that is
+	// within the dimension limits but exceeds the prompt's base64 byte budget.
+	const pixels = Buffer.alloc(800 * 600 * 4);
+	let seed = 123456;
+	for (let index = 0; index < pixels.length; index++) {
+		seed ^= seed << 13;
+		seed ^= seed >>> 17;
+		seed ^= seed << 5;
+		pixels[index] = index % 4 === 3 ? 255 : seed & 255;
+	}
+	const Image = createJimp({ formats: [png, jpeg], plugins: [] });
+	const image = Image.fromBitmap({ width: 800, height: 600, data: pixels });
+	noisyPng = await image.getBuffer("image/png");
+	noisyJpeg = await image.getBuffer("image/jpeg", { quality: 80 });
+	await writeFile(path.join(dir, "large.png"), noisyPng);
+	await writeFile(path.join(dir, "large.jpeg"), noisyJpeg);
+	await writeFile(path.join(dir, "large-copy.jpeg"), noisyJpeg);
+
+	// A valid 1x1 WebP with a large ancillary chunk: WebP has no local resize codec.
+	const tinyWebp = Buffer.from("UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA", "base64");
+	const largeWebp = Buffer.alloc((RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES * 3) / 4 + 64);
+	tinyWebp.copy(largeWebp);
+	largeWebp.writeUInt32LE(largeWebp.length - 8, 4);
+	largeWebp.write("JUNK", tinyWebp.length);
+	largeWebp.writeUInt32LE(largeWebp.length - tinyWebp.length - 8, tinyWebp.length + 4);
+	await writeFile(path.join(dir, "large.webp"), largeWebp);
 });
 
 afterAll(async () => {
@@ -132,19 +167,85 @@ describe("collectPromptImageAttachments", () => {
 		expect(result!.images).toHaveLength(1);
 	});
 
-	it("caps the number of attachments and reports the overflow", async () => {
+	it("resizes screenshots to the prompt's base64 byte limit", async () => {
+		expect(noisyPng.toString("base64").length).toBeGreaterThan(RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES);
+		const message = "describe large.png";
+		const result = await collectPromptImageAttachments(message, dir, visionModel);
+		expect(result?.attachedPaths).toEqual([path.join(dir, "large.png")]);
+		expect(result?.failedPaths).toEqual([]);
+		expect(result?.images).toHaveLength(1);
+		const attachment = result!.images[0];
+		expect(Buffer.byteLength(attachment.data, "utf8")).toBeLessThanOrEqual(
+			RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES,
+		);
+		expect(await decodeImage(Buffer.from(attachment.data, "base64"))).toMatchObject({ width: 800, height: 600 });
+		expect(() => normalizeClientInputPayload("prompt", { message, images: result!.images })).not.toThrow();
+	});
+
+	it("fits multiple images within the combined budget even when each already fits individually", async () => {
+		const encodedBytes = noisyJpeg.toString("base64").length;
+		expect(encodedBytes).toBeLessThanOrEqual(RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES);
+		expect(encodedBytes * 2).toBeGreaterThan(RPC_CONVERSATION_INPUT_IMAGES_MAX_UTF8_BYTES);
+		const message = "compare large.jpeg large-copy.jpeg";
+		const result = await collectPromptImageAttachments(message, dir, visionModel);
+		expect(result?.attachedPaths).toEqual([path.join(dir, "large.jpeg"), path.join(dir, "large-copy.jpeg")]);
+		expect(result?.failedPaths).toEqual([]);
+		expect(result?.images).toHaveLength(2);
+		let totalBytes = 0;
+		for (const image of result!.images) {
+			const dataBytes = Buffer.byteLength(image.data, "utf8");
+			expect(dataBytes).toBeLessThanOrEqual(RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES);
+			totalBytes += dataBytes + Buffer.byteLength(image.mimeType, "utf8");
+			expect(await decodeImage(Buffer.from(image.data, "base64"))).toMatchObject({ width: 800, height: 600 });
+		}
+		expect(totalBytes).toBeLessThanOrEqual(RPC_CONVERSATION_INPUT_IMAGES_MAX_UTF8_BYTES);
+		for (const command of ["prompt", "steer", "follow_up"] as const) {
+			expect(() => normalizeClientInputPayload(command, { message, images: result!.images })).not.toThrow();
+		}
+	});
+
+	it.each(["large.jpeg shot.png", "shot.png large.jpeg"])(
+		"keeps images unchanged when their combined size already fits: %s",
+		async (message) => {
+			const result = await collectPromptImageAttachments(message, dir, visionModel);
+			expect(result?.failedPaths).toEqual([]);
+			expect(result?.images).toHaveLength(2);
+			expect(result!.images.map((image) => image.data)).toEqual(
+				message.startsWith("large.jpeg")
+					? [noisyJpeg.toString("base64"), TINY_PNG]
+					: [TINY_PNG, noisyJpeg.toString("base64")],
+			);
+			expect(() => normalizeClientInputPayload("prompt", { message, images: result!.images })).not.toThrow();
+		},
+	);
+
+	it("reports an image that cannot fit without blocking other attachments", async () => {
+		const message = "compare large.webp shot.png";
+		const result = await collectPromptImageAttachments(message, dir, visionModel);
+		expect(result?.failedPaths).toEqual([path.join(dir, "large.webp")]);
+		expect(result?.attachedPaths).toEqual([path.join(dir, "shot.png")]);
+		expect(result?.images).toEqual([{ type: "image", mimeType: "image/png", data: TINY_PNG }]);
+		expect(() => normalizeClientInputPayload("prompt", { message, images: result!.images })).not.toThrow();
+	});
+
+	it("caps the number of attachments at the protocol limit and reports the overflow", async () => {
 		const capDir = await mkdtemp(path.join(os.tmpdir(), "volt-prompt-images-cap-"));
 		try {
 			const names: string[] = [];
-			for (let i = 0; i < MAX_PROMPT_IMAGE_ATTACHMENTS + 2; i++) {
+			for (let i = 0; i < RPC_CONVERSATION_INPUT_MAX_IMAGES + 2; i++) {
 				const name = `img-${String(i).padStart(2, "0")}.png`;
 				await writeFile(path.join(capDir, name), Buffer.from(TINY_PNG, "base64"));
 				names.push(name);
 			}
 			const result = await collectPromptImageAttachments(names.join(" "), capDir, visionModel);
 			expect(result).not.toBeNull();
-			expect(result!.images).toHaveLength(MAX_PROMPT_IMAGE_ATTACHMENTS);
-			expect(result!.cappedPaths).toHaveLength(2);
+			expect(result!.images).toHaveLength(RPC_CONVERSATION_INPUT_MAX_IMAGES);
+			expect(result!.cappedPaths).toEqual(
+				names.slice(RPC_CONVERSATION_INPUT_MAX_IMAGES).map((name) => path.join(capDir, name)),
+			);
+			expect(() =>
+				normalizeClientInputPayload("prompt", { message: names.join(" "), images: result!.images }),
+			).not.toThrow();
 		} finally {
 			await rm(capDir, { recursive: true, force: true });
 		}

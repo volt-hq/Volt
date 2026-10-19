@@ -11,11 +11,17 @@
 
 import { readFile, stat } from "node:fs/promises";
 import type { Api, ImageContent, Model } from "@hansjm10/volt-ai";
+import {
+	RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES,
+	RPC_CONVERSATION_INPUT_IMAGE_MIME_TYPE_MAX_UTF8_BYTES,
+	RPC_CONVERSATION_INPUT_IMAGES_MAX_UTF8_BYTES,
+	RPC_CONVERSATION_INPUT_MAX_IMAGES,
+} from "@hansjm10/volt-protocol/wire-limits";
 import { resolveReadPathAsync } from "../../core/tools/path-utils.ts";
 import { resizeImage } from "../../utils/image-resize.ts";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
 
-export const MAX_PROMPT_IMAGE_ATTACHMENTS = 10;
+export const MAX_PROMPT_IMAGE_ATTACHMENTS = RPC_CONVERSATION_INPUT_MAX_IMAGES;
 
 const IMAGE_EXTENSION_PATTERN = /\.(png|jpe?g|gif|webp)$/i;
 
@@ -92,8 +98,9 @@ export function mayAttachImages(text: string): boolean {
 
 /**
  * Scan prompt text for existing image files and load them as attachments,
- * resized through the shared image pipeline. Returns null when the model does
- * not accept images (leave the paths as plain text) or when nothing matched.
+ * resized through the shared image pipeline within the protocol's per-image
+ * and combined byte budgets. Returns null when the model does not accept
+ * images (leave the paths as plain text) or when nothing matched.
  */
 export async function collectPromptImageAttachments(
 	text: string,
@@ -105,6 +112,7 @@ export async function collectPromptImageAttachments(
 	}
 
 	const seen = new Set<string>();
+	const candidates: { path: string; mimeType: string; requestedBytes: number }[] = [];
 	const result: PromptImageAttachments = { images: [], attachedPaths: [], cappedPaths: [], failedPaths: [] };
 
 	for (const token of extractPathTokens(text)) {
@@ -126,18 +134,41 @@ export async function collectPromptImageAttachments(
 			continue;
 		}
 
-		if (result.images.length >= MAX_PROMPT_IMAGE_ATTACHMENTS) {
+		candidates.push({
+			path: resolved,
+			mimeType,
+			requestedBytes:
+				Math.min(Math.ceil(stats.size / 3) * 4, RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES) +
+				RPC_CONVERSATION_INPUT_IMAGE_MIME_TYPE_MAX_UTF8_BYTES,
+		});
+	}
+
+	let remainingBytes = RPC_CONVERSATION_INPUT_IMAGES_MAX_UTF8_BYTES;
+	for (const [index, candidate] of candidates.entries()) {
+		const { path: resolved, mimeType } = candidate;
+		const remainingSlots = MAX_PROMPT_IMAGE_ATTACHMENTS - result.images.length;
+		if (remainingSlots === 0) {
 			result.cappedPaths.push(resolved);
 			continue;
 		}
 
+		// Reserve a fair share for each remaining image, but only its source
+		// size when smaller. Unused bytes stay available to later attachments.
+		const pending = candidates.slice(index, index + remainingSlots);
+		const share = Math.floor(remainingBytes / pending.length);
+		const reservedBytes = pending.slice(1).reduce((total, image) => total + Math.min(image.requestedBytes, share), 0);
+		const maxBytes = Math.min(
+			RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES,
+			remainingBytes - reservedBytes - RPC_CONVERSATION_INPUT_IMAGE_MIME_TYPE_MAX_UTF8_BYTES,
+		);
 		try {
 			const content = await readFile(resolved);
-			const resized = await resizeImage(content, mimeType);
+			const resized = await resizeImage(content, mimeType, { maxBytes });
 			if (!resized) {
 				result.failedPaths.push(resolved);
 				continue;
 			}
+			remainingBytes -= Buffer.byteLength(resized.data, "utf8") + Buffer.byteLength(resized.mimeType, "utf8");
 			result.images.push({ type: "image", mimeType: resized.mimeType, data: resized.data });
 			result.attachedPaths.push(resolved);
 		} catch {
