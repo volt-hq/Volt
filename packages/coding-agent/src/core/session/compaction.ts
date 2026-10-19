@@ -285,6 +285,7 @@ export class SessionCompaction {
 	 * plus the response reserve must fit the window, an automatic compaction
 	 * must land below its trigger, and a built-in checkpoint must respect its
 	 * composed size limit. Extension summaries are admitted the same way.
+	 * Returns the estimated rebuilt context.
 	 */
 	private async admit(
 		compaction: CompactionResult,
@@ -295,7 +296,7 @@ export class SessionCompaction {
 		planningCheckpoint: CustomMessage | undefined,
 		cause: ConversationCompactionCause,
 		model: Model<Api>,
-	): Promise<void> {
+	): Promise<number> {
 		const { contextWindow, reserveTokens, retainedTokens, baseTokens } = footprint;
 		const fixedTokens = baseTokens + (planningCheckpoint ? estimateTokens(planningCheckpoint) : 0);
 		const summaryTokens = Math.ceil(
@@ -335,7 +336,7 @@ export class SessionCompaction {
 		}
 		// Landing below the trigger is required only when compaction chose what to keep. When it keeps only
 		// the newest indivisible suffix, which alone exceeds the allowance, the next compaction summarizes it.
-		if (cause === "manual" || keepsForcedSuffix) return;
+		if (cause === "manual" || keepsForcedSuffix) return compactedTokens;
 		const { triggerTokens } = footprint;
 		if (contextWindow > 0 && triggerTokens > 0 && compactedTokens > triggerTokens) {
 			await this.reject(
@@ -360,6 +361,7 @@ export class SessionCompaction {
 				requests,
 			);
 		}
+		return compactedTokens;
 	}
 
 	private generate(
@@ -516,7 +518,7 @@ export class SessionCompaction {
 			extensionCompaction = result?.compaction;
 		}
 		let compaction: CompactionResult;
-		let builtInRequests: CompactionRequestUsage[] | undefined;
+		let builtInDetails: CompactionDetails | undefined;
 		if (extensionCompaction) {
 			const boundaryError = compactionBoundaryError(pathEntries, extensionCompaction.firstKeptEntryId);
 			if (boundaryError) {
@@ -549,7 +551,7 @@ export class SessionCompaction {
 				request.instructions,
 			);
 			compaction = { ...generated, summary: composeCheckpoint(generated.summary, hostBlocks) };
-			builtInRequests = generated.details.requests ?? [];
+			builtInDetails = generated.details;
 		}
 		if (request.signal.aborted) throw new Error("Compaction cancelled");
 		const planningCheckpoint = this.host.planning().createCheckpointMessage(this.host.planning().current);
@@ -557,9 +559,9 @@ export class SessionCompaction {
 			compaction.firstKeptEntryId === preparation.firstKeptEntryId
 				? prepared
 				: footprint(compaction.firstKeptEntryId);
-		await this.admit(
+		const tokensAfter = await this.admit(
 			compaction,
-			builtInRequests,
+			builtInDetails && (builtInDetails.requests ?? []),
 			kept,
 			// An extension boundary that keeps more than the forced suffix chose what to keep.
 			compactionPlan.keepsOversizedSuffix && kept.retainedCount <= prepared.retainedCount,
@@ -567,12 +569,14 @@ export class SessionCompaction {
 			reason,
 			model,
 		);
+		// Built-in details are host-owned and record the admitted size; an extension's stay as it gave them.
+		const details = builtInDetails === undefined ? compaction.details : { ...builtInDetails, tokensAfter };
 		this.compactionSummary = {
 			result: {
 				summary: compaction.summary,
 				firstKeptEntryId: compaction.firstKeptEntryId,
 				tokensBefore: compaction.tokensBefore,
-				...(compaction.details === undefined ? {} : { details: compaction.details }),
+				...(details === undefined ? {} : { details }),
 			},
 			fromExtension: extensionCompaction !== undefined,
 		};
@@ -580,7 +584,7 @@ export class SessionCompaction {
 			summary: compaction.summary,
 			firstKeptEntryId: compaction.firstKeptEntryId,
 			tokensBefore: compaction.tokensBefore,
-			...(compaction.details === undefined ? {} : { details: compaction.details }),
+			...(details === undefined ? {} : { details }),
 			...(extensionCompaction === undefined ? {} : { fromHook: true }),
 			...(planningCheckpoint === undefined ? {} : { messages: [planningCheckpoint] }),
 		};

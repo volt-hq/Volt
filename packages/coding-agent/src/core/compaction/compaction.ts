@@ -90,6 +90,11 @@ export type CompactionDetails = {
 	requests?: CompactionRequestUsage[];
 	/** Why built-in session compaction used the strategy it did. */
 	strategyReason?: CompactionStrategyReason;
+	/**
+	 * Estimated tokens of the context built-in session compaction rebuilt: the
+	 * checkpoint, retained messages, system prompt, tools and plan checkpoint.
+	 */
+	tokensAfter?: number;
 };
 
 /**

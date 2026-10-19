@@ -180,6 +180,10 @@ describe("AgentSession cache-preserving compaction", () => {
 			},
 		]);
 		expect(details.requests?.[0].usage?.cacheRead).toBeGreaterThan(0);
+		expect(details.strategyReason).toBe("native");
+		// The admitted rebuilt context: the checkpoint, plus the retained answer, system prompt and tools.
+		expect(details.tokensAfter).toBeGreaterThan(Math.ceil(result.summary.length / 4));
+		expect(details.tokensAfter).toBeLessThan(result.tokensBefore);
 		expect(harness.eventsOfType("compaction_end").at(-1)?.result?.details).toEqual(details);
 		const savedDetails = structuredClone(details);
 		diagnostics[0].details.transport.sseAttempts = 99;

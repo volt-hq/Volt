@@ -1,7 +1,8 @@
 import type { JsonValue } from "@hansjm10/volt-ai";
 import type { ProjectedEntry } from "@hansjm10/volt-protocol";
-import { Container } from "@hansjm10/volt-tui";
-import { describe, expect, test, vi } from "vitest";
+import { Container, getKeybindings, setKeybindings } from "@hansjm10/volt-tui";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { KeybindingsManager } from "../src/core/keybindings.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -28,7 +29,7 @@ const showCompacted = Reflect.get(InteractiveMode.prototype, "showCompacted") as
 	entry: CompactionEntry,
 ) => void;
 
-function compactionEntry(details?: JsonValue): CompactionEntry {
+function compactionEntry(details?: JsonValue, fromHook?: boolean): CompactionEntry {
 	return {
 		ordinal: 7,
 		id: "compaction-1",
@@ -36,26 +37,37 @@ function compactionEntry(details?: JsonValue): CompactionEntry {
 		type: "compaction",
 		timestamp: new Date(0).toISOString(),
 		payload: {
-			summary: "summary",
+			summary: "summary text",
 			firstKeptEntryId: "kept",
-			tokensBefore: 123,
+			tokensBefore: 265_707,
 			...(details === undefined ? {} : { details }),
+			...(fromHook === undefined ? {} : { fromHook }),
 		},
 	};
 }
 
-/** The chat's lines below the compaction summary: the request usage lines. */
-function usageLines(chat: Container): string[] {
-	const lines = chat.render(240).lines.map((line) => stripAnsi(line).trim());
-	const start = lines.findIndex((line) => /^(Native|Chunked) compaction/.test(line));
-	return start < 0 ? [] : lines.slice(start);
+/** The compaction box's text lines, without its label and padding. */
+function compactionLines(chat: Container): string[] {
+	return chat
+		.render(200)
+		.lines.map((line) => stripAnsi(line).trim())
+		.filter((line) => line.length > 0 && line !== "[compaction]");
 }
 
-function setExpanded(chat: Container, expanded: boolean): void {
-	for (const child of chat.children) {
-		if ("setExpanded" in child && typeof child.setExpanded === "function") child.setExpanded(expanded);
-	}
-}
+/** Details of the incident compaction: eight requests over 5m 15s, two of them discarded as oversized. */
+const chunkedDetails = {
+	readFiles: [],
+	modifiedFiles: [],
+	tokensAfter: 41_230,
+	strategyReason: "preflight_overflow",
+	requests: [42_587, 50_843, 30_925, 42_697, 47_256, 35_595, 46_762, 18_829].map((durationMs, index, all) => ({
+		strategy: "chunked",
+		attempt: index + 1,
+		startedAt: 1_000 + all.slice(0, index).reduce((sum, value) => sum + value, 0),
+		durationMs,
+		...(index === 1 || index === 4 ? { rejected: "oversized" } : { stopReason: "stop" }),
+	})),
+};
 
 describe("InteractiveMode extension shutdown", () => {
 	test("shuts down at once when idle, else once the conversation settles", () => {
@@ -76,105 +88,41 @@ describe("InteractiveMode extension shutdown", () => {
 });
 
 describe("InteractiveMode compaction", () => {
-	test("appends the compaction's summary and usage line, listing every request when expanded", () => {
-		const fakeThis = createCompactionContext();
-		const request = { provider: "test-provider", model: "test-model" };
-		showCompacted.call(
-			fakeThis,
-			compactionEntry({
-				strategyReason: "provider_overflow",
-				requests: [
-					{ ...request, strategy: "native", purpose: "native", attempt: 1 },
-					{
-						...request,
-						strategy: "native",
-						purpose: "native",
-						attempt: 2,
-						stopReason: "error",
-						usage: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, totalTokens: 0 },
-					},
-					{
-						...request,
-						strategy: "chunked",
-						purpose: "history",
-						attempt: 3,
-						stopReason: "stop",
-						textChars: 4000,
-						usage: { input: 100, cacheRead: 800, cacheWrite: 100, output: 100, totalTokens: 1100 },
-					},
-					{
-						...request,
-						strategy: "chunked",
-						purpose: "history",
-						attempt: 4,
-						stopReason: "stop",
-						textChars: 3000,
-						usage: { input: 100, cacheRead: 0, cacheWrite: 0, output: 100, totalTokens: 200 },
-					},
-				],
-			}),
-		);
-
-		const lines = fakeThis.chatContainer.render(160).lines.map((line) => stripAnsi(line).trim());
-		expect(lines.join("\n")).toContain("[compaction]");
-		const summary = `Chunked compaction (provider rejected one request as too large) · 4 requests (2 failed) · ${(1100).toLocaleString()} prompt tokens, 72.7% cached, 2 requests without usage · checkpoint 7 chars`;
-		expect(usageLines(fakeThis.chatContainer)).toEqual([summary]);
-
-		setExpanded(fakeThis.chatContainer, true);
-		expect(usageLines(fakeThis.chatContainer)).toEqual([
-			summary,
-			"1. native · no response · usage unavailable",
-			"2. native retry · error · usage unavailable",
-			`3. history · ${(4000).toLocaleString()} chars · ${(1000).toLocaleString()} prompt tokens`,
-			`4. history · ${(3000).toLocaleString()} chars · 100 prompt tokens`,
-		]);
-		setExpanded(fakeThis.chatContainer, false);
-		expect(usageLines(fakeThis.chatContainer)).toEqual([summary]);
+	const previousKeybindings = getKeybindings();
+	beforeEach(() => {
+		setKeybindings(new KeybindingsManager());
+	});
+	afterEach(() => {
+		setKeybindings(previousKeybindings);
 	});
 
-	test("starts expanded when tool output is expanded", () => {
+	const headline = `Compacted from ${(265_707).toLocaleString()} to ~${(41_230).toLocaleString()} tokens in 5m 15s`;
+	const note = "The conversation was too long to summarize at once, so it was summarized in 6 parts.";
+
+	test("says how much smaller the context got, how long it took, and why it took the longer route", () => {
+		const fakeThis = createCompactionContext();
+		showCompacted.call(fakeThis, compactionEntry(chunkedDetails));
+		expect(compactionLines(fakeThis.chatContainer)).toEqual([`${headline} (ctrl+o to expand)`, note]);
+	});
+
+	test("puts the same outcome above the expanded summary", () => {
 		const fakeThis = { ...createCompactionContext(), toolOutputExpanded: true };
-		const request = { strategy: "native", attempt: 1, provider: "test-provider", model: "test-model" };
-		showCompacted.call(fakeThis, compactionEntry({ requests: [{ ...request, stopReason: "stop" }] }));
-		expect(usageLines(fakeThis.chatContainer)).toEqual([
-			"Native compaction · 1 request · usage unavailable · checkpoint 7 chars",
-			"1. native · completed · usage unavailable",
-		]);
+		showCompacted.call(fakeThis, compactionEntry(chunkedDetails));
+		expect(compactionLines(fakeThis.chatContainer)).toEqual([headline, note, "summary text"]);
 	});
 
-	test("shows nothing for a compaction without request records", () => {
-		const fakeThis = createCompactionContext();
-		showCompacted.call(fakeThis, compactionEntry({ readFiles: [], modifiedFiles: [] }));
-		expect(usageLines(fakeThis.chatContainer)).toEqual([]);
-	});
-
-	test("shows unavailable cache data and ignores malformed records without losing later requests", () => {
-		const fakeThis = createCompactionContext();
-		const request = { strategy: "native", provider: "test-provider", model: "test-model", stopReason: "stop" };
-		showCompacted.call(
-			fakeThis,
-			compactionEntry({
-				requests: [
-					null,
-					{ strategy: "unsupported", attempt: 1 },
-					{ ...request, attempt: 2 },
-					{ ...request, attempt: 3, usage: { input: "100", cacheRead: 100, cacheWrite: 0 } },
-					{
-						...request,
-						attempt: 4,
-						usage: { input: 0, cacheRead: 0, cacheWrite: 0, output: 100, totalTokens: 100 },
-					},
-				],
-			}),
-		);
-
-		setExpanded(fakeThis.chatContainer, true);
-		expect(usageLines(fakeThis.chatContainer)).toEqual([
-			"Native compaction · 3 requests · usage unavailable · checkpoint 7 chars",
-			"2. native · completed · usage unavailable",
-			"3. native · completed · usage unavailable",
-			"4. native · completed · usage unavailable",
-		]);
-		expect(fakeThis.showError).not.toHaveBeenCalled();
+	test("shows only the size before for compactions without built-in details", () => {
+		for (const entry of [
+			compactionEntry(),
+			compactionEntry({ custom: true }),
+			compactionEntry(chunkedDetails, true),
+		]) {
+			const fakeThis = createCompactionContext();
+			showCompacted.call(fakeThis, entry);
+			expect(compactionLines(fakeThis.chatContainer)).toEqual([
+				`Compacted from ${(265_707).toLocaleString()} tokens (ctrl+o to expand)`,
+			]);
+			expect(fakeThis.showError).not.toHaveBeenCalled();
+		}
 	});
 });
