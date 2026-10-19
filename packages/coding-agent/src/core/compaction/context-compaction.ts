@@ -324,7 +324,7 @@ export async function compactContext(
 			nativeCheckpointInstruction(target, scope, options.customInstructions);
 		const outputTokens = checkpointOutputTokens(model);
 		const maxChars = outputTokens * CHECKPOINT_CHARS_PER_TOKEN;
-		const firstTarget: CheckpointTarget = { targetChars: checkpointTargetChars(maxChars, 0), maxChars };
+		const firstTarget: CheckpointTarget = { targetChars: checkpointTargetChars(maxChars, 0, "native"), maxChars };
 		budget = {
 			contextWindow: model.contextWindow,
 			estimatedContextTokens: options.estimatedContextTokens,
