@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { serializeConversation } from "../src/core/compaction/utils.ts";
 import { convertToLlm } from "../src/core/messages.ts";
-import { createQualityFixtures } from "./compaction-quality/fixtures.ts";
+import { createQualityFixtures, createTrajectoryFixtures } from "./compaction-quality/fixtures.ts";
 import {
 	getQualityInput,
 	QUALITY_LAYERS,
@@ -253,5 +253,68 @@ describe("offline compaction quality fixtures", () => {
 		change(fixture);
 		expect(() => getQualityInput(fixture)).toThrow(error);
 		expect(() => scoreQuality(fixture, [])).toThrow(error);
+	});
+});
+
+describe("offline multi-compaction trajectory fixtures", () => {
+	it("probes one trajectory after three and five compactions with criteria for every layer", () => {
+		const fixtures = createTrajectoryFixtures();
+		expect(fixtures.map((fixture) => [fixture.id, 1 + (fixture.input.epochs?.length ?? 0)])).toEqual([
+			["streaming-config-migration-after-3", 3],
+			["streaming-config-migration-after-5", 5],
+		]);
+		expect(createTrajectoryFixtures()).toEqual(fixtures);
+		for (const fixture of fixtures) {
+			expect(() => validateQualityFixture(fixture)).not.toThrow();
+			expect(scoreQuality(fixture, assessed(fixture, "fail")).complete).toBe(true);
+			// Early facts are graded long after the epoch that introduced them.
+			expect(fixture.criteria.some((criterion) => criterion.sourceMessageIds.includes("request"))).toBe(true);
+		}
+	});
+
+	it("projects epochs with the input and keeps every epoch's tool groups and boundary intact", () => {
+		for (const fixture of createTrajectoryFixtures()) {
+			const input = getQualityInput(fixture);
+			expect(input.epochs).toEqual(fixture.input.epochs);
+			for (const epoch of input.epochs ?? []) {
+				const boundary = epoch.messages.findIndex(({ id }) => id === epoch.firstKeptMessageId);
+				expect(boundary).toBeGreaterThan(0);
+				const pending = new Set<string>();
+				for (const { message } of epoch.messages) {
+					if (message.role === "toolResult") expect(pending.delete(message.toolCallId)).toBe(true);
+					else if (message.role === "assistant")
+						for (const block of message.content) if (block.type === "toolCall") pending.add(block.id);
+				}
+				expect(pending.size).toBe(0);
+			}
+		}
+	});
+
+	it.each([
+		{
+			name: "duplicate ids across epochs",
+			change: (fixture: QualityFixture) => {
+				fixture.input.epochs![1].messages[0].id = "request";
+			},
+			error: "Duplicate message",
+		},
+		{
+			name: "an epoch without older history",
+			change: (fixture: QualityFixture) => {
+				fixture.input.epochs![0].firstKeptMessageId = fixture.input.epochs![0].messages[0].id;
+			},
+			error: "older history",
+		},
+		{
+			name: "an epoch boundary inside a tool group",
+			change: (fixture: QualityFixture) => {
+				fixture.input.epochs![1].firstKeptMessageId = "key-test";
+			},
+			error: "tool-call/result group",
+		},
+	])("rejects $name", ({ change, error }) => {
+		const fixture = createTrajectoryFixtures()[0];
+		change(fixture);
+		expect(() => validateQualityFixture(fixture)).toThrow(error);
 	});
 });

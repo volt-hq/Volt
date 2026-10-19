@@ -40,6 +40,7 @@ vi.mock("../src/core/compaction/index.js", () => ({
 	estimateTokens: (message: { content?: unknown }) => Math.ceil(JSON.stringify(message.content ?? "").length / 4),
 	estimateMessagesTokens: (messages: Array<{ content?: unknown }>) =>
 		messages.reduce((total, message) => total + Math.ceil(JSON.stringify(message.content ?? "").length / 4), 0),
+	estimateRequestTokens: () => 0,
 	estimateContextTokens: (
 		messages: Array<{
 			role: string;
@@ -84,6 +85,8 @@ vi.mock("../src/core/compaction/index.js", () => ({
 }));
 
 vi.mock("../src/core/compaction/context-compaction.ts", () => ({
+	COMPACTION_REQUEST_TIMEOUT_MS: 600_000,
+	COMPACTION_TOTAL_TIMEOUT_MS: 1_800_000,
 	compactContext: async () => ({
 		summary: "compacted",
 		firstKeptEntryId: compactionMockState.firstKeptEntryId ?? "missing-first-kept-entry",

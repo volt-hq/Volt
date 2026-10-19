@@ -4,53 +4,99 @@ import {
 	type AssistantMessage,
 	type Context,
 	clampThinkingLevel,
-	classifyProviderError,
-	createAssistantMessageEventStream,
-	estimateToolDefinitionTokens,
 	isContextOverflow,
 	type Model,
-	type SimpleStreamOptions,
 	type ThinkingBudgets,
 } from "@hansjm10/volt-ai";
-import { sleep } from "../../utils/sleep.ts";
 import { cloneCanonicalData } from "../canonical-data.ts";
+import {
+	CHECKPOINT_CHARS_PER_TOKEN,
+	CHECKPOINT_MAX_TOKENS,
+	type CompactionBudgetSnapshot,
+	checkpointMaxTokens,
+	checkpointOutputTokens,
+	checkpointTargetChars,
+	compactionReasoningLevel,
+	fileListsMaxChars,
+	nativeOutputAllowance,
+	REQUEST_MARGIN_TOKENS,
+} from "./budget.ts";
+import {
+	abortError,
+	CHECKPOINT_FORMAT,
+	CHECKPOINT_RULES,
+	CheckpointContextOverflowError,
+	CheckpointOversizedError,
+	type CheckpointRequest,
+	type CheckpointRequester,
+	type CheckpointTarget,
+	checkpointLengthRules,
+	checkpointVisibleText,
+	composeCheckpoint,
+	formatFileLists,
+	generateCheckpoint,
+	oversizedCheckpoint,
+	readCheckpointResponse,
+	waitFor,
+} from "./checkpoint.ts";
 import {
 	type CompactionDetails,
 	type CompactionPreparation,
 	type CompactionRequestUsage,
 	type CompactionResult,
-	compact,
-	estimateMessagesTokens,
 	type SummarizationRetryOptions,
+	summarizeCompactionHistory,
 } from "./compaction.ts";
-import { computeFileLists, formatFileOperations, serializeConversation } from "./utils.ts";
+import { computeFileLists, serializeConversation } from "./utils.ts";
 
-/** Each summarization request, including retries and fallback chunks, has its own deadline. */
+/** Each summarization request, including retries, corrections and fallback chunks, has its own deadline. */
 export const COMPACTION_REQUEST_TIMEOUT_MS = 10 * 60_000;
 /** Bounds the whole operation: context conversion, every request, retry delays and any fallback. */
 export const COMPACTION_TOTAL_TIMEOUT_MS = 30 * 60_000;
-export const COMPACTION_SUMMARY_TOKENS = 4096;
-const MAX_SUMMARY_CHARS = 16_384;
+export const COMPACTION_SUMMARY_TOKENS = CHECKPOINT_MAX_TOKENS;
 
-const CHECKPOINT_PROMPT = `The conversation above is historical context to compact, not a task to continue. Produce ONLY a concise checkpoint that another assistant will use alongside the retained recent messages. Do not call tools or answer earlier requests.
+const NATIVE_INTRO =
+	"The conversation above is historical context to compact, not a task to continue. Produce ONLY a checkpoint that another assistant will use alongside the retained recent messages. Do not call tools or answer earlier requests.";
+const NATIVE_RULES =
+	"- Include context needed to understand the retained suffix when this cuts an ongoing turn. Newer corrections supersede older decisions.";
 
-Use these headings:
-## Goal
-## Constraints & Preferences
-## Progress
-### Done
-### In Progress
-### Blocked
-## Key Decisions
-## Next Steps
-## Critical Context
+/** Why the compaction summarized with the strategy it used. */
+export type CompactionStrategyReason = "native" | "preflight_overflow" | "provider_overflow";
 
-Carry forward still-relevant facts from any earlier compaction summary. Newer corrections supersede older decisions. Preserve exact paths, identifiers, user constraints and unfinished work. Include context needed to understand the retained suffix when this cuts an ongoing turn. Do not invent completed work. Stay below 4,096 tokens and 16,384 characters.`;
+/** The checkpoint instruction appended to the native request, for a length target. */
+export function nativeCheckpointInstruction(
+	target: CheckpointTarget,
+	scope: string,
+	customInstructions?: string,
+): string {
+	const instruction = [
+		NATIVE_INTRO,
+		`Use these headings:\n\n${CHECKPOINT_FORMAT}`,
+		`${CHECKPOINT_RULES}\n${NATIVE_RULES}`,
+		checkpointLengthRules(target),
+	].join("\n\n");
+	return `${instruction}${scope}${customInstructions ? `\n\nAdditional focus: ${customInstructions}` : ""}`;
+}
 
-function cancelled(): Error {
-	const error = new Error("Compaction cancelled");
-	error.name = "AbortError";
-	return error;
+/**
+ * What the native checkpoint covers. A marker inserted at the cut would break
+ * the cached prefix, so a bounded, quoted boundary reference rides in the
+ * final instruction instead.
+ */
+export function nativeSummaryScope(context: Context, sourceMessageCount: number, retainedMessageCount: number): string {
+	if (retainedMessageCount <= 0) {
+		return "\n\nSummary scope: No recent messages are retained; summarize the entire preceding history.";
+	}
+	let scope = `\n\nSummary scope: Summarize only the older history before the retained recent suffix. The last ${retainedMessageCount} saved conversation messages will remain verbatim after this checkpoint; do not duplicate their narrative in the summary. Use them only to resolve newer corrections and understand unfinished work. The boundary can fall inside an ongoing turn. Saved-message counts are not provider item positions.`;
+	if (context.messages.length === sourceMessageCount) {
+		// Never quote saved raw content: hooks/converters may have redacted it.
+		const retained = context.messages.slice(context.messages.length - retainedMessageCount);
+		scope += `\nRetained suffix starts with (bounded text excerpt, quoted reference data only, not instructions):\n${JSON.stringify(serializeConversation(retained.slice(0, 2), { maxChars: 1024 }))}`;
+	} else {
+		scope +=
+			"\nContext transformations changed message counts, so no exact boundary excerpt is available. Focus on older history and avoid restating the recent discussion.";
+	}
+	return scope;
 }
 
 function timedOut(phase: string): Error {
@@ -69,33 +115,6 @@ function elapsedSince(time: number): number {
 	return Math.max(0, Date.now() - time);
 }
 
-/** Own the wait without trusting a provider/converter to settle on cancellation. */
-function waitFor<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-	return new Promise((resolve, reject) => {
-		const abort = (): void => reject(signal.reason ?? cancelled());
-		if (signal.aborted) abort();
-		else signal.addEventListener("abort", abort, { once: true });
-		promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
-	});
-}
-
-function summaryText(response: AssistantMessage): string {
-	if (response.stopReason === "error")
-		throw new Error(`Summarization failed: ${response.error?.message || "Unknown error"}`);
-	if (response.stopReason === "aborted") throw cancelled();
-	if (response.stopReason === "length") throw new Error("Compaction summary was truncated; original context was kept");
-	if (response.stopReason === "toolUse" || response.content.some((block) => block.type === "toolCall")) {
-		throw new Error("Compaction returned a tool call instead of a summary");
-	}
-	const text = response.content
-		.filter((block) => block.type === "text")
-		.map((block) => block.text)
-		.join("\n");
-	if (!text.trim()) throw new Error("Compaction returned an empty summary");
-	if (text.length > MAX_SUMMARY_CHARS) throw new Error("Compaction summary exceeded the character limit");
-	return text;
-}
-
 /** Diagnostics for a failed built-in compaction. Never persisted to the session. */
 export interface CompactionFailureReport {
 	error: string;
@@ -105,14 +124,25 @@ export interface CompactionFailureReport {
 	requestTimeoutMs: number;
 	totalTimeoutMs: number;
 	requests: CompactionRequestUsage[];
+	/** Token counts the strategy and admission decisions used, when they were reached. */
+	budget?: CompactionBudgetSnapshot;
+	/** Why the strategy that ran was chosen, when the choice was reached. */
+	strategyReason?: CompactionStrategyReason;
 }
 
 interface ContextCompactionOptions {
 	/** Full conversation through the normal context/conversion pipeline. */
 	context: (signal: AbortSignal) => Promise<Context>;
+	/**
+	 * Tokens the conversation's next request would send: provider usage of the
+	 * latest response plus later messages, as the session estimates it.
+	 */
+	estimatedContextTokens: number;
 	/** Saved message counts, before the context/conversion pipeline. */
 	sourceMessageCount: number;
 	retainedMessageCount: number;
+	/** The rendered user-message record composed after the generated checkpoint. */
+	userMessages?: string;
 	streamFn: StreamFn;
 	signal: AbortSignal;
 	thinkingLevel: ThinkingLevel;
@@ -132,7 +162,7 @@ export async function compactContext(
 	const requests: CompactionRequestUsage[] = [];
 	const controller = new AbortController();
 	const signal = controller.signal;
-	const abort = (): void => controller.abort(cancelled());
+	const abort = (): void => controller.abort(abortError("Compaction cancelled"));
 	if (options.signal.aborted) abort();
 	else options.signal.addEventListener("abort", abort, { once: true });
 	const startedAt = Date.now();
@@ -140,6 +170,8 @@ export async function compactContext(
 	// Names the active step in timeout errors and failure reports.
 	let phase = "preparing context";
 	let stoppedPhase: string | undefined;
+	let budget: CompactionBudgetSnapshot | undefined;
+	let strategyReason: CompactionStrategyReason | undefined;
 	signal.addEventListener(
 		"abort",
 		() => {
@@ -155,264 +187,223 @@ export async function compactContext(
 		baseDelayMs: Math.min(30_000, Math.max(0, options.retry.baseDelayMs)),
 		maxDelayMs: Math.min(30_000, Math.max(0, options.retry.maxDelayMs)),
 	};
-	// Also bounds the serialized fallback without changing the standalone chunked helper.
-	const boundedStream = (
-		requestModel: Model<Api>,
-		context: Context,
-		requestOptions: SimpleStreamOptions | undefined,
+	// Deadlines and request telemetry. The shared reader enforces each request's
+	// character limit; validation, retries and corrections belong to the caller.
+	const send = async (
+		request: CheckpointRequest,
 		strategy: CompactionRequestUsage["strategy"],
-		validateSummary?: (response: AssistantMessage) => void,
-	) => {
-		const result = createAssistantMessageEventStream();
+	): Promise<AssistantMessage> => {
 		const requestAbort = new AbortController();
-		const requestSignal = AbortSignal.any([signal, requestOptions?.signal ?? signal, requestAbort.signal]);
-		void (async () => {
-			let dispatched: CompactionRequestUsage | undefined;
-			let requestTimer: ReturnType<typeof setTimeout> | undefined;
-			try {
-				requestSignal.throwIfAborted();
-				if (Date.now() >= deadline) {
-					controller.abort(timedOut(phase));
-					signal.throwIfAborted();
-				}
-				const requestUsage: CompactionRequestUsage = {
-					strategy,
-					attempt: requests.length + 1,
-					provider: requestModel.provider,
-					model: requestModel.id,
-					startedAt: Date.now(),
-				};
-				requests.push(requestUsage);
-				dispatched = requestUsage;
-				const requestName = `${strategy} request ${requestUsage.attempt}`;
-				phase = `${requestName} in progress`;
-				// Slow but progressing requests each get a full clock. A request timeout
-				// ends the compaction: retrying the same slow request would only repeat it.
-				requestTimer = setTimeout(
-					() => controller.abort(requestTimedOut(requestName)),
-					COMPACTION_REQUEST_TIMEOUT_MS,
-				);
-				const stream = await waitFor(
-					Promise.resolve(
-						options.streamFn(requestModel, context, {
-							...requestOptions,
-							maxTokens: Math.min(
-								COMPACTION_SUMMARY_TOKENS,
-								requestOptions?.maxTokens ?? COMPACTION_SUMMARY_TOKENS,
-							),
-							maxRetries: 0,
-							signal: requestSignal,
-						}),
-					),
-					requestSignal,
-				);
-				const iterator = stream[Symbol.asyncIterator]();
-				let response: AssistantMessage | undefined;
-				let textChars = 0;
-				try {
-					for (;;) {
-						const next = await waitFor(iterator.next(), requestSignal);
-						if (next.done) break;
-						const event = next.value;
-						requestUsage.timeToFirstEventMs ??= elapsedSince(requestUsage.startedAt);
-						if (
-							event.type === "toolcall_start" ||
-							event.type === "toolcall_delta" ||
-							event.type === "toolcall_end"
-						) {
-							throw new Error("Compaction returned a tool call instead of a summary");
-						}
-						if (event.type === "text_delta") {
-							requestUsage.timeToFirstTextMs ??= elapsedSince(requestUsage.startedAt);
-							textChars += event.delta.length;
-							if (textChars > MAX_SUMMARY_CHARS)
-								throw new Error("Compaction summary exceeded the character limit");
-						}
-						if (event.type === "done" || event.type === "error") {
-							response = event.type === "done" ? event.message : event.error;
-							break;
-						}
-					}
-				} finally {
-					void iterator.return?.().catch(() => {});
-				}
-				requestSignal.throwIfAborted();
-				if (!response) throw new Error("Compaction stream ended without a terminal response");
-				requestUsage.stopReason = response.stopReason;
-				// Copy only reported counts. Invalid telemetry must not fail a valid summary
-				// at the session's lossless-JSON persistence boundary.
-				const usage = response.usage;
-				if (
-					usage &&
-					[usage.input, usage.output, usage.cacheRead, usage.cacheWrite, usage.totalTokens].every(
-						(count) => Number.isSafeInteger(count) && count >= 0 && !Object.is(count, -0),
-					)
-				) {
-					requestUsage.usage = {
-						input: usage.input,
-						output: usage.output,
-						cacheRead: usage.cacheRead,
-						cacheWrite: usage.cacheWrite,
-						totalTokens: usage.totalTokens,
-					};
-				}
-				const diagnostics: NonNullable<CompactionRequestUsage["diagnostics"]> = [];
-				try {
-					const reportedDiagnostics = response.diagnostics;
-					if (Array.isArray(reportedDiagnostics)) {
-						for (const diagnostic of reportedDiagnostics) {
-							try {
-								if (!diagnostic || diagnostic.type !== "codex_request") continue;
-								const { timestamp, details } = diagnostic;
-								if (typeof timestamp !== "number") continue;
-								if (
-									details !== undefined &&
-									(details === null || typeof details !== "object" || Array.isArray(details))
-								) {
-									continue;
-								}
-								diagnostics.push(
-									cloneCanonicalData(
-										{ type: "codex_request", timestamp, ...(details === undefined ? {} : { details }) },
-										"Compaction request diagnostic",
-									),
-								);
-							} catch {
-								// Malformed telemetry must not discard a valid summary or other records.
-							}
-						}
-					}
-				} catch {
-					// Treat an unreadable diagnostics collection as unavailable telemetry.
-				}
-				if (diagnostics.length > 0) requestUsage.diagnostics = diagnostics;
-				if (response.stopReason === "error" || response.stopReason === "aborted") {
-					result.push({ type: "error", seq: 1, reason: response.stopReason, error: response });
-				} else {
-					validateSummary?.(response);
-					result.push({ type: "done", seq: 1, reason: response.stopReason, message: response });
-				}
-			} catch (error) {
-				requestAbort.abort();
-				result.fail(requestSignal.aborted && signal.aborted ? signal.reason : error);
-			} finally {
-				clearTimeout(requestTimer);
-				if (dispatched) {
-					dispatched.durationMs = elapsedSince(dispatched.startedAt);
-					phase = `after ${dispatched.strategy} request ${dispatched.attempt} finished`;
-				}
+		const requestSignal = AbortSignal.any([signal, request.options.signal ?? signal, requestAbort.signal]);
+		let record: CompactionRequestUsage | undefined;
+		let requestTimer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			requestSignal.throwIfAborted();
+			if (Date.now() >= deadline) {
+				controller.abort(timedOut(phase));
+				signal.throwIfAborted();
 			}
-		})();
-		return result;
+			const current: CompactionRequestUsage = {
+				strategy,
+				purpose: request.purpose,
+				attempt: requests.length + 1,
+				provider: request.model.provider,
+				model: request.model.id,
+				startedAt: Date.now(),
+				targetChars: request.targetChars,
+				maxChars: request.maxChars,
+			};
+			record = current;
+			requests.push(current);
+			const requestName = `${strategy} request ${current.attempt}`;
+			phase = `${requestName} in progress`;
+			// Slow but progressing requests each get a full clock. A request timeout
+			// ends the compaction: retrying the same slow request would only repeat it.
+			requestTimer = setTimeout(() => controller.abort(requestTimedOut(requestName)), COMPACTION_REQUEST_TIMEOUT_MS);
+			const stream = await waitFor(
+				Promise.resolve(
+					options.streamFn(request.model, request.context, {
+						...request.options,
+						maxTokens: Math.min(CHECKPOINT_MAX_TOKENS, request.options.maxTokens ?? CHECKPOINT_MAX_TOKENS),
+						maxRetries: 0,
+						signal: requestSignal,
+					}),
+				),
+				requestSignal,
+			);
+			const response = await readCheckpointResponse(stream, {
+				maxChars: request.maxChars,
+				signal: requestSignal,
+				onEvent: (event, textChars) => {
+					current.timeToFirstEventMs ??= elapsedSince(current.startedAt);
+					if (event.type === "text_delta") current.timeToFirstTextMs ??= elapsedSince(current.startedAt);
+					if (textChars > 0) current.textChars = textChars;
+				},
+			});
+			requestSignal.throwIfAborted();
+			current.stopReason = response.stopReason;
+			if (response.stopReason === "stop" || response.stopReason === "length") {
+				current.textChars = checkpointVisibleText(response).length;
+				if (oversizedCheckpoint(response, request.maxChars)) current.rejected = "oversized";
+			}
+			// Copy only reported counts. Invalid telemetry must not fail a valid summary
+			// at the session's lossless-JSON persistence boundary.
+			const usage = response.usage;
+			if (
+				usage &&
+				[usage.input, usage.output, usage.cacheRead, usage.cacheWrite, usage.totalTokens].every(
+					(count) => Number.isSafeInteger(count) && count >= 0 && !Object.is(count, -0),
+				)
+			) {
+				current.usage = {
+					input: usage.input,
+					output: usage.output,
+					cacheRead: usage.cacheRead,
+					cacheWrite: usage.cacheWrite,
+					totalTokens: usage.totalTokens,
+				};
+			}
+			const diagnostics: NonNullable<CompactionRequestUsage["diagnostics"]> = [];
+			try {
+				const reportedDiagnostics = response.diagnostics;
+				if (Array.isArray(reportedDiagnostics)) {
+					for (const diagnostic of reportedDiagnostics) {
+						try {
+							if (!diagnostic || diagnostic.type !== "codex_request") continue;
+							const { timestamp, details } = diagnostic;
+							if (typeof timestamp !== "number") continue;
+							if (
+								details !== undefined &&
+								(details === null || typeof details !== "object" || Array.isArray(details))
+							) {
+								continue;
+							}
+							diagnostics.push(
+								cloneCanonicalData(
+									{ type: "codex_request", timestamp, ...(details === undefined ? {} : { details }) },
+									"Compaction request diagnostic",
+								),
+							);
+						} catch {
+							// Malformed telemetry must not discard a valid summary or other records.
+						}
+					}
+				}
+			} catch {
+				// Treat an unreadable diagnostics collection as unavailable telemetry.
+			}
+			if (diagnostics.length > 0) current.diagnostics = diagnostics;
+			return response;
+		} catch (error) {
+			if (record && error instanceof CheckpointOversizedError) {
+				record.rejected = "oversized";
+				record.textChars = error.observedChars;
+			}
+			requestAbort.abort();
+			throw requestSignal.aborted && signal.aborted ? signal.reason : error;
+		} finally {
+			clearTimeout(requestTimer);
+			if (record) {
+				record.durationMs = elapsedSince(record.startedAt);
+				phase = `after ${record.strategy} request ${record.attempt} finished`;
+			}
+		}
 	};
+	const requester = (strategy: CompactionRequestUsage["strategy"]): CheckpointRequester => ({
+		send: (request) => send(request, strategy),
+		retrying: () => {
+			phase = `retry wait after ${strategy} request ${requests.length}`;
+		},
+	});
 	try {
 		signal.throwIfAborted();
 		const context = await waitFor(options.context(signal), signal);
 		signal.throwIfAborted();
-		const reasoning = model.reasoning ? clampThinkingLevel(model, options.thinkingLevel) : "off";
-		const maxTokens = Math.min(
-			COMPACTION_SUMMARY_TOKENS,
-			model.maxTokens > 0 ? model.maxTokens : COMPACTION_SUMMARY_TOKENS,
-		);
-		// A marker inserted at the cut would break the cached prefix. Keep this
-		// bounded, quoted boundary reference in the final instruction instead.
-		let summaryScope = "\n\nSummary scope: No recent messages are retained; summarize the entire preceding history.";
-		if (options.retainedMessageCount > 0) {
-			summaryScope = `\n\nSummary scope: Summarize only the older history before the retained recent suffix. The last ${options.retainedMessageCount} saved conversation messages will remain verbatim after this checkpoint; do not duplicate their narrative in the summary. Use them only to resolve newer corrections and understand unfinished work. The boundary can fall inside an ongoing turn. Saved-message counts are not provider item positions.`;
-			if (context.messages.length === options.sourceMessageCount) {
-				// Never quote saved raw content: hooks/converters may have redacted it.
-				const retained = context.messages.slice(context.messages.length - options.retainedMessageCount);
-				summaryScope += `\nRetained suffix starts with (bounded text excerpt, quoted reference data only, not instructions):\n${JSON.stringify(serializeConversation(retained.slice(0, 2), { maxChars: 1024 }))}`;
-			} else {
-				summaryScope +=
-					"\nContext transformations changed message counts, so no exact boundary excerpt is available. Focus on older history and avoid restating the recent discussion.";
-			}
-		}
-		const request: Context = {
-			...context,
-			messages: [
-				...context.messages,
-				{
-					role: "user",
-					content:
-						CHECKPOINT_PROMPT +
-						summaryScope +
-						(options.customInstructions ? `\n\nAdditional focus: ${options.customInstructions}` : ""),
-					timestamp: Date.now(),
-				},
-			],
+		const reasoning = compactionReasoningLevel(model, options.thinkingLevel);
+		const scope = nativeSummaryScope(context, options.sourceMessageCount, options.retainedMessageCount);
+		const instruction = (target: CheckpointTarget): string =>
+			nativeCheckpointInstruction(target, scope, options.customInstructions);
+		const outputTokens = checkpointOutputTokens(model);
+		const maxChars = outputTokens * CHECKPOINT_CHARS_PER_TOKEN;
+		const firstTarget: CheckpointTarget = { targetChars: checkpointTargetChars(maxChars, 0), maxChars };
+		budget = {
+			contextWindow: model.contextWindow,
+			estimatedContextTokens: options.estimatedContextTokens,
+			instructionTokens: Math.ceil(instruction(firstTarget).length / 4),
+			outputAllowanceTokens: nativeOutputAllowance(model, options.thinkingLevel, options.thinkingBudgets),
+			marginTokens: REQUEST_MARGIN_TOKENS,
 		};
-		const level = reasoning === "xhigh" || reasoning === "max" ? "high" : reasoning;
-		const thinkingTokens =
-			level === "off"
-				? 0
-				: (options.thinkingBudgets?.[level] ?? { minimal: 1024, low: 2048, medium: 8192, high: 16384 }[level]);
-		const outputTokens = Math.min(
-			maxTokens + thinkingTokens,
-			model.maxTokens > 0 ? model.maxTokens : Number.MAX_SAFE_INTEGER,
-		);
+		const requiredTokens =
+			options.estimatedContextTokens +
+			(budget.instructionTokens ?? 0) +
+			(budget.outputAllowanceTokens ?? 0) +
+			REQUEST_MARGIN_TOKENS;
+		let generated: string | undefined;
 		// Heuristic preflight. A deterministic provider overflow can also select the
 		// chunked fallback; no other error changes strategies or discards source.
-		const inputTokens =
-			estimateMessagesTokens(request.messages) +
-			Math.ceil((request.systemPrompt?.length ?? 0) / 4) +
-			estimateToolDefinitionTokens(request.tools) +
-			1024;
-		if (model.contextWindow > 0 && inputTokens + outputTokens <= model.contextWindow) {
-			const requestOptions: SimpleStreamOptions = {
-				maxTokens,
-				signal,
-				...(reasoning === "off" ? {} : { reasoning }),
-			};
-			for (let attempt = 0; ; attempt++) {
-				signal.throwIfAborted();
-				let response: AssistantMessage | undefined;
-				try {
-					response = await (await boundedStream(model, request, requestOptions, "native")).result();
-					// Classify overflow before validating a candidate summary, including zero-output length stops.
-					if (isContextOverflow(response, model.contextWindow)) break;
-					const summary = summaryText(response);
-					const { readFiles, modifiedFiles } = computeFileLists(preparation.fileOps);
-					return {
-						summary: summary + formatFileOperations(readFiles, modifiedFiles),
-						firstKeptEntryId: preparation.firstKeptEntryId,
-						tokensBefore: preparation.tokensBefore,
-						details: { readFiles, modifiedFiles, requests },
-					};
-				} catch (error) {
-					if (signal.aborted) throw signal.reason;
-					if (error instanceof Error && error.name === "AbortError") throw error;
-					const message = error instanceof Error ? error.message : String(error);
-					// Only a failure the provider classified as retryable is worth repeating.
-					const retryable =
-						response === undefined
-							? classifyProviderError(error).retryable
-							: response.stopReason === "error" && response.error?.retryable === true;
-					if (!retryable || attempt >= retry.maxRetries) {
-						if (attempt === 0) throw error;
-						throw new Error(`Summarization failed after ${attempt + 1} attempts: ${message}`, { cause: error });
-					}
-					phase = `retry wait after native request ${requests.length}`;
-					await waitFor(sleep(Math.min(retry.maxDelayMs, retry.baseDelayMs * 2 ** attempt), signal), signal);
-				}
+		if (model.contextWindow > 0 && requiredTokens <= model.contextWindow) {
+			strategyReason = "native";
+			const instructionTimestamp = Date.now();
+			try {
+				generated = await waitFor(
+					generateCheckpoint(
+						requester("native"),
+						{
+							purpose: "native",
+							operation: "Summarization",
+							model,
+							options: { maxTokens: outputTokens, signal, ...(reasoning === "off" ? {} : { reasoning }) },
+							maxChars,
+							// A correction keeps the identical conversation prefix and replaces only the instruction.
+							context: (target) => ({
+								...context,
+								messages: [
+									...context.messages,
+									{ role: "user", content: instruction(target), timestamp: instructionTimestamp },
+								],
+							}),
+							// Classify overflow before validating a candidate, including zero-output length stops.
+							overflowed: (response) => isContextOverflow(response, model.contextWindow),
+						},
+						retry,
+					),
+					signal,
+				);
+			} catch (error) {
+				if (!(error instanceof CheckpointContextOverflowError)) throw error;
+				strategyReason = "provider_overflow";
 			}
+		} else {
+			strategyReason = "preflight_overflow";
 		}
-		const fallbackReasoning = model.reasoning ? clampThinkingLevel(model, "minimal") : "off";
-		const result = await waitFor(
-			compact(
-				{ ...preparation, settings: { ...preparation.settings, reserveTokens: COMPACTION_SUMMARY_TOKENS / 0.8 } },
-				model,
-				// The chunked helper must only receive valid summaries or provider errors.
-				(requestModel, context, requestOptions) =>
-					boundedStream(requestModel, context, requestOptions, "chunked", summaryText),
-				options.customInstructions,
+		if (generated === undefined) {
+			const fallbackReasoning = model.reasoning ? clampThinkingLevel(model, "minimal") : "off";
+			generated = await waitFor(
+				summarizeCompactionHistory(
+					{
+						...preparation,
+						settings: { ...preparation.settings, reserveTokens: checkpointMaxTokens(model.contextWindow) / 0.8 },
+					},
+					model,
+					requester("chunked"),
+					options.customInstructions,
+					signal,
+					fallbackReasoning === "off" ? undefined : fallbackReasoning,
+					retry,
+				),
 				signal,
-				fallbackReasoning === "off" ? undefined : fallbackReasoning,
-				retry,
-			),
-			signal,
-		);
-		return { ...result, details: { ...result.details, requests } };
+			);
+		}
+		const { readFiles, modifiedFiles } = computeFileLists(preparation.fileOps);
+		return {
+			summary: composeCheckpoint(generated, {
+				...(options.userMessages ? { userMessages: options.userMessages } : {}),
+				fileLists: formatFileLists(readFiles, modifiedFiles, fileListsMaxChars(model.contextWindow)),
+			}),
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: { readFiles, modifiedFiles, requests },
+		};
 	} catch (error) {
 		if (options.onFailure) {
 			try {
@@ -427,6 +418,8 @@ export async function compactContext(
 						...request,
 						durationMs: request.durationMs ?? elapsedSince(request.startedAt),
 					})),
+					...(budget === undefined ? {} : { budget }),
+					...(strategyReason === undefined ? {} : { strategyReason }),
 				});
 			} catch {
 				// Failure diagnostics must never replace the compaction error.

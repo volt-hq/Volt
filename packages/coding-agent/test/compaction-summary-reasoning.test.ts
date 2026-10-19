@@ -248,7 +248,7 @@ describe("generateSummary reasoning options", () => {
 		});
 	});
 
-	it("clamps compaction summary maxTokens to the model output cap", async () => {
+	it("splits the compaction summary budget, clamped to the model output cap, 75/25 between history and prefix", async () => {
 		const preparation: CompactionPreparation = {
 			firstKeptEntryId: "entry-keep",
 			messagesToSummarize: messages,
@@ -261,7 +261,7 @@ describe("generateSummary reasoning options", () => {
 
 		await compact(preparation, createModel(false, 128000), streamFn);
 
-		expect(summaryRequestMock.mock.calls.map((call) => call[2]?.maxTokens)).toEqual([128000, 128000]);
+		expect(summaryRequestMock.mock.calls.map((call) => call[2]?.maxTokens)).toEqual([96000, 32000]);
 	});
 
 	it("chunks a long turn prefix chronologically", async () => {

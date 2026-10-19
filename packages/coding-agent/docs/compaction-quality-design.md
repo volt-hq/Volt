@@ -41,6 +41,7 @@ The current corpus lives in `packages/coding-agent/test/compaction-quality/fixtu
 - The ID of the first message retained verbatim. Tool calls and results stay together.
 - A continuation prompt that does not reveal the answer rubric.
 - Criteria with a stable ID, evaluation layer, requirement, source-message anchors, and a critical flag.
+- Optionally, later `epochs` for a multi-compaction trajectory: each epoch's new messages and the ID of its first message the next compaction retains. Message IDs are unique across all epochs, every epoch has older history to summarize, and no boundary splits a tool group.
 
 `getQualityInput()` explicitly projects and clones only the input fields. Never send the full fixture object to an evaluated model. A future provider adapter must send message values, not grading criteria or message-ID wrappers. The boundary is runner metadata, not an extra instruction embedded into old conversation history.
 
@@ -82,7 +83,7 @@ The offline tests use controlled assessments to verify this accounting. Those as
 
 ## Approved next-action pilot
 
-The approved model is `openai-codex/gpt-5.6-luna` with low thinking through stored subscription OAuth. The user waived a monetary spending limit. The runner still bounds each case to five minutes and eight request attempts, with no automatic retries. Each attempt records whether the provider was invoked; credential rejection is not a provider dispatch. Subscription requests consume quota even when they have no per-request charge.
+The approved model is `openai-codex/gpt-5.6-luna` with low thinking through stored subscription OAuth. The user waived a monetary spending limit. The runner still bounds each case to five minutes and eight request attempts per compaction (seven for the compaction, one for the continuation), with no automatic retries. Each attempt records whether the provider was invoked; credential rejection is not a provider dispatch. Subscription requests consume quota even when they have no per-request charge.
 
 Run from the repository root:
 
@@ -107,6 +108,22 @@ The runner records the native request context, provider request body through `on
 `manifest.json` records the planned experiment before requests. Each completed or failed case gets an exclusive JSON artifact, followed by `results.json` for the aggregate run. Provider failures are retained rather than silently excluded. A case timeout stops admission of new cases. The worker writes available artifacts and reports completion; the supervisor then terminates it and waits for process exit, including any provider operations that ignored cancellation. A startup handshake prevents admission after cancellation during worker loading. Supervisor cancellation and IPC owner loss terminate the worker immediately, so an active case may not produce a final artifact. The supervisor also enforces a 45-minute overall deadline and force-terminates the worker if IPC cancellation has not stopped it within two seconds. If termination interrupts cleanup, the manifest and already completed case files remain available. This is a local process guarantee, not a guarantee of server-side cancellation. Late provider payload callbacks cannot modify settled case records. Each case records the number of successfully generated checkpoints: zero for full-context controls. A full-context control that cannot fit is recorded as `context-unavailable`, not as a successful control.
 
 The pilot performs **no automatic semantic grading**. Its score objects remain unassessed, including the summary layer that does not apply to the full-context control. Inspect actual artifacts for concrete findings; do not turn completed request counts into quality pass rates. Human-reviewed reference checkpoints, blinded grading, and calibrated semantic scores remain follow-up work.
+
+## Multi-compaction trajectories
+
+Repeated compaction can lose what an early checkpoint captured: each checkpoint is written from the previous one. Volt guards the user's own words deterministically. Every built-in checkpoint carries the user's earlier messages verbatim, rebuilt from the whole branch, and never from a model summary. `test/suite/agent-session-compaction-admission.test.ts` checks that after five compactions whose summarizer keeps nothing, the next request still contains the original goal, an early constraint, and the latest correction. That proves delivery, not semantic fidelity.
+
+`createTrajectoryFixtures()` probes one synthetic trajectory after three and after five compactions. The first request carries an API constraint and a release prohibition, a later decision is superseded by a correction, an approach fails, and work is then verified only partially. Criteria grade early facts long after the epoch that introduced them.
+
+`runPilotCase()` compacts a fixture once, then once more per epoch: each epoch's messages follow the previous checkpoint and retained messages, and the next compaction keeps the epoch's authored boundary. The native condition runs production `compactContext()` with the user-message record the session would build; the chunked-helper condition composes the same host-owned blocks around the `compact()` helper's text. The full-context control sends every message of every epoch. A case's deadline and request limit scale with its compaction count.
+
+Select the trajectories explicitly; the default suite remains the twelve seeds:
+
+```bash
+node scripts/run-compaction-quality.mjs --model openai-codex/gpt-5.6-luna --thinking low --trials 1 --suite trajectories
+```
+
+A trajectory case can run for minutes per compaction, and the supervisor's 45-minute overall deadline bounds a run. The offline tests in `test/compaction-quality-runner.test.ts` run every trajectory under every condition with injected streams. A live trajectory run needs the same separate approval as the seed pilot and has not been performed.
 
 ## Longer-session baseline, pending approval
 

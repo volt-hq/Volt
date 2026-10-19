@@ -48,7 +48,8 @@ describe("model-specific automatic compaction", () => {
 		expect(harness.eventsOfType("compaction_end")[0]).toMatchObject({
 			aborted: false,
 			willRetry: false,
-			result: { summary: "Checkpoint" },
+			// The user's earlier messages follow the generated checkpoint.
+			result: { summary: expect.stringMatching(/^Checkpoint\n\n<user-messages>\n/) },
 		});
 		expect(harness.eventsOfType("compaction_end")[0].result!.tokensBefore).toBeGreaterThanOrEqual(350_000);
 		expect(harness.session.model?.contextWindow).toBe(1_000_000);
@@ -92,7 +93,9 @@ describe("model-specific automatic compaction", () => {
 		]);
 		await harness.session.prompt("Continue with the configured model");
 		expect(harness.eventsOfType("compaction_start")).toHaveLength(1);
-		expect(harness.eventsOfType("compaction_end")[0].result?.summary).toBe("Model switch checkpoint");
+		expect(harness.eventsOfType("compaction_end")[0].result?.summary).toMatch(
+			/^Model switch checkpoint\n\n<user-messages>\n/,
+		);
 		expect(lastAssistantText(harness.session)).toBe("Large model reply");
 	});
 });
