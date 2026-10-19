@@ -157,7 +157,7 @@ describe("cache-preserving compaction", () => {
 		expect(result).toMatchObject({
 			firstKeptEntryId: "kept",
 			tokensBefore: 580_000,
-			details: { readFiles: ["src/example.ts"], modifiedFiles: [] },
+			details: { readFiles: ["src/example.ts"], modifiedFiles: [], strategyReason: "native" },
 		});
 		// The session composes the host-owned blocks; this returns the generated text.
 		expect(result.summary).toBe("## Goal\nPreserve original goal");
@@ -248,6 +248,9 @@ describe("cache-preserving compaction", () => {
 			expect(JSON.stringify(calls.at(-1))).not.toContain("RECENT-ONLY");
 			expect(result.firstKeptEntryId).toBe("kept");
 			expect(result.details.requests?.at(-1)?.strategy).toBe("chunked");
+			expect(result.details.strategyReason).toBe(
+				overflow === "preflight" ? "preflight_overflow" : "provider_overflow",
+			);
 		},
 	);
 

@@ -46,8 +46,15 @@ function compactionEntry(details?: JsonValue): CompactionEntry {
 
 /** The chat's lines below the compaction summary: the request usage lines. */
 function usageLines(chat: Container): string[] {
-	const lines = chat.render(160).lines.map((line) => stripAnsi(line).trim());
-	return lines.slice(lines.findIndex((line) => line.includes("compaction request")));
+	const lines = chat.render(240).lines.map((line) => stripAnsi(line).trim());
+	const start = lines.findIndex((line) => /^(Native|Chunked) compaction/.test(line));
+	return start < 0 ? [] : lines.slice(start);
+}
+
+function setExpanded(chat: Container, expanded: boolean): void {
+	for (const child of chat.children) {
+		if ("setExpanded" in child && typeof child.setExpanded === "function") child.setExpanded(expanded);
+	}
 }
 
 describe("InteractiveMode extension shutdown", () => {
@@ -69,17 +76,19 @@ describe("InteractiveMode extension shutdown", () => {
 });
 
 describe("InteractiveMode compaction", () => {
-	test("appends the compaction's summary, then every request it made", () => {
+	test("appends the compaction's summary and usage line, listing every request when expanded", () => {
 		const fakeThis = createCompactionContext();
 		const request = { provider: "test-provider", model: "test-model" };
 		showCompacted.call(
 			fakeThis,
 			compactionEntry({
+				strategyReason: "provider_overflow",
 				requests: [
-					{ ...request, strategy: "native", attempt: 1 },
+					{ ...request, strategy: "native", purpose: "native", attempt: 1 },
 					{
 						...request,
 						strategy: "native",
+						purpose: "native",
 						attempt: 2,
 						stopReason: "error",
 						usage: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, totalTokens: 0 },
@@ -87,15 +96,19 @@ describe("InteractiveMode compaction", () => {
 					{
 						...request,
 						strategy: "chunked",
+						purpose: "history",
 						attempt: 3,
 						stopReason: "stop",
+						textChars: 4000,
 						usage: { input: 100, cacheRead: 800, cacheWrite: 100, output: 100, totalTokens: 1100 },
 					},
 					{
 						...request,
 						strategy: "chunked",
+						purpose: "history",
 						attempt: 4,
 						stopReason: "stop",
+						textChars: 3000,
 						usage: { input: 100, cacheRead: 0, cacheWrite: 0, output: 100, totalTokens: 200 },
 					},
 				],
@@ -104,12 +117,35 @@ describe("InteractiveMode compaction", () => {
 
 		const lines = fakeThis.chatContainer.render(160).lines.map((line) => stripAnsi(line).trim());
 		expect(lines.join("\n")).toContain("[compaction]");
+		const summary = `Chunked compaction (provider rejected one request as too large) · 4 requests (2 failed) · ${(1100).toLocaleString()} prompt tokens, 72.7% cached, 2 requests without usage · checkpoint 7 chars`;
+		expect(usageLines(fakeThis.chatContainer)).toEqual([summary]);
+
+		setExpanded(fakeThis.chatContainer, true);
 		expect(usageLines(fakeThis.chatContainer)).toEqual([
-			"Native compaction request 1 (no terminal response): cache usage unavailable",
-			"Native compaction request 2 (error): cache usage unavailable",
-			`Chunked compaction request 3 (stop): 800 cached / ${(1000).toLocaleString()} prompt tokens — 80.0% hit`,
-			"Chunked compaction request 4 (stop): 0 cached / 100 prompt tokens — 0.0% hit",
+			summary,
+			"1. native · no response · usage unavailable",
+			"2. native retry · error · usage unavailable",
+			`3. history · ${(4000).toLocaleString()} chars · ${(1000).toLocaleString()} prompt tokens`,
+			`4. history · ${(3000).toLocaleString()} chars · 100 prompt tokens`,
 		]);
+		setExpanded(fakeThis.chatContainer, false);
+		expect(usageLines(fakeThis.chatContainer)).toEqual([summary]);
+	});
+
+	test("starts expanded when tool output is expanded", () => {
+		const fakeThis = { ...createCompactionContext(), toolOutputExpanded: true };
+		const request = { strategy: "native", attempt: 1, provider: "test-provider", model: "test-model" };
+		showCompacted.call(fakeThis, compactionEntry({ requests: [{ ...request, stopReason: "stop" }] }));
+		expect(usageLines(fakeThis.chatContainer)).toEqual([
+			"Native compaction · 1 request · usage unavailable · checkpoint 7 chars",
+			"1. native · completed · usage unavailable",
+		]);
+	});
+
+	test("shows nothing for a compaction without request records", () => {
+		const fakeThis = createCompactionContext();
+		showCompacted.call(fakeThis, compactionEntry({ readFiles: [], modifiedFiles: [] }));
+		expect(usageLines(fakeThis.chatContainer)).toEqual([]);
 	});
 
 	test("shows unavailable cache data and ignores malformed records without losing later requests", () => {
@@ -132,10 +168,12 @@ describe("InteractiveMode compaction", () => {
 			}),
 		);
 
+		setExpanded(fakeThis.chatContainer, true);
 		expect(usageLines(fakeThis.chatContainer)).toEqual([
-			"Native compaction request 2 (stop): cache usage unavailable",
-			"Native compaction request 3 (stop): cache usage unavailable",
-			"Native compaction request 4 (stop): cache usage unavailable",
+			"Native compaction · 3 requests · usage unavailable · checkpoint 7 chars",
+			"2. native · completed · usage unavailable",
+			"3. native · completed · usage unavailable",
+			"4. native · completed · usage unavailable",
 		]);
 		expect(fakeThis.showError).not.toHaveBeenCalled();
 	});

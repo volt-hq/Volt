@@ -2381,7 +2381,8 @@ export class InteractiveMode {
 	/**
 	 * A compaction committed while the TUI showed the conversation: the
 	 * transcript now starts from it, and its summary and request usage show
-	 * where the conversation goes on.
+	 * where the conversation goes on. Usage is one line; expanding the tool
+	 * output lists every request.
 	 */
 	private showCompacted(entry: Extract<ProjectedEntry, { type: "compaction" }>): void {
 		const payload = entry.payload;
@@ -2393,8 +2394,20 @@ export class InteractiveMode {
 		);
 		summary.setExpanded(this.toolOutputExpanded);
 		this.chatContainer.addChild(summary);
-		for (const line of formatCompactionUsage(payload.details)) {
-			this.chatContainer.addChild(new Text(theme.fg("dim", line), 1, 0));
+		const usage = formatCompactionUsage(payload.details, payload.summary.length);
+		if (usage) {
+			this.chatContainer.addChild(
+				new ExpandableText(
+					() => theme.fg("dim", usage.summary),
+					() =>
+						[usage.summary, ...usage.requests.map((line) => `  ${line}`)]
+							.map((line) => theme.fg("dim", line))
+							.join("\n"),
+					this.toolOutputExpanded,
+					1,
+					0,
+				),
+			);
 		}
 		this.ui.requestRender();
 	}

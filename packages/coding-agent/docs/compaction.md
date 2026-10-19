@@ -116,17 +116,20 @@ The response reserve counts at most half the context window. A refused checkpoin
 
 When built-in summary generation fails or is cancelled, or a compaction is refused before a request or at admission, Volt writes a failure record to `~/.volt/agent/debug/compaction-latest.json` (or the configured agent directory), replacing the previous record. It contains the session ID, error, active step (`preflight` and `admission` for refusals), elapsed time, deadlines, thinking level, every dispatched request's record as described below (including Codex request diagnostics when enabled), the token counts the strategy or admission decision used (`budget`), and why the native or chunked strategy ran (`strategyReason`: `native`, `preflight_overflow`, or `provider_overflow`). It contains no prompts or summary text. Writing it never changes the compaction outcome.
 
-### Compaction Cache Usage
+### Compaction Request Usage
 
-After a successful manual or automatic compaction, interactive mode shows a separate line for each summarization request, for example:
+After a successful manual or automatic compaction, interactive mode shows one usage line below the summary: the strategy and, when the native request did not fit, why; the request count with any oversized or failed requests; the time from the first request to the last; the total prompt tokens and their cached share; and the generated checkpoint's size. Expanding tool output (`ctrl+o` by default) lists every request below it, for example:
 
 ```text
-Native compaction request 1 (stop): 68,000 cached / 70,000 prompt tokens — 97.1% hit
+Chunked compaction (too large for one request) · 8 requests (2 oversized) · 5m 15s · 88,566 prompt tokens, 39.9% cached, 2 requests without usage · checkpoint 19,242 chars
+  1. history · 9,723 chars · 42.5s · 14,494 prompt tokens
+  2. history · oversized (12,296 of 12,288 chars) · 50.8s · usage unavailable
+  3. history retry · 7,838 chars · 30.9s · 17,981 prompt tokens, 98.9% cached
 ```
 
-These are the compaction requests themselves, not the first conversation request after compaction or the footer's latest cache-hit rate. The percentage is `cacheRead / (input + cacheRead + cacheWrite) * 100`; output tokens are excluded. Missing, invalid, or zero-prompt usage is shown as unavailable, not as a cache miss.
+These are the compaction requests themselves, not the first conversation request after compaction or the footer's latest cache-hit rate. The cached share is `cacheRead / (input + cacheRead + cacheWrite) * 100`; output tokens are excluded. A request line shows it only for native requests and for retries, which resend a prefix the provider may have cached; each new fallback chunk sends new source text, so a miss there is expected. A request is a retry when it repeats a checkpoint whose previous request was not accepted. Missing, invalid, or zero-prompt usage is shown as unavailable, not as a cache miss.
 
-Built-in session compaction saves these records in `CompactionEntry.details.requests` and returns them in the completion result. Each record contains the strategy (`native` or `chunked`), its `purpose` (`native`, a `history` chunk, or a split turn's `turn_prefix`), a one-based `attempt` in dispatch order across all chunks, retries and corrections, the requested provider/model, the length it asked for (`targetChars`) and its hard limit (`maxChars`), the visible text it produced or streamed before it was stopped (`textChars`), `rejected: "oversized"` when that text was discarded for a correction, timing (`startedAt` epoch milliseconds, then `timeToFirstEventMs`, `timeToFirstTextMs` and `durationMs` from dispatch; reasoning usually occurs between the first event and the first text), the terminal `stopReason`, and the provider-reported `input`, `output`, `cacheRead`, `cacheWrite`, and `totalTokens` under `usage`. A request that fails before a terminal response has neither `stopReason` nor `usage`; invalid token counts are omitted. Retries and fallback requests remain separate even when they finish out of order. See [session storage](session-format.md) for inspecting entries through `SessionManager` or a JSONL snapshot.
+Built-in session compaction saves these records in `CompactionEntry.details.requests` and returns them in the completion result. Each record contains the strategy (`native` or `chunked`), its `purpose` (`native`, a `history` chunk, or a split turn's `turn_prefix`), a one-based `attempt` in dispatch order across all chunks, retries and corrections, the requested provider/model, the length it asked for (`targetChars`) and its hard limit (`maxChars`), the visible text it produced or streamed before it was stopped (`textChars`), `rejected: "oversized"` when that text was discarded for a correction, timing (`startedAt` epoch milliseconds, then `timeToFirstEventMs`, `timeToFirstTextMs` and `durationMs` from dispatch; reasoning usually occurs between the first event and the first text), the terminal `stopReason`, and the provider-reported `input`, `output`, `cacheRead`, `cacheWrite`, and `totalTokens` under `usage`. A request that fails before a terminal response has neither `stopReason` nor `usage`; invalid token counts are omitted. Retries and fallback requests remain separate even when they finish out of order. `CompactionEntry.details.strategyReason` records why the strategy ran, with the values the failure record uses. See [session storage](session-format.md) for inspecting entries through `SessionManager` or a JSONL snapshot.
 
 Records cover only that compaction, including earlier failed attempts if it eventually succeeds. A failed or cancelled compaction still installs no entry. Custom extension summaries and the standalone chunked helper do not automatically collect these records. The metadata is not inserted into the summary or provider context, and does not change provider requests or footer totals.
 
@@ -221,6 +224,7 @@ interface CompactionDetails {
   readFiles: string[];     // Complete, cumulative; the summary lists a bounded subset
   modifiedFiles: string[]; // Complete, cumulative; the summary lists a bounded subset
   requests?: CompactionRequestUsage[]; // Per-request usage from built-in session compaction
+  strategyReason?: "native" | "preflight_overflow" | "provider_overflow"; // Why built-in session compaction used its strategy
 }
 ```
 
