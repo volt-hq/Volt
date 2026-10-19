@@ -42,10 +42,11 @@ import {
 	type CompactionPreparation,
 	type CompactionRequestUsage,
 	type CompactionResult,
+	compactionBoundaryError,
 	estimateMessagesTokens,
 	estimateRequestTokens,
 	estimateTokens,
-	prepareCompaction,
+	planCompaction,
 	type SummarizationRetryOptions,
 } from "../compaction/index.ts";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "../extensions/index.ts";
@@ -87,12 +88,6 @@ interface CompactionFootprint {
 	/** Context messages the compacted context keeps verbatim. */
 	readonly retainedCount: number;
 	readonly retainedTokens: number;
-	/**
-	 * Tokens of messages compaction may choose to keep: what fits below the
-	 * automatic trigger beside the system prompt, tools, plan checkpoint and
-	 * largest checkpoint. Only the newest indivisible suffix is kept beyond it.
-	 */
-	readonly retainedAllowance: number;
 	/** The context size automatic compaction triggers above; 0 or less when every response triggers it. */
 	readonly triggerTokens: number;
 	readonly systemPrompt: string;
@@ -275,7 +270,8 @@ export class SessionCompaction {
 		compaction: CompactionResult,
 		builtIn: CompactionRequestUsage[] | undefined,
 		footprint: CompactionFootprint,
-		prepared: CompactionFootprint,
+		/** The boundary keeps no more than the newest indivisible suffix it was forced to keep whole. */
+		keepsForcedSuffix: boolean,
 		planningCheckpoint: CustomMessage | undefined,
 		cause: ConversationCompactionCause,
 		model: Model<Api>,
@@ -317,12 +313,9 @@ export class SessionCompaction {
 				requests,
 			);
 		}
-		// Landing below the trigger is required only when compaction chose what to keep. When the newest
-		// indivisible suffix the preparation kept alone exceeds the allowance, the next compaction summarizes
-		// it instead. A boundary that keeps more than that suffix chose to, and is held to the trigger.
-		const forcedSuffix =
-			prepared.retainedTokens > prepared.retainedAllowance && footprint.retainedTokens <= prepared.retainedTokens;
-		if (cause === "manual" || forcedSuffix) return;
+		// Landing below the trigger is required only when compaction chose what to keep. When it keeps only
+		// the newest indivisible suffix, which alone exceeds the allowance, the next compaction summarizes it.
+		if (cause === "manual" || keepsForcedSuffix) return;
 		const { triggerTokens } = footprint;
 		if (contextWindow > 0 && triggerTokens > 0 && compactedTokens > triggerTokens) {
 			await this.reject(
@@ -455,16 +448,6 @@ export class SessionCompaction {
 			planTokensBefore +
 			maxInstalledCheckpointTokens(contextWindow) +
 			(triggerReserve - settings.reserveTokens);
-		const retainedAllowance =
-			contextWindow > 0
-				? Math.min(
-						settings.keepRecentTokens,
-						Math.max(
-							0,
-							contextWindow - settings.reserveTokens - estimateToolDefinitionTokens(tools) - fixedTokens,
-						),
-					)
-				: settings.keepRecentTokens;
 		const footprint = (firstKeptEntryId: string): CompactionFootprint => {
 			const retainedCount = retainedMessageCount(pathEntries, firstKeptEntryId);
 			return {
@@ -474,7 +457,6 @@ export class SessionCompaction {
 				retainedTokens: estimateMessagesTokens(
 					branchMessages.slice(Math.max(0, branchMessages.length - retainedCount)),
 				),
-				retainedAllowance,
 				triggerTokens: contextWindow - triggerReserve,
 				systemPrompt,
 				tools,
@@ -482,15 +464,16 @@ export class SessionCompaction {
 			};
 		};
 		// A branch of settings entries alone (its model selection) has nothing to compact.
-		const preparation =
+		const compactionPlan =
 			this.host.conversation().state.context.messages.length === 0
 				? undefined
-				: prepareCompaction(pathEntries, branchMessages, settings, { tools, contextWindow, fixedTokens });
-		if (!preparation) {
+				: planCompaction(pathEntries, branchMessages, settings, { tools, contextWindow, fixedTokens });
+		if (!compactionPlan) {
 			if (reason !== "manual") throw new Error("Auto-compaction could not find a safe compaction boundary");
 			if (pathEntries.at(-1)?.type === "compaction") throw new Error("Already compacted");
 			throw new Error("Nothing to compact (session too small)");
 		}
+		const { preparation } = compactionPlan;
 		const prepared = footprint(preparation.firstKeptEntryId);
 		await this.assertCanFit(prepared, planTokensBefore, 0);
 
@@ -515,6 +498,12 @@ export class SessionCompaction {
 		let compaction: CompactionResult;
 		let builtInRequests: CompactionRequestUsage[] | undefined;
 		if (extensionCompaction) {
+			const boundaryError = compactionBoundaryError(pathEntries, extensionCompaction.firstKeptEntryId);
+			if (boundaryError) {
+				throw new Error(
+					`Extension compaction boundary ${JSON.stringify(extensionCompaction.firstKeptEntryId)} ${boundaryError}; original context was kept`,
+				);
+			}
 			compaction = extensionCompaction;
 		} else {
 			await this.assertCanFit(prepared, planTokensBefore, maxInstalledCheckpointTokens(contextWindow));
@@ -533,13 +522,16 @@ export class SessionCompaction {
 		}
 		if (request.signal.aborted) throw new Error("Compaction cancelled");
 		const planningCheckpoint = this.host.planning().createCheckpointMessage(this.host.planning().current);
+		const kept =
+			compaction.firstKeptEntryId === preparation.firstKeptEntryId
+				? prepared
+				: footprint(compaction.firstKeptEntryId);
 		await this.admit(
 			compaction,
 			builtInRequests,
-			compaction.firstKeptEntryId === preparation.firstKeptEntryId
-				? prepared
-				: footprint(compaction.firstKeptEntryId),
-			prepared,
+			kept,
+			// An extension boundary that keeps more than the forced suffix chose what to keep.
+			compactionPlan.keepsOversizedSuffix && kept.retainedCount <= prepared.retainedCount,
 			planningCheckpoint,
 			reason,
 			model,

@@ -13,11 +13,13 @@ import {
 	type CompactionSettings,
 	calculateContextTokens,
 	compact,
+	compactionBoundaryError,
 	DEFAULT_COMPACTION_SETTINGS,
 	estimateContextTokens,
 	estimateMessagesTokens,
 	findCutPoint,
 	getLastAssistantUsage,
+	planCompaction,
 	prepareCompaction,
 	shouldCompact,
 } from "../src/core/compaction/index.ts";
@@ -611,6 +613,97 @@ describe("prepareCompaction with previous compaction", () => {
 		expect(summarizedText).toContain("user msg 3 - kept by compaction1");
 		expect(summarizedText).not.toContain("First summary");
 		expect(preparation!.previousSummary).toBe("First summary");
+	});
+});
+
+/** An assistant tool call and its result, as two message entries. */
+function createToolExchange(resultText: string): [SessionMessageEntry, SessionMessageEntry] {
+	const toolCall = fauxToolCall("read", { path: "file.txt" });
+	const call = createMessageEntry({ ...createAssistantMessage(""), content: [toolCall], stopReason: "toolUse" });
+	const result = createMessageEntry({
+		role: "toolResult",
+		toolCallId: toolCall.id,
+		toolName: toolCall.name,
+		content: [{ type: "text", text: resultText }],
+		isError: false,
+		timestamp: Date.now(),
+	});
+	return [call, result];
+}
+
+describe("planCompaction oversized suffix", () => {
+	const settings: CompactionSettings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 500 };
+
+	it("reports a boundary that keeps the newest indivisible suffix because it alone exceeds the allowance", () => {
+		const entries = [createMessageEntry(createUserMessage("older context")), ...createToolExchange("x".repeat(2400))];
+
+		const plan = planCompaction(entries, pathContext(entries).messages, settings);
+
+		expect(plan?.preparation.firstKeptEntryId).toBe(entries[1].id);
+		expect(plan?.keepsOversizedSuffix).toBe(true);
+	});
+
+	it("does not report the newest boundary when its suffix fits the allowance", () => {
+		const entries = [
+			createMessageEntry(createUserMessage("a".repeat(2400))),
+			createMessageEntry(createUserMessage("b".repeat(1600))),
+		];
+
+		const plan = planCompaction(entries, pathContext(entries).messages, settings);
+
+		expect(plan?.preparation.firstKeptEntryId).toBe(entries[1].id);
+		expect(plan?.keepsOversizedSuffix).toBe(false);
+	});
+});
+
+describe("compactionBoundaryError", () => {
+	it("accepts cut points and entries that add no context directly before one", () => {
+		const user = createMessageEntry(createUserMessage("1"));
+		const assistant = createMessageEntry(createAssistantMessage("a"));
+		const modelChange = createModelChangeEntry("openai", "gpt-4");
+		const [call] = createToolExchange("contents");
+		const entries = [user, assistant, modelChange, call];
+
+		for (const entry of entries) expect(compactionBoundaryError(entries, entry.id)).toBeUndefined();
+	});
+
+	it("rejects a boundary off the branch, before what the previous compaction kept, at a tool result, or keeping nothing", () => {
+		const summarized = createMessageEntry(createUserMessage("summarized"));
+		const kept = createMessageEntry(createUserMessage("kept by the previous compaction"));
+		const previous = createCompactionEntry("Summary", kept.id);
+		const [call, result] = createToolExchange("contents");
+		const thinking = createThinkingLevelEntry("high");
+		const entries = [summarized, kept, previous, call, result, thinking];
+
+		expect(compactionBoundaryError(entries, "missing")).toBe("is not an entry on the current branch");
+		expect(compactionBoundaryError(entries, summarized.id)).toBe(
+			"is before the messages the previous compaction kept",
+		);
+		expect(compactionBoundaryError(entries, result.id)).toBe("would keep a tool result without its tool call");
+		expect(compactionBoundaryError(entries, thinking.id)).toBe("keeps no context messages");
+		expect(compactionBoundaryError(entries, kept.id)).toBeUndefined();
+		expect(compactionBoundaryError(entries, call.id)).toBeUndefined();
+	});
+
+	it("accepts every boundary planCompaction chooses", () => {
+		const entries: SessionEntry[] = [
+			createMessageEntry(createUserMessage("first request ".repeat(40))),
+			createMessageEntry(createAssistantMessage("first answer ".repeat(40))),
+		];
+		entries.push(createCompactionEntry("Summary", entries[1].id));
+		entries.push(createModelChangeEntry("openai", "gpt-4"));
+		entries.push(createMessageEntry(createUserMessage("second request ".repeat(40))));
+		entries.push(...createToolExchange("x".repeat(800)));
+		entries.push(createThinkingLevelEntry("high"));
+		entries.push(...createToolExchange("y".repeat(1600)));
+		entries.push(createMessageEntry(createAssistantMessage("done ".repeat(40))));
+		const messages = pathContext(entries).messages;
+
+		for (const keepRecentTokens of [0, 1, 50, 100, 200, 400, 600, 800, 100_000]) {
+			const plan = planCompaction(entries, messages, { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens });
+			expect(plan).toBeDefined();
+			expect(compactionBoundaryError(entries, plan!.preparation.firstKeptEntryId)).toBeUndefined();
+		}
 	});
 });
 

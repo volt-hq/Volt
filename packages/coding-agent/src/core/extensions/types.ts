@@ -1609,6 +1609,12 @@ export interface SessionBeforeForkResult {
 
 export interface SessionBeforeCompactResult {
 	cancel?: boolean;
+	/**
+	 * A custom summary to install. Its `firstKeptEntryId` must be a valid boundary:
+	 * an entry on the branch, no earlier than what the previous compaction kept, whose
+	 * first kept message is not a tool result. `preparation.firstKeptEntryId` always
+	 * qualifies. Any other boundary fails the compaction without committing.
+	 */
 	compaction?: CompactionResult;
 }
 

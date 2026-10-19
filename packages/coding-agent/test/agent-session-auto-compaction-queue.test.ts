@@ -73,9 +73,9 @@ vi.mock("../src/core/compaction/index.js", () => ({
 		return { tokens, usageTokens: 0, trailingTokens: tokens, lastUsageIndex: null };
 	},
 	generateBranchSummary: async () => ({ summary: "", aborted: false, readFiles: [], modifiedFiles: [] }),
-	prepareCompaction: (branchEntries: Array<{ id: string }>) => {
+	planCompaction: (branchEntries: Array<{ id: string }>) => {
 		compactionMockState.firstKeptEntryId = branchEntries.at(-1)?.id;
-		return { dummy: true };
+		return { preparation: { dummy: true }, keepsOversizedSuffix: false };
 	},
 	shouldCompact: (
 		contextTokens: number,

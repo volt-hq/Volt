@@ -110,7 +110,7 @@ Before a checkpoint commits, built-in or extension-provided, Volt estimates the 
 
 - **Before any request**, the retained messages, system prompt, tools, plan checkpoint and response reserve must fit the context window, and for a built-in summary the largest checkpoint too. Otherwise compaction fails without a request: `Compaction cannot fit the context window: ...`. This happens when the newest exchange that must stay verbatim, such as one huge tool result, is itself too large.
 - **After the summary exists**, the rebuilt context plus the response reserve must fit the window. A built-in checkpoint must also stay within its composed size limit.
-- **An automatic compaction** must land below the trigger it fired at, and below the model's `compaction.modelThresholds` entry when one is set; otherwise it would compact again at once. This applies when compaction chose what to keep. When the newest indivisible exchange alone exceeds what may be kept, the next compaction summarizes it instead.
+- **An automatic compaction** must land below the trigger it fired at, and below the model's `compaction.modelThresholds` entry when one is set; otherwise it would compact again at once. This applies when compaction chose what to keep. When it keeps only the newest indivisible exchange, which alone exceeds what may be kept, the next compaction summarizes it instead. An extension checkpoint that keeps more than that exchange chose what to keep, and must land below the trigger.
 
 The response reserve counts at most half the context window. A refused checkpoint commits nothing; its error ends with `original context was kept`.
 
@@ -377,7 +377,7 @@ Extensions can intercept and customize both compaction and branch summarization.
 
 ### session_before_compact
 
-Fired before auto-compaction or `/compact`. Can cancel or provide custom summary. See `SessionBeforeCompactEvent` and `CompactionPreparation` in the types file. A custom summary is installed as given, without the host's user-message record or file lists, and passes the same [admission](#admission) as a built-in one: if its rebuilt context would not fit, nothing is committed. The `compact()` and `generateSummary()` helpers bound their output to about 80% of the `reserveTokens` you pass, at four characters per token, and regenerate an oversized summary shorter.
+Fired before auto-compaction or `/compact`. Can cancel or provide custom summary. See `SessionBeforeCompactEvent` and `CompactionPreparation` in the types file. A custom summary is installed as given, without the host's user-message record or file lists, and passes the same [admission](#admission) as a built-in one: if its rebuilt context would not fit, nothing is committed. Its `firstKeptEntryId` must be a valid boundary: an entry on the branch, no earlier than the messages the previous compaction kept, whose first kept context message is not a tool result (entries that add no context, such as model changes, may precede that message). `preparation.firstKeptEntryId` always qualifies. Any other boundary fails the compaction without committing: `Extension compaction boundary "<id>" ...; original context was kept`. The `compact()` and `generateSummary()` helpers bound their output to about 80% of the `reserveTokens` you pass, at four characters per token, and regenerate an oversized summary shorter.
 
 ```typescript
 volt.on("session_before_compact", async (event, ctx) => {

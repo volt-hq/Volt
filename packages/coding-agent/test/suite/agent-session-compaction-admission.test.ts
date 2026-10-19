@@ -294,21 +294,90 @@ describe("compaction admission", () => {
 		expect(await failureRecord(harness)).toMatchObject({ phase: "admission", budget: { triggerTokens: 30 } });
 	});
 
-	it("holds an extension checkpoint that keeps an earlier boundary to the threshold", async () => {
-		const keepEverything: ExtensionFactory = (volt) => {
-			volt.on("session_before_compact", async (event) => ({
-				compaction: {
-					summary: "Extension checkpoint",
-					// Keeps more than the allowance by choice: the prepared boundary keeps only the recent exchange.
-					firstKeptEntryId: event.branchEntries.find((entry) => entry.type === "message")!.id,
-					tokensBefore: event.preparation.tokensBefore,
-					details: {},
-				},
-			}));
+	it("commits an automatic compaction above the threshold when it keeps only an oversized newest exchange", async () => {
+		const harness = await harnessFor({
+			settings: { retry: { enabled: false }, compaction: { keepRecentTokens: 1 } },
+			seed: (seed) => seed.user("Original request").assistant("Answer"),
+		});
+		const model = harness.getModel();
+		harness.settingsManager.setCompactionThresholdTokens(`${model.provider}/${model.id}`, 30);
+		const { summaries } = routeRequests(
+			harness,
+			() => "Checkpoint",
+			() => "Reply",
+			1000,
+		);
+
+		await harness.session.prompt("Next request");
+		expect(summaries).toHaveLength(1);
+		expect(compactions(harness)).toHaveLength(1);
+		expect(harness.session.messages.slice(1).map(getMessageText)).toEqual(["Reply"]);
+	});
+
+	it.each([
+		{ keepRecentTokens: 20, prepared: "fits the allowance" },
+		{ keepRecentTokens: 1, prepared: "keeps an oversized newest exchange" },
+	])(
+		"holds an extension checkpoint that keeps an earlier boundary to the threshold when the prepared boundary $prepared",
+		async ({ keepRecentTokens }) => {
+			const keepEverything: ExtensionFactory = (volt) => {
+				volt.on("session_before_compact", async (event) => ({
+					compaction: {
+						summary: "Extension checkpoint",
+						// Keeps more than the allowance by choice: the prepared boundary keeps only the recent exchange.
+						firstKeptEntryId: event.branchEntries.find((entry) => entry.type === "message")!.id,
+						tokensBefore: event.preparation.tokensBefore,
+						details: {},
+					},
+				}));
+			};
+			const harness = await harnessFor({
+				extensionFactories: [keepEverything],
+				settings: { retry: { enabled: false }, compaction: { keepRecentTokens } },
+				seed: (seed) =>
+					seed
+						.user(`older ask ${"x".repeat(200)}`)
+						.assistant(`older answer ${"y".repeat(200)}`)
+						.user("RECENT ASK")
+						.assistant("recent answer"),
+			});
+			const model = harness.getModel();
+			harness.settingsManager.setCompactionThresholdTokens(`${model.provider}/${model.id}`, 30);
+			routeRequests(
+				harness,
+				() => "never",
+				() => "Reply",
+				1000,
+			);
+
+			await expect(harness.session.prompt("Next request")).rejects.toThrow(
+				/Auto-compaction failed: Compacted context \(~[\d,]+ tokens\) would still reach the 30-token compaction threshold/,
+			);
+			expect(compactions(harness)).toHaveLength(0);
+		},
+	);
+});
+
+describe("extension compaction boundaries", () => {
+	it("rejects a boundary before the messages the previous compaction kept", async () => {
+		let keepFromStart = false;
+		const extension: ExtensionFactory = (volt) => {
+			volt.on("session_before_compact", async (event) =>
+				keepFromStart
+					? {
+							compaction: {
+								summary: "Extension checkpoint",
+								firstKeptEntryId: event.branchEntries.find((entry) => entry.type === "message")!.id,
+								tokensBefore: event.preparation.tokensBefore,
+								details: {},
+							},
+						}
+					: undefined,
+			);
 		};
 		const harness = await harnessFor({
-			extensionFactories: [keepEverything],
-			settings: { retry: { enabled: false }, compaction: { keepRecentTokens: 20 } },
+			extensionFactories: [extension],
+			settings: { compaction: { keepRecentTokens: 20 } },
 			seed: (seed) =>
 				seed
 					.user(`older ask ${"x".repeat(200)}`)
@@ -316,19 +385,52 @@ describe("compaction admission", () => {
 					.user("RECENT ASK")
 					.assistant("recent answer"),
 		});
-		const model = harness.getModel();
-		harness.settingsManager.setCompactionThresholdTokens(`${model.provider}/${model.id}`, 30);
 		routeRequests(
 			harness,
-			() => "never",
+			() => "Checkpoint.",
 			() => "Reply",
-			1000,
 		);
+		await harness.session.compact();
+		await harness.session.prompt("Next request");
+		keepFromStart = true;
+		const entries = harness.sessionManager.getEntries();
 
-		await expect(harness.session.prompt("Next request")).rejects.toThrow(
-			/Auto-compaction failed: Compacted context \(~[\d,]+ tokens\) would still reach the 30-token compaction threshold/,
+		await expect(harness.session.compact()).rejects.toThrow(
+			/Extension compaction boundary "[^"]+" is before the messages the previous compaction kept; original context was kept/,
 		);
-		expect(compactions(harness)).toHaveLength(0);
+		expect(harness.sessionManager.getEntries()).toEqual(entries);
+		expect(compactions(harness)).toHaveLength(1);
+	});
+
+	it("rejects a boundary that would keep a tool result without its call", async () => {
+		const atToolResult: ExtensionFactory = (volt) => {
+			volt.on("session_before_compact", async (event) => ({
+				compaction: {
+					summary: "Extension checkpoint",
+					firstKeptEntryId: event.branchEntries.find(
+						(entry) => entry.type === "message" && entry.message.role === "toolResult",
+					)!.id,
+					tokensBefore: event.preparation.tokensBefore,
+					details: {},
+				},
+			}));
+		};
+		const call = fauxToolCall("read", { path: "notes.txt" });
+		const harness = await harnessFor({
+			extensionFactories: [atToolResult],
+			seed: (seed) =>
+				seed
+					.user("Read the notes")
+					.assistant("", { toolCalls: [call] })
+					.toolResult(call.id, "notes")
+					.assistant("Done"),
+		});
+		const entries = harness.sessionManager.getEntries();
+
+		await expect(harness.session.compact()).rejects.toThrow(
+			/Extension compaction boundary "[^"]+" would keep a tool result without its tool call; original context was kept/,
+		);
+		expect(harness.sessionManager.getEntries()).toEqual(entries);
 	});
 });
 

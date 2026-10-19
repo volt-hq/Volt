@@ -516,15 +516,32 @@ export function findCutPoint(
 	endIndex: number,
 	keepRecentTokens: number,
 ): CutPointResult {
+	return locateCutPoint(entries, startIndex, endIndex, keepRecentTokens).cut;
+}
+
+/**
+ * {@link findCutPoint}, and whether the cut keeps the newest indivisible suffix
+ * because no later boundary exists, though it alone exceeds `keepRecentTokens`.
+ */
+function locateCutPoint(
+	entries: SessionEntry[],
+	startIndex: number,
+	endIndex: number,
+	keepRecentTokens: number,
+): { cut: CutPointResult; keepsOversizedSuffix: boolean } {
 	const cutPoints = findValidCutPoints(entries, startIndex, endIndex);
 
 	if (cutPoints.length === 0) {
-		return { firstKeptEntryIndex: startIndex, turnStartIndex: -1, isSplitTurn: false };
+		return {
+			cut: { firstKeptEntryIndex: startIndex, turnStartIndex: -1, isSplitTurn: false },
+			keepsOversizedSuffix: false,
+		};
 	}
 
 	// Walk backwards from newest, accumulating estimated context message sizes.
 	let accumulatedTokens = 0;
 	let cutIndex = cutPoints[0]; // Default: keep from first context entry.
+	let keepsOversizedSuffix = false;
 
 	for (let i = endIndex - 1; i >= startIndex; i--) {
 		const message = getMessageFromEntryForCompaction(entries[i]);
@@ -535,7 +552,9 @@ export function findCutPoint(
 			// Exclude the crossing message by cutting at the next valid boundary. If
 			// there is no later boundary, retain the newest valid suffix so compaction
 			// still advances without separating tool results from their assistant call.
-			cutIndex = cutPoints.find((candidate) => candidate > i) ?? cutPoints[cutPoints.length - 1];
+			const laterCut = cutPoints.find((candidate) => candidate > i);
+			keepsOversizedSuffix = laterCut === undefined;
+			cutIndex = laterCut ?? cutPoints[cutPoints.length - 1];
 			break;
 		}
 		accumulatedTokens += messageTokens;
@@ -559,9 +578,8 @@ export function findCutPoint(
 	const turnStartIndex = isUserMessage ? -1 : findTurnStartIndex(entries, cutIndex, startIndex);
 
 	return {
-		firstKeptEntryIndex: cutIndex,
-		turnStartIndex,
-		isSplitTurn: !isUserMessage && turnStartIndex !== -1,
+		cut: { firstKeptEntryIndex: cutIndex, turnStartIndex, isSplitTurn: !isUserMessage && turnStartIndex !== -1 },
+		keepsOversizedSuffix,
 	};
 }
 
@@ -799,6 +817,50 @@ export interface CompactionPreparation {
 	settings: CompactionSettings;
 }
 
+/** A compaction's preparation, and whether its boundary was chosen or forced. */
+export interface CompactionPlan {
+	readonly preparation: CompactionPreparation;
+	/**
+	 * The boundary keeps the newest indivisible context suffix whole because no
+	 * later boundary exists, though it alone exceeds the retained-message allowance.
+	 */
+	readonly keepsOversizedSuffix: boolean;
+}
+
+/**
+ * The branch's latest compaction, and where the span a later compaction may
+ * cut starts: the first entry that compaction kept, or the entry after it.
+ */
+function compactionSpan(pathEntries: readonly SessionEntry[]): { previousIndex: number; start: number } {
+	for (let i = pathEntries.length - 1; i >= 0; i--) {
+		const entry = pathEntries[i];
+		if (entry.type !== "compaction") continue;
+		const firstKeptIndex = pathEntries.findIndex((candidate) => candidate.id === entry.firstKeptEntryId);
+		return { previousIndex: i, start: firstKeptIndex >= 0 ? firstKeptIndex : i + 1 };
+	}
+	return { previousIndex: -1, start: 0 };
+}
+
+/**
+ * Why a compaction cannot keep messages from `firstKeptEntryId` on the branch
+ * `pathEntries`, or undefined when it can. Like a boundary {@link planCompaction}
+ * chooses, it must be no earlier than what the latest compaction kept, and the
+ * first context message it keeps must be a valid cut point, so a tool result is
+ * never kept without its call. Entries that add no context may precede that message.
+ */
+export function compactionBoundaryError(pathEntries: SessionEntry[], firstKeptEntryId: string): string | undefined {
+	const index = pathEntries.findIndex((entry) => entry.id === firstKeptEntryId);
+	if (index < 0) return "is not an entry on the current branch";
+	if (index < compactionSpan(pathEntries).start) return "is before the messages the previous compaction kept";
+	const firstMessageIndex = pathEntries.findIndex(
+		(entry, entryIndex) => entryIndex >= index && getMessageFromEntryForCompaction(entry) !== undefined,
+	);
+	if (firstMessageIndex < 0) return "keeps no context messages";
+	return findValidCutPoints(pathEntries, firstMessageIndex, firstMessageIndex + 1).length > 0
+		? undefined
+		: "would keep a tool result without its tool call";
+}
+
 /**
  * Prepare compacting the branch `pathEntries`, root first. `messages` is that
  * branch's model context (the fold's `context.messages` for it); it measures
@@ -810,26 +872,23 @@ export function prepareCompaction(
 	settings: CompactionSettings,
 	context: CompactionContextBudget = {},
 ): CompactionPreparation | undefined {
+	return planCompaction(pathEntries, messages, settings, context)?.preparation;
+}
+
+/** {@link prepareCompaction}, and whether the boundary it chose keeps an oversized newest suffix. */
+export function planCompaction(
+	pathEntries: SessionEntry[],
+	messages: readonly AgentMessage[],
+	settings: CompactionSettings,
+	context: CompactionContextBudget = {},
+): CompactionPlan | undefined {
 	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
 		return undefined;
 	}
 
-	let prevCompactionIndex = -1;
-	for (let i = pathEntries.length - 1; i >= 0; i--) {
-		if (pathEntries[i].type === "compaction") {
-			prevCompactionIndex = i;
-			break;
-		}
-	}
-
-	let previousSummary: string | undefined;
-	let boundaryStart = 0;
-	if (prevCompactionIndex >= 0) {
-		const prevCompaction = pathEntries[prevCompactionIndex] as CompactionEntry;
-		previousSummary = prevCompaction.summary;
-		const firstKeptEntryIndex = pathEntries.findIndex((entry) => entry.id === prevCompaction.firstKeptEntryId);
-		boundaryStart = firstKeptEntryIndex >= 0 ? firstKeptEntryIndex : prevCompactionIndex + 1;
-	}
+	const { previousIndex: prevCompactionIndex, start: boundaryStart } = compactionSpan(pathEntries);
+	const previousSummary =
+		prevCompactionIndex >= 0 ? (pathEntries[prevCompactionIndex] as CompactionEntry).summary : undefined;
 	const boundaryEnd = pathEntries.length;
 	const toolTokens = estimateToolDefinitionTokens(context.tools);
 	const tokensBefore = estimateContextTokens(messages, context.tools).tokens;
@@ -842,7 +901,12 @@ export function prepareCompaction(
 				)
 			: settings.keepRecentTokens;
 
-	const cutPoint = findCutPoint(pathEntries, boundaryStart, boundaryEnd, retainedMessageTokens);
+	const { cut: cutPoint, keepsOversizedSuffix } = locateCutPoint(
+		pathEntries,
+		boundaryStart,
+		boundaryEnd,
+		retainedMessageTokens,
+	);
 
 	// Get UUID of first kept entry
 	const firstKeptEntry = pathEntries[cutPoint.firstKeptEntryIndex];
@@ -880,14 +944,17 @@ export function prepareCompaction(
 	}
 
 	return {
-		firstKeptEntryId,
-		messagesToSummarize,
-		turnPrefixMessages,
-		isSplitTurn: cutPoint.isSplitTurn,
-		tokensBefore,
-		previousSummary,
-		fileOps,
-		settings,
+		preparation: {
+			firstKeptEntryId,
+			messagesToSummarize,
+			turnPrefixMessages,
+			isSplitTurn: cutPoint.isSplitTurn,
+			tokensBefore,
+			previousSummary,
+			fileOps,
+			settings,
+		},
+		keepsOversizedSuffix,
 	};
 }
 
