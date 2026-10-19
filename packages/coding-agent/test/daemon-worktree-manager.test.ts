@@ -7,6 +7,7 @@ import {
 	readdirSync,
 	rmSync,
 	symlinkSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -670,6 +671,117 @@ describe("worktree manager (fake git)", () => {
 			purgedRecoveryCheckouts: [expect.stringContaining("clean-recovery-")],
 		});
 		expect(await manager.listRecoveryCheckouts()).toEqual([]);
+	});
+
+	it("makes room in a full recovery folder from its oldest clean checkouts, never from preserved data", async () => {
+		const recoveryRoot = join(getWorktreesRoot(agentDir), "recovery");
+		/** A recovery checkout: removal found it clean `markedAt` seconds into the epoch, or it preserves data. */
+		const recovery = (name: string, markedAt?: number): string => {
+			const path = join(recoveryRoot, name);
+			mkdirSync(path, { recursive: true });
+			if (markedAt !== undefined) {
+				const marker = join(path, ".volt-safe-to-purge.json");
+				// Another workspace's: the quota is shared.
+				writeFileSync(marker, `${JSON.stringify({ workspaceName: "other" })}\n`);
+				utimesSync(marker, markedAt, markedAt);
+			}
+			return path;
+		};
+		// First by name, while the oldest clean one is last by name: the age of its marker decides.
+		const preserved = recovery("a-preserved");
+		for (let index = 0; index < 30; index += 1) recovery(`clean-${index}`, 2_000 + index);
+		const oldest = recovery("clean-oldest", 1_000);
+		const checkout = getWorktreeCheckoutPath(agentDir, workspaceDir, "full-recovery");
+		const git = createFakeGit((args) => {
+			if (args[0] === "worktree" && args[1] === "add") mkdirSync(checkout, { recursive: true });
+			return { ok: true };
+		});
+		const manager = createManager(git.runGit);
+		await manager.create(workspace, { id: "full-recovery" });
+		expect(await manager.listRecoveryCheckouts()).toHaveLength(32);
+
+		await expect(manager.remove(workspace, "full-recovery")).resolves.toEqual({ ok: true });
+		const recoveries = await manager.listRecoveryCheckouts();
+		expect(recoveries).toHaveLength(32);
+		expect(recoveries).toContain(preserved);
+		expect(recoveries).not.toContain(oldest);
+		expect(recoveries.filter((path) => path.startsWith(join(recoveryRoot, "full-recovery-")))).toHaveLength(1);
+	});
+
+	it("keeps a checkout it cannot set aside while preserved data fills the recovery folder", async () => {
+		const recoveryRoot = join(getWorktreesRoot(agentDir), "recovery");
+		for (let index = 0; index < 32; index += 1)
+			mkdirSync(join(recoveryRoot, `preserved-${index}`), { recursive: true });
+		const checkout = getWorktreeCheckoutPath(agentDir, workspaceDir, "no-room");
+		const git = createFakeGit((args) => {
+			if (args[0] === "worktree" && args[1] === "add") mkdirSync(checkout, { recursive: true });
+			return { ok: true };
+		});
+		const manager = createManager(git.runGit);
+		await manager.create(workspace, { id: "no-room" });
+
+		await expect(manager.remove(workspace, "no-room")).resolves.toEqual({
+			ok: false,
+			error: "git_failed",
+			detail: expect.stringContaining("recovery quota of 32 checkouts is full of checkouts that preserve data"),
+		});
+		expect(existsSync(checkout)).toBe(true);
+		expect(await manager.listRecoveryCheckouts()).toHaveLength(32);
+		expect(await stateManager.listWorktrees("repo")).toHaveLength(1);
+	});
+
+	it("lets a concurrent removal evict a checkout another removal just found clean", async () => {
+		const recoveryRoot = join(getWorktreesRoot(agentDir), "recovery");
+		for (let index = 0; index < 31; index += 1)
+			mkdirSync(join(recoveryRoot, `preserved-${index}`), { recursive: true });
+		const manager = createManager(okGit().runGit);
+		await manager.create(workspace, { id: "first" });
+		await manager.create(workspace, { id: "second" });
+		mkdirSync(getWorktreeCheckoutPath(agentDir, workspaceDir, "first"), { recursive: true });
+		mkdirSync(getWorktreeCheckoutPath(agentDir, workspaceDir, "second"), { recursive: true });
+		// The first removal fills the folder, then stalls after releasing the lifecycle lock.
+		const firstFlush = createDeferred();
+		flushState.mockImplementationOnce(() => firstFlush.promise);
+
+		const firstRemoval = manager.remove(workspace, "first");
+		await expect(manager.remove(workspace, "second")).resolves.toEqual({ ok: true });
+		firstFlush.resolve();
+		await expect(firstRemoval).resolves.toEqual({ ok: true });
+		const recoveries = await manager.listRecoveryCheckouts();
+		expect(recoveries).toHaveLength(32);
+		expect(recoveries.filter((path) => path.startsWith(join(recoveryRoot, "first-")))).toEqual([]);
+		expect(recoveries.filter((path) => path.startsWith(join(recoveryRoot, "second-")))).toHaveLength(1);
+	});
+
+	it("removes a checkout preserved under recovery without evicting another clean one", async () => {
+		const recoveryRoot = join(getWorktreesRoot(agentDir), "recovery");
+		for (let index = 0; index < 30; index += 1)
+			mkdirSync(join(recoveryRoot, `preserved-${index}`), { recursive: true });
+		const clean = join(recoveryRoot, "clean");
+		mkdirSync(clean, { recursive: true });
+		writeFileSync(join(clean, ".volt-safe-to-purge.json"), `${JSON.stringify({ workspaceName: "repo" })}\n`);
+		let statusCalls = 0;
+		const git = createFakeGit((args) => {
+			if (args.includes("submodule")) return { ok: true, stdout: "" };
+			if (!args.includes("status")) return { ok: true };
+			statusCalls += 1;
+			// Changes during the first removal, clean again for the retry.
+			return { ok: true, stdout: statusCalls === 2 ? "!! .env\n" : "" };
+		});
+		const manager = createManager(git.runGit);
+		await manager.create(workspace, { id: "retried" });
+		mkdirSync(getWorktreeCheckoutPath(agentDir, workspaceDir, "retried"), { recursive: true });
+		await expect(manager.remove(workspace, "retried")).resolves.toMatchObject({
+			ok: false,
+			error: "worktree_dirty",
+		});
+		expect(await manager.listRecoveryCheckouts()).toHaveLength(32);
+
+		await expect(manager.remove(workspace, "retried")).resolves.toEqual({ ok: true });
+		const recoveries = await manager.listRecoveryCheckouts();
+		expect(recoveries).toHaveLength(32);
+		expect(recoveries).toContain(clean);
+		expect(await stateManager.listWorktrees("repo")).toEqual([]);
 	});
 
 	it("refuses to remove an active worktree even when forced", async () => {
