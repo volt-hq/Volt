@@ -203,9 +203,9 @@ describe("bounded fallback summaries", () => {
 		);
 		await generateSummary(messages, model, 2000, streamFn, undefined, undefined, previous);
 		const prompt = promptText(requests[0]);
-		// 0.8 × 2,000 reserve = 1,600 tokens = 6,400 characters; the first target is 60% of that.
+		// 0.8 × 2,000 reserve = 1,600 tokens = 6,400 characters; a fallback's first target is 45% of that.
 		expect(requests[0].options?.maxTokens).toBe(1600);
-		expect(prompt).toContain("aim for at most 3,840 characters");
+		expect(prompt).toContain("aim for at most 2,880 characters");
 		expect(prompt).toContain("hard limit is 6,400 characters");
 		expect(prompt).toContain("<previous-summary>\n## Goal\nEarlier checkpoint\n</previous-summary>");
 		expect(prompt).not.toContain("Earlier user message");
@@ -253,7 +253,7 @@ describe("bounded fallback summaries", () => {
 		expect(requests).toHaveLength(2);
 		const [first, second] = requests.map(promptText);
 		expect(second).toContain("A previous attempt reached 6,401 characters and was rejected");
-		expect(second).toContain("aim for at most 2,560 characters");
+		expect(second).toContain("aim for at most 1,920 characters");
 		expect(second.slice(0, second.indexOf("</conversation>"))).toBe(first.slice(0, first.indexOf("</conversation>")));
 	});
 

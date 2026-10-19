@@ -96,10 +96,12 @@ describe("compaction budgets", () => {
 		expect(reasoningAllowanceTokens("xhigh", { high: 4000 })).toBe(4000);
 	});
 
-	it("tightens correction targets and splits split-turn budgets 75/25", () => {
-		expect([0, 1, 2, 3].map((correction) => checkpointTargetChars(CHECKPOINT_MAX_CHARS, correction))).toEqual([
-			9830, 6553, 4096, 4096,
-		]);
+	it("tightens correction targets, aims fallback requests lower, and splits split-turn budgets 75/25", () => {
+		const targets = (purpose: "native" | "history" | "turn_prefix") =>
+			[0, 1, 2, 3].map((correction) => checkpointTargetChars(CHECKPOINT_MAX_CHARS, correction, purpose));
+		expect(targets("native")).toEqual([9830, 6553, 4096, 4096]);
+		expect(targets("history")).toEqual([7372, 4915, 3276, 3276]);
+		expect(targets("turn_prefix")).toEqual(targets("history"));
 		expect(splitCheckpointTokens(4096)).toEqual({ history: 3072, turnPrefix: 1024 });
 	});
 
