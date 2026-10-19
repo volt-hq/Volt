@@ -487,7 +487,10 @@ export class WorktreeManager {
 	): Promise<string> {
 		const recoveryRoot = join(getWorktreesRoot(this.agentDir), "recovery");
 		ensurePrivateDirectorySync(recoveryRoot);
-		const excess = (await this.listRecoveryCheckouts()).length - MAX_RECOVERY_CHECKOUTS + 1;
+		// A checkout already under recovery/ only gets a new name there, so it needs no room.
+		const excess = isSamePath(dirname(checkoutPath), recoveryRoot)
+			? 0
+			: (await this.listRecoveryCheckouts()).length - MAX_RECOVERY_CHECKOUTS + 1;
 		if (excess > 0) {
 			const purgeable = await this.purgeableRecoveryCheckouts(records);
 			if (purgeable.length < excess) {
@@ -1055,13 +1058,13 @@ export class WorktreeManager {
 	): Promise<WorktreeResult<Record<never, never>>> {
 		const force = options.force === true;
 		let preservedRecovery = false;
-		let cleanRecoveryPath: string | undefined;
 		let releaseSessionRemoval: (() => void) | undefined;
 		let removalLock: NativeFileLock | undefined;
 		try {
 			const result = await this.stateManager.runWorkspaceWorktreeLifecycle<WorktreeResult<Record<never, never>>>(
 				workspace.name,
 				async (current) => {
+					let cleanRecoveryPath: string | undefined;
 					const record = current.worktrees.find((entry) => entry.id === worktreeId);
 					if (!record) {
 						return { result: { ok: false, error: "worktree_not_found" } };
@@ -1168,14 +1171,20 @@ export class WorktreeManager {
 						// Checkout vanished out-of-band: clear the stale gitdir entry best-effort.
 						await this.runGit(["worktree", "prune"], sourceRootPath).catch(() => undefined);
 					}
-					return { result: { ok: true }, removeWorktreeIds: [worktreeId] };
+					return {
+						result: { ok: true },
+						removeWorktreeIds: [worktreeId],
+						// The removal is durable here. Mark before the lock is released so the next removal can
+						// evict this checkout; a failed mark only keeps it as preserved and must not undo the removal.
+						afterPersistWhileLocked: async () => {
+							if (cleanRecoveryPath === undefined) return;
+							await this.markRecoverySafeToPurge(cleanRecoveryPath, workspace.name).catch(() => undefined);
+						},
+					};
 				},
 			);
 			if (result.ok || preservedRecovery) {
 				await this.flushState?.();
-			}
-			if (result.ok && cleanRecoveryPath) {
-				await this.markRecoverySafeToPurge(cleanRecoveryPath, workspace.name).catch(() => undefined);
 			}
 			return result;
 		} catch (error) {
