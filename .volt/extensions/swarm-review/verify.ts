@@ -37,7 +37,7 @@ const VERDICT_SCHEMA = Type.Object({
 			priority: Type.Integer({
 				minimum: 0,
 				maximum: 3,
-				description: "0 blocker, 1 urgent, 2 real bounded defect, 3 optional improvement",
+				description: "0 blocker, 1 urgent, 2 wrong, stale, or missing behavior, 3 correct behavior that could be better",
 			}),
 			explanation: Type.String({ description: "The code facts you verified, the trigger, and the impact" }),
 			fix: Type.Optional(Type.String({ description: "Concise suggested fix" })),
@@ -75,7 +75,11 @@ function createVerdictTool(setup: SwarmSetup, cluster: Cluster, checkout: string
 			if (errors.length === 0 && findings.length > 0) {
 				const validation = await setup.engine.validate({
 					summary: "Anchors of a verdict",
-					candidates: findings.map((finding, index) => candidateFor(cluster, finding, index + 1)),
+					// Only the anchor is checked: a review without optional findings would refuse P3, and a verifier must be
+					// able to confirm a real issue it rates optional rather than reject it.
+					candidates: findings.map((finding, index) =>
+						candidateFor(cluster, { ...finding, priority: Math.min(finding.priority, 2) }, index + 1),
+					),
 					limitations: [],
 				});
 				for (const error of validation.errors) {

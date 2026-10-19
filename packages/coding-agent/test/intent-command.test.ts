@@ -178,15 +178,18 @@ describe("the equivalent command", () => {
 				focus: "security boundary",
 				scope: "src/**,test/**",
 				effort: "high",
-				includeOptional: true,
+				includeOptional: false,
 				scopeMode: "full",
 			}),
-		).toBe('branch main --focus "security boundary" --scope src/**,test/** --effort high --include-optional --full');
+		).toBe(
+			'branch main --focus "security boundary" --scope src/**,test/** --effort high --include-optional=false --full',
+		);
+		// Optional findings are included by default.
 		expect(
 			formatIntentCommand(review, {
 				target: "branch_uncommitted",
 				effort: "standard",
-				includeOptional: false,
+				includeOptional: true,
 				scopeMode: "incremental",
 			}),
 		).toBe("branch-uncommitted");
@@ -248,7 +251,8 @@ describe("the equivalent command", () => {
 
 				const expected: IntentCommandInput = { ...input };
 				if (expected.effort === "standard") delete expected.effort;
-				if (expected.includeOptional === false) delete expected.includeOptional;
+				if (expected.includeOptional === DEFAULT_REVIEW_RUN_CONTROLS.includeOptional)
+					delete expected.includeOptional;
 				if (expected.scopeMode === "incremental") delete expected.scopeMode;
 
 				const text = formatIntentCommand(review, input);
@@ -454,7 +458,7 @@ describe("the options form", () => {
 			value: "standard",
 			options: [{ value: "low" }, { value: "standard" }, { value: "high" }],
 		});
-		expect(form[3]).toMatchObject({ value: false });
+		expect(form[3]).toMatchObject({ value: true });
 		expect(form[4]).toMatchObject({ value: "incremental", options: [{ value: "incremental" }, { value: "full" }] });
 		expect(form[0]).not.toHaveProperty("value");
 	});
@@ -465,7 +469,7 @@ describe("the options form", () => {
 				focus: "",
 				scope: "",
 				effort: "standard",
-				includeOptional: false,
+				includeOptional: true,
 				scopeMode: "incremental",
 			}),
 		).toEqual({});
@@ -474,10 +478,10 @@ describe("the options form", () => {
 				focus: "auth",
 				scope: " src/** , test/** ,src/**",
 				effort: "high",
-				includeOptional: true,
+				includeOptional: false,
 				scopeMode: "full",
 			}),
-		).toEqual({ focus: "auth", scope: "src/**,test/**", effort: "high", includeOptional: true, scopeMode: "full" });
+		).toEqual({ focus: "auth", scope: "src/**,test/**", effort: "high", includeOptional: false, scopeMode: "full" });
 	});
 
 	it("gives a form answer the same command a typed line gives", () => {

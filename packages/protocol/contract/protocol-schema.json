@@ -11114,8 +11114,8 @@
 				"includeOptional": {
 					"type": "boolean",
 					"title": "Include optional findings",
-					"description": "Also report P3 suggestions.",
-					"default": false
+					"description": "Also report P3 suggestions (on unless set to false).",
+					"default": true
 				},
 				"scopeMode": {
 					"title": "Scope mode",

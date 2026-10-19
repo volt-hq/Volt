@@ -90,11 +90,15 @@ export function buildReport(
 	const { options, target } = setup;
 	const completedWorkers = state.workers.filter((worker) => worker.status === "done").length;
 	const byKind = (kind: string): Cluster[] => state.clusters.filter((cluster) => effectiveKind(cluster) === kind);
-	const findings: ReportedFinding[] = byKind("confirmed")
+	const confirmed: ReportedFinding[] = byKind("confirmed")
 		.flatMap((cluster) =>
 			clusterFindings(cluster, new Set(cluster.candidates.map((candidate) => candidate.worker)).size),
 		)
 		.sort((a, b) => a.priority - b.priority || b.workers - a.workers);
+	// Verifiers confirm optional issues at P3; a review that leaves them out lists them only here.
+	const { includeOptional } = setup.engine.target.controls;
+	const findings = includeOptional ? confirmed : confirmed.filter((finding) => finding.priority < 3);
+	const optional = includeOptional ? [] : confirmed.filter((finding) => finding.priority >= 3);
 
 	const waves = state.waves.length;
 	const lines = [
@@ -142,6 +146,7 @@ export function buildReport(
 	const claims = state.clusters.reduce((sum, cluster) => sum + cluster.candidates.length, 0);
 	const counts = [
 		`**${findings.length} confirmed finding(s)**`,
+		...(optional.length > 0 ? [`${optional.length} optional (P3, left out of this review)`] : []),
 		`${byKind("disputed").length} disputed`,
 		`${byKind("uncertain").length} uncertain`,
 		`${byKind("rejected").length} rejected`,
@@ -170,6 +175,15 @@ export function buildReport(
 		);
 		if (finding.fix) lines.push("", `**Fix:** ${finding.fix}`);
 	});
+
+	if (optional.length > 0) {
+		lines.push("", "### Optional improvements (P3; this review leaves them out)");
+		for (const finding of optional) {
+			lines.push(
+				`- ${finding.title} ${where(finding.file, finding.line, finding.endLine)} (${finding.agreement === "both" ? "both verifiers" : "1 verifier"}): ${finding.explanation}`,
+			);
+		}
+	}
 
 	const disputed = byKind("disputed");
 	if (disputed.length > 0) {

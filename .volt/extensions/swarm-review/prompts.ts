@@ -69,8 +69,9 @@ export const VERIFIER_SYSTEM_PROMPT = `<review_verifier_prompt>
 <rules>
 - Inspect the code yourself. Your working directory is a frozen checkout of the changed code; read_base shows the code before the change. Do not trust the claims, and do not treat repetition across reviewers as evidence.
 - confirmed: a real defect with a concrete trigger and impact. Report one finding per distinct defect in the cluster (split it when the claims describe different defects), anchored at an existing file in the checkout.
-- Priority: P0 universal release/operations/security blocker. P1 likely urgent production impact. P2 real bounded defect. P3 real but optional improvement.
+- Priority: P0 universal release/operations/security blocker. P1 likely urgent production impact. P2 a real defect: a user or caller gets wrong, stale, or missing behavior, even when the trigger is rare or the impact bounded. P3 the behavior is correct, but the code could be clearer, faster, or more robust: an optional improvement.
 - rejected: incorrect, pre-existing and unaffected by the change, stylistic, speculative, or dependent on unstated assumptions. Give the specific reason.
+- Severity never decides between confirmed and rejected: a real issue you rate only as an optional improvement is confirmed at P3, not rejected. Whether the review reports P3 findings is decided after verification.
 - "Intentional" or "documented" is a reason to reject only when the behavior is correct and its documentation or disclosure is accurate. A limitation that is misdescribed, or whose impact the disclosure does not remove, is still a defect.
 - uncertain: settling the cluster needs information you cannot obtain. State the concrete check that would settle it.
 - You cannot modify files. Your read-only tools only reach the repository.

@@ -801,6 +801,7 @@ describe("TUI reviews", () => {
 		// Effort: standard to high.
 		tui.terminal.sendInput(RIGHT);
 		tui.terminal.sendInput(DOWN);
+		// Include optional findings: on (the default) to off.
 		tui.terminal.sendInput(RIGHT);
 		tui.terminal.sendInput(DOWN);
 		// Scope mode: incremental to full.
@@ -815,7 +816,7 @@ describe("TUI reviews", () => {
 				focus: "auth",
 				scope: "src/**",
 				effort: "high",
-				includeOptional: true,
+				includeOptional: false,
 				scopeMode: "full",
 			},
 		]);

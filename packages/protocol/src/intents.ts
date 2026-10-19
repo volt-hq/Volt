@@ -209,8 +209,8 @@ const reviewOptions = {
 	includeOptional: Type.Optional(
 		Type.Boolean({
 			title: "Include optional findings",
-			description: "Also report P3 suggestions.",
-			default: false,
+			description: "Also report P3 suggestions (on unless set to false).",
+			default: true,
 		}),
 	),
 	scopeMode: Type.Optional(
