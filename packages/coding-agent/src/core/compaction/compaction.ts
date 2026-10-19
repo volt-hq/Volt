@@ -79,12 +79,22 @@ export type CompactionRequestUsage = {
 	diagnostics?: Pick<NonNullable<AssistantMessage["diagnostics"]>[number], "type" | "timestamp" | "details">[];
 };
 
+/** Why the compaction summarized with the strategy it used. */
+export type CompactionStrategyReason = "native" | "preflight_overflow" | "provider_overflow";
+
 /** Details stored in CompactionEntry.details for file tracking and request accounting. */
 export type CompactionDetails = {
 	readFiles: string[];
 	modifiedFiles: string[];
 	/** Captured by built-in session compaction, not the standalone summarization helper. */
 	requests?: CompactionRequestUsage[];
+	/** Why built-in session compaction used the strategy it did. */
+	strategyReason?: CompactionStrategyReason;
+	/**
+	 * Estimated tokens of the context built-in session compaction rebuilt: the
+	 * checkpoint, retained messages, system prompt, tools and plan checkpoint.
+	 */
+	tokensAfter?: number;
 };
 
 /**

@@ -50,6 +50,7 @@ import {
 } from "../../../core/messages.ts";
 import { parseSkillBlock } from "../../../core/skill-block.ts";
 import type { TruncationResult } from "../../../core/tools/truncate.ts";
+import { readCompactionOutcome } from "../compaction-outcome.ts";
 import { AssistantMessageComponent } from "../components/assistant-message.ts";
 import { BashExecutionComponent } from "../components/bash-execution.ts";
 import { BranchSummaryMessageComponent } from "../components/branch-summary-message.ts";
@@ -316,6 +317,7 @@ export class TranscriptView {
 					new CompactionSummaryMessageComponent(
 						createCompactionSummaryMessage(entry.payload.summary, entry.payload.tokensBefore, entry.timestamp),
 						this.host.markdownTheme(),
+						readCompactionOutcome(entry.payload.fromHook ? undefined : entry.payload.details),
 					),
 				);
 				return;

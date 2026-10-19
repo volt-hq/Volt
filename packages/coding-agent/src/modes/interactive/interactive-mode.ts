@@ -190,7 +190,7 @@ import { TranscriptView } from "./client/transcript-view.ts";
 import { TuiCatalogs } from "./client/tui-catalogs.ts";
 import { TuiStore, type TuiStoreChange } from "./client/tui-store.ts";
 import { ConversationWork } from "./client/work-view.ts";
-import { formatCompactionUsage } from "./compaction-usage.ts";
+import { readCompactionOutcome } from "./compaction-outcome.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
@@ -2380,8 +2380,8 @@ export class InteractiveMode {
 
 	/**
 	 * A compaction committed while the TUI showed the conversation: the
-	 * transcript now starts from it, and its summary and request usage show
-	 * where the conversation goes on.
+	 * transcript now starts from it, and its summary shows where the
+	 * conversation goes on.
 	 */
 	private showCompacted(entry: Extract<ProjectedEntry, { type: "compaction" }>): void {
 		const payload = entry.payload;
@@ -2390,12 +2390,10 @@ export class InteractiveMode {
 		const summary = new CompactionSummaryMessageComponent(
 			createCompactionSummaryMessage(payload.summary, payload.tokensBefore, entry.timestamp),
 			this.getMarkdownThemeWithSettings(),
+			readCompactionOutcome(payload.fromHook ? undefined : payload.details),
 		);
 		summary.setExpanded(this.toolOutputExpanded);
 		this.chatContainer.addChild(summary);
-		for (const line of formatCompactionUsage(payload.details)) {
-			this.chatContainer.addChild(new Text(theme.fg("dim", line), 1, 0));
-		}
 		this.ui.requestRender();
 	}
 
