@@ -293,6 +293,43 @@ describe("compaction admission", () => {
 		expect(harness.sessionManager.getEntries().length).toBeGreaterThan(entries);
 		expect(await failureRecord(harness)).toMatchObject({ phase: "admission", budget: { triggerTokens: 30 } });
 	});
+
+	it("holds an extension checkpoint that keeps an earlier boundary to the threshold", async () => {
+		const keepEverything: ExtensionFactory = (volt) => {
+			volt.on("session_before_compact", async (event) => ({
+				compaction: {
+					summary: "Extension checkpoint",
+					// Keeps more than the allowance by choice: the prepared boundary keeps only the recent exchange.
+					firstKeptEntryId: event.branchEntries.find((entry) => entry.type === "message")!.id,
+					tokensBefore: event.preparation.tokensBefore,
+					details: {},
+				},
+			}));
+		};
+		const harness = await harnessFor({
+			extensionFactories: [keepEverything],
+			settings: { retry: { enabled: false }, compaction: { keepRecentTokens: 20 } },
+			seed: (seed) =>
+				seed
+					.user(`older ask ${"x".repeat(200)}`)
+					.assistant(`older answer ${"y".repeat(200)}`)
+					.user("RECENT ASK")
+					.assistant("recent answer"),
+		});
+		const model = harness.getModel();
+		harness.settingsManager.setCompactionThresholdTokens(`${model.provider}/${model.id}`, 30);
+		routeRequests(
+			harness,
+			() => "never",
+			() => "Reply",
+			1000,
+		);
+
+		await expect(harness.session.prompt("Next request")).rejects.toThrow(
+			/Auto-compaction failed: Compacted context \(~[\d,]+ tokens\) would still reach the 30-token compaction threshold/,
+		);
+		expect(compactions(harness)).toHaveLength(0);
+	});
 });
 
 describe("automatic compaction trigger", () => {

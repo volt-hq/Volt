@@ -275,6 +275,7 @@ export class SessionCompaction {
 		compaction: CompactionResult,
 		builtIn: CompactionRequestUsage[] | undefined,
 		footprint: CompactionFootprint,
+		prepared: CompactionFootprint,
 		planningCheckpoint: CustomMessage | undefined,
 		cause: ConversationCompactionCause,
 		model: Model<Api>,
@@ -317,8 +318,11 @@ export class SessionCompaction {
 			);
 		}
 		// Landing below the trigger is required only when compaction chose what to keep. When the newest
-		// indivisible suffix alone exceeds the allowance, the next compaction summarizes it instead.
-		if (cause === "manual" || footprint.retainedTokens > footprint.retainedAllowance) return;
+		// indivisible suffix the preparation kept alone exceeds the allowance, the next compaction summarizes
+		// it instead. A boundary that keeps more than that suffix chose to, and is held to the trigger.
+		const forcedSuffix =
+			prepared.retainedTokens > prepared.retainedAllowance && footprint.retainedTokens <= prepared.retainedTokens;
+		if (cause === "manual" || forcedSuffix) return;
 		const { triggerTokens } = footprint;
 		if (contextWindow > 0 && triggerTokens > 0 && compactedTokens > triggerTokens) {
 			await this.reject(
@@ -535,6 +539,7 @@ export class SessionCompaction {
 			compaction.firstKeptEntryId === preparation.firstKeptEntryId
 				? prepared
 				: footprint(compaction.firstKeptEntryId),
+			prepared,
 			planningCheckpoint,
 			reason,
 			model,
