@@ -22,17 +22,40 @@ export function insideRoot(root: string, path: string): boolean {
 	return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
-/** Throws unless the path, with symlinks resolved when it exists, stays inside one of the allowed roots. */
-function assertInsideRoots(roots: readonly string[], absolutePath: string): void {
-	let target = absolutePath;
+/** The allowed roots as given and with symlinks resolved (as given when a root cannot be resolved). */
+interface Roots {
+	given: readonly string[];
+	resolved: readonly string[];
+}
+
+function rootsOf(paths: readonly string[]): Roots {
+	const resolved = paths.map((path) => {
+		try {
+			return realpathSync(path);
+		} catch {
+			return path;
+		}
+	});
+	return { given: paths, resolved };
+}
+
+/**
+ * Throws unless the path stays inside one of the allowed roots. An existing path is resolved and compared with the
+ * resolved roots, so a root reached through a symlink (macOS's /var -> /private/var) keeps its files while an
+ * in-root symlink to elsewhere does not. A nonexistent path is checked lexically against both spellings of the roots.
+ */
+function assertInsideRoots(roots: Roots, absolutePath: string): void {
+	let target: string | undefined;
 	try {
 		target = realpathSync(absolutePath);
 	} catch {
 		// Nonexistent paths are checked lexically; the tool reports them as missing.
 	}
-	if (!roots.some((root) => insideRoot(root, target))) {
-		throw new Error(`Access outside the repository under review is not allowed: ${absolutePath}`);
-	}
+	const inside =
+		target === undefined
+			? [...roots.given, ...roots.resolved].some((root) => insideRoot(root, absolutePath))
+			: roots.resolved.some((root) => insideRoot(root, target));
+	if (!inside) throw new Error(`Access outside the repository under review is not allowed: ${absolutePath}`);
 }
 
 /** Returns the checkout-relative path of an existing file inside the checkout, or undefined. */
@@ -71,7 +94,7 @@ function resolveLikeBuiltinTools(root: string, raw: string): string {
 function confineTool<TParams extends TSchema, TDetails>(
 	tool: ToolDefinition<TParams, TDetails>,
 	cwd: string,
-	roots: readonly string[],
+	roots: Roots,
 ) {
 	return defineTool({
 		...tool,
@@ -94,7 +117,7 @@ function confineTool<TParams extends TSchema, TDetails>(
  */
 export function createRepositoryTools(target: ReviewTarget, checkout: string) {
 	const cwd = checkout;
-	const roots = [checkout, target.repoRoot];
+	const roots = rootsOf([checkout, target.repoRoot]);
 	const guard = (path: string): string => {
 		assertInsideRoots(roots, path);
 		return path;
