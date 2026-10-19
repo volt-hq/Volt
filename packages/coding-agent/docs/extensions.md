@@ -802,6 +802,8 @@ volt.on("tool_execution_end", async (event, ctx) => {
 
 Fired before each LLM call. Modify messages non-destructively. See [Session Format](session-format.md) for message types.
 
+The hook shapes a request's view of the conversation; it is not a redaction boundary. Compaction's native request passes through it, but its chunked fallback, user-message record and file lists are built from the saved session (see [Summary Format](compaction.md#summary-format)).
+
 ```typescript
 volt.on("context", async (event, ctx) => {
   // event.messages - deep copy, safe to modify

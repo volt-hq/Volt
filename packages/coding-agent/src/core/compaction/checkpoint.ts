@@ -178,6 +178,8 @@ export interface CheckpointReadOptions {
  * Rejects a tool call as soon as it starts, and throws
  * {@link CheckpointOversizedError} as soon as streamed text exceeds the
  * limit, so a provider that ignores the requested token limit cannot run on.
+ * Returning the iterator does not stop the provider: a caller that gets an
+ * error must cancel the request through its signal.
  */
 export async function readCheckpointResponse(
 	stream: AsyncIterable<AssistantMessageEvent>,
@@ -272,13 +274,23 @@ export interface CheckpointRequester {
 /**
  * A requester that sends through a stream function with no deadlines or
  * telemetry. It drains each event directly so a fast stream never backs up;
- * the stream owns cancellation through the request's signal.
+ * the stream owns cancellation through the request's signal, which also
+ * cancels a response rejected before it ends.
  */
 export function streamCheckpointRequester(streamFn: StreamFn): CheckpointRequester {
 	return {
 		async send(request) {
-			const stream = await streamFn(request.model, request.context, request.options);
-			return readCheckpointResponse(stream, { maxChars: request.maxChars });
+			const rejected = new AbortController();
+			const signal = request.options.signal
+				? AbortSignal.any([request.options.signal, rejected.signal])
+				: rejected.signal;
+			try {
+				const stream = await streamFn(request.model, request.context, { ...request.options, signal });
+				return await readCheckpointResponse(stream, { maxChars: request.maxChars });
+			} catch (error) {
+				rejected.abort();
+				throw error;
+			}
 		},
 	};
 }
@@ -463,30 +475,39 @@ export function formatFileLists(
 	modifiedFiles: readonly string[],
 	maxChars = FILE_LISTS_MAX_CHARS,
 ): string {
+	const lists = (
+		[
+			["modified-files", "modified", modifiedFiles],
+			["read-files", "read", readFiles],
+		] as const
+	).filter(([, , paths]) => paths.length > 0);
+	const marker = (label: string, count: number): string => `[... ${count} more ${label} files omitted]`;
+	// A block's frame and room for its omission marker, reserved before any path.
+	const frame = (tag: string, label: string, count: number): number =>
+		`<${tag}>`.length + `</${tag}>`.length + 2 + marker(label, count).length + 1;
 	let remaining = maxChars;
 	const blocks: string[] = [];
-	for (const [tag, label, paths] of [
-		["modified-files", "modified", modifiedFiles],
-		["read-files", "read", readFiles],
-	] as const) {
-		if (paths.length === 0) continue;
-		const open = `<${tag}>`;
-		const close = `</${tag}>`;
-		const marker = (count: number): string => `[... ${count} more ${label} files omitted]`;
+	for (const [index, [tag, label, paths]] of lists.entries()) {
 		const separator = blocks.length > 0 ? 2 : 0;
-		// Frame, separator, and room for an omission marker are reserved before any path.
-		let used = separator + open.length + close.length + 2 + marker(paths.length).length + 1;
+		let used = separator + frame(tag, label, paths.length);
 		if (used > remaining) continue;
+		// Later blocks keep room for their frame and count, so a long list cannot hide the next one.
+		const limit = lists
+			.slice(index + 1)
+			.reduce(
+				(room, [nextTag, nextLabel, nextPaths]) => room - 2 - frame(nextTag, nextLabel, nextPaths.length),
+				remaining,
+			);
 		const listed: string[] = [];
 		for (const path of paths) {
 			const line = escapeHostTags(path);
-			if (used + line.length + 1 > remaining) break;
+			if (used + line.length + 1 > limit) break;
 			listed.push(line);
 			used += line.length + 1;
 		}
 		const omitted = paths.length - listed.length;
-		const lines = [...listed, ...(omitted > 0 ? [marker(omitted)] : [])];
-		const block = `${open}\n${lines.join("\n")}\n${close}`;
+		const lines = [...listed, ...(omitted > 0 ? [marker(label, omitted)] : [])];
+		const block = `<${tag}>\n${lines.join("\n")}\n</${tag}>`;
 		blocks.push(block);
 		remaining -= separator + block.length;
 	}

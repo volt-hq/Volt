@@ -107,6 +107,7 @@ describe("compaction budgets", () => {
 		expect(checkpointMaxTokens(2048)).toBe(512);
 		expect(userMessagesMaxChars(272_000)).toBe(16_384);
 		expect(userMessagesMaxChars(128_000)).toBe(10_240);
+		expect(userMessagesMaxChars(4096)).toBe(1024);
 		expect(fileListsMaxChars(272_000)).toBe(8192);
 		expect(fileListsMaxChars(16_384)).toBe(3276);
 		expect(maxComposedCheckpointChars(272_000)).toBe(16_384 + 16_384 + 8192 + 512);
@@ -164,6 +165,23 @@ describe("estimateRequestTokens", () => {
 		failed.stopReason = "error";
 		const messages: AgentMessage[] = [assistant("ok", 10_000, 1), assistant("zero", 0, 2), failed];
 		expect(estimateRequestTokens({ messages })).toBe(10_000 + estimateMessagesTokens(messages.slice(1)));
+	});
+});
+
+describe("estimateMessagesTokens", () => {
+	it("does not count bash output excluded from context", () => {
+		const bash = (excludeFromContext: boolean): AgentMessage => ({
+			role: "bashExecution",
+			command: "cat huge.log",
+			output: "x".repeat(4000),
+			exitCode: 0,
+			cancelled: false,
+			truncated: false,
+			excludeFromContext,
+			timestamp: 1,
+		});
+		expect(estimateMessagesTokens([bash(true)])).toBe(0);
+		expect(estimateMessagesTokens([bash(false)])).toBe(Math.ceil(("cat huge.log".length + 4000) / 4));
 	});
 });
 

@@ -8,6 +8,7 @@ import {
 	type SimpleStreamOptions,
 } from "@hansjm10/volt-ai";
 import { describe, expect, it } from "vitest";
+import { userMessagesMaxChars } from "../src/core/compaction/budget.ts";
 import {
 	composeCheckpoint,
 	formatFileLists,
@@ -92,6 +93,15 @@ describe("user-message record", () => {
 		expect(formatUserMessages([], 20_000)).toBeUndefined();
 		expect(formatUserMessages(["  "], 20_000)).toBeUndefined();
 	});
+
+	it("keeps the first message on small context windows", () => {
+		for (const contextWindow of [2048, 4000, 4096]) {
+			const maxChars = userMessagesMaxChars(contextWindow);
+			const record = formatUserMessages(["Original request", "Second", "Third"], maxChars);
+			expect(record).toContain("(1) Original request");
+			expect(record!.length).toBeLessThanOrEqual(maxChars);
+		}
+	});
 });
 
 describe("file lists", () => {
@@ -106,6 +116,16 @@ describe("file lists", () => {
 			"<modified-files>\nb.ts\n</modified-files>\n\n<read-files>\na.ts\n</read-files>",
 		);
 		expect(formatFileLists([], [])).toBe("");
+	});
+
+	it("keeps room to count read files when modified files fill the limit", () => {
+		const modified = Array.from({ length: 200 }, (_, index) => `src/some/long/path/modified-file-${index}.ts`);
+		const lists = formatFileLists(["important/read.ts", "other/read.ts"], modified, 2000);
+		expect(lists.length).toBeLessThanOrEqual(2000);
+		expect(lists).toMatch(/\[\.\.\. \d+ more modified files omitted\]/);
+		expect(lists).toMatch(/<read-files>\n(?:[^\n]+\n)*<\/read-files>$/);
+		const read = lists.slice(lists.indexOf("<read-files>"));
+		expect(read.includes("important/read.ts") || read.includes("[... 2 more read files omitted]")).toBe(true);
 	});
 });
 
@@ -145,6 +165,38 @@ describe("bounded fallback summaries", () => {
 		expect(prompt).toContain("<previous-summary>\n## Goal\nEarlier checkpoint\n</previous-summary>");
 		expect(prompt).not.toContain("Earlier user message");
 		expect(prompt).not.toContain("PRESERVE all existing information");
+	});
+
+	it("cancels an oversized response before regenerating it", async () => {
+		const signals: Array<AbortSignal | undefined> = [];
+		const streamFn: StreamFn = (_model, _context, options) => {
+			signals.push(options?.signal);
+			const stream = createAssistantMessageEventStream();
+			if (signals.length === 1) {
+				// Runs past the limit and never ends, as a provider ignoring maxTokens does.
+				stream.push({
+					type: "text_delta",
+					seq: 1,
+					contentIndex: 0,
+					delta: "x".repeat(6401),
+					snapshot: fauxAssistantMessage(""),
+					toolState: [],
+				});
+			} else {
+				const message = fauxAssistantMessage("## Goal\nShort");
+				queueMicrotask(() => stream.push({ type: "done", seq: 1, reason: "stop", message }));
+			}
+			return stream;
+		};
+		const caller = new AbortController();
+		await expect(generateSummary(messages, model, 2000, streamFn, caller.signal)).resolves.toBe("## Goal\nShort");
+		expect(signals).toHaveLength(2);
+		expect(signals[0]?.aborted).toBe(true);
+		expect(signals[1]?.aborted).toBe(false);
+		expect(caller.signal.aborted).toBe(false);
+		// The caller's signal still cancels each request.
+		caller.abort();
+		expect(signals[1]?.aborted).toBe(true);
 	});
 
 	it("regenerates an oversized summary shorter from the same source", async () => {

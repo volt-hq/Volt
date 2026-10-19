@@ -114,7 +114,7 @@ Before a checkpoint commits, built-in or extension-provided, Volt estimates the 
 
 The response reserve counts at most half the context window. A refused checkpoint commits nothing; its error ends with `original context was kept`.
 
-When a compaction fails, is cancelled or is refused, Volt writes a failure record to `~/.volt/agent/debug/compaction-latest.json` (or the configured agent directory), replacing the previous record. It contains the session ID, error, active step (`preflight` and `admission` for refusals), elapsed time, deadlines, thinking level, every dispatched request's record as described below (including Codex request diagnostics when enabled), the token counts the strategy or admission decision used (`budget`), and why the native or chunked strategy ran (`strategyReason`: `native`, `preflight_overflow`, or `provider_overflow`). It contains no prompts or summary text. Writing it never changes the compaction outcome.
+When built-in summary generation fails or is cancelled, or a compaction is refused before a request or at admission, Volt writes a failure record to `~/.volt/agent/debug/compaction-latest.json` (or the configured agent directory), replacing the previous record. It contains the session ID, error, active step (`preflight` and `admission` for refusals), elapsed time, deadlines, thinking level, every dispatched request's record as described below (including Codex request diagnostics when enabled), the token counts the strategy or admission decision used (`budget`), and why the native or chunked strategy ran (`strategyReason`: `native`, `preflight_overflow`, or `provider_overflow`). It contains no prompts or summary text. Writing it never changes the compaction outcome.
 
 ### Compaction Cache Usage
 
@@ -350,10 +350,10 @@ The generated text is rewritten on every compaction, not appended to. The durabl
 
 The host-owned blocks never pass through a model, so repeated compactions cannot erode them:
 
-- **`<user-messages>`**: the user's messages from the whole branch before the retained suffix, including history earlier compactions already summarized. The first message is always kept; then the newest ones, within at most 4,096 tokens or 2% of the context window. Each keeps up to 2,000 characters, and images appear as `[image]`. Newer messages, the retained conversation, and recorded decisions take precedence over older ones.
+- **`<user-messages>`**: the user's messages from the whole branch before the retained suffix, including history earlier compactions already summarized. The first message is always kept; then the newest ones, within at most 4,096 tokens or 2% of the context window, and at least 1,024 characters. Each keeps up to 2,000 characters, and images appear as `[image]`. Newer messages, the retained conversation, and recorded decisions take precedence over older ones.
 - **`<modified-files>`, then `<read-files>`**: within 8,192 characters (less on small windows), counting the paths that do not fit. `details` keeps the complete lists.
 
-A fallback request reuses the previous checkpoint without these blocks; the host rebuilds them. Branch summaries keep their own structure: Goal, Constraints & Preferences, Progress, Key Decisions, Next Steps, Critical Context, then `<read-files>` and `<modified-files>`.
+A fallback request reuses the previous checkpoint without these blocks; the host rebuilds them. These blocks and the chunked fallback are built from the saved session, not from what [`context`](extensions.md#context) hooks return: a hook shapes each request's view of the conversation and is not a redaction boundary. Branch summaries keep their own structure: Goal, Constraints & Preferences, Progress, Key Decisions, Next Steps, Critical Context, then `<read-files>` and `<modified-files>`.
 
 ### Message Serialization
 

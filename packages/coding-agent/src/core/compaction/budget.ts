@@ -28,8 +28,10 @@ export const MAX_CHECKPOINT_CORRECTIONS = CHECKPOINT_TARGET_RATIOS.length - 1;
 export const SPLIT_HISTORY_SHARE = 0.75;
 /** The verbatim user-message record gets at most this many tokens... */
 export const USER_MESSAGES_MAX_TOKENS = 4096;
-/** ...and at most this share of the context window. */
+/** ...and at most this share of the context window... */
 export const USER_MESSAGES_WINDOW_SHARE = 0.02;
+/** ...but never fewer characters than this, so the first message always has room. */
+const MIN_USER_MESSAGES_CHARS = 1024;
 /** Characters one recorded user message keeps. */
 export const USER_MESSAGE_MAX_CHARS = 2000;
 /** Characters the rendered read/modified file lists may take. */
@@ -100,9 +102,15 @@ export function splitCheckpointTokens(totalTokens: number): { history: number; t
 
 /** Characters the verbatim user-message record may take for a context window. */
 export function userMessagesMaxChars(contextWindow: number): number {
-	const windowTokens =
-		contextWindow > 0 ? Math.floor(contextWindow * USER_MESSAGES_WINDOW_SHARE) : USER_MESSAGES_MAX_TOKENS;
-	return Math.min(USER_MESSAGES_MAX_TOKENS, windowTokens) * CHECKPOINT_CHARS_PER_TOKEN;
+	const maxChars = USER_MESSAGES_MAX_TOKENS * CHECKPOINT_CHARS_PER_TOKEN;
+	if (!(contextWindow > 0)) return maxChars;
+	return Math.min(
+		maxChars,
+		Math.max(
+			MIN_USER_MESSAGES_CHARS,
+			Math.floor(contextWindow * USER_MESSAGES_WINDOW_SHARE) * CHECKPOINT_CHARS_PER_TOKEN,
+		),
+	);
 }
 
 /** The longest checkpoint built-in compaction composes: generated text, user messages, and file lists. */

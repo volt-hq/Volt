@@ -368,7 +368,8 @@ function estimateTextAndImageContentChars(content: string | Array<{ type: string
 
 /**
  * Estimate token count for a message using chars/4 heuristic.
- * This is conservative (overestimates tokens).
+ * This is conservative (overestimates tokens). Messages the model never
+ * sees, such as `!!` bash output, count as zero.
  */
 export function estimateTokens(message: AgentMessage): number {
 	let chars = 0;
@@ -399,6 +400,7 @@ export function estimateTokens(message: AgentMessage): number {
 			return Math.ceil(chars / 4);
 		}
 		case "bashExecution": {
+			if (message.excludeFromContext) return 0;
 			chars = message.command.length + message.output.length;
 			return Math.ceil(chars / 4);
 		}

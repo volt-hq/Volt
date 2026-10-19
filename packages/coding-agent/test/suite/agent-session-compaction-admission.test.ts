@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { maxComposedCheckpointChars } from "../../src/core/compaction/budget.ts";
 import type { CompactionDetails } from "../../src/core/compaction/compaction.ts";
 import type { ExtensionFactory } from "../../src/core/extensions/types.ts";
+import { bashResultOperations } from "../utilities/session-reads.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
 
 const harnesses: Harness[] = [];
@@ -143,6 +144,28 @@ describe("compaction admission", () => {
 		expect(turns).toHaveLength(0);
 		expect(harness.sessionManager.getEntries()).toEqual(entries);
 		expect(await failureRecord(harness)).toMatchObject({ phase: "preflight", requests: [] });
+	});
+
+	it("does not count bash output excluded from context toward the messages it must keep", async () => {
+		const harness = await harnessFor({
+			models: [{ id: "small", contextWindow: 32_768, maxTokens: 8192 }],
+			settings: { compaction: { keepRecentTokens: 1 } },
+			seed: (seed) => seed.user("Earlier request").assistant("Earlier answer"),
+		});
+		// `!!` output the model never sees is the newest exchange, so compaction keeps it.
+		await harness.session.runUserBash("cat huge.log", {
+			excludeFromContext: true,
+			operations: bashResultOperations({ output: "x".repeat(50_000), exitCode: 0 }),
+		});
+		const { summaries } = routeRequests(
+			harness,
+			() => "Checkpoint",
+			() => "never",
+		);
+
+		await harness.session.compact();
+		expect(summaries.length).toBeGreaterThan(0);
+		expect(compactions(harness)).toHaveLength(1);
 	});
 
 	it("bounds a split-turn checkpoint with its user messages, file lists and plan, and keeps tool exchanges valid", async () => {
