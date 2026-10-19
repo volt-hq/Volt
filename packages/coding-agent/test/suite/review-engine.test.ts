@@ -168,6 +168,7 @@ describe("review engines", () => {
 				followUps?: boolean;
 				/** Start it in a conversation with no model, as the host's own verification then has none. */
 				noModel?: boolean;
+				controls?: { includeOptional?: boolean };
 			} = {},
 		) => {
 			const { workId } = await startEngineReview({
@@ -176,6 +177,7 @@ describe("review engines", () => {
 				remote: options.remote ?? false,
 				...(options.previousRunId === undefined ? {} : { previousRunId: options.previousRunId }),
 				...(options.followUps === undefined ? {} : { followUps: options.followUps }),
+				...(options.controls === undefined ? {} : { controls: options.controls }),
 				cwd: harness.tempDir,
 				work: harness.session.work,
 				modelRegistry: harness.session.modelRegistry,
@@ -364,7 +366,8 @@ describe("review engines", () => {
 				expect(ctx.target).toMatchObject({
 					kind: "uncommitted",
 					description: expect.stringContaining("uncommitted"),
-					controls: { scope: [], effort: "standard", includeOptional: false },
+					// Optional findings are included unless the review leaves them out.
+					controls: { scope: [], effort: "standard", includeOptional: true },
 				});
 				submission = await reviewCarefully(ctx, { commandsRun: ["npm test"] });
 			}),
@@ -585,11 +588,12 @@ describe("review engines", () => {
 			let submission: Awaited<ReturnType<ReviewEngineContext["submit"]>> | undefined;
 			const { runs } = await start(
 				engine(async (ctx) => {
-					// P3 without includeOptional is an error, though the anchor itself is fine.
+					// P3 in a review that leaves optional findings out is an error, though the anchor itself is fine.
 					const optional = candidates({ priority: 3 });
 					validation = await ctx.validate(optional);
 					submission = await reviewCarefully(ctx, { candidates: optional });
 				}),
+				{ controls: { includeOptional: false } },
 			);
 			expect(validation).toEqual({ accepted: [], errors: ["candidates[0] uses P3 without includeOptional"] });
 			expect(submission).toMatchObject({ findings: 0, rejected: ["candidate-1"], completionStatus: "complete" });

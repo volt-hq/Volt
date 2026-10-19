@@ -217,6 +217,79 @@ describe("the swarm review as an engine", () => {
 		expect(output).toContain("Zero divisor returns the numerator");
 	}, 60_000);
 
+	test.each([
+		{
+			name: "reports one both rate optional, by default",
+			priorities: [3, 3],
+			includeOptional: undefined,
+			reported: 3,
+		},
+		{ name: "reports a P2/P3 split at P2", priorities: [3, 2], includeOptional: undefined, reported: 2 },
+		{
+			name: "leaves optional ones in the report when told to",
+			priorities: [3, 3],
+			includeOptional: false,
+			reported: undefined,
+		},
+	])(
+		"lets verifiers confirm a defect they rate optional: $name",
+		async ({ priorities, includeOptional, reported }) => {
+			const confirmedAt = (priority: number) =>
+				fauxAssistantMessage(
+					fauxToolCall("report_verdict", {
+						verdict: "confirmed",
+						reason: "The added guard returns amount when divisor is zero.",
+						findings: [
+							{
+								title: "Zero divisor returns the numerator",
+								file: "src/value.ts",
+								line: 2,
+								priority,
+								explanation: "The guard returns amount instead of signalling an invalid division.",
+							},
+						],
+					}),
+					{ stopReason: "toolUse" },
+				);
+			// Each verifier answers once: a P3 the host's checks sent back would leave the queue short.
+			const { client, conversation, harness } = await setup([
+				fauxAssistantMessage(fauxToolCall("report_findings", { findings: [finding] }), { stopReason: "toolUse" }),
+				fauxAssistantMessage(
+					fauxToolCall("report_clusters", {
+						clusters: [{ title: "Zero divisor guard returns the wrong value", claims: ["C1"] }],
+					}),
+					{ stopReason: "toolUse" },
+				),
+				confirmedAt(priorities[0]),
+				confirmedAt(priorities[1]),
+			]);
+			const started = await client.intent("review", {
+				target: "uncommitted",
+				engine: ENGINE,
+				engineParams: SEQUENTIAL,
+				...(includeOptional === undefined ? {} : { includeOptional }),
+			});
+			const workId = (started as { result: { workId: string } }).result.workId;
+			await vi.waitFor(
+				() => expect(getReviewRun(conversation.session.sessionManager, workId)?.status).toBe("completed"),
+				{ timeout: 30_000 },
+			);
+			expect(harness.faux.state.callCount).toBe(4);
+			const run = getReviewRun(conversation.session.sessionManager, workId)!;
+			await conversation.session.work.settled(workId);
+			const output = conversation.session.work.output(workId)?.text ?? "";
+			if (reported === undefined) {
+				expect(run.result?.findings).toHaveLength(0);
+				expect(output).toContain("### Optional improvements (P3; this review leaves them out)");
+			} else {
+				expect(run.result?.findings).toHaveLength(1);
+				expect(run.result?.findings[0]).toMatchObject({ priority: reported });
+				expect(output).not.toContain("### Optional improvements");
+			}
+		},
+		60_000,
+	);
+
 	test("fails with the reason when its model cannot be found, before any session starts", async () => {
 		const { client, conversation, harness } = await setup([]);
 		const started = await client.intent("review", {

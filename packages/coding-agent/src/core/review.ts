@@ -143,7 +143,7 @@ export interface ReviewRunControls {
 export const DEFAULT_REVIEW_RUN_CONTROLS: ReviewRunControls = {
 	scope: [],
 	effort: "standard",
-	includeOptional: false,
+	includeOptional: true,
 	scopeMode: "incremental",
 };
 
