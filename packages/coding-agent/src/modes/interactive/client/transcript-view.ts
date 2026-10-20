@@ -19,8 +19,12 @@
  *
  * Entries appended to the transcript append rows; any other change of the
  * transcript (a compaction, another branch) draws it afresh. A snapshot of
- * the same conversation keeps the rows of the entries it still shows and
- * presents them as the snapshot does.
+ * the same log keeps the rows of the entries it still shows and presents
+ * them as the snapshot does.
+ *
+ * Rows are kept by entry id, which names the same entry only within one log
+ * generation: a snapshot of another log, even of the same conversation id,
+ * is drawn with `rebuild`, never `sync` or `refresh`.
  */
 
 import {
@@ -152,7 +156,7 @@ function isStreamBoundary(item: LiveItem): boolean {
 	return item.type === "assistant_start" || item.type === "assistant_end";
 }
 
-/** Whether `next` is `rendered` with entries appended. */
+/** Whether `next` is `rendered` with entries appended, both of one log: its entry ids name the same entries. */
 function extendsRendered(rendered: readonly ProjectedEntry[], next: readonly ProjectedEntry[]): boolean {
 	if (rendered.length === 0) return true;
 	return (
@@ -228,10 +232,9 @@ export class TranscriptView {
 	}
 
 	/**
-	 * The store holds a snapshot of the conversation it showed: keep the rows
-	 * of the entries the transcript still shows, presented as the snapshot
-	 * presents them, and draw the rest; afresh when the transcript changed
-	 * otherwise.
+	 * The store holds a snapshot of the log it showed: keep the rows of the
+	 * entries the transcript still shows, presented as the snapshot presents
+	 * them, and draw the rest; afresh when the transcript changed otherwise.
 	 */
 	refresh(): void {
 		const next = this.store.transcript();

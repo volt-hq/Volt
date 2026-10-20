@@ -12,6 +12,13 @@
  * conversation (a resync, or a resubscription after a gap) resets it as well.
  * A subscription that ends otherwise (`ended{lost}`, at shutdown `closed`)
  * ends what the store shows.
+ *
+ * The store shows a log: a conversation in one log generation. An entry id
+ * names the same entry only within its log; a conversation recreated under
+ * the same id (deleted, then imported again) is another log, whose entries
+ * may repeat the old log's ids with other content. Each reset says whether
+ * its snapshot is of the log the store showed, so what views keep by entry id
+ * outlives only a snapshot of that log.
  */
 
 import {
@@ -32,8 +39,12 @@ type PhaseValue = Extract<LiveValue, { kind: "phase" }>;
 
 /** What changed in the store. */
 export type TuiStoreChange =
-	/** A snapshot replaced what the store holds: of the conversation it moved to or connected on (`moved`), or of the same one. */
-	| { readonly type: "reset"; readonly conversation: string; readonly moved: boolean }
+	/**
+	 * A snapshot replaced what the store holds: of the log it showed (`sameLog`: a resync, or a resubscription after
+	 * a gap), or of another log (the conversation the client moved to or connected on, or one recreated under the
+	 * same id).
+	 */
+	| { readonly type: "reset"; readonly conversation: string; readonly sameLog: boolean }
 	/** The client moves to `target`: the store holds nothing until the target's snapshot. */
 	| { readonly type: "moving"; readonly target: string }
 	/** Entries were appended to the log. */
@@ -93,6 +104,8 @@ export class TuiStore {
 	private attached: ProtocolClient | undefined;
 	/** The conversation of the last snapshot, until the client moves. */
 	private shown: string | undefined;
+	/** The log generation of the last snapshot, while the store shows its conversation. */
+	private shownGeneration: string | undefined;
 	/** The conversation the client moves to, until its snapshot resets the store. */
 	private movingTo: string | undefined;
 	private branchCache: { readonly state: ClientState; readonly branch: readonly ProjectedEntry[] } | undefined;
@@ -208,10 +221,11 @@ export class TuiStore {
 		}
 		switch (change.type) {
 			case "snapshot": {
-				const moved = this.shown !== change.conversation;
+				const sameLog = this.shown === change.conversation && this.shownGeneration === change.sessionGeneration;
 				this.shown = change.conversation;
+				this.shownGeneration = change.sessionGeneration;
 				this.movingTo = undefined;
-				this.emit({ type: "reset", conversation: change.conversation, moved });
+				this.emit({ type: "reset", conversation: change.conversation, sameLog });
 				this.settleWaiters();
 				return;
 			}
@@ -224,10 +238,12 @@ export class TuiStore {
 			case "ended":
 				if (change.reason === "moved") {
 					this.shown = undefined;
+					this.shownGeneration = undefined;
 					this.movingTo = change.target;
 					this.emit({ type: "moving", target: change.target });
 				} else if (change.reason !== "unsubscribed") {
 					this.shown = undefined;
+					this.shownGeneration = undefined;
 					this.movingTo = undefined;
 					this.emit({ type: "ended", reason: change.reason });
 					this.settleWaiters(new Error(`The conversation's subscription ended: ${change.reason}`));
