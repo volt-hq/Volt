@@ -124,7 +124,7 @@ function observe(client: TestClient) {
 		live: true,
 		accepts: () => false,
 	});
-	subscription.start("snapshot");
+	subscription.start({ after: "snapshot" });
 	cleanups.push(async () => subscription.dispose());
 	return { frames, subscription };
 }

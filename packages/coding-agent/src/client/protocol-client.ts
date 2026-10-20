@@ -7,8 +7,8 @@
  * When an intent moves it to another conversation, it follows: the old
  * subscription ends `moved` and it subscribes to the target from a snapshot,
  * on the same connection or, following moves by reconnecting, on the next
- * one. On a gap in the live lane it resubscribes after its position.
- * `connect` again on a new transport resumes after its position; a client
+ * one. On a gap in the live lane it resubscribes after its generation-pinned
+ * position. `connect` again on a new transport resumes that same log; a client
  * that resumes after a lost connection (`resumeAfterLoss`) waits for that
  * instead of failing when its connection ends unannounced. Beside it,
  * `observe` subscribes to a conversation the client may read but not act on,
@@ -200,6 +200,8 @@ export interface ConversationObservation {
 	/** Whether the live state arrived after the snapshot: what the observation holds is current. */
 	readonly caughtUp: boolean;
 	readonly state: ClientState;
+	/** The log generation the state belongs to; unknown until a snapshot arrives. */
+	readonly sessionGeneration: string | undefined;
 	readonly live: LiveFoldState;
 	/** Why the observation ended, once it did. */
 	readonly ended: ObservationEnd | undefined;
@@ -214,6 +216,7 @@ class Observation implements ConversationObservation {
 	received = false;
 	caughtUp = false;
 	state: ClientState = emptyClientState();
+	sessionGeneration: string | undefined;
 	live: LiveFoldState = emptyLiveFold();
 	ended: ObservationEnd | undefined;
 	subscriptionId = "";
@@ -243,6 +246,7 @@ class Observation implements ConversationObservation {
 	/** Subscribe afresh: after the position held, or from a snapshot when nothing is. */
 	start(after: number | "snapshot"): void {
 		this.liveSeq = 0;
+		if (after === "snapshot") this.sessionGeneration = undefined;
 		this.owner.subscribe(this, after);
 	}
 
@@ -257,6 +261,7 @@ class Observation implements ConversationObservation {
 		switch (frame.type) {
 			case "snapshot":
 				this.state = clientRestore(frame.ordinal, frame.state);
+				this.sessionGeneration = frame.sessionGeneration;
 				this.live = emptyLiveFold();
 				this.received = true;
 				break;
@@ -351,6 +356,7 @@ export class ProtocolClient {
 	private readonly observations = new Map<string, Observation>();
 	private readonly caughtUpWaiters = new Set<{ resolve: () => void; reject: (error: Error) => void }>();
 	private clientState: ClientState = emptyClientState();
+	private clientGeneration: string | undefined;
 	private liveState: LiveFoldState = emptyLiveFold();
 	private liveSeq = 0;
 	/** The ordinal of the newest entry that changed the pending inputs. */
@@ -377,6 +383,11 @@ export class ProtocolClient {
 	/** The conversation's client fold: its entries, leaf, branch values, labels, and pending inputs. */
 	get state(): ClientState {
 		return this.clientState;
+	}
+
+	/** The log generation the fold belongs to; unknown until a snapshot arrives. */
+	get sessionGeneration(): string | undefined {
+		return this.clientGeneration;
 	}
 
 	/** The conversation's live state: keyed values (phase, usage, host requests, ...) and what streams. */
@@ -662,7 +673,11 @@ export class ProtocolClient {
 				const id = randomUUID();
 				subscribed.subscriptionId = id;
 				this.observations.set(id, subscribed);
-				this.send({ type: "subscribe", subscriptionId: id, conversation, after });
+				const position =
+					after !== "snapshot" && subscribed.sessionGeneration !== undefined
+						? { after, sessionGeneration: subscribed.sessionGeneration }
+						: { after: "snapshot" };
+				this.send({ type: "subscribe", subscriptionId: id, conversation, ...position });
 			},
 			unsubscribe: (subscribed) => {
 				if (!this.observations.delete(subscribed.subscriptionId)) return;
@@ -688,7 +703,12 @@ export class ProtocolClient {
 		const id = randomUUID();
 		this.subscription = { id, conversation, caughtUp: false };
 		this.liveSeq = 0;
-		this.send({ type: "subscribe", subscriptionId: id, conversation, after });
+		if (after === "snapshot") this.clientGeneration = undefined;
+		const position =
+			after !== "snapshot" && this.clientGeneration !== undefined
+				? { after, sessionGeneration: this.clientGeneration }
+				: { after: "snapshot" };
+		this.send({ type: "subscribe", subscriptionId: id, conversation, ...position });
 	}
 
 	/** Start over on the same conversation after the client's position. */
@@ -762,6 +782,7 @@ export class ProtocolClient {
 			case "snapshot":
 				if (!ours) return;
 				this.clientState = clientRestore(frame.ordinal, frame.state);
+				this.clientGeneration = frame.sessionGeneration;
 				this.liveState = emptyLiveFold();
 				this.queueChangedAt = frame.ordinal;
 				this.changed(frame);
@@ -818,6 +839,7 @@ export class ProtocolClient {
 			case "ended":
 				if (!ours) return;
 				if (frame.reason === "moved") {
+					this.clientGeneration = undefined;
 					this.clientState = emptyClientState();
 					this.liveState = emptyLiveFold();
 					this.queueChangedAt = 0;

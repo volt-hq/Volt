@@ -293,7 +293,10 @@ function subscribe(host: Host, subscriber: TestSubscriber, profile: Profile, aft
 		accepts: () => true,
 	});
 	subscriber.subscription = subscription;
-	subscription.start(after);
+	// A position is the subscriber's in this log: it resumes in the log's own generation.
+	subscription.start(
+		after === "snapshot" ? { after } : { after, sessionGeneration: host.manager.getSessionGeneration() },
+	);
 }
 
 interface RunState {

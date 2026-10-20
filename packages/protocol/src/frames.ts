@@ -7,9 +7,10 @@
  * a snapshot, and receives `snapshot`, `entry`, `head`, and `live` frames on
  * that subscription until `ended`. Its position is the newest ordinal it saw;
  * `head` advances it over entries the profile hides. Resuming with
- * `subscribe{after: P}` sends the visible entries after P, a `head` when
- * needed, then `live{reset: true}`. A profile with bounded replay may answer a
- * long gap with a snapshot at the current ordinal instead.
+ * `subscribe{after: P, sessionGeneration: G}` sends the visible entries after P,
+ * a `head` when needed, then `live{reset: true}`. A different log generation,
+ * a position past the head, or a gap beyond the profile's replay bound answers
+ * with a snapshot at the current ordinal instead.
  *
  * Intents answer `accepted` or `rejected`; queries answer `result` or
  * `query_error`. `changed` tells clients to refetch a catalog. `fatal` ends the
@@ -18,7 +19,7 @@
 
 import { type Static, type TSchema, Type } from "typebox";
 import { ClientSnapshotSchema } from "./client-fold.ts";
-import { LogEntryOrdinalSchema, LogSessionIdSchema } from "./entries.ts";
+import { LogEntryIdSchema, LogEntryOrdinalSchema, LogSessionIdSchema } from "./entries.ts";
 import { opaque, stringEnum } from "./helpers.ts";
 import {
 	DYNAMIC_INTENT_PATTERN,
@@ -178,18 +179,19 @@ export const HelloFrameSchema = Type.Object(
 	closed,
 );
 
-export const SubscribeFrameSchema = Type.Object(
-	{
-		type: Type.Literal("subscribe"),
-		subscriptionId: id,
-		conversation: LogSessionIdSchema,
-		/** The client's position to resume after, or `snapshot` for a fold snapshot first. */
-		after: Type.Union([position, Type.Literal("snapshot")]),
-		/** Whether to receive the live lane; default true. */
-		live: Type.Optional(Type.Boolean()),
-	},
-	closed,
-);
+const subscriptionFields = {
+	type: Type.Literal("subscribe"),
+	subscriptionId: id,
+	conversation: LogSessionIdSchema,
+	/** Whether to receive the live lane; default true. */
+	live: Type.Optional(Type.Boolean()),
+};
+
+/** Numeric positions belong to one log generation, never to a session ID alone. */
+export const SubscribeFrameSchema = Type.Union([
+	Type.Object({ ...subscriptionFields, after: Type.Literal("snapshot") }, closed),
+	Type.Object({ ...subscriptionFields, after: position, sessionGeneration: LogEntryIdSchema }, closed),
+]);
 
 export const UnsubscribeFrameSchema = Type.Object({ type: Type.Literal("unsubscribe"), subscriptionId: id }, closed);
 
@@ -229,6 +231,7 @@ export const SnapshotFrameSchema = Type.Object(
 		type: Type.Literal("snapshot"),
 		subscriptionId: id,
 		conversation: LogSessionIdSchema,
+		sessionGeneration: LogEntryIdSchema,
 		ordinal: position,
 		state: ClientSnapshotSchema,
 	},

@@ -94,10 +94,17 @@ function message(ordinal: number, parentId: string | null, role: "user" | "assis
 	} as ProjectedEntry;
 }
 
+/** The text a message of {@link message} holds. */
+function textOf(shown: unknown): string {
+	const content = (shown as { content: string | Array<{ text: string }> }).content;
+	return typeof content === "string" ? content : content.map((part) => part.text).join("");
+}
+
 /** A client whose observation of `conversation` holds `state`, closed, and whose `history` answers `older`. */
 function observingClient(conversation: string, state: ClientState, older: ProjectedEntry[]) {
 	const observation: ConversationObservation = {
 		conversation,
+		sessionGeneration: "work-observation-generation",
 		received: true,
 		caughtUp: true,
 		state,
@@ -191,6 +198,81 @@ describe("the TUI's work from its client", () => {
 		expect(opened.conversation.messages()).toHaveLength(4);
 		opened.conversation.dispose();
 		expect(observation.stop).toHaveBeenCalledOnce();
+	});
+
+	it("pages only the log it observes, never an old log's pages under a log recreated with its id", async () => {
+		const oldTail = [message(50, "e49", "user", "old question"), message(51, "e50", "assistant", "old answer")];
+		const oldPage = [
+			message(48, null, "user", "old earlier question"),
+			message(49, "e48", "assistant", "old earlier answer"),
+		];
+		let state = stateWith([], oldTail, true);
+		let generation = "old-log";
+		const listeners = new Set<() => void>();
+		const observation: ConversationObservation = {
+			conversation: "child",
+			get sessionGeneration() {
+				return generation;
+			},
+			received: true,
+			caughtUp: true,
+			get state() {
+				return state;
+			},
+			live: emptyLiveFold(),
+			ended: undefined,
+			onChange: (listener) => {
+				listeners.add(listener);
+				return () => listeners.delete(listener);
+			},
+			stop: vi.fn(),
+		};
+		// The host answers the observation's resubscription with a snapshot of a log recreated under the same id.
+		const recreate = (log: string, tail: ProjectedEntry[]): void => {
+			generation = log;
+			state = stateWith([], tail, true);
+			for (const listener of [...listeners]) listener();
+		};
+		const answers: Array<(page: unknown) => void> = [];
+		const query = vi.fn(() => new Promise<unknown>((resolve) => answers.push(resolve)));
+		const intent = vi.fn(async () => ({
+			type: "accepted",
+			intentId: "i",
+			ordinals: [],
+			result: { conversation: "child" },
+		}));
+		const client = { observe: vi.fn(() => observation), query, intent } as unknown as ProtocolClient;
+		const own = new ConversationWork({
+			client: () => client,
+			holder: holder(stateWith([item("w1", { kind: "subagent", opens: true })])),
+		});
+		const opened = await own.open("w1");
+		if (opened.kind !== "view") throw new Error("Expected a read-only view");
+		const conversation = opened.conversation;
+		const shown = () => conversation.messages().map(textOf);
+
+		const oldLoad = conversation.loadEarlier?.();
+		answers.shift()?.({ entries: oldPage, earlier: false });
+		await oldLoad;
+		expect(shown()).toEqual(["old earlier question", "old earlier answer", "old question", "old answer"]);
+		expect(conversation.earlier).toBe(false);
+
+		// The recreated log reuses the old log's entry ids for other entries: none of the old pages show or anchor a page.
+		recreate("new-log", [message(20, "e19", "user", "new question"), message(21, "e20", "assistant", "new answer")]);
+		expect(shown()).toEqual(["new question", "new answer"]);
+		expect(conversation.earlier).toBe(true);
+		const newLoad = conversation.loadEarlier?.();
+		expect(query).toHaveBeenLastCalledWith("history", expect.objectContaining({ before: 20, branch: "e20" }), {
+			conversation: "child",
+		});
+
+		// A page asked of one log and answered after another arrived is dropped.
+		recreate("third-log", [message(30, "e29", "user", "third question")]);
+		answers.shift()?.({ entries: [message(19, null, "user", "new earlier question")], earlier: false });
+		await newLoad;
+		expect(shown()).toEqual(["third question"]);
+		expect(conversation.earlier).toBe(true);
+		conversation.dispose();
 	});
 
 	it("loads a conversation's older entries in the inspector as it scrolls up from the top", async () => {

@@ -10,7 +10,7 @@ Runs the prompts and writes the conversation to stdout as Volt protocol frames, 
 
 The stream is one subscription (`subscriptionId: "json-1"`) of the conversation the run is on:
 
-1. `snapshot{ordinal, state}`: the conversation before the run, as a client fold snapshot (`state.entries` holds every entry);
+1. `snapshot{sessionGeneration, ordinal, state}`: the conversation before the run, as a client fold snapshot (`state.entries` holds every entry) of the log generation `sessionGeneration` names (see [RPC mode](rpc.md#subscriptions));
 2. `entry{entry}` for each entry the run commits, in log order, and `head{ordinal}` when the last entries of a batch are hidden;
 3. `live{basedOn, seq, reset?, items}` for the live lane: the first is a reset; then the run phase, token use, the streaming assistant message (`assistant_start`, `assistant_delta`, `assistant_end`), running tools (`tool`, with their `presentation` or a `patch` of it), work (`work/<id>`), extension status items, panels, and title (`ext_status/…`, `ext_panel/…`, `ext_title`, and `patch` items for panels), and notices;
 4. `ended{reason: "closed"}` once the run ends.
@@ -18,7 +18,7 @@ The stream is one subscription (`subscriptionId: "json-1"`) of the conversation 
 When an extension command moves the run to another conversation (`ctx.newSession()` and the like), the subscription ends with `ended{reason: "moved", target}` and a new one (`json-2`, ...) starts from that conversation's snapshot.
 
 ```json
-{"type":"snapshot","subscriptionId":"json-1","conversation":"01990f6e-…","ordinal":2,"state":{"leafId":null,"entries":[…],"earlier":false,"model":{"provider":"anthropic","modelId":"claude-sonnet-4-5"},…}}
+{"type":"snapshot","subscriptionId":"json-1","conversation":"01990f6e-…","sessionGeneration":"3f6a2c1e-…","ordinal":2,"state":{"leafId":null,"entries":[…],"earlier":false,"model":{"provider":"anthropic","modelId":"claude-sonnet-4-5"},…}}
 {"type":"live","subscriptionId":"json-1","basedOn":2,"seq":1,"reset":true,"items":[{"type":"set","key":"phase","value":{"kind":"phase","busy":false,"operation":null}},…]}
 {"type":"entry","subscriptionId":"json-1","entry":{"ordinal":3,"id":"9f2c…","parentId":null,"type":"message","timestamp":"…","payload":{"message":{"role":"user",…}},"view":{"role":"user","text":"List files","truncated":false}}}
 {"type":"live","subscriptionId":"json-1","basedOn":3,"seq":2,"items":[{"type":"set","key":"phase","value":{"kind":"phase","busy":true,"operation":"turn","run":{"startedAt":1790000000000}}}]}

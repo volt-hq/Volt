@@ -66,7 +66,7 @@ export async function runPrintMode(
 			live: true,
 			accepts: () => false,
 		});
-		subscription.start("snapshot");
+		subscription.start({ after: "snapshot" });
 	};
 	const endSubscription = (end: SubscriptionEnd): void => {
 		subscription?.end(end);

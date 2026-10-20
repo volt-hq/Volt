@@ -184,6 +184,7 @@ describe("runPrintMode", () => {
 				type: "snapshot",
 				subscriptionId: "json-1",
 				conversation: "print-session",
+				sessionGeneration: session.sessionManager.getSessionGeneration(),
 				ordinal: 0,
 				state: expect.objectContaining({ entries: [], earlier: false }),
 			},

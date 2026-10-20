@@ -240,13 +240,24 @@ describe("protocol server on the remote profile", () => {
 
 	it("caps subscriptions per connection and snapshot reads per window", async () => {
 		const { harness, conversation } = await setup();
+		const sessionGeneration = conversation.session.sessionManager.getSessionGeneration();
 		const capped = phone(harness, conversation, { limits: { subscriptions: 2 } });
 		await welcomed(capped);
 		for (const id of ["a", "b", "c"]) {
-			capped.send({ type: "subscribe", subscriptionId: id, conversation: conversation.id, after: 0 });
+			capped.send({
+				type: "subscribe",
+				subscriptionId: id,
+				conversation: conversation.id,
+				after: 0,
+				sessionGeneration,
+			});
 		}
 		await capped.ended;
-		expect(capped.frames.at(-1)).toMatchObject({ type: "fatal", code: "invalid_frame" });
+		expect(capped.frames.at(-1)).toMatchObject({
+			type: "fatal",
+			code: "invalid_frame",
+			message: "More than 2 subscriptions",
+		});
 
 		const reader = phone(harness, conversation, { limits: { readBurst: 2, readRefillMs: 60_000 } });
 		await welcomed(reader);
@@ -286,12 +297,26 @@ describe("protocol server on the remote profile", () => {
 			limits: { entriesPerRead: 2, readBurst: cost + 1, readRefillMs: 60_000 },
 		});
 		await welcomed(resumer);
-		resumer.send({ type: "subscribe", subscriptionId: "a", conversation: conversation.id, after: 0, live: false });
+		const resume = {
+			type: "subscribe",
+			conversation: conversation.id,
+			after: 0,
+			sessionGeneration: conversation.session.sessionManager.getSessionGeneration(),
+			live: false,
+		};
+		resumer.send({ ...resume, subscriptionId: "a" });
 		resumer.send({ type: "unsubscribe", subscriptionId: "a" });
-		resumer.send({ type: "subscribe", subscriptionId: "b", conversation: conversation.id, after: 0, live: false });
+		resumer.send({ ...resume, subscriptionId: "b" });
 		await resumer.ended;
+		// The first resume replays the log; the second is past the budget.
+		expect(resumer.frames.filter((frame) => frame.type === "snapshot")).toEqual([]);
+		expect(resumer.frames.some((frame) => frame.type === "entry" && frame.subscriptionId === "a")).toBe(true);
 		expect(resumer.frames.filter((frame) => frame.type === "entry" && frame.subscriptionId === "b")).toEqual([]);
-		expect(resumer.frames.at(-1)).toMatchObject({ type: "fatal", code: "invalid_frame" });
+		expect(resumer.frames.at(-1)).toMatchObject({
+			type: "fatal",
+			code: "invalid_frame",
+			message: "Too many subscriptions requested",
+		});
 
 		const lister = phone(harness, conversation, { limits: { readBurst: 1, readRefillMs: 60_000 } });
 		await welcomed(lister);
@@ -486,6 +511,8 @@ describe("protocol server on the remote profile", () => {
 			subscriptionId: "s",
 			conversation: "00000000-0000-0000-0000-000000000000",
 			after: 0,
+			// No log is served here, so no generation is current: any well-formed one is refused alike.
+			sessionGeneration: "00000000-0000-0000-0000-000000000000",
 		});
 		await vi.waitFor(() =>
 			expect(device.frames.find((frame) => frame.type === "query_error" && frame.queryId === "q-1")).toMatchObject({

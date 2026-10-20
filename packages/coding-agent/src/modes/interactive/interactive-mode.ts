@@ -2248,14 +2248,15 @@ export class InteractiveMode {
 			case "reset":
 				// Before the client connected, the conversation shows once it did.
 				if (!this.connected) return;
-				if (change.moved) {
-					this.showConversation({ afresh: true });
-					void this.refreshInput();
-					void this.loadMovedConversationScope();
-				} else {
+				if (change.sameLog) {
 					this.transcript.refresh();
 					this.showQueueIfChanged();
 					this.syncStatus();
+				} else {
+					// Nothing the TUI drew of another log holds for this one, even under the same conversation id.
+					this.showConversation({ afresh: true });
+					void this.refreshInput();
+					void this.loadConversationScope();
 				}
 				return;
 			case "moving":
@@ -2283,12 +2284,13 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * The TUI shows a conversation its client moved to: once the client tells
-	 * where it runs and what it loaded, the TUI reads its own settings there
-	 * (with the project trust warning they call for) and registers its
-	 * themes. A later move follows its own conversation.
+	 * The TUI shows another log: of a conversation its client moved to, or of
+	 * one recreated under the same id. Once the client tells where it runs and
+	 * what it loaded, the TUI reads its own settings there (with the project
+	 * trust warning they call for) and registers its themes. A later move
+	 * follows its own conversation.
 	 */
-	private async loadMovedConversationScope(): Promise<void> {
+	private async loadConversationScope(): Promise<void> {
 		const conversation = this.store.conversation;
 		const [scope, resources] = await Promise.all([
 			this.readSettingsScope(),
@@ -2308,8 +2310,9 @@ export class InteractiveMode {
 	/**
 	 * Show the conversation the store shows as the TUI's: what its extensions
 	 * contribute, its status and plan, and its transcript, `afresh` in a
-	 * cleared chat (a conversation the client moved to) or after what the chat
-	 * shows (at startup). Rendering resumes once it shows.
+	 * cleared chat (another log: a conversation the client moved to, or one
+	 * recreated under the same id) or after what the chat shows (at startup).
+	 * Rendering resumes once it shows.
 	 */
 	private showConversation(options: { afresh: boolean }): void {
 		this.quitConfirmation = undefined;

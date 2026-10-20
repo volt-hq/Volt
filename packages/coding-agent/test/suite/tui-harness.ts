@@ -11,7 +11,11 @@ import type { HostRequestKind } from "@hansjm10/volt-protocol";
 import { setKeybindings, type TUI, type TuiMode } from "@hansjm10/volt-tui";
 import { expect, vi } from "vitest";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
-import { type ConnectThroughOptions, connectThrough } from "../../src/client/conversation-connector.ts";
+import {
+	type ConnectThroughOptions,
+	type ConversationConnector,
+	connectThrough,
+} from "../../src/client/conversation-connector.ts";
 import { InProcessConnector } from "../../src/client/in-process-connector.ts";
 import type { ProtocolClient } from "../../src/client/protocol-client.ts";
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
@@ -76,13 +80,15 @@ export interface TuiHarness extends HostHarness {
 	/**
 	 * InteractiveMode over the TUI's connector, its client connected and its
 	 * conversation shown; with `connect: false`, its UI runs and the fixture's
-	 * `connect` connects it.
+	 * `connect` connects it. With `connector`, the TUI reaches the host through
+	 * it instead, such as one that wraps the harness's.
 	 */
 	startMode(options?: {
 		tuiMode?: TuiMode;
 		columns?: number;
 		rows?: number;
 		connect?: boolean;
+		connector?: ConversationConnector;
 	}): Promise<TuiModeFixture>;
 	/** Store a session in the startup conversation's session directory, for a resume. */
 	storeSession(name?: string): Promise<SessionReference>;
@@ -140,7 +146,7 @@ export async function createTuiHarness(options: TuiHarnessOptions = {}): Promise
 				vi.stubEnv("VOLT_CODING_AGENT_DIR", harness.tempDir);
 				const settings = startup.session.settingsManager;
 				const profile = settings.getActiveProfile();
-				const mode = new InteractiveMode(connector, {
+				const mode = new InteractiveMode(modeOptions.connector ?? connector, {
 					tuiMode,
 					// Where the startup conversation runs, as the volt CLI tells the TUI before its client connects.
 					settingsScope: {

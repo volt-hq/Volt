@@ -1005,7 +1005,9 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 				}
 				case "snapshot": {
 					views.delete(frame.subscriptionId);
-					let redacted = sanitize(frame);
+					// The envelope's host-minted log identity is public resume data.
+					// Nested session locators remain stripped by the sanitizer.
+					let redacted = { ...sanitize(frame), sessionGeneration: frame.sessionGeneration };
 					while (!fits(redacted) && redacted.state.entries.length > 0) {
 						const entries = redacted.state.entries.slice(Math.ceil(redacted.state.entries.length / 4));
 						redacted = { ...redacted, state: { ...redacted.state, entries, earlier: true } };

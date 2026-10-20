@@ -199,6 +199,15 @@ describe("profile redaction", () => {
 					expect(projected.payload).toEqual(expected);
 					expect(projected.parentId).toBe(entry.parentId);
 				}
+				const snapshot: HostFrame = {
+					type: "snapshot",
+					subscriptionId: "s",
+					conversation: "conversation",
+					sessionGeneration: manager.getSessionGeneration(),
+					ordinal: manager.getOrdinal(),
+					state: clientSnapshot(clientFold([])),
+				};
+				expect(localProfile.redactor().redact(snapshot)).toBe(snapshot);
 			}),
 			{ numRuns: 50 },
 		);
@@ -277,10 +286,18 @@ describe("profile redaction", () => {
 						type: "snapshot",
 						subscriptionId: "s",
 						conversation: "conversation",
+						sessionGeneration: manager.getSessionGeneration(),
 						ordinal: manager.getOrdinal(),
 						state: clientSnapshot(clientFold(projected)),
 					};
-					expect(leaks(redactor.redact(snapshot))).toEqual([]);
+					const redactedSnapshot = redactor.redact(snapshot);
+					expect(leaks(redactedSnapshot)).toEqual([]);
+					// The device resumes in the log the snapshot came from: redaction keeps its generation.
+					expect(redactedSnapshot).toMatchObject({
+						type: "snapshot",
+						sessionGeneration: manager.getSessionGeneration(),
+						ordinal: manager.getOrdinal(),
+					});
 
 					// The streaming message, split into deltas at arbitrary points.
 					const message = {

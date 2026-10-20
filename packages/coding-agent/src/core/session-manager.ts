@@ -1349,6 +1349,11 @@ export class SessionManager {
 		return this.sessionId;
 	}
 
+	/** The log's identity: stable across persisted reopen, new for a recreated log. */
+	getSessionGeneration(): string {
+		return this.sessionGeneration;
+	}
+
 	/**
 	 * This session's link when it is a review finding discussion: its first
 	 * entry, written by the host that created it. A child stays linked after
