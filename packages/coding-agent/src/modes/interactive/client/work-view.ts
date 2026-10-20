@@ -276,6 +276,17 @@ function messagesOf(entries: readonly ProjectedEntry[]): unknown[] {
 }
 
 /**
+ * Older entries of an observed conversation's active branch, oldest first, and
+ * whether more remain, of the log generation they were read from: an entry id
+ * and ordinal name an entry only within one log.
+ */
+interface EarlierPages {
+	readonly generation: string;
+	readonly entries: readonly ProjectedEntry[];
+	readonly earlier: boolean;
+}
+
+/**
  * A conversation the TUI reads but does not act on, observed through its
  * client: its transcript, what streams in it while it is open, and its own
  * work. Entries older than a bounded snapshot load a page at a time.
@@ -286,14 +297,13 @@ export class ObservedConversation implements WorkConversation {
 	private readonly client: ProtocolClient;
 	private readonly conversation: string;
 	private readonly observation: ConversationObservation;
-	/** Older entries of the active branch loaded with `history`, oldest first. */
-	private earlierEntries: ProjectedEntry[] = [];
-	private earlierLeft: boolean | undefined;
+	/** The pages loaded with `history`; shown and paged from only while the observation holds their log. */
+	private pages: EarlierPages | undefined;
 	private loading = false;
 	private readonly listeners = new Set<() => void>();
 	private readonly unsubscribe: () => void;
 	private messageCache:
-		| { state: ClientState; live: LiveFoldState; earlier: ProjectedEntry[]; messages: unknown[] }
+		| { state: ClientState; live: LiveFoldState; pages: EarlierPages | undefined; messages: unknown[] }
 		| undefined;
 
 	/** Observe `conversation` until what it holds is current; throws when it ended without a snapshot. */
@@ -349,29 +359,36 @@ export class ObservedConversation implements WorkConversation {
 
 	/** Whether older entries remain to load. */
 	get earlier(): boolean {
-		return this.earlierLeft ?? this.observation.state.earlier;
+		return this.currentPages()?.earlier ?? this.observation.state.earlier;
+	}
+
+	/** The pages loaded, while the observation holds the log they were read from. */
+	private currentPages(): EarlierPages | undefined {
+		const pages = this.pages;
+		return pages !== undefined && pages.generation === this.observation.sessionGeneration ? pages : undefined;
 	}
 
 	messages(): readonly unknown[] {
 		const { state, live } = this.observation;
+		const pages = this.currentPages();
 		const cached = this.messageCache;
-		if (cached?.state === state && cached.live === live && cached.earlier === this.earlierEntries) {
-			return cached.messages;
-		}
+		if (cached?.state === state && cached.live === live && cached.pages === pages) return cached.messages;
 		const streaming = live.assistant?.message;
 		const messages = [
-			...messagesOf(this.earlierEntries),
+			...messagesOf(pages?.entries ?? []),
 			...messagesOf(transcriptOf(clientActiveBranch(state))),
 			...(streaming === undefined ? [] : [streaming]),
 		];
-		this.messageCache = { state, live, earlier: this.earlierEntries, messages };
+		this.messageCache = { state, live, pages, messages };
 		return messages;
 	}
 
 	/** Load the page of entries before the oldest one held; nothing when none remain or a page loads. */
 	async loadEarlier(): Promise<void> {
-		if (!this.earlier || this.loading) return;
-		const oldest = this.earlierEntries[0] ?? clientActiveBranch(this.observation.state)[0];
+		const generation = this.observation.sessionGeneration;
+		if (!this.earlier || this.loading || generation === undefined) return;
+		const loaded = this.currentPages()?.entries ?? [];
+		const oldest = loaded[0] ?? clientActiveBranch(this.observation.state)[0];
 		if (oldest === undefined) return;
 		this.loading = true;
 		try {
@@ -380,10 +397,11 @@ export class ObservedConversation implements WorkConversation {
 				{ before: oldest.ordinal, limit: HISTORY_PAGE_MAX_ENTRIES, branch: oldest.id },
 				{ conversation: this.conversation },
 			);
+			// A page of a log the observation no longer holds is dropped: the log it holds pages afresh.
+			if (this.observation.sessionGeneration !== generation) return;
 			// The branch walk starts at the oldest entry held, which the page repeats.
 			const older = page.entries.filter((entry) => entry.ordinal < oldest.ordinal);
-			this.earlierEntries = [...older, ...this.earlierEntries];
-			this.earlierLeft = page.earlier;
+			this.pages = { generation, entries: [...older, ...loaded], earlier: page.earlier };
 		} finally {
 			this.loading = false;
 			this.changed();
