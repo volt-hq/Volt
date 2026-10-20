@@ -722,7 +722,7 @@ export function createJobsToolDefinition(
 		],
 		parameters: jobsSchema,
 		present: presentJobs,
-		async execute(toolCallId, params, signal): Promise<AgentToolResult<JobsToolDetails>> {
+		async execute(toolCallId, params, signal, onUpdate): Promise<AgentToolResult<JobsToolDetails>> {
 			if (signal?.aborted) throw new Error("Operation aborted");
 			if (!options?.jobs) throw new Error("Background jobs require a conversation that runs them.");
 			const jobs = options.jobs;
@@ -733,6 +733,15 @@ export function createJobsToolDefinition(
 				throw new Error("ids, mode, and timeoutMs are valid only with jobs wait.");
 			if (params.action === "wait") {
 				if (params.id !== undefined || !params.ids) throw new Error("jobs wait requires ids, not id.");
+				// Name the waited jobs at once, so the call shows their labels while it waits; the wait validates the ids.
+				const named = params.ids.flatMap((id) => {
+					try {
+						return [withoutOutput(jobs.get(id))];
+					} catch {
+						return [];
+					}
+				});
+				if (named.length === params.ids.length) onUpdate?.({ content: [], details: { jobs: named } });
 				return jobWaitResult(
 					await jobs.wait(params.ids, {
 						...(params.mode === undefined ? {} : { mode: params.mode }),

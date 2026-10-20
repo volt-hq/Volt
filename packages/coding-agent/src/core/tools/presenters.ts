@@ -551,7 +551,8 @@ function namesJob(details: unknown): boolean {
  */
 export function presentBackground(inner: ToolPresenter): ToolPresenter {
 	return (input) => {
-		const { background, ...args } = input.args;
+		// The job's description is its work item's title, which clients show under the call.
+		const { background, description: _description, ...args } = input.args;
 		if (background !== true) return inner({ ...input, args });
 		const presented = inner({ args, argsComplete: input.argsComplete, state: "pending", cwd: input.cwd });
 		const title = presented.title;

@@ -328,6 +328,40 @@ describe("background tool interface", () => {
 		expect(await tool.execute("foreground", { command: "work" })).toMatchObject({ details: { marker: "done" } });
 	});
 
+	it("labels a job by its description and keeps the description from the tool", async () => {
+		const { jobs } = await runtime();
+		const received: unknown[] = [];
+		const definition: ToolDefinition<typeof schema, { marker: string }> = {
+			name: "bash",
+			label: "bash",
+			description: "Test Bash",
+			parameters: schema,
+			execute: async (_id, input) => {
+				received.push(input);
+				return { content: [{ type: "text", text: "done" }], details: { marker: "done" } };
+			},
+		};
+		const tool = wrapToolDefinition(withBackgroundJobs(definition, { start: (job) => jobs.start(job) }));
+		const described = summary(
+			await tool.execute("described", {
+				command: "npm run check",
+				background: true,
+				description: "Type-check the workspace",
+			}),
+		);
+		expect(described.label).toBe("Type-check the workspace");
+		const blank = summary(
+			await tool.execute("blank", { command: "npm run check", background: true, description: "  " }),
+		);
+		expect(blank.label).toBe("npm run check");
+		await jobs.wait([described.id, blank.id], { mode: "all" });
+		await tool.execute("foreground", { command: "ls", description: "List files" });
+		expect(received).toEqual([{ command: "npm run check" }, { command: "npm run check" }, { command: "ls" }]);
+		await expect(
+			tool.execute("invalid", { command: "ls", background: true, description: 42 } as never),
+		).rejects.toThrow("description must be a string");
+	});
+
 	it("keeps subagent preflight direct, preserves failure status, and finalizes actual completion once", async () => {
 		const { jobs } = await runtime();
 		const finalize = vi.fn(async (_name, _id, _input, result: AgentToolResult<unknown>) => result);
@@ -367,5 +401,39 @@ describe("background tool interface", () => {
 		await expect(tool.execute("bad", { action: "list", id: job.id })).rejects.toThrow("does not accept");
 		await expect(tool.execute("bad", { action: "read", id: job.id, timeoutMs: 1 })).rejects.toThrow("wait");
 		await expect(createJobsTool().execute("bad", { action: "list" })).rejects.toThrow("conversation");
+	});
+
+	it("names the jobs a wait waits for in a partial result before it settles", async () => {
+		const { jobs } = await runtime();
+		const tool = createJobsTool({ jobs });
+		const done = deferred();
+		const job = await start(
+			jobs,
+			async () => {
+				await done.promise;
+				return completed;
+			},
+			"Run the unit tests",
+		);
+		const updates: AgentToolResult<unknown>[] = [];
+		const waiting = tool.execute("wait", { action: "wait", ids: [job.id] }, undefined, (update) =>
+			updates.push(update),
+		);
+		await vi.waitFor(() => expect(updates).toHaveLength(1));
+		expect(updates[0]).toMatchObject({
+			content: [],
+			details: { jobs: [{ id: job.id, tool: "bash", label: "Run the unit tests", status: "running" }] },
+		});
+		// A summary, without the job's output.
+		expect(updates[0].details).not.toHaveProperty(["jobs", 0, "output"]);
+		done.resolve();
+		expect((await waiting).details).toMatchObject({ wait: { results: [{ id: job.id, status: "completed" }] } });
+		const unknown: AgentToolResult<unknown>[] = [];
+		await expect(
+			tool.execute("unknown", { action: "wait", ids: [job.id, "job_missing"] }, undefined, (update) =>
+				unknown.push(update),
+			),
+		).rejects.toThrow("Unknown background job");
+		expect(unknown).toEqual([]);
 	});
 });

@@ -89,8 +89,10 @@ Configure delivery in [Settings](settings.md) with `steeringMode` and `followUpM
 Native `bash` and `subagent` spawning calls accept `background: true`. Volt returns a job ID so the model can continue independent work instead of waiting for the entire tool call. Ordinary calls still wait for completion. This is separate from parallel tool batches, which wait for all calls before the model continues.
 
 ```json
-{ "command": "./run-checks.sh", "background": true }
+{ "command": "./run-checks.sh", "background": true, "description": "Run the repository checks" }
 ```
+
+The optional `description` is a short label for the job. Job lists, the work status, `jobs` cards, and completion notices show it instead of the raw command or task. Without one, the job is labeled by its command or task.
 
 Subagent confirmation is unchanged. The first spawning call returns the registry preflight directly without starting a job. Repeat the exact request with its `confirm` token and `background: true` to start a background single, parallel, or chain job. Child concurrency, budget, tool-policy, and duplicate-request safeguards still apply. Background mode does not apply to registry list/follow/resume operations.
 
