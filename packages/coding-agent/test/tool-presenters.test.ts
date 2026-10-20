@@ -578,6 +578,16 @@ describe("background calls", () => {
 		);
 		// The job is a work item clients show live under the call; its state at start would go stale.
 		expect(presented).toEqual({ title: [{ text: "$ ", bold: true }, { text: "npm test" }] });
+		// The description titles the job's work item, not the call.
+		expect(
+			present(
+				background,
+				input({ command: "npm test", background: true, description: "Run the unit tests" }, "done", {
+					text: "Background job job_1: running",
+					details: { job: { ...job, label: "Run the unit tests" } },
+				}),
+			),
+		).toEqual(presented);
 	});
 
 	it("says when a job failed to start", () => {

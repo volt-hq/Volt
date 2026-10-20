@@ -561,19 +561,19 @@ describe("interactive background jobs", () => {
 			fixture.commit(toolCallId);
 			await terminal.waitForRender();
 			const collapsed = stripAnsi(access.chatContainer.render(80).lines.join("\n"));
-			// The launch's title and its job's line, the notice, and the wait's table row.
-			expect(collapsed.match(/Run focused integration checks/g)).toHaveLength(4);
+			// The launch's title and its job's line, the notice, and the wait's title and table row.
+			expect(collapsed.match(/Run focused integration checks/g)).toHaveLength(5);
 			expect(collapsed.match(/final output/g)).toHaveLength(1);
 			expect(collapsed).toContain("$ Run focused integration checks");
 			expect(collapsed).toContain("Failed · Run focused integration checks");
-			expect(collapsed).toContain(`jobs wait ${job.id}`);
+			expect(collapsed).toContain("wait for Run focused integration checks");
 			expect(collapsed).toContain("1 failed");
 			expect(collapsed).not.toContain("terminal (any)");
 			const saved = harness.sessionManager.getConversationState().context;
 			terminal.sendInput("\x0f");
 			await terminal.waitForRender();
 			const expanded = stripAnsi(access.chatContainer.render(80).lines.join("\n"));
-			expect(expanded).toContain(`jobs wait ${job.id}`);
+			expect(expanded).toContain("wait for Run focused integration checks");
 			expect(expanded).toContain(job.id);
 			expect(expanded.match(/final output/g)).toHaveLength(2);
 			terminal.sendInput("\x0f");
@@ -684,11 +684,11 @@ describe("interactive background jobs", () => {
 				if (!card) throw new Error("Expected pending wait card");
 				const output = stripAnsi(card.render(80).lines.join("\n"));
 				expect(output).toContain("Waiting for background job");
-				expect(output).toContain("jobs wait");
+				expect(output).toContain("wait for");
 				// The job's own launch card above shows it live, as the job reports it.
 				const transcript = stripAnsi(access.chatContainer.render(80).lines.join("\n"));
 				expect(transcript).toContain(`Running · ${job.label}`);
-				expect(transcript).not.toContain("Running at capture");
+				expect(transcript).not.toMatch(/Running\s+Command/);
 			}
 			finish();
 			const result = await waiting;
@@ -937,7 +937,7 @@ describe("interactive background jobs", () => {
 				const output = terminal.getViewport().join("\n");
 				expect(output).toContain(outcome === "completed" ? "Completed" : "Failed");
 				expect(output).toContain("final output");
-				expect(output).not.toContain("Running at capture");
+				expect(output).not.toMatch(/Running\s+Command/);
 				expect(access.ui.getFocusedComponent()).toBe(access.editor);
 			}
 			expect(harness.sessionManager.getConversationState().context).toEqual(transcript);
@@ -992,7 +992,7 @@ describe("interactive background jobs", () => {
 			const output = stripAnsi(access.chatContainer.render(100).lines.join("\n"));
 			expect(output).toContain("Completed · Run focused integration checks");
 			expect(output).toContain("final output");
-			expect(output).not.toContain("Running at capture");
+			expect(output).not.toMatch(/Running\s+Command/);
 		}
 		expect(jobs.get(job.id).status).toBe("completed");
 	});

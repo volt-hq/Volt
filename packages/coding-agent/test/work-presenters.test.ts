@@ -719,21 +719,87 @@ describe("jobs presenter", () => {
 		(args) => {
 			for (const state of ["pending", "running"] as const) {
 				const presented = jobs(input(args, state));
-				expect(styled(presented.title)).toMatch(/^jobs/);
+				expect(styled(presented.title)).toMatch(/^(background jobs$|check on |wait for )/);
 				expect(presented.showsDuration).toBe(true);
 			}
 		},
 	);
 
-	it("names the action and its jobs in the title, and what it waits for while it runs", () => {
-		expect(styled(jobs(input({ action: "list" }, "running")).title)).toBe("jobs list");
-		expect(styled(jobs(input({ action: "read", id: "job_1" }, "running")).title)).toBe("jobs read job_1");
-		expect(styled(jobs(input({ action: "cancel", id: "job_1" }, "running")).title)).toBe("jobs cancel job_1");
-		expect(styled(jobs(input({ action: "wait", ids: ["job_1"] }, "running")).title)).toBe("jobs wait job_1");
+	it("says what the call does and names its jobs in the title, and what it waits for while it runs", () => {
+		expect(styled(jobs(input({ action: "list" }, "running")).title)).toBe("list background jobs");
+		const read = jobs(input({ action: "read", id: "job_1" }, "running"));
+		expect(styled(read.title)).toBe("check on job_1");
+		expect(read.activity).toBe("Checking background job");
+		expect(styled(jobs(input({ action: "cancel", id: "job_1" }, "running")).title)).toBe("cancel job_1");
+		expect(styled(jobs(input({ action: "wait", ids: ["job_1"] }, "running")).title)).toBe("wait for job_1");
 		const many = jobs(input({ action: "wait", ids: ["a", "b", "c"], mode: "all" }, "running"));
-		expect(styled(many.title)).toBe("jobs wait (all) · 3 jobs");
+		expect(styled(many.title)).toBe("wait for 3 jobs");
 		expect(many.activity).toBe("Waiting for 3 background jobs");
+		for (const mode of [{}, { mode: "any" }]) {
+			const any = jobs(input({ action: "wait", ids: ["a", "b", "c"], ...mode }, "running"));
+			expect(styled(any.title)).toBe("wait for first of 3 jobs");
+		}
 		expect(jobs(input({ action: "list" }, "pending")).activity).toBe("Generating arguments");
+	});
+
+	it("names a running wait's jobs by the labels its partial result records", () => {
+		const job: JobSummary = { id: "job_1", tool: "bash", label: "Run the\nunit tests", status: "running" };
+		const other: JobSummary = { id: "job_2", tool: "subagent", label: "Review the auth flow", status: "completed" };
+		const partial = (ids: string[], named: JobSummary[]) =>
+			jobs(input({ action: "wait", ids }, "running", { details: { jobs: named }, partial: true }));
+		const single = partial(["job_1"], [job]);
+		expect(styled(single.title)).toBe("wait for Run the unit tests");
+		expect(single.activity).toBe("Waiting for background job");
+		expect(single.summary).toBeUndefined();
+		const many = partial(["job_1", "job_2"], [job, other]);
+		expect(styled(many.title)).toBe("wait for first of 2 jobs");
+		expect(plain(many.summary)).toBe(
+			"Running | Command | Run the unit tests\nCompleted | Agent | Review the auth flow",
+		);
+		// Jobs the arguments do not name, and invalid metadata, leave the id.
+		expect(styled(partial(["job_3"], [job]).title)).toBe("wait for job_3");
+		expect(partial(["job_3", "job_4"], [job]).summary).toBeUndefined();
+		expect(
+			styled(
+				jobs(
+					input({ action: "wait", ids: ["job_1"] }, "running", {
+						details: { jobs: [{ ...job, status: "unknown" }] },
+						partial: true,
+					}),
+				).title,
+			),
+		).toBe("wait for job_1");
+	});
+
+	it("names the job of a read, cancel, or wait result by its label, and a replaced result by id", () => {
+		const snapshot = snapshotOf("completed");
+		const read = jobResult(snapshot);
+		const text = (read.content[0] as { text: string }).text;
+		for (const action of ["read", "cancel"] as const) {
+			const presented = jobs(input({ action, id: snapshot.id }, "done", { text, details: read.details }));
+			expect(styled(presented.title)).toBe(`${action === "read" ? "check on" : "cancel"} npm run check`);
+		}
+		const wait = jobWaitResult({
+			id: "wait_1",
+			ids: [snapshot.id],
+			mode: "any",
+			reason: "terminal",
+			startedAt: 1,
+			endedAt: 2,
+			results: [snapshot],
+			pending: [],
+		});
+		const waited = jobs(
+			input({ action: "wait", ids: [snapshot.id] }, "done", {
+				text: (wait.content[0] as { text: string }).text,
+				details: wait.details,
+			}),
+		);
+		expect(styled(waited.title)).toBe("wait for npm run check");
+		const replaced = jobs(
+			input({ action: "read", id: snapshot.id }, "done", { text: "Extension text", details: read.details }),
+		);
+		expect(styled(replaced.title)).toBe(`check on ${snapshot.id}`);
 	});
 
 	it.each(["read", "cancel"] as const)("shows a %s result as the job's row and, expanded, its output", (action) => {
@@ -748,9 +814,12 @@ describe("jobs presenter", () => {
 					isError: result.isError === true,
 				}),
 			);
-			const active = status === "running" || status === "cancelling";
+			const label = `${status[0]!.toUpperCase()}${status.slice(1)}`;
+			// Collapsed, the job's row without its id; expanded, with it.
 			const [table] = nodesOfType(presented.summary, "table");
-			expect(plain(table ? [table] : [])).toContain(`${active ? " at capture" : ""} | bash | npm run check`);
+			expect(plain(table ? [table] : [])).toBe(`${label} | Command | npm run check`);
+			const [expanded] = nodesOfType(presented.body, "table");
+			expect(plain(expanded ? [expanded] : [])).toBe(`${label} | Command | npm run check | ${snapshot.id}`);
 			expect(plain(presented.summary)).toContain("Output truncated");
 			expect(plain(presented.summary)).not.toContain("Captured output");
 			const body = plain(presented.body);
@@ -801,14 +870,16 @@ describe("jobs presenter", () => {
 					isError: true,
 				}),
 			);
-			expect(styled(presented.title)).toBe("jobs wait (all) · 4 jobs");
+			expect(styled(presented.title)).toBe("wait for 4 jobs");
 			const summary = plain(presented.summary);
 			expect(summary.split("\n")[0]).toBe(
 				`${reason === "terminal" ? "" : `${reason} · `}1 failed · 1 completed · 1 cancelled · 1 pending`,
 			);
-			expect(summary).toContain("Running at capture | subagent | Pending task | job_pending");
+			expect(summary).toContain("Running | Agent | Pending task");
+			expect(summary).not.toContain("job_pending");
 			expect(summary).not.toContain("**Output");
 			const body = plain(presented.body);
+			expect(body).toContain("Running | Agent | Pending task | job_pending");
 			for (let index = 0; index < results.length; index++) expect(body).toContain(`**Output ${index}**`);
 			expect(body).toContain("Output truncated");
 			expect(body).not.toContain("wait_private");
@@ -974,7 +1045,7 @@ describe("jobs presenter", () => {
 				details: result.details,
 			}),
 		);
-		expect(plain(presented.summary)).toContain("Running at capture | bash | Filtered label");
+		expect(plain(presented.summary)).toContain("Running | Command | Filtered label");
 		expect(plain(presented.body)).toContain("token=[REDACTED]");
 	});
 });
@@ -1000,6 +1071,6 @@ describe("presenting an extension's tool of a built-in name", () => {
 		});
 		expect(override.tool("jobs")?.policy).toMatchObject({ owner: "extension", extensionId: "forger" });
 		expect(actions(override)).not.toContain('"cancel_work"');
-		expect(actions(override)).toContain("Running at capture");
+		expect(actions(override)).toContain('"text":"Running"');
 	});
 });

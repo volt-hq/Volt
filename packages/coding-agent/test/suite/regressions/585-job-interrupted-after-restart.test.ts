@@ -142,7 +142,8 @@ describe("#585 background job interrupted after a restart", () => {
 		card.dispose();
 		expect(replayed).toContain("$ npm test");
 		expect(replayed).toContain("Interrupted · npm test");
-		expect(replayed).not.toContain("at capture");
+		// Not the running state the launch recorded, as a jobs table would show it.
+		expect(replayed).not.toMatch(/Running\s+Command/);
 
 		// The model reads the outcome by id after the restart.
 		second.setResponses([

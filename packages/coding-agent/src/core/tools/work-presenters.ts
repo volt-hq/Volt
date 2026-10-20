@@ -5,9 +5,11 @@
  * what the call's arguments and result recorded, never the live work, which
  * clients show from the work items themselves.
  *
- * - `jobs` shows the jobs its result names as a table with their state at
- *   capture, the output the model saw, and a cancel action for each job still
- *   running. A result whose text a hook replaced shows that text literally.
+ * - `jobs` shows the jobs its result names as a table with the status the
+ *   result recorded (their ids only expanded), the output the model saw, and
+ *   a cancel action for each job still running. Its title says what the call
+ *   does in plain words. A result whose text a hook replaced shows that text
+ *   literally.
  * - `subagent` shows each child as a timed step and, expanded, a card with
  *   its task, metrics, error, output, nested delegation, and an action that
  *   opens its conversation. A spawn shows nothing until a child exists, so a
@@ -89,10 +91,6 @@ const JOB_STATUS: Readonly<Record<JobStatus, { readonly label: string; readonly 
 
 function isJobStatus(value: unknown): value is JobStatus {
 	return typeof value === "string" && Object.hasOwn(JOB_STATUS, value);
-}
-
-function isTerminalJob(status: JobStatus): boolean {
-	return status !== "running" && status !== "cancelling";
 }
 
 function isFailedJob(status: JobStatus): boolean {
@@ -184,22 +182,32 @@ function jobCounts(jobs: readonly JobSummary[]): string {
 		.join(" · ");
 }
 
-/** Jobs as a table: their state when the result was captured, tool, label, and id. */
-function jobsTable(jobs: readonly JobSummary[], pending: ReadonlySet<JobSummary> = new Set()): UiNode {
+/** What runs a job, as the table names it. */
+const JOB_TYPE: Readonly<Record<JobSummary["tool"], string>> = { bash: "Command", subagent: "Agent" };
+
+/**
+ * Jobs as a table: their status when the result was recorded, what runs
+ * them, their label, and, with `ids` (expanded views), their id.
+ */
+function jobsTable(jobs: readonly JobSummary[], options: { readonly ids: boolean }): UiNode {
 	return {
 		type: "table",
 		key: "jobs",
-		columns: [{ header: "Status" }, { header: "Tool" }, { header: "Job" }, { header: "Id" }],
+		columns: [
+			{ header: "Status" },
+			{ header: "Type" },
+			{ header: "Job" },
+			...(options.ids ? [{ header: "Id" }] : []),
+		],
 		rows: jobs.map((job) => {
 			const style = JOB_STATUS[job.status];
-			const captured = pending.has(job) || !isTerminalJob(job.status);
 			return {
 				key: job.id,
 				cells: [
-					[{ text: captured ? `${style.label} at capture` : style.label, token: style.token }],
-					job.tool,
+					[{ text: style.label, token: style.token }],
+					JOB_TYPE[job.tool],
 					oneLine(literal(job.label), 200) || "(no task label)",
-					[{ text: job.id, token: "muted" }],
+					...(options.ids ? [[{ text: job.id, token: "muted" as const }]] : []),
 				],
 			};
 		}),
@@ -236,31 +244,38 @@ function jobsOutput(text: string): UiNode[] {
 	return lines.length === 0 ? [] : [{ type: "terminal", key: "output", lines }];
 }
 
-function jobsTitle(args: Args): UiNodeStyledText {
+/** The job ids a call's arguments name. */
+function argIds(args: Args): string[] {
+	if (typeof args.id === "string") return [args.id];
+	return Array.isArray(args.ids) ? args.ids.filter((id): id is string => typeof id === "string") : [];
+}
+
+/**
+ * The title of a jobs call, in plain words: what it does and the job it
+ * names, by the job's label when `named` (what the call's result recorded)
+ * knows it, else by id.
+ */
+function jobsTitle(args: Args, named: readonly JobSummary[] = []): UiNodeStyledText {
 	const action = args.action;
 	const ids = Array.isArray(args.ids) ? args.ids.filter((id): id is string => typeof id === "string") : [];
 	const id = typeof args.id === "string" ? args.id : ids.length === 1 ? ids[0] : undefined;
-	if (action === "list") return [{ text: "jobs list", bold: true }];
+	const label = id === undefined ? undefined : named.find((job) => job.id === id)?.label;
+	const shown = (label === undefined ? "" : oneLine(literal(label))) || (id === undefined ? "" : oneLine(literal(id)));
+	const subject = shown ? { text: ` ${shown}`, token: "accent" as const } : { text: " …", token: "muted" as const };
+	if (action === "list") return [{ text: "list background jobs", bold: true }];
 	if (action === "wait") {
-		const mode = args.mode === "all" ? "all" : "any";
-		const name = ids.length > 1 ? `jobs wait (${mode})` : "jobs wait";
-		if (ids.length > 1)
+		if (ids.length > 1) {
+			const count = args.mode === "all" ? `${ids.length} jobs` : `first of ${ids.length} jobs`;
 			return [
-				{ text: name, bold: true },
-				{ text: ` · ${ids.length} jobs`, token: "accent" },
+				{ text: "wait for", bold: true },
+				{ text: ` ${count}`, token: "accent" },
 			];
-		return [
-			{ text: name, bold: true },
-			id === undefined ? { text: " …", token: "muted" } : { text: ` ${oneLine(literal(id))}`, token: "accent" },
-		];
+		}
+		return [{ text: "wait for", bold: true }, subject];
 	}
-	if (action === "read" || action === "cancel") {
-		return [
-			{ text: `jobs ${action}`, bold: true },
-			id === undefined ? { text: " …", token: "muted" } : { text: ` ${oneLine(literal(id))}`, token: "accent" },
-		];
-	}
-	return [{ text: "jobs", bold: true }];
+	if (action === "read") return [{ text: "check on", bold: true }, subject];
+	if (action === "cancel") return [{ text: "cancel", bold: true }, subject];
+	return [{ text: "background jobs", bold: true }];
 }
 
 function jobsActivity(args: Args): string {
@@ -273,28 +288,37 @@ function jobsActivity(args: Args): string {
 		case "list":
 			return "Listing background jobs";
 		default:
-			return "Reading background job";
+			return "Checking background job";
 	}
 }
 
 /**
  * jobs: the jobs the result names as a table (collapsed, a list's first
  * five), the wait's reason and counts, and, expanded, every job, a cancel
- * action for each still running, and the output the model saw. A result
- * whose text a hook replaced shows that text.
+ * action for each still running, and the output the model saw. A running
+ * wait shows the jobs its partial result names, and the title names a job
+ * by its label once a result names it. A result whose text a hook replaced
+ * shows that text.
  */
 export const presentJobs: ToolPresenter = (input) => {
-	const title = jobsTitle(input.args);
 	if (input.state !== "done") {
+		const details = input.result?.partial === true ? input.result.details : undefined;
+		const ids = argIds(input.args);
+		const named = (isRecord(details) ? (jobSummaries(details.jobs) ?? []) : []).filter((job) => ids.includes(job.id));
 		return {
-			title,
+			title: jobsTitle(input.args, named),
 			activity: input.state === "running" || input.argsComplete ? jobsActivity(input.args) : "Generating arguments",
+			...(ids.length > 1 && named.length > 0 ? { summary: [jobsTable(named, { ids: false })] } : {}),
 			showsDuration: true,
 		};
 	}
 	const text = resultText(input.result);
 	const isError = input.result?.isError === true;
 	const native = nativeJobsResult(input.result?.details, text, isError);
+	const title = jobsTitle(
+		input.args,
+		native?.kind === "job" ? [native.job] : native?.kind === "wait" ? [...native.results, ...native.pending] : [],
+	);
 	if (!native) {
 		const lines = outputLines(literal(text).trim());
 		const shown = lines.slice(0, JOBS_TEXT_SUMMARY_LINES);
@@ -325,16 +349,21 @@ export const presentJobs: ToolPresenter = (input) => {
 				: [];
 		return {
 			title,
-			summary: [counts, jobsTable(shown), ...more],
-			body: [counts, jobsTable(native.jobs), ...cancelActions(native.jobs)],
+			summary: [counts, jobsTable(shown, { ids: false }), ...more],
+			body: [counts, jobsTable(native.jobs, { ids: true }), ...cancelActions(native.jobs)],
 			showsDuration: true,
 		};
 	}
 	if (native.kind === "job") {
 		return {
 			title,
-			summary: [jobsTable([native.job]), ...truncated],
-			body: [jobsTable([native.job]), ...cancelActions([native.job]), ...truncated, ...jobsOutput(text)],
+			summary: [jobsTable([native.job], { ids: false }), ...truncated],
+			body: [
+				jobsTable([native.job], { ids: true }),
+				...cancelActions([native.job]),
+				...truncated,
+				...jobsOutput(text),
+			],
 			showsDuration: true,
 		};
 	}
@@ -345,11 +374,10 @@ export const presentJobs: ToolPresenter = (input) => {
 		...(native.pending.length === 0 ? [] : [{ text: `${native.pending.length} pending`, token: "warning" as const }]),
 	];
 	const statusNode = status.length === 0 ? [] : [textNode("status", joined(status))];
-	const table = jobsTable(all, new Set(native.pending));
 	return {
 		title,
-		summary: [...statusNode, table, ...truncated],
-		body: [...statusNode, table, ...cancelActions(native.pending), ...jobsOutput(text)],
+		summary: [...statusNode, jobsTable(all, { ids: false }), ...truncated],
+		body: [...statusNode, jobsTable(all, { ids: true }), ...cancelActions(native.pending), ...jobsOutput(text)],
 		showsDuration: true,
 	};
 };
