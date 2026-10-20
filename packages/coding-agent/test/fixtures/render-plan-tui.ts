@@ -1,3 +1,4 @@
+import { PRESENTATION_MAX_SERIALIZED_BYTES } from "@hansjm10/volt-protocol";
 import {
 	type Component,
 	Container,
@@ -19,10 +20,11 @@ import { KeybindingsManager } from "../../src/core/keybindings.ts";
 import type { PlanningState, PlanPhase, PlanState } from "../../src/core/planning.ts";
 import { getEditorTheme, initTheme, theme } from "../../src/core/theme/runtime.ts";
 import { BUILTIN_PRESENTERS } from "../../src/core/tools/presenters.ts";
+import { presentToolCall, type ToolPresentResult } from "../../src/core/ui/presentation.ts";
 import { PlanInspectorComponent } from "../../src/modes/interactive/components/plan-inspector.ts";
 import { PlanDetailsComponent, PlanStatusComponent } from "../../src/modes/interactive/components/plan-status.ts";
-import { PresentedToolComponent } from "../../src/modes/interactive/components/presented-tool.ts";
 import { ResponsivePlanLayoutComponent } from "../../src/modes/interactive/components/responsive-plan-layout.ts";
+import { ToolCallRow } from "../../src/modes/interactive/components/tool-call-row.ts";
 
 class FixtureFooter implements Component {
 	invalidate(): void {
@@ -152,31 +154,40 @@ inspector = new PlanInspectorComponent({
 	requestRender: () => tui.requestRender(),
 });
 const status = new PlanStatusComponent(planning);
-const tool = new PresentedToolComponent(
-	"update_plan",
-	{
-		title: plan.title,
-		summary: plan.summary,
-		steps: plan.steps.map((step) => ({
-			id: step.id,
-			text: step.text,
-			...(step.substeps
-				? { substeps: step.substeps.map((substep) => ({ id: substep.id, text: substep.text })) }
-				: {}),
-		})),
-	},
-	() => BUILTIN_PRESENTERS,
-	tui,
-	process.cwd(),
-);
-tool.updateResult(
-	{
-		content: [{ type: "text", text: JSON.stringify({ mode: planning.mode, planId: plan.id, steps: plan.steps }) }],
-		details: planning,
-		isError: false,
-	},
-	false,
-);
+const tool = new ToolCallRow("update_plan", tui);
+const result: ToolPresentResult = {
+	content: [{ type: "text", text: JSON.stringify({ mode: planning.mode, planId: plan.id, steps: plan.steps }) }],
+	details: planning,
+	isError: false,
+	partial: false,
+};
+tool.update({
+	presentation: presentToolCall(
+		BUILTIN_PRESENTERS.tool("update_plan"),
+		"update_plan",
+		{
+			args: {
+				title: plan.title,
+				summary: plan.summary,
+				steps: plan.steps.map((step) => ({
+					id: step.id,
+					text: step.text,
+					...(step.substeps
+						? { substeps: step.substeps.map((substep) => ({ id: substep.id, text: substep.text })) }
+						: {}),
+				})),
+			},
+			argsComplete: true,
+			state: "done",
+			result,
+			cwd: process.cwd(),
+		},
+		PRESENTATION_MAX_SERIALIZED_BYTES,
+	),
+	state: "done",
+	isError: result.isError,
+	content: result.content,
+});
 tool.setExpanded(process.env.VOLT_PLAN_EXPANDED === "1");
 
 const transcript = new Container();

@@ -1,32 +1,25 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
-import type { TUI } from "@hansjm10/volt-tui";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { initTheme } from "../../../src/core/theme/runtime.ts";
+import type { ToolPresentation } from "@hansjm10/volt-protocol";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createEditTool } from "../../../src/core/tools/edit.ts";
-import { HOST_UI_POLICY, type ToolPresenter } from "../../../src/core/ui/presentation.ts";
-import { PresentedToolComponent } from "../../../src/modes/interactive/components/presented-tool.ts";
-import { STREAMING_RENDER_INTERVAL_MS } from "../../../src/modes/interactive/components/streaming-render-coalescer.ts";
+import { HOST_UI_POLICY, type PresenterSet, type ToolPresenter } from "../../../src/core/ui/presentation.ts";
+import {
+	ArgumentPresentations,
+	PRESENTATION_COALESCE_MS,
+	ToolPresentationState,
+} from "../../../src/core/ui/presentation-state.ts";
 import { createHarness } from "../harness.ts";
 
-/** A tool row presenting with `present`. */
-function row(present: ToolPresenter): PresentedToolComponent {
-	const presenters = {
+/** Host presenters for the preview tool. */
+function presenters(present: ToolPresenter): PresenterSet {
+	return {
 		generation: 0,
 		tool: () => ({ present, policy: HOST_UI_POLICY }),
 		message: () => undefined,
 	};
-	return new PresentedToolComponent(
-		"preview",
-		{},
-		() => presenters,
-		{ requestRender: () => {} } as unknown as TUI,
-		process.cwd(),
-	);
 }
-
-beforeAll(() => initTheme("dark"));
 afterEach(() => vi.useRealTimers());
 
 describe("tool argument processing (#354)", () => {
@@ -61,42 +54,70 @@ describe("tool argument processing (#354)", () => {
 		}
 	});
 
-	it("bounds preview presentations per tool and flushes the latest arguments at completion", () => {
+	it("bounds host preview presentations per tool and flushes the latest arguments at completion", () => {
 		vi.useFakeTimers();
-		const presented: unknown[] = [];
-		const component = row((input) => {
-			presented.push(input.args);
-			return { title: "preview" };
+		const present = vi.fn<ToolPresenter>((input) => ({ title: `preview ${String(input.args.text)}` }));
+		const published = vi.fn<(id: string, presentation: ToolPresentation) => void>();
+		const state = new ArgumentPresentations({
+			presenters: () => presenters(present),
+			cwd: () => process.cwd(),
+			publish: published,
 		});
 		try {
-			for (let index = 0; index < 1000; index++) component.updateArgs({ text: String(index) });
-			expect(presented).toEqual([{}, { text: "0" }]);
-			vi.advanceTimersByTime(STREAMING_RENDER_INTERVAL_MS);
-			expect(presented.at(-1)).toEqual({ text: "999" });
-			component.updateArgs({ text: "final" });
-			component.setArgsComplete();
-			expect(presented.at(-1)).toEqual({ text: "final" });
-			const count = presented.length;
-			vi.advanceTimersByTime(STREAMING_RENDER_INTERVAL_MS * 2);
-			expect(presented).toHaveLength(count);
+			for (let index = 0; index < 1000; index++) state.update("call", "preview", { text: String(index) }, false);
+			expect(present).toHaveBeenCalledTimes(1);
+			expect(published).toHaveBeenLastCalledWith("call", { title: "preview 0" });
+			vi.advanceTimersByTime(PRESENTATION_COALESCE_MS);
+			expect(present).toHaveBeenCalledTimes(2);
+			expect(published).toHaveBeenLastCalledWith("call", { title: "preview 999" });
+			state.update("call", "preview", { text: "queued" }, false);
+			state.update("call", "preview", { text: "final" }, true);
+			expect(present).toHaveBeenLastCalledWith(
+				expect.objectContaining({ args: { text: "final" }, argsComplete: true, state: "pending" }),
+			);
+			expect(published).toHaveBeenLastCalledWith("call", { title: "preview final" });
+			vi.advanceTimersByTime(PRESENTATION_COALESCE_MS * 2);
+			expect(present).toHaveBeenCalledTimes(3);
 			expect(vi.getTimerCount()).toBe(0);
 		} finally {
-			component.dispose();
+			state.close();
 		}
 	});
 
-	it("cancels queued previews on disposal and shows failures immediately", () => {
+	it.each(["clear", "close"] as const)("drops queued host argument previews on %s", (action) => {
 		vi.useFakeTimers();
-		const present = vi.fn<ToolPresenter>(() => ({ title: "preview" }));
-		const component = row(present);
-		component.updateArgs({ step: 1 });
-		component.updateArgs({ step: 2 });
-		component.updateResult({ content: [{ type: "text", text: "Stopped" }], isError: true });
-		expect(component.render(80).lines.join("\n")).toContain("✗");
-		component.dispose();
-		const count = present.mock.calls.length;
-		vi.advanceTimersByTime(STREAMING_RENDER_INTERVAL_MS * 2);
-		expect(present).toHaveBeenCalledTimes(count);
+		const publish = vi.fn();
+		const state = new ArgumentPresentations({
+			presenters: () => presenters((input) => ({ title: `step ${String(input.args.step)}` })),
+			cwd: () => process.cwd(),
+			publish,
+		});
+		state.update("call", "preview", { step: 1 }, false);
+		state.update("call", "preview", { step: 2 }, false);
+		state[action]();
+		vi.advanceTimersByTime(PRESENTATION_COALESCE_MS * 2);
+		expect(publish).toHaveBeenCalledExactlyOnceWith("call", { title: "step 1" });
 		expect(vi.getTimerCount()).toBe(0);
+		state.close();
+	});
+
+	it("presents a host-side failure immediately and drops the queued partial result", () => {
+		vi.useFakeTimers();
+		const update = vi.fn();
+		const state = new ToolPresentationState({
+			presenters: () => presenters((input) => ({ title: input.result?.isError ? "Stopped" : "preview" })),
+			cwd: () => process.cwd(),
+			held: () => ({ title: "preview" }),
+			update,
+		});
+		state.start("call", "preview", {});
+		state.update("call", { content: [{ type: "text", text: "partial" }] });
+		expect(state.end("call", "preview", {}, { content: [{ type: "text", text: "Stopped" }], isError: true })).toEqual(
+			{ presentation: { title: "Stopped" } },
+		);
+		vi.advanceTimersByTime(PRESENTATION_COALESCE_MS * 2);
+		expect(update).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(0);
+		state.close();
 	});
 });
