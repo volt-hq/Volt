@@ -4,6 +4,7 @@ import type { Socket } from "node:net";
 import type { Duplex } from "node:stream";
 import { DuplexWriteGate, StreamClosedError } from "../core/protocol/transport/duplex-write-gate.ts";
 import type { IrohBiStreamLike, IrohBytes } from "../core/protocol/transport/iroh-transport.ts";
+import type { IrohRemoteHostHandshakeFailureOutcome } from "../core/remote/iroh/protocol.ts";
 import type { DistributiveOmit } from "./control-client.ts";
 import {
 	createDaemonProof,
@@ -23,6 +24,11 @@ import {
 
 export const RELAY_TOKEN_TTL_MS = 10_000;
 export const RELAY_OFFER_RETRY_AFTER_MS = 1_000;
+/** Close options that have the phone of an offer closed before redemption retry its open at the host's pace. */
+export const RELAY_OFFER_RETRY = {
+	outcome: "duplicate_conversation_connection",
+	retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS,
+} as const satisfies RelayCloseOptions;
 /** How long an active relay outlives its worker's exit for the bytes the worker wrote before it. */
 export const RELAY_WORKER_EXIT_GRACE_MS = 2_000;
 
@@ -44,12 +50,15 @@ export interface RelayOutcome {
 
 export interface RelayPendingRejection {
 	message: string;
+	outcome?: IrohRemoteHostHandshakeFailureOutcome;
 	retryAfterMs?: number;
 }
 
 export interface RelayCloseOptions {
 	/** Deferred phone-handshake failure sent only when the relay is still offered. */
 	pendingMessage?: string;
+	/** The deferred failure's outcome, which a phone acts on (a retry, for one). */
+	outcome?: IrohRemoteHostHandshakeFailureOutcome;
 	retryAfterMs?: number;
 	/** Optional diagnostic attached to the terminal relay outcome. */
 	error?: string;
@@ -144,10 +153,7 @@ export class RelayLifecycleOwner {
 
 		const expiryDelayMs = Math.max(0, this.expiresAt - Date.now());
 		this.expiryTimer = setTimeout(() => {
-			void this.close("error", {
-				pendingMessage: RELAY_EXPIRY_MESSAGE,
-				retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS,
-			});
+			void this.close("error", { pendingMessage: RELAY_EXPIRY_MESSAGE, ...RELAY_OFFER_RETRY });
 		}, expiryDelayMs);
 		this.expiryTimer.unref?.();
 	}
@@ -177,10 +183,7 @@ export class RelayLifecycleOwner {
 			return false;
 		}
 		if (now > this.expiresAt) {
-			void this.close("error", {
-				pendingMessage: RELAY_EXPIRY_MESSAGE,
-				retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS,
-			});
+			void this.close("error", { pendingMessage: RELAY_EXPIRY_MESSAGE, ...RELAY_OFFER_RETRY });
 			return false;
 		}
 
@@ -246,6 +249,7 @@ export class RelayLifecycleOwner {
 		this.recordTerminalError(options.error);
 		const rejection: RelayPendingRejection = {
 			message: options.pendingMessage ?? RELAY_PENDING_CLOSE_MESSAGE,
+			...(options.outcome === undefined ? {} : { outcome: options.outcome }),
 			...(options.retryAfterMs === undefined ? {} : { retryAfterMs: options.retryAfterMs }),
 		};
 		this.startOfferedPhysicalClose(rejection);

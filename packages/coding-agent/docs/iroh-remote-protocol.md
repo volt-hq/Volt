@@ -132,7 +132,7 @@ Host handshake failure outcomes:
 | `workspace_authorization_removed` | The workspace exists but this client is no longer authorized for it. |
 | `workspace_forbidden` | The workspace exists but this client is not allowed to use it. This is reserved for legacy or future per-client workspace restrictions. |
 | `session_unavailable` | A strict `conversation.target:"session"` target does not resolve to an available session. |
-| `duplicate_conversation_connection` | The same authoritative client already has an active stream for the resolved workspace/session. |
+| `duplicate_conversation_connection` | The same authoritative client already has an active stream for the resolved workspace/session, or the open must be retried: a newer connection of the same client replaced it, or the conversation's worker did not take it up before it exited or the offer expired. Carries the resolved workspace/session and `retryAfterMs`. |
 | `conversation_in_use` | The conversation runs in a worker another paired device opened with tools outside the attaching client's persisted grant, so the client cannot safely attach. A conversation a desktop TUI opened never refuses this way. |
 | `conversation_locked` | Another Volt process on the host (for example `volt -p`, `--mode rpc`, or an SDK embedding) has the session open for writing, so no conversation worker can open it. Keep the saved host and selection; the user closes the session there and retries. |
 
@@ -148,7 +148,7 @@ A paired client may open multiple conversation streams, including multiple sessi
 {"type":"volt_iroh_handshake","success":false,"outcome":"duplicate_conversation_connection","hostNodeId":"<authoritative-host-node-id>","workspace":"volt","sessionId":"abc123","retryAfterMs":500,"error":"duplicate conversation connection"}
 ```
 
-If the duplicate is the first conversation stream on a new Iroh connection from the same authoritative client, the host treats the previous active stream as stale, closes it, and relays the new stream to the conversation's worker instead. Distinct authoritative clients may attach to one conversation. A conversation's tools are fixed when its worker starts: a client attaching to a conversation a desktop TUI opened uses the TUI's tools, and a client attaching to one another paired device opened must have that conversation's tool policy within its own effective grant. Otherwise the host rejects with `conversation_in_use` and includes the resolved workspace/session identity.
+If the duplicate is the first conversation stream on a new Iroh connection from the same authoritative client, the host treats the previous active stream as stale, closes it, and relays the new stream to the conversation's worker instead. A previous stream still awaiting its handshake response gets a `duplicate_conversation_connection` rejection with `retryAfterMs`, so its client retries at the host's pace. Distinct authoritative clients may attach to one conversation. A conversation's tools are fixed when its worker starts: a client attaching to a conversation a desktop TUI opened uses the TUI's tools, and a client attaching to one another paired device opened must have that conversation's tool policy within its own effective grant. Otherwise the host rejects with `conversation_in_use` and includes the resolved workspace/session identity.
 
 ## Stream feature compatibility
 
