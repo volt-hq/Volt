@@ -447,7 +447,11 @@ describe("relay framing (§12.2.3)", () => {
 		).toBe(false);
 		expect(await relay.settled).toEqual({ reason: "error", bytesUp: 0, bytesDown: 0, durationMs: 0 });
 		expect(rejectPending).toHaveBeenCalledTimes(1);
-		expect(rejectPending).toHaveBeenCalledWith({ message: "relay offer expired; retry", retryAfterMs: 1000 });
+		expect(rejectPending).toHaveBeenCalledWith({
+			message: "relay offer expired; retry",
+			outcome: "duplicate_conversation_connection",
+			retryAfterMs: 1000,
+		});
 		expect(onSettled).toHaveBeenCalledTimes(1);
 
 		await vi.advanceTimersByTimeAsync(RELAY_TOKEN_TTL_MS);
@@ -718,10 +722,18 @@ describe("relay worker exit (D19)", () => {
 		const rejectPending = vi.fn(async () => {});
 		const relay = mintTestRelay(registry, new FakePhoneIrohStream(), vi.fn(), undefined, rejectPending);
 
-		const settled = relay.workerExited({ pendingMessage: "conversation host exited; retry" });
+		const settled = relay.workerExited({
+			pendingMessage: "conversation host exited; retry",
+			outcome: "duplicate_conversation_connection",
+			retryAfterMs: 1000,
+		});
 		expect(relay.phase).toBe("closed");
 		expect(await settled).toEqual({ reason: "worker_exited", bytesUp: 0, bytesDown: 0, durationMs: 0 });
-		expect(rejectPending).toHaveBeenCalledWith({ message: "conversation host exited; retry" });
+		expect(rejectPending).toHaveBeenCalledWith({
+			message: "conversation host exited; retry",
+			outcome: "duplicate_conversation_connection",
+			retryAfterMs: 1000,
+		});
 	});
 });
 

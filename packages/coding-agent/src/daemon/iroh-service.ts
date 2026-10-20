@@ -159,7 +159,7 @@ import {
 	revokeIrohManagedRelayAppEndpoint,
 	revokeIrohManagedRelayCredential,
 } from "./relay-credential.ts";
-import { type RelayLifecycleOwner, RelayRegistry } from "./relay-stream.ts";
+import { RELAY_OFFER_RETRY, type RelayLifecycleOwner, RelayRegistry } from "./relay-stream.ts";
 import {
 	type RemoteIntentHost,
 	type RemoteStreamKeep,
@@ -171,7 +171,12 @@ import {
 } from "./remote-intents.ts";
 import { resolveWorktreeCleanupPolicy } from "./state.ts";
 import { sanitizeHostThemeTokens } from "./theme-push.ts";
-import { type LiveWorker, MAX_WORKER_HOSTED_SESSIONS, type WorkerRegistry } from "./worker-registry.ts";
+import {
+	type LiveWorker,
+	MAX_WORKER_HOSTED_SESSIONS,
+	WorkerOpenError,
+	type WorkerRegistry,
+} from "./worker-registry.ts";
 import { isPathInside, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
 import type { SessionPlacement, WorkspaceSession } from "./workspace-sessions.ts";
 import {
@@ -1095,7 +1100,7 @@ class IrohDaemonService {
 		this.workers.onWorkerExited((workerId) => {
 			for (const [relayId, entry] of this.workerRelays) {
 				if (entry.workerId !== workerId) continue;
-				void entry.relay.workerExited({ pendingMessage: "conversation host exited; retry" });
+				void entry.relay.workerExited({ pendingMessage: "conversation host exited; retry", ...RELAY_OFFER_RETRY });
 				this.workerRelays.delete(relayId);
 			}
 		});
@@ -3877,7 +3882,9 @@ class IrohDaemonService {
 			await this.rejectDuplicateActiveConnection(stream, authorization, sessionId, "relay_registry");
 			return;
 		}
-		for (const relay of relaysOf()) void relay.close("error", { pendingMessage: "conversation reopened; retry" });
+		for (const relay of relaysOf()) {
+			void relay.close("error", { pendingMessage: "conversation reopened; retry", ...RELAY_OFFER_RETRY });
+		}
 		try {
 			// A fresh pairing replaces the conversation a phone-opened worker serves, as it replaced a daemon
 			// runtime; a TUI's worker keeps serving its TUI (the phone uses its tools, D9, or is refused).
@@ -3950,7 +3957,18 @@ class IrohDaemonService {
 				},
 			);
 		} catch (error) {
-			if (admission.isCurrent()) await failed(error);
+			if (!admission.isCurrent()) return;
+			// A worker transition's retry names the conversation retried, as the phone checks.
+			await failed(
+				error instanceof WorkerOpenError && error.outcome === "duplicate_conversation_connection"
+					? createConversationOpenError("duplicate_conversation_connection", error.message, {
+							workspace: workspaceName,
+							sessionId,
+							retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS,
+							cause: error,
+						})
+					: error,
+			);
 			return;
 		}
 		const relay = opened.relay;
@@ -3959,9 +3977,7 @@ class IrohDaemonService {
 				relay
 					.close(normalizeRelayCloseReason(reason), {
 						pendingMessage: relayPendingMessageForReason(reason),
-						...(reason === "workspace_unregistered" || reason === "host_shutdown"
-							? {}
-							: { retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS }),
+						...(reason === "workspace_unregistered" || reason === "host_shutdown" ? {} : RELAY_OFFER_RETRY),
 					})
 					.then(() => undefined),
 			)
@@ -4038,10 +4054,12 @@ class IrohDaemonService {
 					worktree: resolved.worktree,
 					workingDirectory: resolved.workingDirectory,
 				}),
-				rejectPending: ({ message, retryAfterMs }) =>
+				// A retry outcome names the conversation retried, as the phone checks.
+				rejectPending: (rejection) =>
 					this.sendHandshakeError(relayPhysicalStream, {
-						message,
-						...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+						...rejection,
+						workspace: workspaceName,
+						sessionId: resolved.sessionId,
 					}),
 				onSettled: async (outcome) => {
 					release();
@@ -4089,7 +4107,7 @@ class IrohDaemonService {
 			streamId,
 		});
 		// The worker's connection closed meanwhile: the offer closes as an expired one does.
-		if (!delivered) void relay.close("error", { retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS });
+		if (!delivered) void relay.close("error", RELAY_OFFER_RETRY);
 		return relay;
 	}
 
