@@ -45,10 +45,60 @@ class OfferHoldingWorkerLauncher implements WorkerLauncher {
 	}
 }
 
+/** Workers that report their conversation's open failed as a worker transition to retry, then exit. */
+class TransitionFailingWorkerLauncher implements WorkerLauncher {
+	launch(request: WorkerLaunchRequest): LaunchedWorker {
+		const exited = Promise.withResolvers<WorkerExit>();
+		const client: DaemonClient = createDaemonClient({
+			socketPath: request.socketPath,
+			version: "test",
+			worker: { workerId: request.workerId, workerToken: request.workerToken },
+			reconnect: false,
+			onEvent: (event) => {
+				if (event.type !== "worker_open") return;
+				void client
+					.request({
+						type: "worker_open_failed",
+						sessionId: event.spec.session.sessionId,
+						message: "conversation runtime is changing; retry",
+						outcome: "duplicate_conversation_connection",
+					})
+					.catch(() => undefined)
+					.then(() => client.close())
+					.then(() => exited.resolve({ reason: "failed" }));
+			},
+		});
+		void client.connect().catch(() => exited.resolve({ reason: "crashed" }));
+		return { pid: process.pid, exited: exited.promise, kill: () => exited.resolve({ reason: "crashed" }) };
+	}
+}
+
 describe.runIf(nativeIrohAvailable || process.env.VOLT_TEST_REQUIRE_NATIVE_IROH === "1")(
-	"regression #947: an open replaced by the same phone's newer connection",
+	"regression #947: a phone's conversation open to retry",
 	() => {
-		it("is rejected as a retryable duplicate that names the conversation", async () => {
+		it("names the conversation when its worker reports a transition to retry", async () => {
+			const harness = await createDaemonHarness({
+				workerLauncher: new TransitionFailingWorkerLauncher(),
+				extensions: [createIrohDaemonService({ relayMode: "disabled" })],
+			});
+			cleanups.push(() => harness.dispose());
+			const ref = await harness.createSession();
+			const paired = await pairPhone(harness);
+			cleanups.push(() => paired.close());
+
+			expect(
+				(await paired.openConversation({ target: "session", sessionId: ref.sessionId })).handshake,
+			).toMatchObject({
+				success: false,
+				outcome: "duplicate_conversation_connection",
+				workspace: harness.workspaceName,
+				sessionId: ref.sessionId,
+				retryAfterMs: 1000,
+				error: "conversation runtime is changing; retry",
+			});
+		}, 60_000);
+
+		it("replaced by the same phone's newer connection is a retryable duplicate that names it", async () => {
 			const harness = await createDaemonHarness({
 				workerLauncher: new OfferHoldingWorkerLauncher(),
 				extensions: [createIrohDaemonService({ relayMode: "disabled" })],

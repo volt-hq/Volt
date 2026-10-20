@@ -171,7 +171,12 @@ import {
 } from "./remote-intents.ts";
 import { resolveWorktreeCleanupPolicy } from "./state.ts";
 import { sanitizeHostThemeTokens } from "./theme-push.ts";
-import { type LiveWorker, MAX_WORKER_HOSTED_SESSIONS, type WorkerRegistry } from "./worker-registry.ts";
+import {
+	type LiveWorker,
+	MAX_WORKER_HOSTED_SESSIONS,
+	WorkerOpenError,
+	type WorkerRegistry,
+} from "./worker-registry.ts";
 import { isPathInside, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
 import type { SessionPlacement, WorkspaceSession } from "./workspace-sessions.ts";
 import {
@@ -3952,7 +3957,18 @@ class IrohDaemonService {
 				},
 			);
 		} catch (error) {
-			if (admission.isCurrent()) await failed(error);
+			if (!admission.isCurrent()) return;
+			// A worker transition's retry names the conversation retried, as the phone checks.
+			await failed(
+				error instanceof WorkerOpenError && error.outcome === "duplicate_conversation_connection"
+					? createConversationOpenError("duplicate_conversation_connection", error.message, {
+							workspace: workspaceName,
+							sessionId,
+							retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS,
+							cause: error,
+						})
+					: error,
+			);
 			return;
 		}
 		const relay = opened.relay;
