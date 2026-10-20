@@ -12,9 +12,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
 import type { BashOperations } from "../../../src/core/tools/bash.ts";
 import * as nativeTools from "../../../src/core/tools/index.ts";
-import { PresentedToolComponent } from "../../../src/modes/interactive/components/presented-tool.ts";
+import { ToolCallRow } from "../../../src/modes/interactive/components/tool-call-row.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
 import { lastAssistantText } from "../../utilities/session-reads.ts";
+import { storeTranscript } from "../../utilities/store-transcript.ts";
 import { createHarness, getMessageText, type Harness } from "../harness.ts";
 
 const harnesses: Harness[] = [];
@@ -118,18 +119,25 @@ describe("#585 background job interrupted after a restart", () => {
 		if (launch?.role !== "toolResult") throw new Error("Expected the launch result");
 		// The card presents the result as recorded; the work the call started shows its own outcome under it.
 		const record = second.session.work.list().find((item) => item.toolCallId === launch.toolCallId);
-		const card = new PresentedToolComponent(
-			"bash",
-			{ command: "npm test", background: true },
-			() => second.session.presenters,
-			{ requestRender: () => {} } as unknown as TUI,
-			second.tempDir,
-			{
-				work: () =>
-					record ? [{ workId: record.workId, title: record.title, status: record.outcome ?? record.state }] : [],
-			},
+		const entry = storeTranscript(second.session).find(
+			(item) =>
+				item.type === "message" &&
+				item.payload?.message.role === "toolResult" &&
+				item.payload.message.toolCallId === launch.toolCallId,
 		);
-		card.updateResult({ content: launch.content, details: launch.details, isError: false });
+		const presentation = entry && "view" in entry ? entry.view?.presentation : undefined;
+		if (presentation?.title === undefined) throw new Error("Expected the host's launch presentation");
+		const card = new ToolCallRow("bash", { requestRender: () => {} } as unknown as TUI, {
+			work: () =>
+				record ? [{ workId: record.workId, title: record.title, status: record.outcome ?? record.state }] : [],
+		});
+		card.update({
+			presentation: { ...presentation, title: presentation.title },
+			state: "done",
+			content: launch.content,
+			isError: launch.isError,
+			...(launch.durationMs === undefined ? {} : { durationMs: launch.durationMs }),
+		});
 		const replayed = stripAnsi(card.render(100).lines.join("\n"));
 		card.dispose();
 		expect(replayed).toContain("$ npm test");

@@ -1,11 +1,13 @@
 import type { AgentToolResult } from "@hansjm10/volt-agent-core";
+import { PRESENTATION_MAX_SERIALIZED_BYTES } from "@hansjm10/volt-protocol";
 import { getKeybindings, setKeybindings, type TUI, visibleWidth } from "@hansjm10/volt-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import { type JobRuntime, type JobSummary, jobResult } from "../src/core/tools/jobs.ts";
 import { BUILTIN_PRESENTERS } from "../src/core/tools/presenters.ts";
-import { PresentedToolComponent } from "../src/modes/interactive/components/presented-tool.ts";
+import { presentToolCall, type ToolPresentResult } from "../src/core/ui/presentation.ts";
+import { ToolCallRow } from "../src/modes/interactive/components/tool-call-row.ts";
 import type { ToolCardWork } from "../src/modes/interactive/ui-node/tool-card.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 import { createTestJobRuntime } from "./utilities/job-runtime.ts";
@@ -79,17 +81,34 @@ function jobWork(jobs: JobRuntime, id: string): ToolCardWork[] {
 
 /** A background bash launch, drawn from its presentation with its job live under it. */
 function launch(jobs: JobRuntime, job: Work["job"], live = true) {
-	const component = new PresentedToolComponent(
+	const component = new ToolCallRow(
 		"bash",
-		{ command: job.label, background: true },
-		() => BUILTIN_PRESENTERS,
 		{ requestRender: () => {} } as unknown as TUI,
-		process.cwd(),
-		{ liveProgress: live, ...(live ? { work: () => jobWork(jobs, job.id) } : {}) },
+		live ? { work: () => jobWork(jobs, job.id) } : {},
 	);
 	cleanup.push(() => component.dispose());
-	component.markExecutionStarted();
 	return component;
+}
+
+/** Supply a completed launch's host presentation, independently of the job's live work. */
+function updateLaunch(card: ToolCallRow, job: Work["job"], result: Omit<ToolPresentResult, "partial">): void {
+	card.update({
+		presentation: presentToolCall(
+			BUILTIN_PRESENTERS.tool("bash"),
+			"bash",
+			{
+				args: { command: job.label, background: true },
+				argsComplete: true,
+				state: "done",
+				result: { ...result, partial: false },
+				cwd: process.cwd(),
+			},
+			PRESENTATION_MAX_SERIALIZED_BYTES,
+		),
+		state: "done",
+		isError: result.isError,
+		content: result.content,
+	});
 }
 
 describe("background job cards", () => {
@@ -99,7 +118,7 @@ describe("background job cards", () => {
 		const jobs = await setup();
 		const work = await start(jobs);
 		const card = launch(jobs, work.job);
-		card.updateResult({ ...jobResult(work.job), isError: false });
+		updateLaunch(card, work.job, { ...jobResult(work.job), isError: false });
 		let rendered = text(card);
 		expect(rendered).toContain(`$ ${work.job.label}`);
 		expect(rendered).not.toContain("Use jobs with action");
@@ -128,7 +147,7 @@ describe("background job cards", () => {
 		const jobs = await setup();
 		const work = await start(jobs);
 		const card = launch(jobs, work.job, false);
-		card.updateResult({ ...jobResult(work.job), isError: false });
+		updateLaunch(card, work.job, { ...jobResult(work.job), isError: false });
 		work.output("LIVE OUTPUT MUST NOT ENTER REPLAY");
 		card.invalidate();
 		expect(text(card)).toContain(`$ ${work.job.label}`);
@@ -142,10 +161,13 @@ describe("background job cards", () => {
 		const jobs = await setup();
 		const work = await start(jobs);
 		const card = launch(jobs, work.job);
-		card.updateResult({ content: [{ type: "text", text: "At most 8 background jobs may run" }], isError: true });
+		updateLaunch(card, work.job, {
+			content: [{ type: "text", text: "At most 8 background jobs may run" }],
+			isError: true,
+		});
 		expect(text(card)).toContain("Background job failed to start");
 		work.output("\x1b[2J\x1b]8;;https://example.com\x07**literal output**\x1b]8;;\x07\u202e\x07");
-		card.updateResult({ ...jobResult(jobs.get(work.job.id)), isError: false });
+		updateLaunch(card, work.job, { ...jobResult(jobs.get(work.job.id)), isError: false });
 		expect(text(card)).toContain("**literal output**");
 		expect(card.render(80).lines.join("\n")).not.toMatch(/\x07|\x1b\[2J|\x1b\]8|\u202e/);
 	});
@@ -157,7 +179,7 @@ describe("background job cards", () => {
 			`\x1b[2J\x1b]8;;https://example.com\x07**literal**\x1b]8;;\x07\n${"界".repeat(120)}\n${"line\n".repeat(3000)}`,
 		);
 		const card = launch(jobs, work.job);
-		card.updateResult({ ...jobResult(jobs.get(work.job.id)), isError: false });
+		updateLaunch(card, work.job, { ...jobResult(jobs.get(work.job.id)), isError: false });
 		const collapsed = text(card, width);
 		expect(collapsed).not.toContain("**literal**");
 		card.setExpanded(true);

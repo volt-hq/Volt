@@ -1,5 +1,6 @@
 import type { AgentToolResult } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
+import { PRESENTATION_MAX_SERIALIZED_BYTES } from "@hansjm10/volt-protocol";
 import { type TUI, visibleWidth } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
@@ -14,7 +15,8 @@ import {
 	jobWaitResult,
 } from "../../../src/core/tools/jobs.ts";
 import { BUILTIN_PRESENTERS } from "../../../src/core/tools/presenters.ts";
-import { PresentedToolComponent } from "../../../src/modes/interactive/components/presented-tool.ts";
+import { presentToolCall } from "../../../src/core/ui/presentation.ts";
+import { ToolCallRow } from "../../../src/modes/interactive/components/tool-call-row.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
 import { createTestJobRuntime, type TestJobRuntime } from "../../utilities/job-runtime.ts";
 import { lastAssistantText } from "../../utilities/session-reads.ts";
@@ -248,16 +250,22 @@ describe("multi-job presentation and delivery", () => {
 		const first = await controlledJob(jobs, "bash", "first");
 		const second = await controlledJob(jobs, "bash", "second");
 		const ids = [first.job.id, second.job.id];
-		const card = new PresentedToolComponent(
-			"jobs",
-			{ action: "wait", ids, mode: "all" },
-			() => BUILTIN_PRESENTERS,
-			{ requestRender: () => {} } as unknown as TUI,
-			process.cwd(),
-		);
+		const card = new ToolCallRow("jobs", { requestRender: () => {} } as unknown as TUI);
+		const input = { args: { action: "wait", ids, mode: "all" }, argsComplete: true, cwd: process.cwd() };
 		const waiting = jobs.wait(ids, { mode: "all", toolCallId: "wait-call" });
 		try {
-			card.markExecutionStarted();
+			card.update({
+				presentation: presentToolCall(
+					BUILTIN_PRESENTERS.tool("jobs"),
+					"jobs",
+					{
+						...input,
+						state: "running",
+					},
+					PRESENTATION_MAX_SERIALIZED_BYTES,
+				),
+				state: "running",
+			});
 			const frame = card.render(width);
 			expect(frame.lines.map(stripAnsi).join(" ").replace(/\s+/g, " ")).toContain(
 				"● jobs wait (all) · 2 jobs Waiting for",
@@ -266,7 +274,21 @@ describe("multi-job presentation and delivery", () => {
 			first.finish.resolve();
 			second.finish.resolve();
 			const result = jobWaitResult(await waiting);
-			card.updateResult({ ...result, isError: false });
+			card.update({
+				presentation: presentToolCall(
+					BUILTIN_PRESENTERS.tool("jobs"),
+					"jobs",
+					{
+						...input,
+						state: "done",
+						result: { ...result, isError: false, partial: false },
+					},
+					PRESENTATION_MAX_SERIALIZED_BYTES,
+				),
+				state: "done",
+				isError: false,
+				content: result.content,
+			});
 			const done = card.render(100).lines.map(stripAnsi).join(" ");
 			expect(done).toContain("jobs wait (all)");
 			expect(done).toContain("2 completed");

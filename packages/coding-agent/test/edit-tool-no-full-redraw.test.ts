@@ -1,20 +1,28 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PRESENTATION_MAX_SERIALIZED_BYTES } from "@hansjm10/volt-protocol";
 import { Container, type Terminal, Text, TuiMainScreen } from "@hansjm10/volt-tui";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import { computeEditsDiff, type Edit } from "../src/core/tools/edit-diff.ts";
 import { presentEdit } from "../src/core/tools/presenters.ts";
-import { HOST_UI_POLICY, type PresenterSet } from "../src/core/ui/presentation.ts";
-import { PresentedToolComponent } from "../src/modes/interactive/components/presented-tool.ts";
+import { HOST_UI_POLICY, presentToolCall, type ToolPresentInput } from "../src/core/ui/presentation.ts";
+import { ToolCallRow, type ToolCallRowUpdate } from "../src/modes/interactive/components/tool-call-row.ts";
 
-/** The edit tool's presenter for every call. */
-const editPresenters: PresenterSet = {
-	generation: 0,
-	tool: () => ({ present: presentEdit, policy: HOST_UI_POLICY }),
-	message: () => undefined,
-};
+function editSnapshot(input: ToolPresentInput): ToolCallRowUpdate {
+	return {
+		presentation: presentToolCall(
+			{ present: presentEdit, policy: HOST_UI_POLICY },
+			"edit",
+			input,
+			PRESENTATION_MAX_SERIALIZED_BYTES,
+		),
+		state: input.state,
+		isError: input.result?.isError === true,
+		content: input.result?.content ?? [],
+	};
+}
 
 class FakeTerminal implements Terminal {
 	columns = 80;
@@ -111,13 +119,9 @@ describe("edit tool TUI rendering", () => {
 			root.addChild(new Text(`history ${i}`, 0, 0));
 		}
 
-		const component = new PresentedToolComponent(
-			"edit",
-			{ path: filePath, edits },
-			() => editPresenters,
-			tui,
-			process.cwd(),
-		);
+		const args = { path: filePath, edits };
+		const component = new ToolCallRow("edit", tui);
+		component.update(editSnapshot({ args, argsComplete: false, state: "pending", cwd: process.cwd() }));
 		// Expanded, the whole diff renders: taller than the terminal before and after the result settles.
 		component.setExpanded(true);
 		root.addChild(component);
@@ -125,7 +129,7 @@ describe("edit tool TUI rendering", () => {
 		tui.start();
 		await waitForRender();
 
-		component.setArgsComplete();
+		component.update(editSnapshot({ args, argsComplete: true, state: "pending", cwd: process.cwd() }));
 		tui.requestRender();
 		await waitForRender();
 		await waitForRender();
@@ -140,13 +144,19 @@ describe("edit tool TUI rendering", () => {
 
 		const redrawsBeforeResult = tui.fullRedraws;
 		const clearsBeforeResult = terminal.fullClearCount;
-		component.updateResult(
-			{
-				content: [{ type: "text", text: `Successfully replaced ${edits.length} block(s) in ${filePath}.` }],
-				details: diff,
-				isError: false,
-			},
-			false,
+		component.update(
+			editSnapshot({
+				args,
+				argsComplete: true,
+				state: "done",
+				result: {
+					content: [{ type: "text", text: `Successfully replaced ${edits.length} block(s) in ${filePath}.` }],
+					details: diff,
+					isError: false,
+					partial: false,
+				},
+				cwd: process.cwd(),
+			}),
 		);
 		tui.requestRender();
 		await waitForRender();
@@ -160,7 +170,7 @@ describe("edit tool TUI rendering", () => {
 		expect(settledRender).not.toContain("Successfully replaced");
 	});
 
-	it("reconstructs the diff from a settled result without argsComplete", async () => {
+	it("reconstructs the diff from a settled result without a prior call preview", async () => {
 		const dir = await mkdtemp(join(tmpdir(), "volt-edit-replay-"));
 		tempDirs.push(dir);
 		const filePath = join(dir, "replay-edit.txt");
@@ -180,28 +190,25 @@ describe("edit tool TUI rendering", () => {
 
 		const terminal = new FakeTerminal();
 		const tui = new TuiMainScreen(terminal);
-		const component = new PresentedToolComponent(
-			"edit",
-			{ path: filePath, edits },
-			() => editPresenters,
-			tui,
-			process.cwd(),
+		const component = new ToolCallRow("edit", tui);
+		component.update(
+			editSnapshot({
+				args: { path: filePath, edits },
+				argsComplete: true,
+				state: "done",
+				result: {
+					content: [{ type: "text", text: `Successfully replaced ${edits.length} block(s) in ${filePath}.` }],
+					details: diff,
+					isError: false,
+					partial: false,
+				},
+				cwd: process.cwd(),
+			}),
 		);
 		// Expanded, the whole diff renders.
 		component.setExpanded(true);
 		tui.addChild(component);
 		tui.start();
-		await waitForRender();
-
-		component.updateResult(
-			{
-				content: [{ type: "text", text: `Successfully replaced ${edits.length} block(s) in ${filePath}.` }],
-				details: diff,
-				isError: false,
-			},
-			false,
-		);
-		await waitForRender();
 		await waitForRender();
 
 		const rendered = component.render(80).lines.join("\n");
@@ -212,24 +219,25 @@ describe("edit tool TUI rendering", () => {
 	it("shows the error of edits that do not apply without a diff", async () => {
 		const terminal = new FakeTerminal();
 		const tui = new TuiMainScreen(terminal);
-		const component = new PresentedToolComponent(
-			"edit",
-			{ path: "missing-edit.txt", edits: [{ oldText: "does not exist", newText: "replacement" }] },
-			() => editPresenters,
-			tui,
-			process.cwd(),
-		);
+		const args = { path: "missing-edit.txt", edits: [{ oldText: "does not exist", newText: "replacement" }] };
+		const component = new ToolCallRow("edit", tui);
+		component.update(editSnapshot({ args, argsComplete: true, state: "pending", cwd: process.cwd() }));
 		tui.addChild(component);
 		tui.start();
-		component.setArgsComplete();
 		// Before it runs, the call previews its replacement; the presenter reads no file.
 		expect(component.render(80).lines.join("\n")).toContain("replacement");
-		component.updateResult(
-			{
-				content: [{ type: "text", text: "Could not find the exact text in missing-edit.txt." }],
-				isError: true,
-			},
-			false,
+		component.update(
+			editSnapshot({
+				args,
+				argsComplete: true,
+				state: "done",
+				result: {
+					content: [{ type: "text", text: "Could not find the exact text in missing-edit.txt." }],
+					isError: true,
+					partial: false,
+				},
+				cwd: process.cwd(),
+			}),
 		);
 		const rendered = component.render(80).lines.join("\n");
 		expect(rendered).toContain("Could not find");

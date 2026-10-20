@@ -18,7 +18,7 @@ import {
 	type ToolPresenter,
 	type ToolPresentInput,
 } from "../src/core/ui/presentation.ts";
-import { PresentedToolComponent } from "../src/modes/interactive/components/presented-tool.ts";
+import { ToolCallRow } from "../src/modes/interactive/components/tool-call-row.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
 function createPlan(phase: PlanPhase = "draft"): PlanState {
@@ -174,17 +174,18 @@ function plainTitle(presentation: ToolPresentation): string {
 		: presentation.title.map((span) => span.text).join("");
 }
 
-function row(name: string, args: Record<string, unknown>) {
-	return new PresentedToolComponent(
-		name,
-		args,
-		() => BUILTIN_PRESENTERS,
-		{ requestRender: () => undefined } as unknown as TUI,
-		process.cwd(),
-	);
+function row(name: PlanningToolName, input: ToolPresentInput): ToolCallRow {
+	const component = new ToolCallRow(name, { requestRender: () => undefined } as unknown as TUI);
+	component.update({
+		presentation: presentToolCall(BUILTIN_PRESENTERS.tool(name), name, input, PRESENTATION_MAX_SERIALIZED_BYTES),
+		state: input.state,
+		isError: input.result?.isError === true,
+		content: input.result?.content ?? [],
+	});
+	return component;
 }
 
-function rendered(component: PresentedToolComponent, width = 120): string {
+function rendered(component: ToolCallRow, width = 120): string {
 	const lines = component.render(width).lines;
 	for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 	return lines.map(stripAnsi).join("\n");
@@ -195,15 +196,13 @@ describe("planning tool presenters", () => {
 
 	it("keeps a draft update that added nothing to its title and shows the checklist on expansion", () => {
 		const planning: PlanningState = { mode: "plan", plan: createPlan() };
-		const component = row("update_plan", {
-			title: planning.plan!.title,
-			steps: planning.plan!.steps.map((step) => ({ id: step.id, text: step.text })),
-		});
-		component.updateResult({
-			content: [{ type: "text", text: JSON.stringify({ mode: planning.mode, planId: planning.plan!.id }) }],
-			details: planning,
-			isError: false,
-		});
+		const component = row(
+			"update_plan",
+			done(planning, {
+				title: planning.plan!.title,
+				steps: planning.plan!.steps.map((step) => ({ id: step.id, text: step.text })),
+			}),
+		);
 
 		const collapsed = rendered(component);
 		expect(collapsed).toContain("✓ update plan · 3 steps");
@@ -260,11 +259,12 @@ describe("planning tool presenters", () => {
 			expected: "request replan · The implementation evidence changed",
 		},
 	])("titles a $name call from its arguments", ({ name, args, expected }) => {
-		const presentation = presented(name, { args, argsComplete: true, state: "pending", cwd: process.cwd() });
+		const input: ToolPresentInput = { args, argsComplete: true, state: "pending", cwd: process.cwd() };
+		const presentation = presented(name, input);
 		expect(plainTitle(presentation)).toBe(expected);
 		expect(presentation.summary).toBeUndefined();
 		expect(presentation.body).toBeUndefined();
-		expect(rendered(row(name, args))).toContain(`○ ${expected}`);
+		expect(rendered(row(name, input))).toContain(`○ ${expected}`);
 	});
 
 	it("titles streaming arguments that are incomplete or of the wrong type", () => {
@@ -277,7 +277,7 @@ describe("planning tool presenters", () => {
 	});
 
 	it("shows planning errors readably, never as fallback JSON", () => {
-		const presentation = presented("update_plan", {
+		const input: ToolPresentInput = {
 			args: { steps: [] },
 			argsComplete: true,
 			state: "done",
@@ -287,7 +287,8 @@ describe("planning tool presenters", () => {
 				partial: false,
 			},
 			cwd: process.cwd(),
-		});
+		};
+		const presentation = presented("update_plan", input);
 		expect(nodeText(presentation.summary)).toContain("Plan changed; apply the latest planning state and retry");
 		expect(nodeText(presentation.summary)).toContain('"token":"error"');
 		expect(presentation.body).toBeUndefined();
@@ -301,11 +302,7 @@ describe("planning tool presenters", () => {
 		});
 		expect(nodeText(empty.summary)).toContain("Planning tool failed");
 
-		const component = row("update_plan", { steps: [] });
-		component.updateResult({
-			content: [{ type: "text", text: "Plan changed; apply the latest planning state and retry" }],
-			isError: true,
-		});
+		const component = row("update_plan", input);
 		const text = rendered(component);
 		expect(text).toContain("✗ update plan");
 		expect(text).toContain("Plan changed; apply the latest planning state and retry");
@@ -557,8 +554,7 @@ describe("planning tool presenters", () => {
 			},
 		]);
 
-		const component = row("update_plan_progress", args);
-		component.updateResult({ content: [{ type: "text", text: "{}" }], details: planning, isError: false });
+		const component = row("update_plan_progress", done(planning, args));
 		const collapsed = rendered(component, 80);
 		expect(collapsed).toContain("✓ plan progress · done 2.2 Retry transient errors · 3/6");
 		expect(collapsed).toContain("backoff capped at 8s");

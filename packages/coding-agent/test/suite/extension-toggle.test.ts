@@ -11,11 +11,10 @@
 
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { JsonValue } from "@hansjm10/volt-ai";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import type { ExtensionSummary, LiveItem, RemoteCapability } from "@hansjm10/volt-protocol";
-import { PRESENTATION_MAX_SERIALIZED_BYTES } from "@hansjm10/volt-protocol";
-import type { TUI } from "@hansjm10/volt-tui";
+import { emptyLiveFold } from "@hansjm10/volt-protocol";
+import { Container, type TUI } from "@hansjm10/volt-tui";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionManifest } from "../../src/core/extensions/manifest.ts";
@@ -23,7 +22,6 @@ import { ExtensionPermissionStore, permissionSubject } from "../../src/core/exte
 import type { ExtensionAPI, ExtensionContext, ExtensionDefinition } from "../../src/core/extensions/types.ts";
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
 import type { LiveClient } from "../../src/core/host/live-state.ts";
-import type { CustomMessage } from "../../src/core/messages.ts";
 import {
 	type IntentContext,
 	type IntentProfile,
@@ -33,10 +31,8 @@ import {
 import { localProfile } from "../../src/core/protocol/profiles.ts";
 import { conversationProjectionSource, projectEntry } from "../../src/core/protocol/projection/entries.ts";
 import { queryRegistry } from "../../src/core/protocol/queries/index.ts";
-import { initTheme } from "../../src/core/theme/runtime.ts";
-import { presentCustomMessage } from "../../src/core/ui/presentation.ts";
-import { PresentedMessageComponent } from "../../src/modes/interactive/components/presented-message.ts";
-import { PresentedToolComponent } from "../../src/modes/interactive/components/presented-tool.ts";
+import { getMarkdownTheme, initTheme } from "../../src/core/theme/runtime.ts";
+import { TranscriptView } from "../../src/modes/interactive/client/transcript-view.ts";
 import { stripAnsi } from "../../src/utils/ansi.ts";
 import { createHostHarness, type HostHarness } from "./host-harness.ts";
 
@@ -314,50 +310,42 @@ describe("extension runtime toggle", () => {
 			timestamp: Date.now(),
 		});
 		await writer.appendCustomMessageEntry("presented-note", "plain note", true, undefined);
+		const transcript = () =>
+			session.sessionManager.getEntries().flatMap((entry) => {
+				const committed = session.sessionManager.getCommittedEntry(entry.id);
+				const projected = committed
+					? projectEntry(committed, conversationProjectionSource(session), localProfile.projection)
+					: undefined;
+				return projected ? [projected] : [];
+			});
 		const views = () =>
-			session.sessionManager
-				.getEntries()
-				.flatMap((entry) => {
-					const committed = session.sessionManager.getCommittedEntry(entry.id);
-					const projected = committed
-						? projectEntry(committed, conversationProjectionSource(session), localProfile.projection)
-						: undefined;
-					return projected && "view" in projected && projected.view ? [projected.view] : [];
-				})
+			transcript()
+				.flatMap((entry) => ("view" in entry && entry.view ? [entry.view] : []))
 				.filter((view) => view.role === "tool" || view.text === "plain note");
 		expect(views().map((view) => view.presentation)).toEqual([
 			{ title: "presented by the extension" },
 			{ body: [{ type: "text", text: "presented note" }] },
 		]);
 		const generation = session.presenters.generation;
-		// The TUI's rows of the call and the message, presenting with the session's presenters.
+		// The TUI draws the host's projected entries, without invoking presenters locally.
 		initTheme("dark");
-		const toolRow = new PresentedToolComponent(
-			"presented_tool",
-			{},
-			() => session.presenters,
-			{ requestRender: () => {} } as unknown as TUI,
-			session.sessionManager.getCwd(),
-		);
-		toolRow.updateResult({ content: [{ type: "text", text: "ok" }], isError: false });
-		const note: CustomMessage<JsonValue> = {
-			role: "custom",
-			customType: "presented-note",
-			content: "plain note",
-			display: true,
-			timestamp: 0,
-		};
-		const messageRow = new PresentedMessageComponent(note, () =>
-			presentCustomMessage(
-				session.presenters.message(note.customType),
-				{ customType: note.customType, content: note.content },
-				PRESENTATION_MAX_SERIALIZED_BYTES,
-			),
-		);
-		const rowText = (row: { render(width: number): { lines: readonly string[] } }) =>
-			stripAnsi(row.render(80).lines.join("\n"));
-		expect(rowText(toolRow)).toContain("presented by the extension");
-		expect(rowText(messageRow)).toContain("presented note");
+		const container = new Container();
+		const view = new TranscriptView({ transcript, live: emptyLiveFold(), phase: undefined }, container, {
+			ui: { requestRender: () => {} } as unknown as TUI,
+			markdownTheme: () => getMarkdownTheme(),
+			hideThinkingBlock: () => false,
+			toolsExpanded: () => false,
+			showImages: () => false,
+			imageWidthCells: () => 60,
+			toolCallWork: () => [],
+			pendingShellRows: new Container(),
+			workNoticeShown: () => {},
+		});
+		cleanups.push(async () => view.dispose());
+		view.show();
+		const rendered = () => stripAnsi(container.render(80).lines.join("\n"));
+		expect(rendered()).toContain("presented by the extension");
+		expect(rendered()).toContain("presented note");
 
 		await intentRegistry.invoke(context(), "set_extension_enabled", {
 			id: "presenting",
@@ -375,17 +363,14 @@ describe("extension runtime toggle", () => {
 		]);
 		expect(present).not.toHaveBeenCalled();
 		expect(presentMessage).not.toHaveBeenCalled();
-		// The TUI retires its rows' use of the disabled extension: presented again, they are generic.
-		toolRow.refreshPresentation();
-		messageRow.refreshPresentation();
-		expect(rowText(toolRow)).not.toContain("presented by the extension");
-		expect(rowText(toolRow)).toContain("presented_tool");
-		expect(rowText(messageRow)).not.toContain("presented note");
-		expect(rowText(messageRow)).toContain("plain note");
+		// A refreshed host projection replaces both presentations in the existing transcript.
+		view.refresh();
+		expect(rendered()).not.toContain("presented by the extension");
+		expect(rendered()).toContain("presented_tool");
+		expect(rendered()).not.toContain("presented note");
+		expect(rendered()).toContain("plain note");
 		expect(present).not.toHaveBeenCalled();
 		expect(presentMessage).not.toHaveBeenCalled();
-		toolRow.dispose();
-		messageRow.dispose();
 
 		await intentRegistry.invoke(context(), "set_extension_enabled", {
 			id: "presenting",
@@ -394,6 +379,9 @@ describe("extension runtime toggle", () => {
 		});
 		await session.extensionRegistry.settled();
 		expect(views()[0]?.presentation).toEqual({ title: "presented by the extension" });
+		view.refresh();
+		expect(rendered()).toContain("presented by the extension");
+		expect(rendered()).toContain("presented note");
 	});
 
 	it("offers an extension's tools until the turn boundary and waits for its running tool call", async () => {
