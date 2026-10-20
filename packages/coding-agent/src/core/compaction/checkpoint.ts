@@ -330,7 +330,7 @@ export async function generateCheckpoint(
 	for (;;) {
 		if (signal?.aborted) throw abortError(`${operation} cancelled`);
 		const target: CheckpointTarget = {
-			targetChars: checkpointTargetChars(maxChars, corrections),
+			targetChars: checkpointTargetChars(maxChars, corrections, generation.purpose),
 			maxChars,
 			...(correction === undefined ? {} : { correction }),
 		};

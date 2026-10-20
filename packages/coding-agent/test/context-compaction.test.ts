@@ -157,7 +157,7 @@ describe("cache-preserving compaction", () => {
 		expect(result).toMatchObject({
 			firstKeptEntryId: "kept",
 			tokensBefore: 580_000,
-			details: { readFiles: ["src/example.ts"], modifiedFiles: [] },
+			details: { readFiles: ["src/example.ts"], modifiedFiles: [], strategyReason: "native" },
 		});
 		// The session composes the host-owned blocks; this returns the generated text.
 		expect(result.summary).toBe("## Goal\nPreserve original goal");
@@ -248,6 +248,9 @@ describe("cache-preserving compaction", () => {
 			expect(JSON.stringify(calls.at(-1))).not.toContain("RECENT-ONLY");
 			expect(result.firstKeptEntryId).toBe("kept");
 			expect(result.details.requests?.at(-1)?.strategy).toBe("chunked");
+			expect(result.details.strategyReason).toBe(
+				overflow === "preflight" ? "preflight_overflow" : "provider_overflow",
+			);
 		},
 	);
 
@@ -1027,10 +1030,34 @@ describe("bounded checkpoint recovery", () => {
 			{ strategy: "chunked", purpose: "history", rejected: "oversized" },
 			{ strategy: "chunked", purpose: "history", rejected: undefined },
 		]);
-		expect(requests[3]).toMatchObject({ maxChars: 16_384, targetChars: 9830, textChars: 16_385 });
-		expect(requests[4]).toMatchObject({ maxChars: 16_384, targetChars: 6553 });
+		expect(requests[3]).toMatchObject({ maxChars: 16_384, targetChars: 7372, textChars: 16_385 });
+		expect(requests[4]).toMatchObject({ maxChars: 16_384, targetChars: 4915 });
 		expect(result.summary.startsWith("Checkpoint 4 corrected")).toBe(true);
 		expect(result.summary).not.toContain("xxxx");
+	});
+
+	it("keeps fallback checkpoints within their limits when the model overshoots its target 1.7 times", async () => {
+		// Measured openai-codex/gpt-6-astra fallback checkpoints ran 1.32 to 1.67 times their target.
+		const astra = { ...model, contextWindow: 272_000, maxTokens: 128_000 };
+		const prepared = preparation();
+		prepared.messagesToSummarize = Array.from({ length: 4 }, (_, index) => ({
+			role: "user",
+			content: `chunk-${index} ${"source ".repeat(8_500)}`,
+			timestamp: index + 1,
+		}));
+		const result = await compactContext(prepared, astra, {
+			...options((_model, request) => {
+				const target = /aim for at most ([\d,]+) characters/.exec(chunkPrompt(request))?.[1];
+				if (target === undefined) throw new Error("fallback prompt has no length target");
+				return streamResponse("x".repeat(Math.ceil(Number(target.replaceAll(",", "")) * 1.67)));
+			}),
+			estimatedContextTokens: 265_095,
+		});
+		const requests = result.details.requests ?? [];
+		expect(requests.map(({ strategy, rejected }) => ({ strategy, rejected }))).toEqual(
+			Array.from({ length: 4 }, () => ({ strategy: "chunked", rejected: undefined })),
+		);
+		for (const request of requests) expect(request.textChars).toBeLessThan(request.maxChars);
 	});
 
 	it("recovers a terminal-only overrun natively, keeping the conversation prefix identical", async () => {

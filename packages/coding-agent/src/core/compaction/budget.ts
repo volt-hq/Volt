@@ -9,6 +9,7 @@
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import { type Api, clampThinkingLevel, type Model, type ThinkingBudgets } from "@hansjm10/volt-ai";
 import { COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX } from "../messages.ts";
+import type { CheckpointPurpose } from "./checkpoint.ts";
 
 /** Output tokens one built-in checkpoint request asks for. */
 export const CHECKPOINT_MAX_TOKENS = 4096;
@@ -20,10 +21,18 @@ export const CHECKPOINT_MAX_CHARS = CHECKPOINT_MAX_TOKENS * CHECKPOINT_CHARS_PER
 const CHECKPOINT_WINDOW_SHARE = 0.1;
 /** ...but never fewer tokens than this. */
 const MIN_CHECKPOINT_TOKENS = 512;
-/** Target share of a request's character limit: the first attempt, then each correction. */
-export const CHECKPOINT_TARGET_RATIOS = [0.6, 0.4, 0.25] as const;
+/** Target shares of a request's character limit: the first attempt, then each correction. */
+type TargetRatios = readonly [first: number, correction: number, lastCorrection: number];
+/** Target shares for the native request. */
+export const NATIVE_TARGET_RATIOS: TargetRatios = [0.6, 0.4, 0.25];
+/**
+ * Target shares for chunked fallback and turn-prefix requests. Measured
+ * fallback checkpoints ran 1.3 to 1.7 times their target, which put a 60%
+ * first target at the hard limit; these keep that overshoot below it.
+ */
+export const CHUNK_TARGET_RATIOS: TargetRatios = [0.45, 0.3, 0.2];
 /** Oversized checkpoints are regenerated at most this many times per request. */
-export const MAX_CHECKPOINT_CORRECTIONS = CHECKPOINT_TARGET_RATIOS.length - 1;
+export const MAX_CHECKPOINT_CORRECTIONS = NATIVE_TARGET_RATIOS.length - 1;
 /** Share of a split-turn fallback budget the history summary gets; the turn prefix gets the rest. */
 export const SPLIT_HISTORY_SHARE = 0.75;
 /** The verbatim user-message record gets at most this many tokens... */
@@ -91,8 +100,9 @@ export function fileListsMaxChars(contextWindow: number): number {
 }
 
 /** The target length of a checkpoint request, tightening with each correction. */
-export function checkpointTargetChars(maxChars: number, correction: number): number {
-	const ratio = CHECKPOINT_TARGET_RATIOS[Math.min(correction, CHECKPOINT_TARGET_RATIOS.length - 1)];
+export function checkpointTargetChars(maxChars: number, correction: number, purpose: CheckpointPurpose): number {
+	const ratios = purpose === "native" ? NATIVE_TARGET_RATIOS : CHUNK_TARGET_RATIOS;
+	const ratio = ratios[Math.min(correction, ratios.length - 1)];
 	return Math.max(1, Math.floor(maxChars * ratio));
 }
 

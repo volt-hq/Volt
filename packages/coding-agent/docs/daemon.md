@@ -662,7 +662,14 @@ Key behaviors:
   with a conversation open in a worker, without `--force`; force closes those
   conversations first. `worktree prune` reconciles records against the
   filesystem and quarantines unrecognized directories by renaming (never
-  deleting) them.
+  deleting) them. Removal without `--force` moves the checkout to
+  `~/.volt/agent/worktrees/recovery/` first; `--force` deletes it, including
+  uncommitted changes. Up to 32 checkouts stay there: once the
+  folder is full, the oldest ones that were clean when removed are deleted to
+  make room, and `worktree prune --purge-recovery` deletes a workspace's clean
+  ones at once. A checkout that changed during removal stays until you delete
+  it; while such checkouts fill all 32 places, removal without `--force`
+  fails.
 - **Fresh checkouts are fresh.** Worktrees share git objects but not
   untracked files: `node_modules`, virtualenvs, and build caches must be
   reinstalled per worktree.

@@ -41,6 +41,7 @@ import {
 	type CompactionPreparation,
 	type CompactionRequestUsage,
 	type CompactionResult,
+	type CompactionStrategyReason,
 	type SummarizationRetryOptions,
 	summarizeCompactionHistory,
 } from "./compaction.ts";
@@ -56,9 +57,6 @@ const NATIVE_INTRO =
 	"The conversation above is historical context to compact, not a task to continue. Produce ONLY a checkpoint that another assistant will use alongside the retained recent messages. Do not call tools or answer earlier requests.";
 const NATIVE_RULES =
 	"- Include context needed to understand the retained suffix when this cuts an ongoing turn. Newer corrections supersede older decisions.";
-
-/** Why the compaction summarized with the strategy it used. */
-export type CompactionStrategyReason = "native" | "preflight_overflow" | "provider_overflow";
 
 /** The checkpoint instruction appended to the native request, for a length target. */
 export function nativeCheckpointInstruction(
@@ -324,7 +322,7 @@ export async function compactContext(
 			nativeCheckpointInstruction(target, scope, options.customInstructions);
 		const outputTokens = checkpointOutputTokens(model);
 		const maxChars = outputTokens * CHECKPOINT_CHARS_PER_TOKEN;
-		const firstTarget: CheckpointTarget = { targetChars: checkpointTargetChars(maxChars, 0), maxChars };
+		const firstTarget: CheckpointTarget = { targetChars: checkpointTargetChars(maxChars, 0, "native"), maxChars };
 		budget = {
 			contextWindow: model.contextWindow,
 			estimatedContextTokens: options.estimatedContextTokens,
@@ -398,7 +396,7 @@ export async function compactContext(
 			summary: generated,
 			firstKeptEntryId: preparation.firstKeptEntryId,
 			tokensBefore: preparation.tokensBefore,
-			details: { readFiles, modifiedFiles, requests },
+			details: { readFiles, modifiedFiles, requests, strategyReason },
 		};
 	} catch (error) {
 		if (options.onFailure) {
