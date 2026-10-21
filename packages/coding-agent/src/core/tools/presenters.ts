@@ -125,19 +125,27 @@ function omittedBefore(details: unknown): number {
  * output that fits in five lines whole, and otherwise how many lines it wrote.
  * While the command runs, a line it is still writing is kept apart, so new
  * output reaches clients as appended lines.
+ *
+ * A call with a description is titled by it (with the timeout in force). The
+ * model wrote the description and nothing checks it against the command, so
+ * the command stays in view: a muted `$ command` line opens the summary, and
+ * a body opens with the command in full.
  */
 export const presentBash: ToolPresenter = (input) => {
 	const command = stringArg(input.args, "command");
+	const description = stringArg(input.args, "description")?.trim() || undefined;
 	const timeout = timeoutSeconds(input.args.timeout);
-	const title: UiNodeStyledText = [
-		{ text: "$ ", bold: true },
-		{ text: command === undefined ? "…" : oneLine(command) },
-		...(timeout === undefined ? [] : [{ text: ` (timeout ${timeout}s)`, token: "muted" as const }]),
-	];
+	const timeoutSuffix = timeout === undefined ? [] : [{ text: ` (timeout ${timeout}s)`, token: "muted" as const }];
+	const commandText = command === undefined ? "…" : oneLine(command);
+	const title: UiNodeStyledText =
+		description === undefined
+			? [{ text: "$ ", bold: true }, { text: commandText }, ...timeoutSuffix]
+			: [{ text: oneLine(description) }, ...timeoutSuffix];
 	const commandNode: UiNode[] =
 		command !== undefined && (command.includes("\n") || command.trim().length > TITLE_TEXT_MAX_CHARS)
 			? [{ type: "code", key: "command", language: "bash", code: command }]
 			: [];
+	const commandLine: UiNode[] = description === undefined ? [] : [textNode("command", `$ ${commandText}`, "muted")];
 	const result = input.result;
 	const running = result?.partial === true;
 	const text = resultText(result);
@@ -161,29 +169,32 @@ export const presentBash: ToolPresenter = (input) => {
 	// A failure's newest lines are where it says why, so they show.
 	const counted =
 		input.state === "done" && result?.isError !== true && (omitted > 0 || all.length > BASH_SUMMARY_LINES);
-	const summary: UiNode[] = counted
-		? [textNode("lines", `${total} line${total === 1 ? "" : "s"}`, "muted")]
-		: [
-				...(tail.length === 0
-					? []
-					: [
-							{
-								type: "terminal" as const,
-								key: "tail",
-								lines: tail,
-								...(omitted + all.length - tail.length > 0
-									? { omittedLines: omitted + all.length - tail.length }
-									: {}),
-							},
-						]),
-				...statusNode,
-			];
+	const summary: UiNode[] = [
+		...commandLine,
+		...(counted
+			? [textNode("lines", `${total} line${total === 1 ? "" : "s"}`, "muted")]
+			: [
+					...(tail.length === 0
+						? []
+						: [
+								{
+									type: "terminal" as const,
+									key: "tail",
+									lines: tail,
+									...(omitted + all.length - tail.length > 0
+										? { omittedLines: omitted + all.length - tail.length }
+										: {}),
+								},
+							]),
+					...statusNode,
+				]),
+	];
 	// Output the summary shows whole needs no body.
 	const fits = commandNode.length === 0 && warnings.length === 0 && omitted === 0 && all.length <= BASH_SUMMARY_LINES;
 	const body: UiNode[] = fits
 		? []
 		: [
-				...commandNode,
+				...(commandNode.length === 0 ? commandLine : commandNode),
 				...(all.length === 0
 					? []
 					: [
@@ -547,13 +558,16 @@ function namesJob(details: unknown): boolean {
  * that clients show live under the call, so anything the result recorded
  * about it (its state when it started) would only go stale. A call whose job
  * failed to start says why. A background call the tool answered itself,
- * without a job, presents as the tool does.
+ * without a job, presents as the tool does. A call's description reaches the
+ * tool's presenter only without `background: true`: a job's description
+ * titles its work item instead.
  */
 export function presentBackground(inner: ToolPresenter): ToolPresenter {
 	return (input) => {
+		const { background, ...foreground } = input.args;
+		if (background !== true) return inner({ ...input, args: foreground });
 		// The job's description is its work item's title, which clients show under the call.
-		const { background, description: _description, ...args } = input.args;
-		if (background !== true) return inner({ ...input, args });
+		const { description: _description, ...args } = foreground;
 		const presented = inner({ args, argsComplete: input.argsComplete, state: "pending", cwd: input.cwd });
 		const title = presented.title;
 		if (input.state !== "done") {
