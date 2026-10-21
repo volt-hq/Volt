@@ -23,7 +23,11 @@
  * the daemon's environment. The request travels on stdin and the result comes
  * back as one JSON line on fd 3, so nothing an extension prints to stdout can
  * corrupt it; stdout and stderr go to `inventory-<id>.log` beside the
- * workers' logs.
+ * workers' logs. However an evaluation ends, what its extensions started ends
+ * with it: once the result is in (the process then waits to be stopped) or the
+ * evaluation is killed, the launcher stops the process with its process group
+ * and every descendant still running, and a process that exits on its own
+ * takes its process group with it.
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
@@ -32,6 +36,7 @@ import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { ENV_AGENT_DIR } from "../config.ts";
 import { ensurePrivateDirectorySync } from "../utils/private-files.ts";
+import { terminateProcessTree } from "../utils/shell.ts";
 import { getWorkerLogDirectory } from "./paths.ts";
 import { resolveDaemonCliInvocation } from "./spawn.ts";
 import { withoutDaemonCredentials } from "./worker-spawn-options.ts";
@@ -99,15 +104,13 @@ export interface LaunchedExtensionInventory {
 	 */
 	readonly result: Promise<unknown>;
 	/**
-	 * Stop the process and what it started: SIGTERM to its process group, so it ends the detached process trees
-	 * its extensions started, then SIGKILL to the group if it has not exited
-	 * {@link EXTENSION_INVENTORY_KILL_GRACE_MS} later.
+	 * Stop the process and what it started, as happens by itself once its result is in: SIGTERM to its process
+	 * group and to each of its descendants (so it ends the detached trees its tools started), then SIGKILL to the
+	 * group and to each of those still running a moment later, whether or not the process has exited. On Windows,
+	 * its process tree is killed outright. Does nothing once a stop has begun.
 	 */
 	kill(): void;
 }
-
-/** How long a stopped extension inventory process has to exit before its process group is killed. */
-export const EXTENSION_INVENTORY_KILL_GRACE_MS = 2_000;
 
 export interface WorkerLauncher {
 	launch(request: WorkerLaunchRequest): LaunchedWorker;
@@ -151,27 +154,6 @@ function killGroup(child: ChildProcess): void {
 		}
 	}
 	child.kill("SIGKILL");
-}
-
-/**
- * Ask `child`'s process group to stop (SIGTERM), so `child` can end what it started outside the group, and kill
- * the group if `child` has not exited `graceMs` later. On Windows, kill `child` outright.
- */
-function terminateGroup(child: ChildProcess, graceMs: number): void {
-	if (child.exitCode !== null || child.signalCode !== null) return;
-	if (process.platform === "win32" || child.pid === undefined) {
-		killGroup(child);
-		return;
-	}
-	try {
-		process.kill(-child.pid, "SIGTERM");
-	} catch {
-		killGroup(child);
-		return;
-	}
-	const escalation = setTimeout(() => killGroup(child), graceMs);
-	escalation.unref();
-	child.once("exit", () => clearTimeout(escalation));
 }
 
 /** Worker logs kept beyond those of running workers; older ones are removed as workers start. */
@@ -256,12 +238,32 @@ export class ProcessWorkerLauncher implements WorkerLauncher {
 			closeSync(logFd);
 		}
 		this.running.add(name);
+		const isExited = () => child.exitCode !== null || child.signalCode !== null;
+		let stopping = false;
+		/** End the process and what it started (`LaunchedExtensionInventory.kill`), once. */
+		const stop = () => {
+			if (stopping) return;
+			stopping = true;
+			// Its descendants are found by parentage, which ends with it; one that exited lost its group on exit (below).
+			if (child.pid !== undefined && !isExited()) void terminateProcessTree(child.pid, isExited);
+		};
 		const exited = new Promise<WorkerExit>((resolve) => {
 			const settle = (exit: WorkerExit) => {
 				this.running.delete(name);
 				resolve(exit);
 			};
-			child.once("exit", (code, signal) => settle(workerExitFromCode(code, signal)));
+			child.once("exit", (code, signal) => {
+				// It exited unstopped (past its deadline, on a bad request, crashed): its process group may still hold
+				// what its extensions started. The group's id is not reused while any of it runs.
+				if (!stopping && process.platform !== "win32" && child.pid !== undefined) {
+					try {
+						process.kill(-child.pid, "SIGKILL");
+					} catch {
+						// Nothing of it is left.
+					}
+				}
+				settle(workerExitFromCode(code, signal));
+			});
 			child.once("error", (error) => {
 				if (child.pid === undefined) settle({ reason: "failed", error: error.message });
 			});
@@ -278,14 +280,20 @@ export class ProcessWorkerLauncher implements WorkerLauncher {
 				size += chunk.length;
 				if (size > EXTENSION_INVENTORY_MAX_OUTPUT_BYTES) {
 					output.destroy();
-					terminateGroup(child, EXTENSION_INVENTORY_KILL_GRACE_MS);
+					stop();
 					reject(new Error("The extension inventory result is too large"));
 					return;
 				}
 				chunks.push(chunk);
 			});
 			output.once("error", () => undefined);
-			output.once("close", () => resolve(Buffer.concat(chunks).toString("utf8")));
+			output.once("close", () => {
+				const text = Buffer.concat(chunks).toString("utf8");
+				// The result is in, and the process waits to be stopped. Closed without one, the process has exited
+				// (its exit takes its group) or the evaluation's timeout stops it.
+				if (text.includes("\n")) stop();
+				resolve(text);
+			});
 		});
 		const bytes = `${JSON.stringify({
 			root: request.root,
@@ -309,7 +317,7 @@ export class ProcessWorkerLauncher implements WorkerLauncher {
 				throw new Error("The extension inventory result is not JSON");
 			}
 		})();
-		return { result, kill: () => terminateGroup(child, EXTENSION_INVENTORY_KILL_GRACE_MS) };
+		return { result, kill: stop };
 	}
 
 	/** A new log file of its own for `name`, in the agent's worker log directory: never one planted at its path, never through a link. */
