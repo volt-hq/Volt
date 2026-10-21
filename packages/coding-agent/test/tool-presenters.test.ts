@@ -127,6 +127,66 @@ describe("bash presenter", () => {
 		expect(presented.body?.[0]).toEqual({ type: "code", key: "command", language: "bash", code: command });
 	});
 
+	it("titles a described call by its description and keeps the command beneath it", () => {
+		const presented = present(
+			presentBash,
+			input({ command: "npm test", description: "Run the unit tests", timeout: 60 }, "done", { text: "ok" }),
+		);
+		expect(presented.title).toEqual([{ text: "Run the unit tests" }, { text: " (timeout 60s)", token: "muted" }]);
+		expect(presented.summary).toEqual([
+			{ type: "text", key: "command", text: "$ npm test", token: "muted" },
+			{ type: "terminal", key: "tail", lines: ["ok"] },
+		]);
+		// Output the summary shows whole needs no body: expanded, the summary shows, command included.
+		expect(presented.body).toBeUndefined();
+	});
+
+	it("opens every summary of a described call with its command", () => {
+		const args = { command: "npm run build", description: "Build the app" };
+		const commandLine = { type: "text", key: "command", text: "$ npm run build", token: "muted" };
+		// Running, before any output.
+		expect(present(presentBash, input(args, "running")).summary).toEqual([commandLine]);
+		// Failed without output: the command and how it ended.
+		const failed = present(presentBash, input(args, "done", { text: "Command exited with code 1", isError: true }));
+		expect(failed.summary).toEqual([commandLine, { type: "text", key: "status", text: "exit 1", token: "error" }]);
+		// Passing output too long to show whole: the command and the line count, and the body opens with the command.
+		const lines = Array.from({ length: 12 }, (_, index) => `line-${index + 1}`);
+		const long = present(presentBash, input(args, "done", { text: lines.join("\n") }));
+		expect(long.summary).toEqual([commandLine, { type: "text", key: "lines", text: "12 lines", token: "muted" }]);
+		expect(long.body?.[0]).toEqual(commandLine);
+		expect(plain(long.body)).toBe(`$ npm run build\n${lines.join("\n")}`);
+	});
+
+	it("opens a described multi-line command's body with the command in full", () => {
+		const command = "for f in *; do\n  echo $f\ndone";
+		const presented = present(
+			presentBash,
+			input({ command, description: "Echo each file" }, "done", { text: "a\nb" }),
+		);
+		expect(title(presented)).toBe("Echo each file");
+		expect(presented.summary?.[0]).toEqual({
+			type: "text",
+			key: "command",
+			text: "$ for f in *; do echo $f done",
+			token: "muted",
+		});
+		expect(presented.body?.[0]).toEqual({ type: "code", key: "command", language: "bash", code: command });
+		expect(presented.body?.filter((node) => node.key === "command")).toHaveLength(1);
+	});
+
+	it.each(["", "  \n "])("presents a blank description as no description: %j", (description) => {
+		const args = { command: "npm test" };
+		expect(present(presentBash, input({ ...args, description }, "done", { text: "ok" }))).toEqual(
+			present(presentBash, input(args, "done", { text: "ok" })),
+		);
+	});
+
+	it("shows a pending described call's command as it streams", () => {
+		const presented = present(presentBash, input({ description: "Run the unit tests" }, "pending"));
+		expect(title(presented)).toBe("Run the unit tests");
+		expect(presented.summary).toEqual([{ type: "text", key: "command", text: "$ …", token: "muted" }]);
+	});
+
 	it("keeps a line still being written apart from complete output while running", () => {
 		const text = "1\n2\n3\n4\n5\n6\nsev";
 		const presented = present(presentBash, input({ command: "build" }, "running", { text, partial: true }));
@@ -561,6 +621,12 @@ describe("background calls", () => {
 		expect(present(background, input({ command: "ls" }, "done", { text: "a" }))).toEqual(
 			present(presentBash, input({ command: "ls" }, "done", { text: "a" })),
 		);
+		// Its description reaches the tool's presenter, which titles the call by it.
+		const args = { command: "ls", description: "List the files" };
+		const presented = present(background, input(args, "done", { text: "a" }));
+		expect(presented).toEqual(present(presentBash, input(args, "done", { text: "a" })));
+		expect(title(presented)).toBe("List the files");
+		expect(present(background, input({ ...args, background: false }, "done", { text: "a" }))).toEqual(presented);
 	});
 
 	it("keeps the tool's title and shows nothing more once the job started", () => {

@@ -362,6 +362,26 @@ describe("background tool interface", () => {
 		).rejects.toThrow("description must be a string");
 	});
 
+	it("keeps a tool's own description parameter and gives a tool without one the job description", () => {
+		const start = (): Promise<JobSummary> => Promise.reject(new Error("Not started"));
+		const bash = createBashToolDefinition(process.cwd());
+		expect(bash.parameters.properties.description).toBeDefined();
+		expect(withBackgroundJobs(bash, { start }).parameters.properties.description).toBe(
+			bash.parameters.properties.description,
+		);
+		const stub: ToolDefinition<typeof schema, { marker: string }> = {
+			name: "bash",
+			label: "bash",
+			description: "Test Bash",
+			parameters: schema,
+			execute: async () => ({ content: [], details: { marker: "done" } }),
+		};
+		expect(withBackgroundJobs(stub, { start }).parameters.properties.description).toMatchObject({
+			type: "string",
+			description: expect.stringContaining("Only used with background: true"),
+		});
+	});
+
 	it("keeps subagent preflight direct, preserves failure status, and finalizes actual completion once", async () => {
 		const { jobs } = await runtime();
 		const finalize = vi.fn(async (_name, _id, _input, result: AgentToolResult<unknown>) => result);

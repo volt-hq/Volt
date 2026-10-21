@@ -57,12 +57,13 @@ export function withBackgroundJobs<T extends TProperties, TDetails>(
 	}
 	const toolName = definition.name;
 	type OriginalArgs = Static<TObject<T>>;
+	// A tool that declares its own description (bash) keeps it; it labels the job as well.
 	const parameters = {
 		...definition.parameters,
 		properties: {
 			...definition.parameters.properties,
 			background: backgroundParameter,
-			description: descriptionParameter,
+			...("description" in definition.parameters.properties ? {} : { description: descriptionParameter }),
 		},
 	} as BackgroundParameters<T>;
 	// The wrapped definition's presenter is typed for its parameters; the wrapper presents instead.

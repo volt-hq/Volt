@@ -48,6 +48,12 @@ const bashSchema = Type.Object({
 			description: `Seconds without output before the command is presumed hung and killed (default ${DEFAULT_STALL_TIMEOUT_SECONDS}, max ${MAX_TIMEOUT_SECONDS}, 0 disables). Raise this only for commands that are legitimately silent for long stretches.`,
 		}),
 	),
+	description: Type.Optional(
+		Type.String({
+			description:
+				'Short user-facing description of what the command does (3-8 words, e.g. "Run coding-agent unit tests"). Shown as the call\'s title above the command. Omit it for commands whose purpose is obvious, such as ls or cat.',
+		}),
+	),
 });
 
 export type BashToolInput = Static<typeof bashSchema>;
@@ -224,6 +230,9 @@ export function createBashToolDefinition(
 		label: "bash",
 		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. A command that produces no output for ${DEFAULT_STALL_TIMEOUT_SECONDS}s is killed as hung, so long-running commands do not need a large timeout to be safe.`,
 		promptSnippet: "Execute bash commands (ls, grep, find, etc.)",
+		promptGuidelines: [
+			"Give bash a short description when the command's purpose is not obvious from the command alone (pipelines, multi-line scripts, builds, tests, git operations); the user sees it as the call's title above the command.",
+		],
 		parameters: bashSchema,
 		async execute(
 			_toolCallId,

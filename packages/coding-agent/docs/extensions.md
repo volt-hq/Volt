@@ -911,7 +911,7 @@ volt.on("tool_call", async (event, ctx) => {
 
   // Built-in tools: no type params needed
   if (isToolCallEventType("bash", event)) {
-    // event.input is { command: string; timeout?: number }
+    // event.input is { command: string; timeout?: number; stallTimeout?: number; description?: string }
     event.input.command = `source ~/.profile\n${event.input.command}`;
 
     if (event.input.command.includes("rm -rf")) {
