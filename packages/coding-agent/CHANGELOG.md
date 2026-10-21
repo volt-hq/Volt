@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.5.0] - 2026-10-21
+
+Standalone Windows executables in this release are not code-signed. Windows may show a SmartScreen warning when you first run them.
+
+### Highlights
+
+- Background jobs can carry a short [description](https://volt-cli.dev/docs/usage/#background-jobs) that job lists, the work status, job cards, and completion notices show instead of the raw command.
+  Job cards now read in plain words ("wait for Run the unit tests", "check on …", "cancel …", "list background jobs") and name the job by its label instead of its id, also while a wait runs. Their table shows "Running" instead of "Running at capture", a Command or Agent type instead of the tool name, and job ids only when expanded.
+
+### Breaking Changes
+
+- **sdk:** A protocol `Profile` now groups its projection settings under `Profile.projection`. ([#935](https://github.com/volt-hq/Volt/issues/935))
+  Read `fidelity`, `includes`, `source`, and `sourceCut` from `profile.projection` (the exported `Projection` type) instead of from `Profile`, and `textScalars` and `presentationBytes` from `profile.projection` instead of from `ProfileLimits`. Passing `localProfile` to `serveConnection` is unchanged.
+- **remote:** Require log generation when resuming cached conversations so a recreated session cannot mix old and new history. ([#957](https://github.com/volt-hq/Volt/issues/957))
+  Update hosts and clients together, including volt-app's generation-fenced resume milestone in [#464](https://github.com/volt-hq/volt-app/issues/464). Keep each snapshot's required `sessionGeneration` alongside its fold and ordinal, and send it with numeric `subscribe.after`. A fresh `after:"snapshot"` request must omit it. Discard ordinal-only recovery records rather than inferring a generation; a generation-mismatch snapshot replaces the old fold and entry-keyed overlays. ProtocolClient and its observations carry the generation automatically.
+
+### Improvements
+
+- **compaction:** Compaction now says how much smaller the context got and how long it took, and explains when a long conversation had to be summarized in parts.
+- **compaction:** Extension-provided compaction summaries now keep your earlier messages verbatim and the file lists, which Volt appends to every checkpoint it installs.
+- **daemon:** Phone conversation opens no longer load the whole session or start a session store worker per lookup, cutting reconnect latency ([#934](https://github.com/volt-hq/Volt/issues/934)).
+- **remote:** Phones open long conversations faster and with about half the bytes: the host sends the newest 100 entries (older ones still load with "Load earlier"), prepares the snapshot from only those, reuses that work when the conversation is reopened or opened on another phone, and redacts workspace paths several times faster ([#935](https://github.com/volt-hq/Volt/issues/935)).
+- **review:** Reviews now include optional (P3) findings by default; pass --include-optional=false to leave them out.
+- **tui:** The terminal shows tool call durations from the host, so they stay correct after reconnecting or redrawing and appear in resumed sessions. ([#925](https://github.com/volt-hq/Volt/issues/925))
+
+### Fixes
+
+- **compaction:** Extension-provided compactions that keep messages from an invalid boundary, such as one before what the previous compaction kept or one that would keep a tool result without its call, now fail without committing instead of rebuilding a broken context.
+- **compaction:** Fixed auto-compaction failing with "Compaction summary exceeded the character limit" in long sessions: compaction now starts earlier, keeps each summary within a length budget, regenerates an oversized summary shorter, and keeps your earlier messages verbatim across repeated compactions.
+  A compaction whose result would not fit the context window, or would immediately trigger another automatic compaction, now fails before anything is committed and says what to change. Checkpoints list modified files before read files and shorten long file lists with a count; the complete lists stay in the compaction details. When a long conversation is summarized in parts, each part aims shorter, so fewer are rejected as oversized and regenerated.
+- **daemon:** Removing a managed worktree no longer fails once 32 removed checkouts fill the recovery folder: the oldest ones that were clean are deleted to make room.
+- **models:** GitHub Copilot now defaults to GPT-6.1 Sol because Copilot retired GPT-5.4, and Copilot's GPT-6 models now use the Responses API.
+- **remote:** A phone's conversation open that the same phone's newer connection replaced, or whose conversation host exited or did not take it up in time, is now rejected as retryable, so the app retries it instead of clearing the selected agent. ([#947](https://github.com/volt-hq/Volt/issues/947))
+- **remote:** Phones and terminals now receive the final frame a conversation host wrote before it exited, such as why the conversation ended, instead of a reset. ([#937](https://github.com/volt-hq/Volt/issues/937))
+- **tui:** Pasted screenshots and image paths are resized to fit prompt attachment limits instead of failing submission with a UTF-8 size error.
+
 ## [0.4.0] - 2026-10-17
 
 Standalone Windows executables in this release are not code-signed. Windows may show a SmartScreen warning when you first run them.
