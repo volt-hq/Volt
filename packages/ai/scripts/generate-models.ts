@@ -1593,8 +1593,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 
 				// Claude 4 and later route to Anthropic Messages API
 				const isCopilotClaude4 = isClaudeAtLeast(modelId, 4, 0) === true;
-				// gpt-5 models require responses API, others use completions
-				const needsResponsesApi = modelId.startsWith("gpt-5") || modelId.startsWith("oswe");
+				// gpt-5 and gpt-6 models require responses API, others use completions
+				const needsResponsesApi =
+					modelId.startsWith("gpt-5") || modelId.startsWith("gpt-6") || modelId.startsWith("oswe");
 
 				const api: Api = isCopilotClaude4
 					? "anthropic-messages"
