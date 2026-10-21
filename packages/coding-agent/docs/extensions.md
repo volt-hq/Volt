@@ -325,6 +325,8 @@ Extension factories may run in invocations that never start a session. Do not st
 
 Defer background resource startup until `session_start` or the command/tool/event that needs the resource. Register an idempotent `session_shutdown` handler to close any session-scoped resources you start.
 
+In the daemon, a process you start ends when the worker or inventory process that runs your extension exits, if it is still descended from that process, detached or not ([daemon.md](daemon.md#processes-a-conversation-started)). A process meant to outlive its conversation must be started from a launcher that exits first.
+
 ### Extension Styles
 
 **Single file** - simplest, for small extensions. The file exports `manifest`:

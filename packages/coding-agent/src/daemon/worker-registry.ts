@@ -1375,7 +1375,8 @@ export class WorkerRegistry {
 	 * Retire `record` without the option to refuse: its relays close first
 	 * (the retire listeners), then it stops, aborting a turn still running
 	 * after 60 s. A worker that has not exited by the forced-stop timeout (its
-	 * event loop is blocked) is killed, so no fence waits for it forever.
+	 * event loop is blocked) is killed after the processes descended from it,
+	 * so no fence waits for it forever.
 	 * Resolves once it exited.
 	 */
 	private retire(record: WorkerRecord, reason: WorkerStopReason): Promise<WorkerExit> {

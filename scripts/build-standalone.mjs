@@ -322,7 +322,9 @@ function assertStagedWorkspaceFsAddon(stageDirectory, target) {
 	// Keep in sync with isNativeAddon() in packages/coding-agent/src/core/workspace-fs/native-loader.ts.
 	const expectedExports = [
 		"FileLock",
+		"ProcessTree",
 		"WorkspaceRoot",
+		"openProcessTree",
 		"tryAcquireFileLock",
 		"workspaceFsApiVersion",
 		"workspaceFsSourceFingerprint",

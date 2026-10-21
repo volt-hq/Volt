@@ -377,3 +377,43 @@ export async function terminateProcessTree(pid: number, isExited?: () => boolean
 	if (!leaderAlive && survivors.length === 0) return;
 	signalProcessTree(pid, survivors, "SIGKILL");
 }
+
+/**
+ * End the processes still descended from `pid` without signalling any process group, so a process whose parent
+ * exited first (it has left the tree) keeps running: SIGTERM, then SIGKILL a moment later to those still running
+ * and to whatever they started meanwhile. With `includeRoot`, `pid` itself is ended with them. `isRootExited`
+ * tells whether `pid` has exited, after which neither it nor its id is signalled or walked; without it, `pid` is
+ * this process or one that cannot exit meanwhile. macOS and Linux only: Windows walks its process table through
+ * the workspace-fs addon (`src/daemon/process-tree.ts`).
+ */
+export async function terminateDescendants(
+	pid: number,
+	options: { includeRoot?: boolean; isRootExited?: () => boolean } = {},
+): Promise<void> {
+	// A root that exited left nothing to walk from (its children were reparented), and its id may be reused.
+	if (process.platform === "win32" || !isSignalablePid(pid) || options.isRootExited?.() === true) return;
+	const rootRuns = () => options.isRootExited?.() !== true && isProcessAlive(pid);
+	const descendants = collectDescendantPids(pid);
+	for (const descendant of descendants) signalPid(descendant, "SIGTERM");
+	if (options.includeRoot === true && rootRuns()) signalPid(pid, "SIGTERM");
+
+	await new Promise((resolve) => setTimeout(resolve, SIGKILL_ESCALATION_MS));
+
+	// Those still running, and whatever they and the root started meanwhile.
+	const survivors = descendants.filter(isProcessAlive);
+	const remaining = new Set(survivors);
+	const table = readChildrenByParent();
+	if (table) {
+		for (const parent of rootRuns() ? [pid, ...survivors] : survivors) {
+			for (const descendant of collectDescendantPids(parent, table)) remaining.add(descendant);
+		}
+	}
+	for (const descendant of remaining) signalPid(descendant, "SIGKILL");
+	if (options.includeRoot === true && rootRuns()) signalPid(pid, "SIGKILL");
+}
+
+/** End the processes still descended from `pid` at once (SIGKILL), for exits that cannot wait; never `pid`. */
+export function killDescendants(pid: number): void {
+	if (process.platform === "win32" || !isSignalablePid(pid)) return;
+	for (const descendant of collectDescendantPids(pid)) signalPid(descendant, "SIGKILL");
+}

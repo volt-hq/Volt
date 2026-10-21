@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { terminateProcessTree } from "../src/utils/shell.ts";
+import { terminateDescendants, terminateProcessTree } from "../src/utils/shell.ts";
 
 const isPosix = process.platform !== "win32";
 const isWindows = process.platform === "win32";
@@ -34,6 +34,9 @@ const ESCAPED_MARKER = "4751";
 const GROUPED_MARKER = "4752";
 const PLAIN_MARKER = "4753";
 const DEEP_MARKER = "4754";
+const IN_TREE_MARKER = "4755";
+const LEFT_TREE_MARKER = "4756";
+const STUBBORN_MARKER = "4757";
 
 function pidAlive(pid: number): boolean {
 	try {
@@ -227,4 +230,62 @@ describe.runIf(isPosix)("terminateProcessTree", () => {
 			cleanup(child, [PLAIN_MARKER]);
 		}
 	}, 30000);
+});
+
+describe.runIf(isPosix)("terminateDescendants", () => {
+	test("ends a process still in the tree, not one that left it though it stays in the process group", async () => {
+		let child: ChildProcess | undefined;
+		try {
+			// The subshell exits at once, so its `sleep` has left the tree; the other `sleep` is the shell's child.
+			child = spawn("/bin/sh", ["-c", `(sleep ${LEFT_TREE_MARKER} &); sleep ${IN_TREE_MARKER}`], {
+				detached: true,
+				stdio: "ignore",
+			});
+			const shellPid = child.pid as number;
+			expect(
+				await poll(
+					() =>
+						pgrepFull(`^sleep ${IN_TREE_MARKER}$`).length > 0 &&
+						pgrepFull(`^sleep ${LEFT_TREE_MARKER}$`).length > 0,
+					5000,
+				),
+			).toBe(true);
+			const inTreePid = pgrepFull(`^sleep ${IN_TREE_MARKER}$`)[0];
+			const leftTreePid = pgrepFull(`^sleep ${LEFT_TREE_MARKER}$`)[0];
+			expect(pgidOf(leftTreePid)).toBe(pgidOf(shellPid));
+
+			await terminateDescendants(shellPid);
+
+			expect(await poll(() => !pidAlive(inTreePid), 5000)).toBe(true);
+			expect(pidAlive(leftTreePid)).toBe(true);
+		} finally {
+			cleanup(child, [IN_TREE_MARKER, LEFT_TREE_MARKER]);
+		}
+	}, 30000);
+
+	test.runIf(hasPerl)(
+		"force-kills a SIGTERM-ignoring descendant, and ends the root with includeRoot",
+		async () => {
+			let child: ChildProcess | undefined;
+			try {
+				child = spawnStubbornTree(STUBBORN_MARKER, false);
+				const running = child;
+				const shellPid = running.pid as number;
+				const exited = new Promise((resolve) => running.once("exit", resolve));
+				expect(await poll(() => pgrepFull(`sleep ${STUBBORN_MARKER}`).length > 0, 5000)).toBe(true);
+				const victimPid = pgrepFull(`sleep ${STUBBORN_MARKER}`)[0];
+
+				await terminateDescendants(shellPid, {
+					includeRoot: true,
+					isRootExited: () => running.exitCode !== null || running.signalCode !== null,
+				});
+
+				expect(await poll(() => !pidAlive(victimPid), 5000)).toBe(true);
+				await exited;
+			} finally {
+				cleanup(child, [STUBBORN_MARKER]);
+			}
+		},
+		30000,
+	);
 });

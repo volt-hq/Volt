@@ -2,7 +2,8 @@
  * An extension inventory as a process of its own (`volt daemon extension-inventory`, started from this
  * checkout's source by `ProcessWorkerLauncher`): it loads the root's extensions, writes its result on fd 3
  * whatever the extensions print, keeps a private log beside the workers', and however an evaluation ends (with
- * a result, stopped, or by exiting on its own) ends the processes its extensions started.
+ * a result, stopped, or by exiting on its own) ends the processes its extensions started, except one that left
+ * its tree.
  */
 
 import {
@@ -21,7 +22,8 @@ import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ExtensionInventoryProbeOutputSchema } from "../src/daemon/extension-inventory.ts";
 import { getWorkerLogDirectory } from "../src/daemon/paths.ts";
-import { ProcessWorkerLauncher } from "../src/daemon/worker-launcher.ts";
+import { CRASH_EXIT_CODE, ProcessWorkerLauncher } from "../src/daemon/worker-launcher.ts";
+import { type SleeperStart, spawnerExtension, writeSleeper } from "./utilities/process-tree.ts";
 
 /** The process starts from source here: compiling it can take a while on a cold cache. */
 const PROCESS_TEST_TIMEOUT_MS = 180_000;
@@ -85,6 +87,26 @@ async function waitForPid(pidFile: string): Promise<number> {
 	const pid = Number(readFileSync(pidFile, "utf8").trim());
 	extensionPids.push(pid);
 	return pid;
+}
+
+/**
+ * A workspace whose extension `spawner` starts Node sleepers (`test/utilities/process-tree.ts`): `plain` with its
+ * child `grandchild`, `detached`, and `orphan`, whose parent exits at once so that it has left the inventory's
+ * tree (on macOS and Linux it stays in the inventory's process group). Once they all run, the factory runs
+ * `then`.
+ */
+function sleeperWorkspace(then = ""): { root: string; agentDir: string; pidFile: (name: string) => string } {
+	const workspace = spawnerWorkspace((dir) => {
+		const pidFile = (name: string) => join(dir, `${name}.pid`);
+		const starts: SleeperStart[] = [
+			{ args: [pidFile("plain"), "child", pidFile("grandchild")] },
+			{ args: [pidFile("detached")], detached: true },
+			{ args: [pidFile("launcher"), "orphan", pidFile("orphan")] },
+		];
+		const names = ["plain", "grandchild", "detached", "orphan"];
+		return spawnerExtension(writeSleeper(dir), starts, names.map(pidFile), then);
+	});
+	return { ...workspace, pidFile: (name) => join(workspace.tempDir, `${name}.pid`) };
 }
 
 async function expectEnded(pids: readonly number[]): Promise<void> {
@@ -261,6 +283,54 @@ export default async function () {
 			launched.kill();
 			await expect(launched.result).rejects.toThrow(/wrote no result/);
 			await expectEnded([pid]);
+		},
+		PROCESS_TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"ends the processes still descended from it once it answers, and leaves running one that left its tree",
+		async () => {
+			const { root, agentDir, pidFile } = sleeperWorkspace();
+
+			const output = await new ProcessWorkerLauncher().launchExtensionInventory({
+				id: "test-7",
+				agentDir,
+				root,
+				projectTrusted: true,
+			}).result;
+
+			expect(output).toMatchObject({ ok: true, extensions: [{ id: "spawner", state: "active" }] });
+			const [plain, grandchild, detached, orphan] = await Promise.all(
+				["plain", "grandchild", "detached", "orphan"].map((name) => waitForPid(pidFile(name))),
+			);
+			await expectEnded([plain, grandchild, detached]);
+			expect(processIsAlive(orphan)).toBe(true);
+		},
+		PROCESS_TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"ends the processes still descended from it when it exits on an uncaught error",
+		async () => {
+			const { root, agentDir, pidFile } = sleeperWorkspace(
+				`setTimeout(() => { throw new Error("spawner failed"); }, 0);
+	await new Promise(() => {});`,
+			);
+
+			const launched = new ProcessWorkerLauncher().launchExtensionInventory({
+				id: "test-8",
+				agentDir,
+				root,
+				projectTrusted: true,
+			});
+
+			await expect(launched.result).rejects.toThrow(`exit code ${CRASH_EXIT_CODE}`);
+			const [plain, grandchild, detached, orphan] = await Promise.all(
+				["plain", "grandchild", "detached", "orphan"].map((name) => waitForPid(pidFile(name))),
+			);
+			await expectEnded([plain, grandchild, detached]);
+			// It ended its tree itself, so the daemon ends nothing after it: its process group is left alone.
+			expect(processIsAlive(orphan)).toBe(true);
 		},
 		PROCESS_TEST_TIMEOUT_MS,
 	);

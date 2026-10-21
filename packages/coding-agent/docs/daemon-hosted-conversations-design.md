@@ -2,7 +2,7 @@
 
 > **Implemented, with amendments.** The [architecture rewrite](architecture-rewrite-design.md) absorbed this design as its host model and implemented it in its Phase 7 ([#585](https://github.com/volt-hq/Volt/issues/585)). Its Phase 1 replaced the store revision and conversation-authority fencing described here with ordinal-fenced log writes and an exclusive per-log lock that every host takes, in-process modes included, so opening a session another process holds fails with `conversation_locked` (Q4). Its Phase 2 deleted rekey (§5.7), and its Phase 3 replaced the RPC commands, events, and bootstrap this design builds on with protocol 1 (§6.1). Dated amendment notes below record where the implementation differs from this text; decided text is left as written. The current behavior is documented in [daemon.md](daemon.md), and the model of record for the worker registry is [`tla/WorkerRegistry.tla`](tla/WorkerRegistry.tla).
 
-- Status: Implemented by the architecture rewrite Phase 7 ([#585](https://github.com/volt-hq/Volt/issues/585)). Open questions decided 2026-10-06 and 2026-10-07 (§11). Amended 2026-10-05 (§5.6), 2026-10-06 (§3.1, §5.3, §5.4, §5.7, §6.3), and 2026-10-07 (§6.3, §6.8, §6.9, §10.3).
+- Status: Implemented by the architecture rewrite Phase 7 ([#585](https://github.com/volt-hq/Volt/issues/585)). Open questions decided 2026-10-06 and 2026-10-07 (§11). Amended 2026-10-05 (§5.6), 2026-10-06 (§3.1, §5.3, §5.4, §5.7, §6.3), 2026-10-07 (§6.3, §6.8, §6.9, §10.3), and 2026-10-21 (§5.3).
 - Date: 2026-10-01
 - Workspaces: `Volt/packages/coding-agent` (primary). `volt-app` needs no protocol change; it can delete dead handling afterwards (§10.3). *(Amended 2026-10-07: the app did need changes, filed as volt-hq/volt-app#397; see §10.3.)*
 - Supersedes: the TUI-ownership model of [Live Shared Sessions](live-shared-session-daemon-design.md): §6 (TUI Integration) entirely, §8 (Extension Compatibility Contract) table, the `tui-owned`/`daemon-draining` lease states and drain protocol in §4, the viewer events in §5.4, goals G4/G5, and the non-goals "Mid-turn ownership migration" and "Multi-TUI co-attach".
@@ -204,6 +204,27 @@ TUI streams go through the daemon relay rather than to a socket the worker expos
 > **Amended 2026-10-06 (shared workers, [#715](https://github.com/volt-hq/Volt/pull/715)).** The states above apply per top-level conversation; the registry's worker states are `starting`, `live`, `retiring`. Retention is per conversation: a detached idle conversation (with its group) closes after `detachedRuntimeTtlMs`, may refuse while active, and a worker retires when it hosts nothing. A `--no-session` worker (D15) is exclusive to its opener and closes 10 s after its last client left. The retention TTL is `detachedRuntimeTtlMs` in the daemon's `state.json` settings: the global `remote.detachedRuntimeTtlMs` setting named here and in §5.7 was never read by the daemon (a gap that predates Phase 7, found 2026-10-07), and `RemoteSettings` no longer declares it.
 >
 > **Amended 2026-10-07 ([#714](https://github.com/volt-hq/Volt/pull/714)).** TUIs that receive `daemon_shutdown` show "Host restarting" and start the daemon themselves after 10 s if it is not back (D16); quitting the TUIs first keeps it stopped.
+
+> **Amended 2026-10-21 (worker process tree, decided by the maintainer; [#971](https://github.com/volt-hq/Volt/issues/971)).** A worker owns its process tree: the processes its conversations start (tools, extensions, LSP and MCP servers) and the processes those start. When a worker exits, every process still descended from it ends. A process whose parent exited before the worker has left the tree. It is not the worker's and keeps running. The rule is the same on every platform, and it is the strictest rule that every platform can enforce. macOS has no unprivileged way to contain a process that has left its parent: kqueue fork tracking is unsupported since 10.5, and Endpoint Security needs an Apple entitlement. Windows job containment and Linux cgroups are therefore not used to go further. The rule is cleanup, not a security boundary: an extension runs with the user's privileges and can start a process that outlives any worker.
+>
+> - **Ends with the worker:** what an extension spawns, detached or not; shell wrappers that keep running (`shell: true`, `npx`, `cmd /c`); LSP and MCP servers; tool commands still running.
+> - **Keeps running:** a background process whose launcher already exited, such as `cmd &` or `nohup … &` through the bash tool. This includes a `volt daemon restart` issued from a conversation. An extension that needs a process to outlive its conversation must start it the same way, from a launcher that exits first.
+>
+> Cleanup runs while the tree is still intact, so the result does not depend on the platform:
+>
+> 1. **Every exit the worker performs** (stopped, failed, daemon lost, its exit deadline, a second signal, an uncaught error): the worker ends its remaining descendants, then exits. On a stop it does this once its conversations have closed, so `session_shutdown` handlers can stop their own processes first. An uncaught error or a second signal exits with a code of its own (70), so that the daemon can tell it from a kill, which Windows reports as exit code 1.
+> 2. **A forced stop that times out** (a blocked event loop): the daemon ends the worker's descendants, then the worker.
+> 3. **A death neither the worker nor the daemon performed** (an exit by a signal or with a code the worker does not use, such as a kill from outside, running out of memory, or a native crash): the daemon ends what it can still identify. On macOS and Linux that is the worker's process group. The group also holds orphans of the worker's non-detached children, and it misses the worker's detached descendants. On Windows it is the dead worker's tree, walked from a process snapshot. This step is best effort, and nothing runs if the daemon is gone too. It runs only after such deaths: after the other two, a process-group kill would also end orphans still in the group, which Windows cannot match.
+>
+> Extension inventory processes ([daemon.md](daemon.md#extension-inventories)) follow the same rule with the same three steps. The daemon's stop, once the answer is in or the evaluation is stopped, is step 2. An inventory that ends by itself (past its deadline, on a bad request, on an uncaught error) performs step 1.
+>
+> | | macOS and Linux | Windows |
+> |---|---|---|
+> | Finding descendants | Parent ids from the process table; a live process's id is never reused | Parent ids from a process snapshot (native); creation times rule out reused ids, and the daemon keeps a worker's id reserved until it has walked the worker's tree |
+> | Ending them | SIGTERM, then SIGKILL to those still running 200 ms later | Terminated at once; Windows has no SIGTERM for arbitrary processes |
+> | After a death the worker did not perform (3) | Kill the worker's process group | Walk the dead worker's tree and terminate it |
+>
+> Rejected: a Windows job object that kills its members when its last handle closes. Such a job also ends orphans, which is stricter than macOS can be. It would also end a daemon restart issued from a conversation, because Node cannot spawn a process with `CREATE_BREAKAWAY_FROM_JOB`.
 
 ### 5.4 Daemon services used by workers
 

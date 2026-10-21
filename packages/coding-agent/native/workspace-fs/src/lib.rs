@@ -1,5 +1,6 @@
 mod file_lock;
 mod private_diagnostics;
+mod process_tree;
 
 pub use private_diagnostics::write_windows_private_file;
 
