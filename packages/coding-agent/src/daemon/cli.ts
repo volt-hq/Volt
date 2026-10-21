@@ -666,7 +666,8 @@ export async function handleDaemonCommand(args: string[], options: DaemonCommand
 		case "extension-inventory": {
 			// Internal and unlisted: the daemon starts one per extension inventory it evaluates.
 			const code = await runExtensionInventoryProcess(agentDir);
-			// Extension factories may leave handles and child processes; the inventory is written.
+			// The inventory is written and the daemon is stopping the process with everything its extensions
+			// started; extension factories may leave handles, and the detached trees its tools started end here.
 			killTrackedDetachedChildren();
 			process.exit(code);
 			return true;

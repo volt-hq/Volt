@@ -3,11 +3,15 @@
  * process of its own, started by the daemon's `ProcessWorkerLauncher` in the
  * root it evaluates. The request arrives as one JSON line on stdin; the result
  * leaves as one JSON line on fd 3 (stdout and stderr are its log, where an
- * extension's own output goes). It evaluates once and exits, ending the
- * detached process trees anything it ran started. Past its deadline, or on
- * SIGTERM (how the daemon stops it), it ends them too and exits without a
- * result; the deadline comes before the daemon's own timeout, so that a
- * process the daemon must kill outright has cleaned up already.
+ * extension's own output goes). It evaluates once, writes its result, closes
+ * fd 3, and waits: the daemon then stops it (SIGTERM) together with every
+ * process its extensions started, which it can find only while this process
+ * runs. Stopped, it ends the detached process trees anything it ran started and
+ * exits. Past its deadline, or on SIGTERM, before it has a result, it ends them
+ * too and exits without one; the deadline comes before the daemon's own
+ * timeout, so that a process the daemon must kill outright has cleaned up
+ * already. Past its deadline after its result (the daemon is gone), it exits as
+ * if stopped.
  */
 
 import { Socket } from "node:net";
@@ -82,27 +86,45 @@ function readRequest(): Promise<ExtensionInventoryProbeRequest> {
 	});
 }
 
-/** Write `output` as one line on the result fd, and wait until it is written. */
+/** Write `output` as one line on the result fd, and wait until it is written and the fd closed. */
 function writeResult(output: ExtensionInventoryProbeOutput): Promise<void> {
 	return new Promise((resolve, reject) => {
 		const socket = new Socket({ fd: RESULT_FD, readable: false, writable: true });
 		socket.once("error", reject);
-		socket.end(`${JSON.stringify(output)}\n`, () => resolve());
+		// Closed, so the daemon reads the end of the result while this process waits to be stopped.
+		socket.end(`${JSON.stringify(output)}\n`, () => {
+			socket.destroy();
+			resolve();
+		});
 	});
 }
 
-/** Evaluate the requested inventory and write it; resolves with the process' exit code. */
+/**
+ * Evaluate the requested inventory, write it, and wait to be stopped; resolves with the process' exit code once
+ * it is (or it could not read its request or write its result).
+ */
 export async function runExtensionInventoryProcess(agentDir: string): Promise<number> {
 	process.title = "volt-extension-inventory";
+	let answered = false;
+	const stopped = Promise.withResolvers<void>();
 	/** Exit without a result, ending the detached process trees anything it ran started. */
 	const abandon = (reason: string): never => {
 		console.error(`${new Date().toISOString()} extension inventory ${reason}; exiting`);
 		killTrackedDetachedChildren();
 		process.exit(FAILED);
 	};
-	const deadline = setTimeout(() => abandon("did not finish"), EXTENSION_INVENTORY_PROCESS_DEADLINE_MS);
+	/** Without a result, abandon it; with one, return, and the caller ends the detached trees and exits. */
+	const stop = (reason: string) => {
+		if (!answered) abandon(reason);
+		console.error(`${new Date().toISOString()} extension inventory ${reason} after its result; exiting`);
+		stopped.resolve();
+	};
+	const deadline = setTimeout(
+		() => stop(answered ? "was not stopped" : "did not finish"),
+		EXTENSION_INVENTORY_PROCESS_DEADLINE_MS,
+	);
 	deadline.unref();
-	process.once("SIGTERM", () => abandon("received SIGTERM"));
+	process.once("SIGTERM", () => stop("received SIGTERM"));
 	let request: ExtensionInventoryProbeRequest;
 	try {
 		request = await readRequest();
@@ -133,5 +155,9 @@ export async function runExtensionInventoryProcess(agentDir: string): Promise<nu
 		console.error(`volt extension inventory: ${error instanceof Error ? error.message : String(error)}`);
 		return FAILED;
 	}
+	answered = true;
+	// Running until the daemon stops it, so that it can find what the extensions started; the deadline if it is gone.
+	deadline.ref();
+	await stopped.promise;
 	return WROTE_RESULT;
 }
