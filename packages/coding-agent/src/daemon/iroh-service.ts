@@ -3958,13 +3958,16 @@ class IrohDaemonService {
 			);
 		} catch (error) {
 			if (!admission.isCurrent()) return;
-			// A worker transition's retry names the conversation retried, as the phone checks.
+			// An outcome the phone checks the identity of names the conversation; a worker transition's retry is paced too.
 			await failed(
-				error instanceof WorkerOpenError && error.outcome === "duplicate_conversation_connection"
-					? createConversationOpenError("duplicate_conversation_connection", error.message, {
+				error instanceof WorkerOpenError &&
+					(error.outcome === "duplicate_conversation_connection" || error.outcome === "conversation_in_use")
+					? createConversationOpenError(error.outcome, error.message, {
 							workspace: workspaceName,
 							sessionId,
-							retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS,
+							...(error.outcome === "duplicate_conversation_connection"
+								? { retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS }
+								: {}),
 							cause: error,
 						})
 					: error,
