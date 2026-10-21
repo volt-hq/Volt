@@ -51,7 +51,7 @@ const bashSchema = Type.Object({
 	description: Type.Optional(
 		Type.String({
 			description:
-				'Short user-facing description of what the command does (3-8 words, e.g. "Run coding-agent unit tests"). Shown as the call\'s title above the command. Omit it for commands whose purpose is obvious, such as ls or cat.',
+				'User-facing description of what the command does, in at most 10 words (e.g. "Check daemon status and the installed volt version"). Shown as the call\'s one-line title above the command. Omit it for commands whose purpose is obvious, such as ls or cat.',
 		}),
 	),
 });
