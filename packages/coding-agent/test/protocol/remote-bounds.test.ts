@@ -486,6 +486,10 @@ describe("remote profile bounds", () => {
 					flooded = true;
 					for (let index = 0; index < count; index++)
 						conversation.liveState.notice("info", `${index}`.padEnd(200, "n"));
+					// Wherever the flood left the queue, a notice past the bound resets it on its own,
+					// so the notice after it is delivered.
+					conversation.liveState.notice("info", "x".repeat(liveQueueBytes));
+					conversation.liveState.notice("info", "last");
 					conversation.liveState.set("ext_status/ci/final", {
 						kind: "ext_status",
 						extension: "ci",
