@@ -149,6 +149,7 @@ func main() {
 			ProductIDs:           configuration.AppStoreProductIDs,
 			AllowedEnvironments:  configuration.AppStoreEnvironments,
 			Now:                  time.Now,
+			Logger:               logger,
 		})
 	default:
 		err = fmt.Errorf("unsupported App Store mode %q", configuration.AppStoreMode)
