@@ -15,6 +15,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
+import { ProcessTreeHold } from "../src/daemon/process-tree.ts";
 import { terminateDescendants, terminateProcessTree } from "../src/utils/shell.ts";
 
 const isPosix = process.platform !== "win32";
@@ -37,6 +38,8 @@ const DEEP_MARKER = "4754";
 const IN_TREE_MARKER = "4755";
 const LEFT_TREE_MARKER = "4756";
 const STUBBORN_MARKER = "4757";
+const SPAWNED_MARKER = "4758";
+const LEFT_HELD_TREE_MARKER = "4759";
 
 function pidAlive(pid: number): boolean {
 	try {
@@ -262,23 +265,64 @@ describe.runIf(isPosix)("terminateDescendants", () => {
 			cleanup(child, [IN_TREE_MARKER, LEFT_TREE_MARKER]);
 		}
 	}, 30000);
+});
+
+/** Hold `child` as the daemon holds a process it started: its exit handled as the launcher handles it. */
+function hold(child: ChildProcess): { tree: ProcessTreeHold; exited: Promise<void> } {
+	const tree = new ProcessTreeHold(child.pid as number, () => child.exitCode !== null || child.signalCode !== null);
+	const exited = new Promise<void>((resolve) =>
+		child.once("exit", () => {
+			tree.exited();
+			resolve();
+		}),
+	);
+	return { tree, exited };
+}
+
+describe.runIf(isPosix)("ProcessTreeHold.end", () => {
+	test("stops the root before it ends its tree, so nothing it keeps starting survives, and leaves a process that left the tree", async () => {
+		let child: ChildProcess | undefined;
+		try {
+			// The root starts a `sleep` every 20 ms for as long as it runs: one it started after the last walk of its
+			// tree would outlive it. The subshell's `sleep` has left the tree, though it stays in the root's group.
+			child = spawn(
+				"/bin/sh",
+				["-c", `(sleep ${LEFT_HELD_TREE_MARKER} &); while :; do sleep ${SPAWNED_MARKER} & sleep 0.02; done`],
+				{ detached: true, stdio: "ignore" },
+			);
+			const { tree, exited } = hold(child);
+			expect(
+				await poll(
+					() =>
+						pgrepFull(`^sleep ${SPAWNED_MARKER}$`).length >= 5 &&
+						pgrepFull(`^sleep ${LEFT_HELD_TREE_MARKER}$`).length > 0,
+					5000,
+				),
+			).toBe(true);
+			const leftTreePid = pgrepFull(`^sleep ${LEFT_HELD_TREE_MARKER}$`)[0];
+
+			await tree.end();
+			await exited;
+
+			expect(await poll(() => pgrepFull(`^sleep ${SPAWNED_MARKER}$`).length === 0, 5000)).toBe(true);
+			// The sweep found the root running throughout, so its exit kills no process group.
+			expect(pidAlive(leftTreePid)).toBe(true);
+		} finally {
+			cleanup(child, [SPAWNED_MARKER, LEFT_HELD_TREE_MARKER]);
+		}
+	}, 30000);
 
 	test.runIf(hasPerl)(
-		"force-kills a SIGTERM-ignoring descendant, and ends the root with includeRoot",
+		"force-kills a SIGTERM-ignoring descendant, then the root",
 		async () => {
 			let child: ChildProcess | undefined;
 			try {
 				child = spawnStubbornTree(STUBBORN_MARKER, false);
-				const running = child;
-				const shellPid = running.pid as number;
-				const exited = new Promise((resolve) => running.once("exit", resolve));
+				const { tree, exited } = hold(child);
 				expect(await poll(() => pgrepFull(`sleep ${STUBBORN_MARKER}`).length > 0, 5000)).toBe(true);
 				const victimPid = pgrepFull(`sleep ${STUBBORN_MARKER}`)[0];
 
-				await terminateDescendants(shellPid, {
-					includeRoot: true,
-					isRootExited: () => running.exitCode !== null || running.signalCode !== null,
-				});
+				await tree.end();
 
 				expect(await poll(() => !pidAlive(victimPid), 5000)).toBe(true);
 				await exited;

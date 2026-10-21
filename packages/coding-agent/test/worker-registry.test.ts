@@ -35,6 +35,9 @@ function setup(options: { ttlMs?: number } = {}) {
 	const launched: FakeWorker[] = [];
 	/** The workers the registry killed, by id. */
 	const killed: string[] = [];
+	/** The exits workers announced (`worker_exit`), with their ids; and whether the launcher ends their descendants. */
+	const announced: Array<[string, WorkerExit]> = [];
+	const descendants = { ended: true };
 	let connections = 0;
 	const registry = new WorkerRegistry({
 		launcher: {
@@ -45,7 +48,15 @@ function setup(options: { ttlMs?: number } = {}) {
 					connectionId: `c-${++connections}`,
 					exit: (exit = { reason: "stopped" }) => exited.resolve(exit),
 				});
-				return { pid: 4242, exited: exited.promise, kill: () => killed.push(request.workerId) };
+				return {
+					pid: 4242,
+					exited: exited.promise,
+					kill: () => killed.push(request.workerId),
+					endDescendants: async (exit) => {
+						announced.push([request.workerId, exit]);
+						return descendants.ended;
+					},
+				};
 			},
 		},
 		agentDir: "/agent",
@@ -169,6 +180,8 @@ function setup(options: { ttlMs?: number } = {}) {
 		audits,
 		launched,
 		killed,
+		announced,
+		descendants,
 		open,
 		hello,
 		send,
@@ -188,6 +201,31 @@ async function waitUntil(condition: () => boolean, timeoutMs = 2_000): Promise<v
 		await new Promise((resolve) => setTimeout(resolve, 1));
 	}
 }
+
+describe("a worker's exit", () => {
+	it("has the launcher end the worker's descendants first, with the reason it gives, and answers whether it did", async () => {
+		const { registry, open, start, send, announced, descendants } = setup();
+		const opened = open("s1");
+		const worker = await start(0);
+		await opened;
+
+		expect(await send(worker, { type: "worker_exit", reason: "failed", error: "boom" })).toMatchObject({
+			type: "worker_exit_result",
+			descendantsEnded: true,
+		});
+		descendants.ended = false;
+		expect(await send(worker, { type: "worker_exit", reason: "stopped" })).toMatchObject({
+			type: "worker_exit_result",
+			descendantsEnded: false,
+		});
+		expect(announced).toEqual([
+			[worker.request.workerId, { reason: "failed", error: "boom" }],
+			[worker.request.workerId, { reason: "stopped" }],
+		]);
+		// The request changes no registry state: the worker's record goes once it exited.
+		expect(registry.list()).toMatchObject([{ state: "live", sessionIds: ["s1"] }]);
+	});
+});
 
 describe("worker registry", () => {
 	it("coalesces concurrent opens into one spawn and attaches both to the live worker", async () => {

@@ -20,8 +20,9 @@
  *
  * Whatever a worker started ends with it (RFC §5.3, worker process tree): the
  * launcher holds each process it starts (`ProcessTreeHold`), ends the
- * processes descended from a worker before it kills one (`kill`), and after a
- * death the worker did not perform itself ends what it can still find.
+ * processes descended from a worker when the worker is about to exit
+ * (`endDescendants`) and before it kills one (`kill`), and after any other
+ * exit ends what it can still find.
  *
  * It also runs extension inventories (`volt daemon extension-inventory`):
  * one-shot processes, started the same way in the root they evaluate, with
@@ -30,7 +31,8 @@
  * corrupt it; stdout and stderr go to `inventory-<id>.log` beside the
  * workers' logs. Its tree follows the same rule: once the result is in (the
  * process then waits to be stopped) or the evaluation is stopped, the launcher
- * ends every process still descended from it, then the process.
+ * ends every process still descended from it, then the process; after any
+ * other exit it ends what it can still find.
  */
 
 import { spawn } from "node:child_process";
@@ -80,6 +82,13 @@ export interface LaunchedWorker {
 	readonly exited: Promise<WorkerExit>;
 	/** Stop a worker that did not exit after a forced stop: end the processes descended from it, then it. */
 	kill(): void;
+	/**
+	 * The worker closed what it hosts and exits next, for `exit` (`worker_exit`): end the processes still
+	 * descended from it while it runs, and have `exited` report `exit`. Resolves whether they were ended (the
+	 * daemon read its process list and found the worker running throughout). A launcher whose workers are not
+	 * processes of their own has nothing to end.
+	 */
+	endDescendants?(exit: WorkerExit): Promise<boolean>;
 }
 
 /** What an extension inventory process evaluates; written to its stdin as one JSON line. */
@@ -108,8 +117,7 @@ export interface LaunchedExtensionInventory {
 	readonly result: Promise<unknown>;
 	/**
 	 * Stop the process and what it started, as happens by itself once its result is in: end every process still
-	 * descended from it, then the process (SIGTERM, then SIGKILL to those still running a moment later; Windows
-	 * terminates them at once). Does nothing once a stop has begun.
+	 * descended from it, then the process (`ProcessTreeHold.end`). Does nothing once a stop has begun.
 	 */
 	kill(): void;
 }
@@ -127,7 +135,11 @@ export interface WorkerBootstrap {
 	readonly socketPath: string;
 }
 
-/** A worker process's exit code for each way it exits; any other code or a signal reads as crashed. */
+/**
+ * A worker process's exit code for each way it exits. The daemon takes a worker's reason from its `worker_exit`;
+ * an exit without one reads as `failed` (it never had a connection to send it on) or `daemon_lost` by its code,
+ * and as crashed with any other code (an extension's `process.exit(0)` among them) or a signal.
+ */
 export const WORKER_EXIT_CODES = {
 	stopped: 0,
 	failed: 4,
@@ -142,28 +154,10 @@ export const EXTENSION_INVENTORY_EXIT_CODES = {
 	failed: 4,
 } as const;
 
-/**
- * The exit code of a worker or an extension inventory that exits on an uncaught error or a second signal, having
- * ended its descendants. No other exit gives it, so the daemon can tell such an exit from a kill: Windows reports
- * a process killed from outside with exit code 1, the code Node itself exits with on an uncaught error.
- */
-export const CRASH_EXIT_CODE = 70;
-
-/** The codes a worker exits with by itself, having ended what it started; any other exit is a death it did not perform. */
-const WORKER_OWN_EXIT_CODES: ReadonlySet<number> = new Set([...Object.values(WORKER_EXIT_CODES), CRASH_EXIT_CODE]);
-/** The codes an extension inventory exits with by itself, having ended what its extensions started. */
-const EXTENSION_INVENTORY_OWN_EXIT_CODES: ReadonlySet<number> = new Set([
-	...Object.values(EXTENSION_INVENTORY_EXIT_CODES),
-	CRASH_EXIT_CODE,
-]);
-
-/** How a worker process exited, from its exit code or signal. */
+/** How a process exited that did not say why (`worker_exit`), from its exit code or signal (`WORKER_EXIT_CODES`). */
 export function workerExitFromCode(code: number | null, signal: NodeJS.Signals | null): WorkerExit {
-	for (const [reason, exitCode] of Object.entries(WORKER_EXIT_CODES) as Array<
-		[keyof typeof WORKER_EXIT_CODES, number]
-	>) {
-		if (signal === null && code === exitCode) return { reason };
-	}
+	if (signal === null && code === WORKER_EXIT_CODES.failed) return { reason: "failed" };
+	if (signal === null && code === WORKER_EXIT_CODES.daemon_lost) return { reason: "daemon_lost" };
 	return { reason: "crashed", error: signal === null ? `exit code ${code}` : `signal ${signal}` };
 }
 
@@ -208,18 +202,16 @@ export class ProcessWorkerLauncher implements WorkerLauncher {
 			child.pid === undefined
 				? undefined
 				: new ProcessTreeHold(child.pid, () => child.exitCode !== null || child.signalCode !== null);
+		/** Why the worker said it exits (`worker_exit`). */
+		let announced: WorkerExit | undefined;
 		const exited = new Promise<WorkerExit>((resolve) => {
 			const settle = (exit: WorkerExit) => {
 				this.running.delete(request.workerId);
 				resolve(exit);
 			};
 			child.once("exit", (code, signal) => {
-				// It died without ending what it started, and the daemon did not end it: end what can still be found.
-				if (tree !== undefined && !tree.ended && (signal !== null || !WORKER_OWN_EXIT_CODES.has(code ?? -1))) {
-					tree.endAfterDeath();
-				}
-				tree?.release();
-				settle(workerExitFromCode(code, signal));
+				tree?.exited();
+				settle(announced ?? workerExitFromCode(code, signal));
 			});
 			// A process that never started; a failed signal to a running one is not its exit.
 			child.once("error", (error) => {
@@ -240,6 +232,10 @@ export class ProcessWorkerLauncher implements WorkerLauncher {
 			logPath,
 			exited,
 			kill: () => void tree?.end(),
+			endDescendants: async (exit) => {
+				announced ??= exit;
+				return (await tree?.endDescendants()) ?? false;
+			},
 		};
 	}
 
@@ -272,15 +268,7 @@ export class ProcessWorkerLauncher implements WorkerLauncher {
 				resolve(exit);
 			};
 			child.once("exit", (code, signal) => {
-				// It died without ending what its extensions started, and was not stopped: end what can still be found.
-				if (
-					tree !== undefined &&
-					!tree.ended &&
-					(signal !== null || !EXTENSION_INVENTORY_OWN_EXIT_CODES.has(code ?? -1))
-				) {
-					tree.endAfterDeath();
-				}
-				tree?.release();
+				tree?.exited();
 				settle(workerExitFromCode(code, signal));
 			});
 			child.once("error", (error) => {
@@ -308,9 +296,8 @@ export class ProcessWorkerLauncher implements WorkerLauncher {
 			output.once("error", () => undefined);
 			output.once("close", () => {
 				const text = Buffer.concat(chunks).toString("utf8");
-				// The result is in, and the process waits to be stopped. Closed without one, the process has exited
-				// (having ended its descendants, or the exit handler ends what it can find) or the evaluation's timeout
-				// stops it.
+				// The result is in, and the process waits to be stopped. Closed without one, the process has exited (the
+				// exit handler ends what it can still find) or the evaluation's timeout stops it.
 				if (text.includes("\n")) stop();
 				resolve(text);
 			});

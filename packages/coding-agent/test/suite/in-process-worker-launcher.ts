@@ -24,7 +24,8 @@ export class InProcessWorkerLauncher implements WorkerLauncher {
 	}
 
 	launch(request: WorkerLaunchRequest): LaunchedWorker {
-		const exited = runWorker(request, this.options).catch(
+		const exited = runWorker(request, this.options).then(
+			(run) => run.exit,
 			(error: unknown): WorkerExit => ({
 				reason: "crashed",
 				error: error instanceof Error ? error.message : String(error),

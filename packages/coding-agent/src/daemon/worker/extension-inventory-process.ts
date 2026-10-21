@@ -6,13 +6,12 @@
  * extension's own output goes). It evaluates once, writes its result, closes
  * fd 3, and waits: the daemon then ends every process still descended from it,
  * which it can find only while this process runs, and then this process
- * (SIGTERM, on which it ends its descendants itself and exits). Every exit it
- * performs ends the processes still descended from it (RFC §5.3, worker
- * process tree): past its deadline, or on SIGTERM, before it has a result, it
- * exits without one; the deadline comes before the daemon's own timeout, so
- * that a process the daemon must kill outright has cleaned up already. Past
- * its deadline after its result (the daemon is gone), it exits as if stopped;
- * on an uncaught error, with `CRASH_EXIT_CODE`.
+ * (`ProcessTreeHold.end`). Every exit it performs also ends the processes
+ * still descended from it (RFC §5.3, worker process tree), and the daemon then
+ * ends what it can still find: past its deadline, or on SIGTERM, before it has
+ * a result, it exits without one; the deadline comes before the daemon's own
+ * timeout. Past its deadline after its result (the daemon is gone), it exits
+ * as if stopped; on an uncaught error, with code 1.
  */
 
 import { Socket } from "node:net";
@@ -22,16 +21,12 @@ import { SettingsManager } from "../../core/settings-manager.ts";
 import { initTheme } from "../../core/theme/runtime.ts";
 import type { ExtensionInventoryProbeOutput } from "../extension-inventory.ts";
 import { exitOnUncaughtError, killOwnDescendants } from "../process-tree.ts";
-import {
-	CRASH_EXIT_CODE,
-	EXTENSION_INVENTORY_EXIT_CODES,
-	type ExtensionInventoryProbeRequest,
-} from "../worker-launcher.ts";
+import { EXTENSION_INVENTORY_EXIT_CODES, type ExtensionInventoryProbeRequest } from "../worker-launcher.ts";
 import { evaluateExtensionInventory } from "./extension-inventory.ts";
 
 /**
  * How long an evaluation may run before the process exits without a result: before the daemon's timeout
- * (`EXTENSION_INVENTORY_TIMEOUT_MS`), so it ends what its extensions started before it is killed.
+ * (`EXTENSION_INVENTORY_TIMEOUT_MS`).
  */
 export const EXTENSION_INVENTORY_PROCESS_DEADLINE_MS = 15_000;
 const MAX_REQUEST_BYTES = 16 * 1024;
@@ -107,7 +102,7 @@ function writeResult(output: ExtensionInventoryProbeOutput): Promise<void> {
  */
 export async function runExtensionInventoryProcess(agentDir: string): Promise<number> {
 	process.title = "volt-extension-inventory";
-	exitOnUncaughtError("volt extension inventory", CRASH_EXIT_CODE);
+	exitOnUncaughtError("volt extension inventory");
 	let answered = false;
 	const stopped = Promise.withResolvers<void>();
 	/** Exit without a result, ending the processes still descended from this one. */

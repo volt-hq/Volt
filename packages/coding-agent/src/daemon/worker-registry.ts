@@ -904,7 +904,8 @@ export class WorkerRegistry {
 					| "worker_hosts"
 					| "worker_released"
 					| "worker_stop_result"
-					| "worker_close_result";
+					| "worker_close_result"
+					| "worker_exit";
 			}
 		>,
 	): Promise<ControlResponse> {
@@ -1113,6 +1114,15 @@ export class WorkerRegistry {
 				}
 				// Closed: the worker releases the group's conversations, the head last.
 				return ok;
+			}
+			case "worker_exit": {
+				// It exits next: the daemon ends what it started first, while it runs. Its record changes once it exited.
+				const exit: WorkerExit = {
+					reason: request.reason,
+					...(request.error === undefined ? {} : { error: request.error }),
+				};
+				const ended = (await record.launched?.endDescendants?.(exit).catch(() => false)) ?? false;
+				return { type: "worker_exit_result", id: request.id, descendantsEnded: ended };
 			}
 		}
 	}

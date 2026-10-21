@@ -97,6 +97,13 @@
 (*    retirement of every worker, as RetireStale does for a workspace),    *)
 (*    and the handoff write a redirect makes to its target log (a          *)
 (*    lock-guarded write that fails the move when the target is held).     *)
+(*  - Not modeled: the worker's process tree (RFC 5.3).  The worker_exit   *)
+(*    request a worker sends once its conversations closed, before it      *)
+(*    exits, changes no registry state, so Dispose stands for it and the   *)
+(*    exit.  Nor a worker the daemon stopped (SIGSTOP) while it killed it  *)
+(*    after a forced stop timed out: if the daemon dies in that window,    *)
+(*    the worker stays stopped and never exits, outside OrphanExit (and    *)
+(*    so OrphansExit and DaemonRestart's wait).                            *)
 (***************************************************************************)
 
 EXTENDS Naturals, FiniteSets, TLC

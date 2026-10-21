@@ -52,10 +52,11 @@
  * work in any conversation, lets a running turn finish for at most 60 s on a
  * forced stop (then aborts it; a stop for lost authority aborts it at once),
  * ends its clients' streams, closes its conversations
- * (`session_shutdown{quit}`), and exits. Losing its daemon connection stops
- * it the same way: a worker never outlives its daemon. A crash takes every
- * conversation it hosts with it; their clients reconnect, and spawn a
- * replacement.
+ * (`session_shutdown{quit}`), has the daemon end the processes descended from
+ * it (`worker_exit`), and exits. Losing its daemon connection stops it the
+ * same way, without the daemon: a worker never outlives its daemon. A crash
+ * takes every conversation it hosts with it; their clients reconnect, and
+ * spawn a replacement.
  *
  * For its whole run it holds a share of the daemon's worker gate
  * (`worker-gate.ts`), so a restarted daemon admits nothing until it exited.
@@ -105,6 +106,10 @@ const ACTIVITY_SAMPLE_MS = 250;
 export const WORKER_TURN_CAP_MS = 60_000;
 /** How long a worker retries the lock of a log it opens while another holder has it. */
 export const WORKER_LOCK_RETRY_MS = 75_000;
+/** Past the turn cap, how long closing the conversations may take before a stopping worker exits anyway. */
+const EXIT_DEADLINE_MARGIN_MS = 10_000;
+/** How long a worker that exits waits for the daemon to end its descendants (`worker_exit`). */
+const EXIT_ANSWER_TIMEOUT_MS = 5_000;
 const LOCK_RETRY_FIRST_DELAY_MS = 50;
 const LOCK_RETRY_MAX_DELAY_MS = 2_000;
 
@@ -115,6 +120,16 @@ export interface RunWorkerOptions {
 	readonly signal?: AbortSignal;
 	/** The worker began to stop. */
 	onStopping?(reason: WorkerExitReason): void;
+}
+
+/** How a worker's run ended. */
+export interface WorkerRun {
+	readonly exit: WorkerExit;
+	/**
+	 * Whether the daemon ended the processes descended from the worker as it exits (`worker_exit`): false when it
+	 * could not, undefined when it was not asked (no connection) or did not answer.
+	 */
+	readonly descendantsEnded: boolean | undefined;
 }
 
 function errorMessage(error: unknown): string {
@@ -297,17 +312,24 @@ function trustSession(sessions: Map<string, Map<string, boolean>>, clientKey: st
 
 /**
  * Run one conversation worker until it stops, holding its share of the
- * daemon's worker gate throughout. Resolves how it exited; never rejects.
+ * daemon's worker gate throughout. Resolves how it ended; never rejects.
+ * While it has its daemon, every way it ends asks the daemon to end the
+ * processes descended from it first (`worker_exit`).
  */
-export async function runWorker(request: WorkerLaunchRequest, options: RunWorkerOptions = {}): Promise<WorkerExit> {
+export async function runWorker(request: WorkerLaunchRequest, options: RunWorkerOptions = {}): Promise<WorkerRun> {
 	let gate: ReturnType<typeof holdWorkerGate>;
 	try {
 		gate = holdWorkerGate(request.agentDir);
 	} catch (error) {
-		return { reason: "failed", error: errorMessage(error) };
+		return { exit: { reason: "failed", error: errorMessage(error) }, descendantsEnded: undefined };
 	}
 	// A daemon holds the gate while it waits for an earlier daemon's workers: this worker's daemon is gone.
-	if (!gate) return { reason: "failed", error: "the daemon that spawned this worker is gone" };
+	if (!gate) {
+		return {
+			exit: { reason: "failed", error: "the daemon that spawned this worker is gone" },
+			descendantsEnded: undefined,
+		};
+	}
 	try {
 		return await serveWorker(request, options);
 	} finally {
@@ -336,7 +358,7 @@ async function quiesce(hosted: readonly WorkerConversation[], capMs: number | un
 	if (!finished) await Promise.allSettled(hosted.map(({ conversation }) => conversation.session.abort()));
 }
 
-async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptions): Promise<WorkerExit> {
+async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptions): Promise<WorkerRun> {
 	let conversations: WorkerConversations | undefined;
 	/** The top-level conversations being opened, by session: a stop or a close meanwhile waits for them. */
 	const opening = new Map<string, Promise<unknown>>();
@@ -344,12 +366,12 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 	const openAborts = new Map<string, AbortController>();
 	/** The groups being closed, by their top-level conversation. */
 	const closingGroups = new Map<string, Promise<void>>();
-	let stopping: Promise<WorkerExit> | undefined;
+	let stopping: Promise<WorkerRun> | undefined;
 	let shuttingDown = false;
 	/** The active conversations last reported; undefined forces the next report. */
 	let reportedActive: string | undefined = "";
 	let sampler: ReturnType<typeof setInterval> | undefined;
-	const exit = Promise.withResolvers<WorkerExit>();
+	const exit = Promise.withResolvers<WorkerRun>();
 	/** Aborted once the worker stops: an open still retrying a held lock gives up. */
 	const halted = new AbortController();
 	/** The streams the worker serves, by relay. */
@@ -373,30 +395,58 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 		);
 	};
 
-	/** Admit nothing new, let a running turn finish (at most `capMs` when given), end the streams, close every conversation, and exit. */
-	const stop = (reason: WorkerExitReason, capMs: number | undefined, shutdown = false): Promise<WorkerExit> => {
+	/**
+	 * End as `exit`: ask the daemon to end the processes descended from this worker (`worker_exit`; not once it
+	 * is lost), then close the connection.
+	 */
+	const leave = async (exit: WorkerExit): Promise<WorkerRun> => {
+		const descendantsEnded =
+			exit.reason === "stopped" || exit.reason === "failed"
+				? await client.exit(exit.reason, exit.error, EXIT_ANSWER_TIMEOUT_MS)
+				: undefined;
+		await client.close().catch(() => undefined);
+		return { exit, descendantsEnded };
+	};
+
+	/**
+	 * Admit nothing new, let a running turn finish (at most `capMs` when given), end the streams, close every
+	 * conversation, and exit. Past the turn cap and margin it exits even if closing its conversations hangs, so a
+	 * worker never outlives its daemon for long and a restarted daemon (which waits for it on the worker gate)
+	 * starts.
+	 */
+	const stop = (reason: WorkerExitReason, capMs: number | undefined, shutdown = false): Promise<WorkerRun> => {
 		shuttingDown ||= shutdown;
 		if (!stopping) options.onStopping?.(reason);
 		halted.abort();
-		stopping ??= (async (): Promise<WorkerExit> => {
+		stopping ??= (async (): Promise<WorkerRun> => {
 			clearInterval(sampler);
-			await Promise.allSettled([...opening.values()]);
-			conversations?.beginStopping();
-			const hosted = conversations?.list() ?? [];
-			await quiesce(hosted, capMs);
-			// A daemon shutdown tells its clients so (`ended{shutdown}`, `fatal{host_shutdown}`); other stops end their streams.
-			await Promise.allSettled(
-				[...served.values()].map((connection) => (shuttingDown ? connection.shutdown() : connection.close())),
-			);
-			await Promise.allSettled([...serving]);
-			let error: string | undefined;
-			try {
-				await conversations?.closeAll();
-			} catch (disposeError) {
-				error = errorMessage(disposeError);
-			}
-			await client.close().catch(() => undefined);
-			return { reason, ...(error === undefined ? {} : { error }) };
+			const closed = (async (): Promise<string | undefined> => {
+				await Promise.allSettled([...opening.values()]);
+				conversations?.beginStopping();
+				const hosted = conversations?.list() ?? [];
+				await quiesce(hosted, capMs);
+				// A daemon shutdown tells its clients so (`ended{shutdown}`, `fatal{host_shutdown}`); other stops end their streams.
+				await Promise.allSettled(
+					[...served.values()].map((connection) => (shuttingDown ? connection.shutdown() : connection.close())),
+				);
+				await Promise.allSettled([...serving]);
+				try {
+					await conversations?.closeAll();
+					return undefined;
+				} catch (disposeError) {
+					return errorMessage(disposeError);
+				}
+			})();
+			let deadline: ReturnType<typeof setTimeout> | undefined;
+			const late = new Promise<string>((resolve) => {
+				deadline = setTimeout(
+					() => resolve("did not finish stopping"),
+					WORKER_TURN_CAP_MS + EXIT_DEADLINE_MARGIN_MS,
+				);
+			});
+			const error = await Promise.race([closed, late]);
+			clearTimeout(deadline);
+			return leave({ reason, ...(error === undefined ? {} : { error }) });
 		})();
 		void stopping.then(exit.resolve);
 		return stopping;
@@ -636,7 +686,7 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 		await client.connect();
 	} catch (error) {
 		await client.close().catch(() => undefined);
-		return { reason: "failed", error: errorMessage(error) };
+		return { exit: { reason: "failed", error: errorMessage(error) }, descendantsEnded: undefined };
 	}
 	// The worker's process was asked to exit: it stops as on a forced stop.
 	if (options.signal?.aborted) void stop("stopped", WORKER_TURN_CAP_MS);
@@ -648,8 +698,7 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 		first = await client.spawnSpec(SPAWN_SPEC_TIMEOUT_MS);
 	} catch (error) {
 		if (stopping) return exit.promise;
-		await client.close().catch(() => undefined);
-		return { reason: "failed", error: errorMessage(error) };
+		return leave({ reason: "failed", error: errorMessage(error) });
 	}
 	// Every conversation of the worker is of one workspace (the daemon routes only compatible opens here).
 	conversations = new WorkerConversations({
@@ -696,14 +745,13 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 		await client
 			.openFailed(first.session.sessionId, errorMessage(failure), failureOutcome(failure))
 			.catch(() => undefined);
-		await client.close().catch(() => undefined);
-		return { reason: "failed", error: errorMessage(failure) };
+		return leave({ reason: "failed", error: errorMessage(failure) });
 	}
 	try {
 		await client.ready(first.session.sessionId);
 	} catch (error) {
-		await stop("failed", undefined);
-		return { reason: "failed", error: errorMessage(error) };
+		const run = await stop("failed", undefined);
+		return { ...run, exit: { reason: "failed", error: errorMessage(error) } };
 	}
 
 	sampler = setInterval(() => {

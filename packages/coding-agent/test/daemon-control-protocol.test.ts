@@ -171,6 +171,7 @@ const REQUESTS: ByType<ControlRequest> = {
 	worker_released: { type: "worker_released", id: "33", sessionId: "s-2" },
 	worker_stop_result: { type: "worker_stop_result", id: "34", stopId: "stop-1", outcome: "refused_active" },
 	worker_close_result: { type: "worker_close_result", id: "35", closeId: "close-1", outcome: "closed" },
+	worker_exit: { type: "worker_exit", id: "36", reason: "failed", error: "The daemon sent no conversation to open" },
 	worker_worktree_restore: {
 		type: "worker_worktree_restore",
 		id: "40",
@@ -338,6 +339,7 @@ const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, u
 	worker_released: [{ sessionId: 1 }],
 	worker_stop_result: [{ outcome: "maybe" }, { stopId: undefined }],
 	worker_close_result: [{ outcome: "stopped" }, { closeId: undefined }],
+	worker_exit: [{ reason: "crashed" }, { reason: undefined }, { error: "e".repeat(1025) }],
 	worker_worktree_restore: [{ path: "" }, { path: "p".repeat(4097) }, { sessionRef: undefined }],
 	worker_worktree_release: [{ pinId: "p".repeat(65) }, { pinId: undefined }],
 	worker_worktree_create: [
@@ -476,6 +478,7 @@ const RESPONSES: ByType<ControlResponse> = {
 		frame: { type: "accepted", intentId: "i-2", ordinals: [], result: { registered: true } },
 	},
 	worker_authority_result: { type: "worker_authority_result", id: "18", authority: "current" },
+	worker_exit_result: { type: "worker_exit_result", id: "20", descendantsEnded: true },
 	worker_worktree_pinned: { type: "worker_worktree_pinned", id: "19", pinId: "pin-1" },
 };
 
@@ -526,6 +529,7 @@ const INVALID_RESPONSES: { [K in ControlResponse["type"]]?: Array<Record<string,
 	relay_push_delivery_result: [{ status: "maybe" }],
 	worker_host_response: [{ response: { value: "x", extra: true } }],
 	worker_authority_result: [{ authority: "lost" }],
+	worker_exit_result: [{ descendantsEnded: "yes" }, { descendantsEnded: undefined }],
 	worker_worktree_pinned: [{ pinId: undefined }],
 };
 

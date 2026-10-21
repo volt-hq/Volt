@@ -206,6 +206,37 @@ export class WorkerDaemonClient {
 	}
 
 	/**
+	 * The worker exits next, for `reason`: ask the daemon to end the processes still descended from it first
+	 * (`worker_exit`). Whether it ended them; undefined when the connection is gone, or the daemon did not answer
+	 * within `timeoutMs` (a busy daemon never holds up an exit).
+	 */
+	async exit(
+		reason: "stopped" | "failed",
+		error: string | undefined,
+		timeoutMs: number,
+	): Promise<boolean | undefined> {
+		if (this.lost) return undefined;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			const response = await Promise.race([
+				this.request({
+					type: "worker_exit",
+					reason,
+					...(error === undefined ? {} : { error: Array.from(error).slice(0, 1024).join("") }),
+				}),
+				new Promise<undefined>((resolve) => {
+					timer = setTimeout(() => resolve(undefined), timeoutMs);
+				}),
+			]);
+			return response?.type === "worker_exit_result" ? response.descendantsEnded : undefined;
+		} catch {
+			return undefined;
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+
+	/**
 	 * Ask the TUI whose open of `sessionId` this worker serves: what it
 	 * answered (no `response` when it closed the question without one), or
 	 * undefined when it cannot be asked (it left; the daemon stops).

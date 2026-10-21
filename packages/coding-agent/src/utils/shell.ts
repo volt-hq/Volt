@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { delimiter } from "node:path";
 import { spawn, spawnSync } from "child_process";
 import { getBinDir } from "../config.ts";
+import { descendantsIn, type ProcessTable, readProcessTableSync } from "./process-table.ts";
 
 export interface ShellConfig {
 	shell: string;
@@ -181,7 +182,7 @@ export function killTrackedDetachedChildren(): void {
 	// One process-table read shared across every tracked child: this runs from
 	// shutdown signal handlers, and a snapshot per child would multiply the
 	// blocking cost by the number of in-flight commands.
-	const table = process.platform === "win32" ? undefined : readChildrenByParent();
+	const table = readProcessTableSync();
 	for (const pid of trackedDetachedChildPids) {
 		killProcessTree(pid, table);
 	}
@@ -190,8 +191,6 @@ export function killTrackedDetachedChildren(): void {
 
 /** Grace period between SIGTERM and SIGKILL when tearing down a process tree. */
 const SIGKILL_ESCALATION_MS = 200;
-/** Cap on the process-table read so enumeration cannot stall a shutdown path. */
-const PROCESS_TABLE_TIMEOUT_MS = 1000;
 
 /**
  * Guard every signalling entry point: `process.kill(-1, ...)` would signal every
@@ -222,33 +221,6 @@ function isProcessAlive(pid: number): boolean {
 }
 
 /**
- * Read the whole process table once and index it by parent.
- *
- * Deliberately one spawn rather than a `pgrep -P` per node: this runs on abort,
- * timeout, and shutdown signal handlers, and a per-node walk costs ~18ms each,
- * which on a large build tree blocks the event loop for seconds.
- */
-function readChildrenByParent(): Map<number, number[]> | undefined {
-	const result = spawnSync("ps", ["-Ao", "pid=,ppid="], {
-		encoding: "utf8",
-		timeout: PROCESS_TABLE_TIMEOUT_MS,
-		maxBuffer: 8 * 1024 * 1024,
-	});
-	if (result.error || typeof result.stdout !== "string") return undefined;
-	const childrenByParent = new Map<number, number[]>();
-	for (const line of result.stdout.split("\n")) {
-		const fields = line.trim().split(/\s+/);
-		const pid = Number.parseInt(fields[0] ?? "", 10);
-		const ppid = Number.parseInt(fields[1] ?? "", 10);
-		if (!Number.isInteger(pid) || !Number.isInteger(ppid)) continue;
-		const siblings = childrenByParent.get(ppid);
-		if (siblings) siblings.push(pid);
-		else childrenByParent.set(ppid, [pid]);
-	}
-	return childrenByParent;
-}
-
-/**
  * Collect every descendant of `pid`, deepest first.
  *
  * Signalling the process group is the primary mechanism, but a child that calls
@@ -258,33 +230,23 @@ function readChildrenByParent(): Map<number, number[]> | undefined {
  *
  * This must run BEFORE anything is killed: once an intermediate parent dies its
  * children are reparented to init and the ppid trail back to us is gone.
+ *
+ * One read of the whole table (`table`, or a fresh one) rather than a
+ * `pgrep -P` per node: this runs on abort, timeout, and shutdown signal
+ * handlers, and a per-node walk costs ~18ms each, which on a large build tree
+ * blocks the event loop for seconds.
  */
-function collectDescendantPids(pid: number, table?: Map<number, number[]>): number[] {
-	if (process.platform === "win32") return [];
-	const childrenByParent = table ?? readChildrenByParent();
+function collectDescendantPids(pid: number, table?: ProcessTable): number[] {
+	const processes = table ?? readProcessTableSync();
 	// No usable process table: fall back to group-only signalling, i.e. the
 	// behavior that predated the sweep.
-	if (!childrenByParent) return [];
-	const collected: number[] = [];
-	const seen = new Set<number>([pid]);
-	const queue: number[] = [pid];
+	if (!processes) return [];
 	// Deliberately uncapped. A breadth-first cap truncates whole levels, which
 	// would drop exactly the deep escaped descendants the group kill cannot
 	// reach — the failure this sweep exists to prevent, reappearing on any tree
 	// large enough to hit the limit. `seen` bounds the walk to each pid once,
 	// and the table is already in memory, so the traversal is map lookups.
-	while (queue.length > 0) {
-		const parent = queue.shift();
-		if (parent === undefined) break;
-		for (const childPid of childrenByParent.get(parent) ?? []) {
-			if (!isSignalablePid(childPid) || seen.has(childPid)) continue;
-			seen.add(childPid);
-			collected.push(childPid);
-			queue.push(childPid);
-		}
-	}
-	// Deepest first, so a parent cannot spawn replacements while we work upward.
-	return collected.reverse();
+	return descendantsIn(processes, [pid]);
 }
 
 function killWindowsTree(pid: number): void {
@@ -341,7 +303,7 @@ function signalProcessTree(pid: number, descendants: number[], signal: NodeJS.Si
  * Stays synchronous because shutdown signal handlers cannot await; use
  * {@link terminateProcessTree} anywhere a graceful stop can be awaited.
  */
-export function killProcessTree(pid: number, table?: Map<number, number[]>): void {
+export function killProcessTree(pid: number, table?: ProcessTable): void {
 	if (!isSignalablePid(pid)) return;
 	if (process.platform === "win32") {
 		killWindowsTree(pid);
@@ -379,37 +341,24 @@ export async function terminateProcessTree(pid: number, isExited?: () => boolean
 }
 
 /**
- * End the processes still descended from `pid` without signalling any process group, so a process whose parent
- * exited first (it has left the tree) keeps running: SIGTERM, then SIGKILL a moment later to those still running
- * and to whatever they started meanwhile. With `includeRoot`, `pid` itself is ended with them. `isRootExited`
- * tells whether `pid` has exited, after which neither it nor its id is signalled or walked; without it, `pid` is
- * this process or one that cannot exit meanwhile. macOS and Linux only: Windows walks its process table through
- * the workspace-fs addon (`src/daemon/process-tree.ts`).
+ * End the processes still descended from `pid` (this process, or one that cannot exit meanwhile) without
+ * signalling any process group, so a process whose parent exited first (it has left the tree) keeps running:
+ * SIGTERM, then SIGKILL a moment later to those still running and to whatever they and `pid` started meanwhile.
+ * macOS and Linux only: Windows walks its process table through the workspace-fs addon
+ * (`src/daemon/process-tree.ts`).
  */
-export async function terminateDescendants(
-	pid: number,
-	options: { includeRoot?: boolean; isRootExited?: () => boolean } = {},
-): Promise<void> {
-	// A root that exited left nothing to walk from (its children were reparented), and its id may be reused.
-	if (process.platform === "win32" || !isSignalablePid(pid) || options.isRootExited?.() === true) return;
-	const rootRuns = () => options.isRootExited?.() !== true && isProcessAlive(pid);
+export async function terminateDescendants(pid: number): Promise<void> {
+	if (process.platform === "win32" || !isSignalablePid(pid)) return;
 	const descendants = collectDescendantPids(pid);
 	for (const descendant of descendants) signalPid(descendant, "SIGTERM");
-	if (options.includeRoot === true && rootRuns()) signalPid(pid, "SIGTERM");
 
 	await new Promise((resolve) => setTimeout(resolve, SIGKILL_ESCALATION_MS));
 
-	// Those still running, and whatever they and the root started meanwhile.
-	const survivors = descendants.filter(isProcessAlive);
-	const remaining = new Set(survivors);
-	const table = readChildrenByParent();
-	if (table) {
-		for (const parent of rootRuns() ? [pid, ...survivors] : survivors) {
-			for (const descendant of collectDescendantPids(parent, table)) remaining.add(descendant);
-		}
-	}
+	// Those still running, and whatever they and `pid` started meanwhile.
+	const remaining = new Set(descendants.filter(isProcessAlive));
+	const table = readProcessTableSync();
+	if (table) for (const descendant of descendantsIn(table, [pid, ...remaining])) remaining.add(descendant);
 	for (const descendant of remaining) signalPid(descendant, "SIGKILL");
-	if (options.includeRoot === true && rootRuns()) signalPid(pid, "SIGKILL");
 }
 
 /** End the processes still descended from `pid` at once (SIGKILL), for exits that cannot wait; never `pid`. */

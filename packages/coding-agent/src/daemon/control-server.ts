@@ -134,6 +134,12 @@ export function retainControlConnectionResource(connection: ControlConnection, r
 
 let controlConnectionSequence = 0;
 
+/**
+ * The requests admitted once the daemon shuts down: a worker's `worker_exit`, which every worker the shutdown
+ * stops sends as it exits. It touches no durable state, only the worker's processes.
+ */
+const ADMITTED_WHILE_SHUTTING_DOWN: ReadonlySet<string> = new Set(["worker_exit"]);
+
 export async function startControlServer(options: ControlServerOptions): Promise<ControlServer> {
 	const { socketPath, version, authToken, handlers } = options;
 	const connections = new Map<string, ControlConnectionImpl>();
@@ -330,7 +336,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 				});
 				return;
 			}
-			if (!acceptingRequests || handlers.isShuttingDown?.()) {
+			if ((!acceptingRequests || handlers.isShuttingDown?.()) && !ADMITTED_WHILE_SHUTTING_DOWN.has(message.type)) {
 				connection.send({
 					type: "error",
 					id: message.id,

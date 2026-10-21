@@ -2,8 +2,9 @@
  * An extension inventory as a process of its own (`volt daemon extension-inventory`, started from this
  * checkout's source by `ProcessWorkerLauncher`): it loads the root's extensions, writes its result on fd 3
  * whatever the extensions print, keeps a private log beside the workers', and however an evaluation ends (with
- * a result, stopped, or by exiting on its own) ends the processes its extensions started, except one that left
- * its tree.
+ * a result, stopped, or by exiting on its own) ends the processes its extensions started. One that left its tree
+ * keeps running when the daemon stopped the process; after an exit the daemon did not carry out, on macOS and
+ * Linux, the daemon's kill of the process group ends it too.
  */
 
 import {
@@ -22,7 +23,7 @@ import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ExtensionInventoryProbeOutputSchema } from "../src/daemon/extension-inventory.ts";
 import { getWorkerLogDirectory } from "../src/daemon/paths.ts";
-import { CRASH_EXIT_CODE, ProcessWorkerLauncher } from "../src/daemon/worker-launcher.ts";
+import { ProcessWorkerLauncher } from "../src/daemon/worker-launcher.ts";
 import { type SleeperStart, spawnerExtension, writeSleeper } from "./utilities/process-tree.ts";
 
 /** The process starts from source here: compiling it can take a while on a cold cache. */
@@ -324,13 +325,39 @@ export default async function () {
 				projectTrusted: true,
 			});
 
-			await expect(launched.result).rejects.toThrow(`exit code ${CRASH_EXIT_CODE}`);
+			await expect(launched.result).rejects.toThrow("crashed: exit code 1");
 			const [plain, grandchild, detached, orphan] = await Promise.all(
 				["plain", "grandchild", "detached", "orphan"].map((name) => waitForPid(pidFile(name))),
 			);
+			// It ended its tree itself, detached processes included.
 			await expectEnded([plain, grandchild, detached]);
-			// It ended its tree itself, so the daemon ends nothing after it: its process group is left alone.
-			expect(processIsAlive(orphan)).toBe(true);
+			// The daemon confirmed no sweep, so it ends what it can still find: on macOS and Linux the process group,
+			// which holds the orphan; on Windows the tree, which does not.
+			if (process.platform === "win32") expect(processIsAlive(orphan)).toBe(true);
+			else await expectEnded([orphan]);
+		},
+		PROCESS_TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"ends the processes still descended from it when an extension exits the process",
+		async () => {
+			// The extension's exit skips the process's own cleanup.
+			const { root, agentDir, pidFile } = sleeperWorkspace("process.exit(0);");
+
+			const launched = new ProcessWorkerLauncher().launchExtensionInventory({
+				id: "test-9",
+				agentDir,
+				root,
+				projectTrusted: true,
+			});
+
+			await expect(launched.result).rejects.toThrow("crashed: exit code 0");
+			const [plain, grandchild] = await Promise.all(
+				["plain", "grandchild", "detached", "orphan"].map((name) => waitForPid(pidFile(name))),
+			);
+			// What the daemon still finds: on macOS and Linux the process group, on Windows the tree.
+			await expectEnded([plain, grandchild]);
 		},
 		PROCESS_TEST_TIMEOUT_MS,
 	);

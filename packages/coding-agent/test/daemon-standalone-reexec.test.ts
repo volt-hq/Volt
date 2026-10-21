@@ -108,7 +108,8 @@ describe("a standalone binary re-executes itself", () => {
 			cwd,
 		});
 
-		await expect(worker.exited).resolves.toEqual({ reason: "stopped" });
+		// The preload exits before the worker runs: a bare exit, without the worker's `worker_exit`.
+		await expect(worker.exited).resolves.toEqual({ reason: "crashed", error: "exit code 0" });
 		expect(launches()).toEqual([{ program: "daemon", args: ["worker"], execArgv: [] }]);
 		expect(readFileSync(recordPath, "utf8")).not.toContain(workerToken);
 	});

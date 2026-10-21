@@ -325,7 +325,7 @@ Extension factories may run in invocations that never start a session. Do not st
 
 Defer background resource startup until `session_start` or the command/tool/event that needs the resource. Register an idempotent `session_shutdown` handler to close any session-scoped resources you start.
 
-In the daemon, a process you start ends when the worker or inventory process that runs your extension exits, if it is still descended from that process, detached or not ([daemon.md](daemon.md#processes-a-conversation-started)). A process meant to outlive its conversation must be started from a launcher that exits first.
+In the daemon, a process you start ends when the worker or inventory process that runs your extension exits, if it is still descended from that process, detached or not ([daemon.md](daemon.md#processes-a-conversation-started)). A process meant to outlive its conversation must be started from a launcher that exits first; on macOS and Linux, start that launcher `detached`, so the process also leaves the worker's process group, which the daemon kills after the worker exits abnormally. Do not call `process.exit`: it skips the worker's orderly stop, and the daemon handles it as a crash.
 
 ### Extension Styles
 

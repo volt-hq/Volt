@@ -5,30 +5,29 @@
  * never in argv or the environment, and are never logged; everything else
  * follows its hello over the socket. Its stdout and stderr are its log.
  *
- * It exits with a code that tells the daemon why (`WORKER_EXIT_CODES`). A
- * stop of any kind arms a deadline: past the 60 s turn cap, and margin, the
- * process exits even if closing its conversations hangs, so a worker never
- * outlives its daemon for long and a restarted daemon (which waits for it on
- * the worker gate) starts. SIGTERM or SIGINT stop it as a forced stop does; a
- * second one exits at once, as an uncaught error does (`CRASH_EXIT_CODE`).
- * Every exit it performs ends the processes still descended from it (RFC §5.3,
- * worker process tree): its tools', its extensions', its language and MCP
- * servers'. A managed checkout is restored only through its daemon
- * connection, never by starting a daemon of its own.
+ * It tells the daemon why it exits (`worker_exit`), and exits with the code of
+ * that reason (`WORKER_EXIT_CODES`), past a deadline if closing its
+ * conversations hangs (`runWorker`). SIGTERM or SIGINT stop it as a forced
+ * stop does; a second one exits at once, as an uncaught error does (code 1).
+ * Whatever it started ends with it (RFC §5.3, worker process tree): its
+ * tools', its extensions', its language and MCP servers'. Before it exits the
+ * daemon ends them; then it ends what it still finds itself, and when the
+ * daemon could not read its process list, it also ends the process groups of
+ * its running tool commands. A managed checkout is restored only through its
+ * daemon connection, never by starting a daemon of its own.
  */
 
 import { SettingsManager } from "../../core/settings-manager.ts";
 import { initTheme } from "../../core/theme/runtime.ts";
+import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { exitOnUncaughtError, killOwnDescendants } from "../process-tree.ts";
 import { markConversationWorkerProcess } from "../session-worktree.ts";
-import { CRASH_EXIT_CODE, WORKER_EXIT_CODES, type WorkerBootstrap, type WorkerExitReason } from "../worker-launcher.ts";
-import { runWorker, WORKER_TURN_CAP_MS } from "./host.ts";
+import { WORKER_EXIT_CODES, type WorkerBootstrap, type WorkerExitReason } from "../worker-launcher.ts";
+import { runWorker } from "./host.ts";
 
 /** How long a worker waits for its bootstrap line. */
 const BOOTSTRAP_TIMEOUT_MS = 30_000;
 const MAX_BOOTSTRAP_BYTES = 16 * 1024;
-/** Past the turn cap: closing the conversations and the process' teardown. */
-const EXIT_DEADLINE_MARGIN_MS = 10_000;
 
 function isBootstrap(value: unknown): value is WorkerBootstrap {
 	if (typeof value !== "object" || value === null) return false;
@@ -85,13 +84,13 @@ function readBootstrap(): Promise<WorkerBootstrap> {
 }
 
 function exitCode(reason: WorkerExitReason): number {
-	return reason === "crashed" ? CRASH_EXIT_CODE : WORKER_EXIT_CODES[reason];
+	return reason === "crashed" ? 1 : WORKER_EXIT_CODES[reason];
 }
 
 /** Run the worker the daemon's launch describes; resolves with the process' exit code. */
 export async function runWorkerProcess(agentDir: string): Promise<number> {
 	process.title = "volt-worker";
-	exitOnUncaughtError("volt worker", CRASH_EXIT_CODE);
+	exitOnUncaughtError("volt worker");
 	markConversationWorkerProcess();
 	let bootstrap: WorkerBootstrap;
 	try {
@@ -113,20 +112,13 @@ export async function runWorkerProcess(agentDir: string): Promise<number> {
 	initTheme(SettingsManager.create(agentDir, agentDir, { projectTrusted: false }).getTheme(), false);
 
 	const halt = new AbortController();
-	let deadline: ReturnType<typeof setTimeout> | undefined;
 	const onStopping = (reason: WorkerExitReason) => {
 		console.error(`${new Date().toISOString()} worker ${workerId} stopping (${reason})`);
-		deadline ??= setTimeout(() => {
-			console.error(`${new Date().toISOString()} worker ${workerId} did not finish stopping; exiting`);
-			killOwnDescendants();
-			process.exit(exitCode(reason));
-		}, WORKER_TURN_CAP_MS + EXIT_DEADLINE_MARGIN_MS);
-		deadline.unref();
 	};
 	const onSignal = (signal: NodeJS.Signals) => {
 		if (halt.signal.aborted) {
 			killOwnDescendants();
-			process.exit(CRASH_EXIT_CODE);
+			process.exit(1);
 		}
 		console.error(`${new Date().toISOString()} worker ${workerId} received ${signal}`);
 		halt.abort();
@@ -134,9 +126,18 @@ export async function runWorkerProcess(agentDir: string): Promise<number> {
 	process.on("SIGTERM", onSignal);
 	process.on("SIGINT", onSignal);
 
-	const exit = await runWorker({ ...bootstrap, agentDir, cwd: process.cwd() }, { signal: halt.signal, onStopping });
+	const { exit, descendantsEnded } = await runWorker(
+		{ ...bootstrap, agentDir, cwd: process.cwd() },
+		{ signal: halt.signal, onStopping },
+	);
 	console.error(
 		`${new Date().toISOString()} worker ${workerId} exited: ${exit.reason}${exit.error === undefined ? "" : ` (${exit.error})`}`,
 	);
+	// The daemon could not read its process list: the tool commands still running end by their process groups,
+	// which needs no process list. The caller then ends what it finds of the rest.
+	if (descendantsEnded === false) {
+		console.error(`${new Date().toISOString()} worker ${workerId}: the daemon did not end its descendants`);
+		killTrackedDetachedChildren();
+	}
 	return exitCode(exit.reason);
 }

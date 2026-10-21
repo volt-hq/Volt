@@ -657,8 +657,9 @@ export async function handleDaemonCommand(args: string[], options: DaemonCommand
 		case "worker": {
 			// Internal and unlisted: the daemon starts one per conversation worker.
 			const code = await runWorkerProcess(agentDir);
-			// Its conversations are closed; whatever is still descended from it (language servers, pools, what tools
-			// and extensions started) ends with it (RFC §5.3, worker process tree).
+			// Its conversations are closed, and the daemon ended its descendants (`worker_exit`) unless it could not.
+			// Whatever is still descended from it (language servers, pools, what tools and extensions started) ends
+			// with it (RFC §5.3, worker process tree): what started since the daemon's sweep, or everything without one.
 			await endOwnDescendants();
 			process.exit(code);
 			return true;
