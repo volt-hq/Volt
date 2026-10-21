@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -12,9 +13,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -34,6 +39,8 @@ type AppleConfig struct {
 	ProductionBaseURL    string
 	SandboxBaseURL       string
 	Now                  func() time.Time
+	// Logger receives bounded App Store Server API failure diagnostics.
+	Logger *slog.Logger
 }
 
 type AppleVerifier struct {
@@ -49,6 +56,7 @@ type AppleVerifier struct {
 	productionBaseURL   string
 	sandboxBaseURL      string
 	now                 func() time.Time
+	logger              *slog.Logger
 }
 
 type statusResponse struct {
@@ -113,6 +121,10 @@ func NewAppleVerifier(config AppleConfig) (*AppleVerifier, error) {
 	if sandboxBaseURL == "" {
 		sandboxBaseURL = "https://api.storekit-sandbox.apple.com"
 	}
+	logger := config.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	return &AppleVerifier{
 		signedData:          signedData,
 		privateKey:          privateKey,
@@ -126,6 +138,7 @@ func NewAppleVerifier(config AppleConfig) (*AppleVerifier, error) {
 		productionBaseURL:   productionBaseURL,
 		sandboxBaseURL:      sandboxBaseURL,
 		now:                 config.Now,
+		logger:              logger,
 	}, nil
 }
 
@@ -143,6 +156,7 @@ func (v *AppleVerifier) VerifyEntitlement(
 	}
 	entitlement, err := v.resolveEntitlement(
 		ctx,
+		"approval",
 		appTransaction.AppTransactionID,
 		appTransaction.ReceiptType,
 		verificationStartedAt,
@@ -164,6 +178,7 @@ func (v *AppleVerifier) ReconcileEntitlement(
 ) (Entitlement, error) {
 	return v.resolveEntitlement(
 		ctx,
+		"reconcile",
 		appTransactionID,
 		environment,
 		v.now().UTC(),
@@ -189,6 +204,7 @@ func (v *AppleVerifier) VerifyNotification(
 	}
 	entitlement, err := v.resolveEntitlement(
 		ctx,
+		"notification",
 		transaction.AppTransactionID,
 		envelope.Data.Environment,
 		verificationStartedAt,
@@ -201,11 +217,12 @@ func (v *AppleVerifier) VerifyNotification(
 
 func (v *AppleVerifier) resolveEntitlement(
 	ctx context.Context,
+	operation string,
 	appTransactionID string,
 	environment string,
 	verificationStartedAt time.Time,
 ) (Entitlement, error) {
-	response, err := v.fetchSubscriptionStatus(ctx, appTransactionID, environment)
+	response, err := v.fetchSubscriptionStatus(ctx, operation, appTransactionID, environment)
 	if err != nil {
 		return Entitlement{}, err
 	}
@@ -340,6 +357,7 @@ func entitlementIsNewer(candidate, current Entitlement) bool {
 
 func (v *AppleVerifier) fetchSubscriptionStatus(
 	ctx context.Context,
+	operation string,
 	appTransactionID string,
 	environment string,
 ) (statusResponse, error) {
@@ -363,27 +381,107 @@ func (v *AppleVerifier) fetchSubscriptionStatus(
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Authorization", "Bearer "+token)
+	started := time.Now()
+	unavailable := func(failure string, attributes ...any) {
+		v.logger.Warn("App Store status lookup failed", append([]any{
+			"operation", operation,
+			"environment", environment,
+			"failure", failure,
+			"elapsed_ms", time.Since(started).Milliseconds(),
+		}, attributes...)...)
+	}
 	response, err := v.httpClient.Do(request)
 	if err != nil {
+		unavailable("transport", "cause", transportFailureCause(err))
 		return statusResponse{}, fmt.Errorf("%w: request App Store status", ErrSubscriptionUnavailable)
 	}
 	defer response.Body.Close()
+	responseAttributes := []any{
+		"http_status", response.StatusCode,
+		"content_type", boundedMediaType(response.Header.Get("Content-Type")),
+	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maximumStatusResponseBytes+1))
 	if err != nil {
+		unavailable("read", append(responseAttributes, "cause", transportFailureCause(err))...)
 		return statusResponse{}, fmt.Errorf("%w: read App Store status", ErrSubscriptionUnavailable)
 	}
 	if len(body) > maximumStatusResponseBytes {
+		unavailable("oversized", responseAttributes...)
 		return statusResponse{}, ErrSubscriptionUnavailable
 	}
-	if response.StatusCode != http.StatusOK ||
-		!strings.HasPrefix(strings.ToLower(response.Header.Get("Content-Type")), "application/json") {
+	if response.StatusCode != http.StatusOK {
+		var appleError struct {
+			ErrorCode int64 `json:"errorCode"`
+		}
+		if json.Unmarshal(body, &appleError) == nil && appleError.ErrorCode > 0 {
+			responseAttributes = append(responseAttributes, "apple_error_code", appleError.ErrorCode)
+		}
+		unavailable("http_status", responseAttributes...)
+		return statusResponse{}, ErrSubscriptionUnavailable
+	}
+	if !strings.HasPrefix(strings.ToLower(response.Header.Get("Content-Type")), "application/json") {
+		unavailable("content_type", responseAttributes...)
 		return statusResponse{}, ErrSubscriptionUnavailable
 	}
 	var decoded statusResponse
 	if err := json.Unmarshal(body, &decoded); err != nil {
+		var typeError *json.UnmarshalTypeError
+		if errors.As(err, &typeError) {
+			responseAttributes = append(responseAttributes, "json_field", bounded(typeError.Field, 128))
+		}
+		unavailable("decode", responseAttributes...)
 		return statusResponse{}, ErrSubscriptionUnavailable
 	}
 	return decoded, nil
+}
+
+// transportFailureCause classifies a request or body-read failure without its
+// message, which embeds the request URL and so the App Transaction ID.
+func transportFailureCause(err error) string {
+	var dnsError *net.DNSError
+	var netError net.Error
+	var certificateError *tls.CertificateVerificationError
+	var alertError tls.AlertError
+	var recordError tls.RecordHeaderError
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.As(err, &dnsError):
+		return "dns"
+	case errors.Is(err, context.DeadlineExceeded),
+		errors.As(err, &netError) && netError.Timeout():
+		return "timeout"
+	case errors.As(err, &certificateError),
+		errors.As(err, &alertError),
+		errors.As(err, &recordError):
+		return "tls"
+	case errors.Is(err, syscall.ECONNRESET):
+		return "connection_reset"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "connection_refused"
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return "eof"
+	default:
+		return "other"
+	}
+}
+
+func boundedMediaType(contentType string) string {
+	if contentType == "" {
+		return "none"
+	}
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return "invalid"
+	}
+	return bounded(mediaType, 64)
+}
+
+func bounded(value string, limit int) string {
+	if len(value) > limit {
+		return value[:limit]
+	}
+	return value
 }
 
 func (v *AppleVerifier) authorizationToken() (string, error) {

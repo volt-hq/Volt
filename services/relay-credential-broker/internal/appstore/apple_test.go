@@ -1,6 +1,7 @@
 package appstore
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -12,6 +13,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -368,10 +371,142 @@ func TestAppleVerifierAcceptsSignedTestNotification(t *testing.T) {
 	}
 }
 
+func TestAppleVerifierLogsBoundedStatusLookupFailures(t *testing.T) {
+	now := time.Date(2026, time.August, 26, 12, 0, 0, 0, time.UTC)
+	authority := newAppleTestAuthority(t, now)
+	appTransactionID := "app-transaction-private"
+	deviceID := "11111111-1111-4111-8111-111111111111"
+	nonce := "22222222-2222-4222-8222-222222222222"
+	deviceDigest := sha512.Sum384([]byte(nonce + deviceID))
+	proof := Proof{
+		SignedAppTransaction: authority.sign(t, map[string]any{
+			"receiptType":             "Sandbox",
+			"appAppleId":              testAppAppleID,
+			"bundleId":                testBundleID,
+			"appTransactionId":        appTransactionID,
+			"deviceVerification":      base64.StdEncoding.EncodeToString(deviceDigest[:]),
+			"deviceVerificationNonce": nonce,
+			"receiptCreationDate":     now.UnixMilli(),
+		}),
+		DeviceVerificationID: deviceID,
+	}
+	approval := func(verifier *AppleVerifier) error {
+		_, err := verifier.VerifyEntitlement(context.Background(), proof)
+		return err
+	}
+	reconcile := func(verifier *AppleVerifier) error {
+		_, err := verifier.ReconcileEntitlement(context.Background(), appTransactionID, "Sandbox")
+		return err
+	}
+	for _, test := range []struct {
+		name    string
+		client  *http.Client
+		handler http.HandlerFunc
+		lookup  func(*AppleVerifier) error
+		want    map[string]any
+		absent  []string
+	}{
+		{
+			name: "Apple error code",
+			handler: func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+				writer.WriteHeader(http.StatusTooManyRequests)
+				_, _ = writer.Write([]byte(`{"errorCode":4290000,"errorMessage":"Rate limit exceeded."}`))
+			},
+			lookup: approval,
+			want: map[string]any{"operation": "approval", "failure": "http_status", "http_status": float64(429),
+				"content_type": "application/json", "apple_error_code": float64(4290000)},
+		},
+		{
+			name: "non-JSON error page",
+			handler: func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Content-Type", "text/html")
+				writer.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = writer.Write([]byte("<html>unavailable</html>"))
+			},
+			lookup: reconcile,
+			want: map[string]any{"operation": "reconcile", "failure": "http_status", "http_status": float64(503),
+				"content_type": "text/html"},
+			absent: []string{"apple_error_code"},
+		},
+		{
+			name:   "timeout",
+			client: &http.Client{Timeout: 50 * time.Millisecond},
+			handler: func(_ http.ResponseWriter, request *http.Request) {
+				<-request.Context().Done()
+			},
+			lookup: reconcile,
+			want:   map[string]any{"operation": "reconcile", "failure": "transport", "cause": "timeout"},
+			absent: []string{"http_status"},
+		},
+		{
+			name: "schema mismatch",
+			handler: func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				_, _ = writer.Write([]byte(`{"environment":"Sandbox","data":"` + appTransactionID + `"}`))
+			},
+			lookup: reconcile,
+			want: map[string]any{"operation": "reconcile", "failure": "decode", "http_status": float64(200),
+				"json_field": "data"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			statusServer := httptest.NewServer(test.handler)
+			defer statusServer.Close()
+			var logs bytes.Buffer
+			verifier := authority.verifierWith(t, now, statusServer.URL,
+				slog.New(slog.NewJSONHandler(&logs, nil)), test.client)
+
+			if err := test.lookup(verifier); !errors.Is(err, ErrSubscriptionUnavailable) {
+				t.Fatalf("lookup error = %v, want %v", err, ErrSubscriptionUnavailable)
+			}
+			if strings.Contains(logs.String(), appTransactionID) {
+				t.Fatalf("failure log exposes the App Transaction ID: %s", logs.String())
+			}
+			lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+			if len(lines) != 1 {
+				t.Fatalf("failure logs = %q, want one record", lines)
+			}
+			var record map[string]any
+			if err := json.Unmarshal([]byte(lines[0]), &record); err != nil {
+				t.Fatal(err)
+			}
+			if record["level"] != "WARN" || record["msg"] != "App Store status lookup failed" ||
+				record["environment"] != "Sandbox" {
+				t.Fatalf("unexpected failure record: %v", record)
+			}
+			if _, ok := record["elapsed_ms"].(float64); !ok {
+				t.Fatalf("failure record has no elapsed time: %v", record)
+			}
+			for key, want := range test.want {
+				if record[key] != want {
+					t.Fatalf("%s = %v, want %v in %v", key, record[key], want, record)
+				}
+			}
+			for _, key := range test.absent {
+				if _, ok := record[key]; ok {
+					t.Fatalf("unexpected %s in %v", key, record)
+				}
+			}
+		})
+	}
+}
+
 func (authority appleTestAuthority) verifier(
 	t *testing.T,
 	now time.Time,
 	sandboxBaseURL string,
+) *AppleVerifier {
+	t.Helper()
+	return authority.verifierWith(t, now, sandboxBaseURL, nil, nil)
+}
+
+func (authority appleTestAuthority) verifierWith(
+	t *testing.T,
+	now time.Time,
+	sandboxBaseURL string,
+	logger *slog.Logger,
+	client *http.Client,
 ) *AppleVerifier {
 	t.Helper()
 	privateKey, err := x509.MarshalPKCS8PrivateKey(authority.apiKey)
@@ -391,8 +526,10 @@ func (authority appleTestAuthority) verifier(
 		SubscriptionGroupID: testSubscriptionGroupID,
 		ProductIDs:          []string{testAnnualProductID},
 		AllowedEnvironments: []string{"Sandbox"},
+		HTTPClient:          client,
 		SandboxBaseURL:      sandboxBaseURL,
 		Now:                 func() time.Time { return now },
+		Logger:              logger,
 	})
 	if err != nil {
 		t.Fatal(err)
