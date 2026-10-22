@@ -41,7 +41,8 @@ afterEach(() => {
 			// Ended already.
 		}
 	}
-	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+	// Windows keeps a process's working directory busy for a moment after it was terminated.
+	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 });
 
 /** A temporary workspace whose one project extension, `spawner`, has `source` as its module. */
@@ -353,11 +354,19 @@ export default async function () {
 			});
 
 			await expect(launched.result).rejects.toThrow("crashed: exit code 0");
-			const [plain, grandchild] = await Promise.all(
+			const [plain, grandchild, detached, orphan] = await Promise.all(
 				["plain", "grandchild", "detached", "orphan"].map((name) => waitForPid(pidFile(name))),
 			);
-			// What the daemon still finds: on macOS and Linux the process group, on Windows the tree.
-			await expectEnded([plain, grandchild]);
+			// What the daemon still finds, which differs by platform in both directions (RFC §5.3).
+			if (process.platform === "win32") {
+				// The dead process's tree, walked from the held handle: every descendant, and no orphan.
+				await expectEnded([plain, grandchild, detached]);
+				expect(processIsAlive(orphan)).toBe(true);
+			} else {
+				// Its process group: the orphan still in it too, but not a descendant in a session of its own.
+				await expectEnded([plain, grandchild, orphan]);
+				expect(processIsAlive(detached)).toBe(true);
+			}
 		},
 		PROCESS_TEST_TIMEOUT_MS,
 	);
