@@ -354,6 +354,8 @@ describe("PR #329 conversation host JSONL import contract", () => {
 					timestamp: branchSummaryTimestamp,
 					fromId: "context-root",
 					summary: branchSummary,
+					readFiles: [],
+					modifiedFiles: [],
 				},
 				{
 					type: "message",

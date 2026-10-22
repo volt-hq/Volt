@@ -231,6 +231,9 @@ export class LogSeed {
 			readonly summary?: string;
 			readonly firstKeptEntryId?: string;
 			readonly tokensBefore?: number;
+			readonly details?: JsonValue;
+			/** An extension's compaction: its `details` are its own. */
+			readonly fromHook?: boolean;
 		} = {},
 	): this {
 		const firstKeptEntryId = options.firstKeptEntryId ?? this.latestUserMessage() ?? this.leafId;
@@ -243,6 +246,8 @@ export class LogSeed {
 					summary: options.summary ?? "Seeded compaction summary",
 					firstKeptEntryId,
 					tokensBefore: options.tokensBefore ?? 1_000,
+					...(options.details === undefined ? {} : { details: options.details }),
+					...(options.fromHook === undefined ? {} : { fromHook: options.fromHook }),
 				},
 			},
 			options.id,
@@ -250,11 +255,21 @@ export class LogSeed {
 	}
 
 	/** A summary of an abandoned branch, at the current leaf (after `leaf()` moved it). */
-	branchSummary(summary: string, options: { readonly id?: string } = {}): this {
-		return this.add(
-			{ type: "branch_summary", visibility: "public", payload: { fromId: this.leafId ?? "root", summary } },
-			options.id,
-		);
+	branchSummary(
+		summary: string,
+		options: {
+			readonly id?: string;
+			readonly readFiles?: readonly string[];
+			readonly modifiedFiles?: readonly string[];
+		} = {},
+	): this {
+		const payload = {
+			fromId: this.leafId ?? "root",
+			summary,
+			readFiles: [...(options.readFiles ?? [])],
+			modifiedFiles: [...(options.modifiedFiles ?? [])],
+		};
+		return this.add({ type: "branch_summary", visibility: "public", payload }, options.id);
 	}
 
 	/** Move the active branch to `targetId` (`null` for before the first entry). */

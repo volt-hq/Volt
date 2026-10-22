@@ -352,7 +352,7 @@ describe("Conversation stream configuration", () => {
 					{ reasoning: "low", maxTokens: 2048, signal },
 				);
 				await response.result();
-				return { summary: "branch" };
+				return { summary: "branch", readFiles: [], modifiedFiles: [] };
 			},
 		};
 		const { conversation } = await openConversation({

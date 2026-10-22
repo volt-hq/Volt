@@ -455,6 +455,8 @@ function partitionMutations(rootEntryId: string, scenario: ProjectionPropertySce
 				...envelope(),
 				fromId: rootEntryId,
 				summary: "retained branch summary",
+				readFiles: [],
+				modifiedFiles: [],
 				details: { source: "partition" },
 				fromHook: true,
 			}),

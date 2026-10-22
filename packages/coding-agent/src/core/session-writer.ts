@@ -20,6 +20,8 @@ import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { isDeepStrictEqual } from "util";
 import { resolvePath } from "../utils/paths.ts";
+import { collectEntriesForBranchSummary } from "./compaction/branch-summarization.ts";
+import { collectFileOps, computeFileLists } from "./compaction/utils.ts";
 import { toLogEntryDraft } from "./conversation-log/entry-codec.ts";
 import {
 	type BashExecutionMessage,
@@ -347,6 +349,7 @@ function compactionEntry(
 function branchSummaryEntry(
 	branchFromId: string | null,
 	summary: string,
+	files: { readFiles: string[]; modifiedFiles: string[] },
 	details?: JsonValue,
 	fromHook?: boolean,
 ): BranchSummaryEntry {
@@ -355,6 +358,7 @@ function branchSummaryEntry(
 		...pendingEnvelope(),
 		fromId: branchFromId ?? "root",
 		summary,
+		...files,
 		...(details === undefined ? {} : { details }),
 		...(fromHook === undefined ? {} : { fromHook }),
 	});
@@ -537,7 +541,8 @@ export class LogWriter implements SessionWriter {
 
 	/**
 	 * Move the leaf to `branchFromId` and append, in the same commit, a summary
-	 * of the branch left behind as its child. Resolves with the summary's id.
+	 * of the branch left behind as its child, with the files that branch read
+	 * and modified. Resolves with the summary's id.
 	 */
 	async branchWithSummary<T = JsonValue>(
 		branchFromId: string | null,
@@ -545,8 +550,12 @@ export class LogWriter implements SessionWriter {
 		details?: JsonCompatibleInput<T>,
 		fromHook?: boolean,
 	): Promise<string> {
-		const entry = branchSummaryEntry(branchFromId, summary, details as JsonValue | undefined, fromHook);
-		return this.lane.commit((write) => write.branchWithSummary(branchFromId, entry));
+		return this.lane.commit((write) => {
+			const { entries } = collectEntriesForBranchSummary(this.sessionManager, write.leafId, branchFromId);
+			const files = computeFileLists(collectFileOps(entries));
+			const entry = branchSummaryEntry(branchFromId, summary, files, details as JsonValue | undefined, fromHook);
+			return write.branchWithSummary(branchFromId, entry);
+		});
 	}
 }
 

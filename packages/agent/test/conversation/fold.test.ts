@@ -275,7 +275,11 @@ describe("conversation fold", () => {
 			/not an ancestor/,
 		);
 		reject(
-			{ type: "branch_summary", parentId: "e1", payload: { fromId: "root", summary: "x" } },
+			{
+				type: "branch_summary",
+				parentId: "e1",
+				payload: { fromId: "root", summary: "x", readFiles: [], modifiedFiles: [] },
+			},
 			/must be its parent/,
 		);
 		reject(

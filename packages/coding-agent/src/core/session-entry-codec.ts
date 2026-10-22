@@ -126,6 +126,11 @@ function stringValue(value: unknown, path: string): string {
 	return value;
 }
 
+function stringArray(value: unknown, path: string): void {
+	if (!Array.isArray(value)) fail(path, "expected an array");
+	for (const [index, item] of value.entries()) stringValue(item, `${path}[${index}]`);
+}
+
 function nonEmptyString(value: unknown, path: string): string {
 	const result = stringValue(value, path);
 	if (result.length === 0) fail(path, "must not be empty");
@@ -520,6 +525,8 @@ function parseSessionEntry(
 		case "branch_summary":
 			idValue(entry.fromId, "$.fromId");
 			stringValue(entry.summary, "$.summary");
+			stringArray(entry.readFiles, "$.readFiles");
+			stringArray(entry.modifiedFiles, "$.modifiedFiles");
 			if (entry.fromHook !== undefined) booleanValue(entry.fromHook, "$.fromHook");
 			break;
 		case "custom":

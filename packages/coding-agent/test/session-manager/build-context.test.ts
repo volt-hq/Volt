@@ -58,6 +58,8 @@ function branchSummary(id: string, parentId: string | null, summary: string): Br
 		parentId,
 		timestamp: "2025-01-01T00:00:00Z",
 		summary,
+		readFiles: [],
+		modifiedFiles: [],
 		fromId: parentId ?? "root",
 	};
 }

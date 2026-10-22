@@ -4,6 +4,7 @@
 
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { Message } from "@hansjm10/volt-ai";
+import type { SessionEntry } from "../session-manager.ts";
 
 // ============================================================================
 // File Operation Tracking
@@ -53,6 +54,25 @@ export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOp
 				break;
 		}
 	}
+}
+
+/**
+ * The file operations `entries` record: the path of each read, write, and
+ * edit tool call, and the files each branch summary records of the branch it
+ * left behind. A compaction records none: the history it summarized precedes
+ * it on the same branch, so a scan of the whole branch counts that history.
+ */
+export function collectFileOps(entries: Iterable<SessionEntry>): FileOperations {
+	const fileOps = createFileOps();
+	for (const entry of entries) {
+		if (entry.type === "message") {
+			extractFileOpsFromMessage(entry.message, fileOps);
+		} else if (entry.type === "branch_summary") {
+			for (const path of entry.readFiles) fileOps.read.add(path);
+			for (const path of entry.modifiedFiles) fileOps.edited.add(path);
+		}
+	}
+	return fileOps;
 }
 
 /**

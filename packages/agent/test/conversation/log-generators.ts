@@ -371,7 +371,7 @@ export function buildLog(ops: readonly LogOp[]): ConversationLogEntry[] {
 						...base(),
 						type: "branch_summary",
 						visibility: "public",
-						payload: { fromId: targetId ?? "root", summary: op.summary },
+						payload: { fromId: targetId ?? "root", summary: op.summary, readFiles: [], modifiedFiles: [] },
 					});
 				}
 				break;

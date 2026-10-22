@@ -59,7 +59,7 @@ function summarizer(messages: readonly AgentMessage[] = []): ConversationSummari
 						...(messages.length === 0 ? {} : { messages }),
 					};
 		},
-		summarizeBranch: async () => ({ summary: "branch summary" }),
+		summarizeBranch: async () => ({ summary: "branch summary", readFiles: [], modifiedFiles: [] }),
 	};
 }
 
@@ -417,7 +417,10 @@ describe("Conversation navigation preparation", () => {
 			label: "ignored",
 			prepare: (value) => {
 				preparation = value;
-				return { summary: { summary: "from the host", fromHook: true }, label: "kept" };
+				return {
+					summary: { summary: "from the host", readFiles: ["a.ts"], modifiedFiles: ["b.ts"], fromHook: true },
+					label: "kept",
+				};
 			},
 		});
 
@@ -431,6 +434,8 @@ describe("Conversation navigation preparation", () => {
 		expect(batches(events).at(-1)).toEqual(["leaf", "branch_summary", "label"]);
 		expect(conversation.state.tree.byId.get(result.summaryEntryId!)?.payload).toMatchObject({
 			summary: "from the host",
+			readFiles: ["a.ts"],
+			modifiedFiles: ["b.ts"],
 			fromHook: true,
 		});
 		expect(conversation.state.labels.get(result.summaryEntryId!)?.label).toBe("kept");
@@ -447,7 +452,10 @@ describe("Conversation navigation preparation", () => {
 
 		await expect(conversation.navigate(first, { summarize: true })).rejects.toMatchObject({ code: "invalid_state" });
 		await expect(
-			conversation.navigate(first, { summarize: true, prepare: () => ({ summary: { summary: "hosted" } }) }),
+			conversation.navigate(first, {
+				summarize: true,
+				prepare: () => ({ summary: { summary: "hosted", readFiles: [], modifiedFiles: [] } }),
+			}),
 		).resolves.toMatchObject({ status: "navigated", leafId: expect.any(String) });
 		await expect(conversation.navigate(null)).resolves.toMatchObject({ status: "navigated", leafId: null });
 	});

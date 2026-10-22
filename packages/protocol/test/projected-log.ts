@@ -396,7 +396,7 @@ export function buildProjectedLog(ops: readonly ProjectedLogOp[], forked: boolea
 					append({
 						parentId: leafId,
 						type: "branch_summary",
-						payload: { fromId: targetId ?? "root", summary: "branch" },
+						payload: { fromId: targetId ?? "root", summary: "branch", readFiles: [], modifiedFiles: [] },
 					});
 				}
 				break;

@@ -33,7 +33,7 @@ const summarizer: ConversationSummarizer = {
 		firstKeptEntryId: state.branch.at(-1) ?? "",
 		tokensBefore: 10,
 	}),
-	summarizeBranch: async () => ({ summary: "branch summary" }),
+	summarizeBranch: async () => ({ summary: "branch summary", readFiles: [], modifiedFiles: [] }),
 };
 
 describe("Conversation admission", () => {

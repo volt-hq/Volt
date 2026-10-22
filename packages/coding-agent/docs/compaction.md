@@ -221,6 +221,7 @@ interface CompactionEntry {
 interface CompactionDetails {
   readFiles: string[];     // Complete, cumulative; the summary lists a bounded subset
   modifiedFiles: string[]; // Complete, cumulative; the summary lists a bounded subset
+  // Volt rebuilds both from the branch and never reads them back
   requests?: CompactionRequestUsage[]; // Per-request usage from built-in session compaction
   strategyReason?: "native" | "preflight_overflow" | "provider_overflow"; // Why built-in session compaction used its strategy
   tokensAfter?: number;    // Estimated rebuilt context of a built-in compaction
@@ -264,11 +265,11 @@ After navigation with summary:
 
 ### Cumulative File Tracking
 
-Both compaction and branch summarization track files cumulatively. When generating a summary, volt extracts file operations from:
-- Tool calls in the messages being summarized
-- Previous compaction or branch summary `details` (if any)
+Both compaction and branch summarization track files cumulatively, whether Volt or an extension wrote the earlier summaries. Volt counts the files of a run of entries from:
+- The paths of `read`, `write`, and `edit` tool calls in its messages
+- The `readFiles` and `modifiedFiles` of each branch summary in it
 
-This means file tracking accumulates across multiple compactions or nested branch summaries, preserving the full history of read and modified files.
+A compaction counts the whole branch before its boundary, including the history earlier compactions summarized: that history stays on the branch, so no compaction needs to record it. A branch summary counts every entry of the branch it leaves, including entries too old to fit the summary request, and records the result on its entry: the branch it leaves is not part of the new branch, and forks and imports do not copy it.
 
 ### BranchSummaryEntry Structure
 
@@ -282,18 +283,14 @@ interface BranchSummaryEntry {
   timestamp: string;   // ISO-8601 UTC
   summary: string;
   fromId: string;      // The entry the summary attaches to (its parentId), or "root"
+  readFiles: string[];     // Files the branch left behind only read, sorted
+  modifiedFiles: string[]; // Files the branch left behind wrote or edited, sorted
   fromHook?: boolean;  // true if provided by extension (legacy field name)
   details?: JsonValue; // implementation-specific JSON data
 }
-
-// Default branch summarization uses this for details (from branch-summarization.ts):
-interface BranchSummaryDetails {
-  readFiles: string[];
-  modifiedFiles: string[];
-}
 ```
 
-As with compaction, extensions can store custom lossless JSON data in `details`.
+Volt records `readFiles` and `modifiedFiles` on every branch summary, including an extension's. As with compaction, extensions can store custom lossless JSON data in `details`; built-in branch summarization stores none.
 
 See [`collectEntriesForBranchSummary()`](../src/core/compaction/branch-summarization.ts), [`prepareBranchEntries()`](../src/core/compaction/branch-summarization.ts), and [`generateBranchSummary()`](../src/core/compaction/branch-summarization.ts) for the implementation.
 
@@ -456,7 +453,7 @@ See [custom-compaction.ts](../examples/extensions/custom-compaction.ts) for a co
 
 ### session_before_tree
 
-Fired before `/tree` navigation. Always fires regardless of whether user chose to summarize. Can cancel navigation or provide custom summary.
+Fired before `/tree` navigation. Always fires regardless of whether user chose to summarize. Can cancel navigation or provide custom summary. Volt records the files of the branch left behind on a custom summary's entry, as it does for its own (see [Cumulative File Tracking](#cumulative-file-tracking)); it does not change the summary text.
 
 ```typescript
 volt.on("session_before_tree", async (event, ctx) => {
