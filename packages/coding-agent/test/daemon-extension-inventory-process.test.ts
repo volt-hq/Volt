@@ -17,7 +17,6 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Compile } from "typebox/compile";
@@ -34,7 +33,7 @@ const tempDirs: string[] = [];
 /** Processes the tests' extensions started; killed after each test in case the inventory left them running. */
 const extensionPids: number[] = [];
 
-afterEach(() => {
+afterEach(async () => {
 	for (const pid of extensionPids.splice(0)) {
 		try {
 			process.kill(pid, "SIGKILL");
@@ -42,26 +41,17 @@ afterEach(() => {
 			// Ended already.
 		}
 	}
-	// Windows keeps a process's working directory busy for a moment after it was terminated.
 	for (const dir of tempDirs.splice(0)) {
-		try {
-			rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
-		} catch (error) {
-			// TEMPORARY DIAGNOSTIC (PR #974): which process still holds the directory.
-			if (process.platform === "win32") {
-				console.error(
-					`DIAGNOSTIC ${dir}\n${execFileSync(
-						"powershell",
-						[
-							"-NoProfile",
-							"-Command",
-							"Get-CimInstance Win32_Process | Where-Object { $_.Name -ne 'svchost.exe' } | Sort-Object CreationDate | Format-Table -AutoSize -Wrap ProcessId,ParentProcessId,CreationDate,Name,CommandLine | Out-String -Width 4096",
-						],
-						{ encoding: "utf8" },
-					)}`,
-				);
+		// Windows keeps a process's working directory busy (EBUSY) for a moment after the process reads as ended,
+		// and rmSync does not retry that on its own.
+		for (let attempt = 1; ; attempt++) {
+			try {
+				rmSync(dir, { recursive: true, force: true });
+				break;
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "EBUSY" || attempt === 50) throw error;
+				await new Promise((resolve) => setTimeout(resolve, 100));
 			}
-			throw error;
 		}
 	}
 });
