@@ -17,6 +17,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Compile } from "typebox/compile";
@@ -42,7 +43,27 @@ afterEach(() => {
 		}
 	}
 	// Windows keeps a process's working directory busy for a moment after it was terminated.
-	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+	for (const dir of tempDirs.splice(0)) {
+		try {
+			rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+		} catch (error) {
+			// TEMPORARY DIAGNOSTIC (PR #974): which process still holds the directory.
+			if (process.platform === "win32") {
+				console.error(
+					`DIAGNOSTIC ${dir}\n${execFileSync(
+						"powershell",
+						[
+							"-NoProfile",
+							"-Command",
+							"Get-CimInstance Win32_Process | Where-Object { $_.Name -ne 'svchost.exe' } | Sort-Object CreationDate | Format-Table -AutoSize -Wrap ProcessId,ParentProcessId,CreationDate,Name,CommandLine | Out-String -Width 4096",
+						],
+						{ encoding: "utf8" },
+					)}`,
+				);
+			}
+			throw error;
+		}
+	}
 });
 
 /** A temporary workspace whose one project extension, `spawner`, has `source` as its module. */
