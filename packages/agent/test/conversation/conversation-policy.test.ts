@@ -272,6 +272,39 @@ describe("Conversation retry", () => {
 		expect((await readLog(log)).filter((entry) => entry.type === "message")).toHaveLength(4);
 	});
 
+	it("retries a failed request when a steer arrived while it ran, and delivers the steer", async () => {
+		const retry = vi.fn<NonNullable<ConversationPolicy["retry"]>>((error, attempt) =>
+			error.retryable && attempt <= 2 ? 0 : undefined,
+		);
+		const { conversation, faux, events } = await openConversation({ policy: { retry } });
+		const requests: string[][] = [];
+		const record = (context: Context) =>
+			requests.push((context.messages as AgentMessage[]).map((message) => `${message.role}:${textOf(message)}`));
+		faux.setResponses([
+			async (context) => {
+				record(context);
+				// Queued while the response streams, as a background job's notice is.
+				await conversation.steer({ message: "the build finished" });
+				return fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "overloaded", retryable: true, message: "overloaded" },
+				});
+			},
+			(context) => {
+				record(context);
+				return fauxAssistantMessage("recovered");
+			},
+		]);
+		await promptAndSettle(conversation, "hello");
+
+		expect(retry.mock.calls.map(([error, attempt]) => [error.kind, attempt])).toEqual([["overloaded", 1]]);
+		expect(requests).toEqual([["user:hello"], ["user:hello", "user:the build finished"]]);
+		expect(textOf(lastAssistant(conversation)!)).toBe("recovered");
+		expect(events.filter((event) => event.type === "retry_end")).toMatchObject([{ attempt: 1, success: true }]);
+		const queues = events.flatMap((event) => (event.type === "queue_changed" ? [event.queue.steer.length] : []));
+		expect(queues.at(-1)).toBe(0);
+	});
+
 	it("cancels the backoff on abort", async () => {
 		const { conversation, faux, events } = await openConversation({ policy: { retry: () => 60_000 } });
 		faux.setResponses([

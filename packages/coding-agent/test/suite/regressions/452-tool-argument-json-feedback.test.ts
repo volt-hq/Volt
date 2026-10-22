@@ -152,6 +152,35 @@ describe("issue #452 tool argument JSON feedback", () => {
 		expect(execute).toHaveBeenCalledTimes(1);
 	});
 
+	it("retries with the feedback when a steer is queued while the rejected response streams", async () => {
+		const { harness, execute, requests, anthropicStep } = await setup([
+			toolUseResponse('{"text":"private\tindented\tvalue"}'),
+			toolUseResponse('{"text":"a\\tb"}'),
+			textResponse("Applied with escaped tabs."),
+		]);
+		let steered = false;
+		harness.setResponses([
+			async (context) => {
+				// A background job's notice arrives as a steer while the response streams.
+				if (!steered) {
+					steered = true;
+					await harness.session.steer("The background build finished.");
+				}
+				return anthropicStep(context);
+			},
+			anthropicStep,
+			anthropicStep,
+		]);
+
+		await harness.session.prompt("Apply the edit");
+
+		expect(harness.eventsOfType("auto_retry_start")).toMatchObject([{ attempt: 1, delayMs: 0 }]);
+		expect(harness.eventsOfType("auto_retry_end")).toMatchObject([{ success: true, attempt: 1 }]);
+		expect(messageTexts(requests[1])).toEqual(["Apply the edit", TAB_FEEDBACK, "The background build finished."]);
+		expect(execute).toHaveBeenCalledTimes(1);
+		expect(harness.session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
+
 	it("stops after the retry limit when every attempt is rejected", async () => {
 		const rejected = '{"text":"private\tvalue"}';
 		const { harness, execute, requests, anthropicStep } = await setup([
