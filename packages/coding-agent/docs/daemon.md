@@ -299,6 +299,56 @@ credentials and model lists refresh. The daemon reads `remote.allowTools` and
   conversation's lock to exit before the open fails with
   `conversation_locked`.
 
+### Processes a conversation started
+
+What a worker's conversations start (commands of the bash tool and other
+tools, language and MCP servers, processes an extension spawns) ends with the
+worker. The daemon does the cleanup itself, and counts only what it observed:
+
+- **The worker stops** (it was asked to, its conversation failed to open, or
+  closing its conversations took too long). Once its conversations have
+  closed, so that extensions can stop their own processes in
+  `session_shutdown`, it asks the daemon to end its descendants and waits up
+  to 5 seconds for the answer. The daemon ends every process still descended
+  from the worker: SIGTERM, then SIGKILL to those still running 200 ms later.
+  Windows has no SIGTERM for other processes, so there they are terminated at
+  once. The worker then ends anything it still finds, and exits.
+- **The daemon kills a worker whose stop timed out.** On macOS and Linux it
+  pauses the worker (SIGSTOP), ends its descendants the same way, then kills
+  it. On Windows it terminates the worker, then its descendants.
+- **Any other exit.** This includes an extension calling `process.exit`, a
+  crash, a kill from outside, running out of memory, losing the daemon, and
+  any case where the daemon could not read the process list. The daemon ends
+  what it can still find. On macOS and Linux that is the worker's process
+  group. On Windows it is the processes still descended from the worker.
+  After a crash or a lost daemon, the worker first ends its descendants
+  itself.
+
+A process whose parent exited before the worker is no longer the worker's.
+After the first two kinds of exit it keeps running, on every platform.
+Examples are a server started in the background with `server &` or `nohup …
+&` through the bash tool, and `volt daemon restart` run from a conversation.
+
+After any other exit, the platforms differ:
+
+- On macOS and Linux, killing the worker's process group also ends such
+  processes if they are still in the group. It misses descendants in groups
+  of their own, such as the bash tool's running commands.
+- On Windows every remaining descendant ends, and those processes do not.
+
+An extension that needs a process to outlive its conversation must start it
+from a launcher that exits first. On macOS and Linux, start that launcher
+`detached` so the process also leaves the worker's process group.
+
+On macOS and Linux the process list comes from `/proc` (Linux) or `ps`
+(macOS).
+
+If the daemon itself dies in the moment between pausing a worker whose stop
+timed out and killing it, the worker stays paused. It still holds the worker
+gate, so every later daemon start waits 75 seconds and exits with code 7.
+`ps` shows the paused worker in state `T` (its log names its pid); kill it
+with `kill -KILL <pid>`.
+
 ### Idle exit
 
 A daemon started by `volt` or `volt daemon start` exits after five minutes in
@@ -366,10 +416,14 @@ the review engines extensions register as their factories run: an engine an
 extension registers later, such as in `session_start`, is offered only once a
 conversation is open. At most two evaluations run at once. An evaluation stops
 itself after 15 seconds, and the daemon kills one still running after 20
-seconds. However an evaluation ends (answered, timed out, or failed), the
-daemon then stops the process and every process its extensions started that is
-still its descendant or in its process group, killing any that do not exit
-promptly.
+seconds. Processes its extensions start follow the same rule as a worker's
+([Processes a conversation started](#processes-a-conversation-started)).
+Once the process answers, or when the daemon stops it, the daemon ends every
+process still descended from it and the process itself, as for a worker whose
+stop timed out. An evaluation that ends by itself (timed out, failed, or an
+extension called `process.exit`) is handled like a worker's other exits: it
+ends its descendants itself where it can, then the daemon ends what it can
+still find.
 
 ## Daemon environment
 

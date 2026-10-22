@@ -43,9 +43,22 @@ export type NativeFileLock = {
 	close(): boolean;
 };
 
+/**
+ * A process held so that the processes descended from it can be ended, while it runs and after it exited: while
+ * it is held, its id is not reused. Windows only.
+ */
+export type NativeProcessTree = {
+	/** End every process descended from the held process (never the process itself); how many were ended. */
+	terminateDescendants(): number;
+	/** Release the process; whether it was held. */
+	close(): boolean;
+};
+
 type NativeWorkspaceFsAddon = {
 	WorkspaceRoot: NativeWorkspaceRootConstructor;
 	tryAcquireFileLock(path: string, shared: boolean): NativeFileLock | null;
+	/** Hold process `pid` (Windows only); null when it cannot be opened. */
+	openProcessTree(pid: number): NativeProcessTree | null;
 	writeWindowsPrivateFile(path: string, data: Buffer): Promise<void>;
 	workspaceFsApiVersion(): string;
 	workspaceFsSourceFingerprint(): string;
@@ -224,6 +237,7 @@ function isNativeAddon(value: unknown): value is NativeWorkspaceFsAddon {
 	return (
 		typeof value.WorkspaceRoot === "function" &&
 		typeof value.tryAcquireFileLock === "function" &&
+		typeof value.openProcessTree === "function" &&
 		typeof value.writeWindowsPrivateFile === "function" &&
 		typeof value.workspaceFsApiVersion === "function" &&
 		typeof value.workspaceFsSourceFingerprint === "function"

@@ -2,7 +2,6 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { getAgentDir, VERSION } from "../config.ts";
-import { killTrackedDetachedChildren } from "../utils/shell.ts";
 import { createDaemonClient } from "./control-client.ts";
 import type { ControlKeepAwakeStatus, ControlResponse, RemoteTransportHealth } from "./control-protocol.ts";
 import { createIrohDaemonService } from "./iroh-service.ts";
@@ -15,6 +14,7 @@ import {
 import { DAEMON_IDLE_EXIT_MS, type PidfileContents, readPidfile, runVoltDaemon } from "./main.ts";
 import { getDaemonPaths } from "./paths.ts";
 import { verifyPidfileProcess } from "./process-identity.ts";
+import { endOwnDescendants } from "./process-tree.ts";
 import { formatRelayAccessStatus, isPhoneTransportAbsent, isRemoteAccessReady } from "./relay-access-status.ts";
 import { installDaemonService, refreshDaemonService, uninstallDaemonService } from "./service-install.ts";
 import {
@@ -657,18 +657,19 @@ export async function handleDaemonCommand(args: string[], options: DaemonCommand
 		case "worker": {
 			// Internal and unlisted: the daemon starts one per conversation worker.
 			const code = await runWorkerProcess(agentDir);
-			// Language servers, watchers, and pools may outlive the conversations; the worker is done,
-			// and so are the detached process trees its tools started.
-			killTrackedDetachedChildren();
+			// Its conversations are closed, and the daemon ended its descendants (`worker_exit`) unless it could not.
+			// Whatever is still descended from it (language servers, pools, what tools and extensions started) ends
+			// with it (RFC §5.3, worker process tree): what started since the daemon's sweep, or everything without one.
+			await endOwnDescendants();
 			process.exit(code);
 			return true;
 		}
 		case "extension-inventory": {
 			// Internal and unlisted: the daemon starts one per extension inventory it evaluates.
 			const code = await runExtensionInventoryProcess(agentDir);
-			// The inventory is written and the daemon is stopping the process with everything its extensions
-			// started; extension factories may leave handles, and the detached trees its tools started end here.
-			killTrackedDetachedChildren();
+			// Answered and stopped, or failed: whatever is still descended from it ends with it; extension factories
+			// may leave handles open.
+			await endOwnDescendants();
 			process.exit(code);
 			return true;
 		}

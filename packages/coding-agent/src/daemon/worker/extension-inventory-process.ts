@@ -4,14 +4,14 @@
  * root it evaluates. The request arrives as one JSON line on stdin; the result
  * leaves as one JSON line on fd 3 (stdout and stderr are its log, where an
  * extension's own output goes). It evaluates once, writes its result, closes
- * fd 3, and waits: the daemon then stops it (SIGTERM) together with every
- * process its extensions started, which it can find only while this process
- * runs. Stopped, it ends the detached process trees anything it ran started and
- * exits. Past its deadline, or on SIGTERM, before it has a result, it ends them
- * too and exits without one; the deadline comes before the daemon's own
- * timeout, so that a process the daemon must kill outright has cleaned up
- * already. Past its deadline after its result (the daemon is gone), it exits as
- * if stopped.
+ * fd 3, and waits: the daemon then ends every process still descended from it,
+ * which it can find only while this process runs, and then this process
+ * (`ProcessTreeHold.end`). Every exit it performs also ends the processes
+ * still descended from it (RFC §5.3, worker process tree), and the daemon then
+ * ends what it can still find: past its deadline, or on SIGTERM, before it has
+ * a result, it exits without one; the deadline comes before the daemon's own
+ * timeout. Past its deadline after its result (the daemon is gone), it exits
+ * as if stopped; on an uncaught error, with code 1.
  */
 
 import { Socket } from "node:net";
@@ -19,21 +19,18 @@ import { isAbsolute } from "node:path";
 import { EXTENSION_ERROR_MAX_CHARS } from "@hansjm10/volt-protocol";
 import { SettingsManager } from "../../core/settings-manager.ts";
 import { initTheme } from "../../core/theme/runtime.ts";
-import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import type { ExtensionInventoryProbeOutput } from "../extension-inventory.ts";
-import type { ExtensionInventoryProbeRequest } from "../worker-launcher.ts";
+import { exitOnUncaughtError, killOwnDescendants } from "../process-tree.ts";
+import { EXTENSION_INVENTORY_EXIT_CODES, type ExtensionInventoryProbeRequest } from "../worker-launcher.ts";
 import { evaluateExtensionInventory } from "./extension-inventory.ts";
 
 /**
  * How long an evaluation may run before the process exits without a result: before the daemon's timeout
- * (`EXTENSION_INVENTORY_TIMEOUT_MS`), so it ends what its extensions started before it is killed.
+ * (`EXTENSION_INVENTORY_TIMEOUT_MS`).
  */
 export const EXTENSION_INVENTORY_PROCESS_DEADLINE_MS = 15_000;
 const MAX_REQUEST_BYTES = 16 * 1024;
-/** The process wrote its result, whether an evaluation or a failure. */
-const WROTE_RESULT = 0;
-/** It could not read its request or write its result. */
-const FAILED = 4;
+const { wroteResult: WROTE_RESULT, failed: FAILED } = EXTENSION_INVENTORY_EXIT_CODES;
 /** The fd its result goes to. */
 const RESULT_FD = 3;
 
@@ -105,15 +102,16 @@ function writeResult(output: ExtensionInventoryProbeOutput): Promise<void> {
  */
 export async function runExtensionInventoryProcess(agentDir: string): Promise<number> {
 	process.title = "volt-extension-inventory";
+	exitOnUncaughtError("volt extension inventory");
 	let answered = false;
 	const stopped = Promise.withResolvers<void>();
-	/** Exit without a result, ending the detached process trees anything it ran started. */
+	/** Exit without a result, ending the processes still descended from this one. */
 	const abandon = (reason: string): never => {
 		console.error(`${new Date().toISOString()} extension inventory ${reason}; exiting`);
-		killTrackedDetachedChildren();
+		killOwnDescendants();
 		process.exit(FAILED);
 	};
-	/** Without a result, abandon it; with one, return, and the caller ends the detached trees and exits. */
+	/** Without a result, abandon it; with one, return, and the caller ends this process's descendants and exits. */
 	const stop = (reason: string) => {
 		if (!answered) abandon(reason);
 		console.error(`${new Date().toISOString()} extension inventory ${reason} after its result; exiting`);

@@ -21,7 +21,9 @@ import { fileURLToPath } from "node:url";
 const API_VERSION = "volt-workspace-fs-v1";
 const EXPECTED_EXPORTS = [
 	"FileLock",
+	"ProcessTree",
 	"WorkspaceRoot",
+	"openProcessTree",
 	"tryAcquireFileLock",
 	"workspaceFsApiVersion",
 	"workspaceFsSourceFingerprint",

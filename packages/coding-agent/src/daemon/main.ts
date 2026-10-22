@@ -726,6 +726,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			case "worker_released":
 			case "worker_stop_result":
 			case "worker_close_result":
+			case "worker_exit":
 				connection.send(await workers.handleWorkerRequest(connection.connectionId, request));
 				return;
 			case "conversation_open":

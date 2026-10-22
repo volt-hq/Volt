@@ -1000,6 +1000,15 @@ export const CONTROL_REQUEST_SCHEMAS = {
 		outcome: stringEnum(["closed", "refused_active"]),
 	}),
 	/**
+	 * Worker: it closed what it hosts and exits next, for `reason`. The daemon
+	 * ends the processes still descended from it first, while it runs, and
+	 * reports its exit with `reason`. Answered by `worker_exit_result`.
+	 */
+	worker_exit: withId("worker_exit", {
+		reason: stringEnum(["stopped", "failed"]),
+		error: Type.Optional(codePoints(0, 1024)),
+	}),
+	/**
 	 * Worker: restore the managed checkout `path` of a session of its
 	 * workspace, and pin it until `worker_worktree_release` or the end of the
 	 * connection. Answered by `worker_worktree_pinned`.
@@ -1055,6 +1064,7 @@ export const WORKER_REQUEST_TYPES = [
 	"worker_authority",
 	"worker_stop_result",
 	"worker_close_result",
+	"worker_exit",
 	"worker_worktree_restore",
 	"worker_worktree_release",
 	"worker_worktree_create",
@@ -1103,6 +1113,7 @@ export const ControlRequestSchema = Type.Union([
 	CONTROL_REQUEST_SCHEMAS.worker_authority,
 	CONTROL_REQUEST_SCHEMAS.worker_stop_result,
 	CONTROL_REQUEST_SCHEMAS.worker_close_result,
+	CONTROL_REQUEST_SCHEMAS.worker_exit,
 	CONTROL_REQUEST_SCHEMAS.worker_worktree_restore,
 	CONTROL_REQUEST_SCHEMAS.worker_worktree_release,
 	CONTROL_REQUEST_SCHEMAS.worker_worktree_create,
@@ -1202,6 +1213,11 @@ export const CONTROL_RESPONSE_SCHEMAS = {
 	worker_host_response: withId("worker_host_response", { response: Type.Optional(HostResponseSchema) }),
 	worker_forward_result: withId("worker_forward_result", { frame: ControlRelayOutcomeSchema }),
 	worker_authority_result: withId("worker_authority_result", { authority: WorkerRelayAuthoritySchema }),
+	/**
+	 * The daemon's answer to `worker_exit`: whether it ended the worker's descendants, having read its process
+	 * list and found the worker running throughout. When it did not, the worker ends them as it can itself.
+	 */
+	worker_exit_result: withId("worker_exit_result", { descendantsEnded: Type.Boolean() }),
 	/** The checkout a worker restored is pinned until it releases `pinId`. */
 	worker_worktree_pinned: withId("worker_worktree_pinned", { pinId: Type.String() }),
 	/** The status of a worker's `worker_notification_delivery`. */
@@ -1227,6 +1243,7 @@ export const ControlResponseSchema = Type.Union([
 	CONTROL_RESPONSE_SCHEMAS.worker_host_response,
 	CONTROL_RESPONSE_SCHEMAS.worker_forward_result,
 	CONTROL_RESPONSE_SCHEMAS.worker_authority_result,
+	CONTROL_RESPONSE_SCHEMAS.worker_exit_result,
 	CONTROL_RESPONSE_SCHEMAS.worker_worktree_pinned,
 	CONTROL_RESPONSE_SCHEMAS.relay_push_delivery_result,
 ]);

@@ -7,11 +7,15 @@
  * killed, finishes its turn and exits when it loses its daemon, and stops
  * with the daemon. A phone's conversation streams from the test's faux
  * provider across the processes, and so does a TUI's, in a worker that runs
- * with the TUI's environment less the daemon's credentials.
+ * with the TUI's environment less the daemon's credentials. What its
+ * conversations' extensions started ends with it, however it ends; a process
+ * that left its tree keeps running through the exits the daemon carries out or
+ * confirms.
  */
 
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import type { HostFrame } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -27,6 +31,15 @@ import { holdWorkerGate, waitForWorkerGate } from "../src/daemon/worker-gate.ts"
 import { type LaunchedWorker, ProcessWorkerLauncher, type WorkerLaunchRequest } from "../src/daemon/worker-launcher.ts";
 import { createDaemonHarness, type DaemonHarness } from "./suite/daemon-harness.ts";
 import { nativeIrohAvailable, pairPhone } from "./utilities/daemon-phone.ts";
+import {
+	expectEnded,
+	killStarted,
+	processIsAlive,
+	type SleeperStart,
+	spawnerExtension,
+	waitForPid,
+	writeSleeper,
+} from "./utilities/process-tree.ts";
 
 /** A worker process starts from source here: compiling it can take a while on a cold cache. */
 const PROCESS_TEST_TIMEOUT_MS = 180_000;
@@ -37,12 +50,15 @@ afterEach(async () => {
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup().catch(() => undefined);
 });
 
-/** The process launcher, recording each launch. */
+/** The process launcher, recording each launch and the worker it launched. */
 class RecordingProcessLauncher extends ProcessWorkerLauncher {
 	readonly requests: WorkerLaunchRequest[] = [];
+	readonly launched: LaunchedWorker[] = [];
 	override launch(request: WorkerLaunchRequest): LaunchedWorker {
 		this.requests.push(request);
-		return super.launch(request);
+		const launched = super.launch(request);
+		this.launched.push(launched);
+		return launched;
 	}
 }
 
@@ -55,13 +71,47 @@ async function startHarness(
 	return harness;
 }
 
-function processIsAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "EPERM";
-	}
+/**
+ * A harness whose workers' conversations load extension `spawner`, which starts sleepers: `plain` with its child
+ * `grandchild`, `detached` (spawned detached), and `orphan`, whose parent exits at once so that it has left the
+ * worker's tree (on macOS and Linux it stays in the worker's process group). Resolves once a worker hosts a
+ * conversation and every sleeper runs. Once they do, the factory runs `then(directory)` (statements), given the
+ * directory the sleepers' pid files are in.
+ */
+async function startSpawningWorker(
+	launcher: ProcessWorkerLauncher,
+	then?: (directory: string) => string,
+): Promise<{
+	harness: DaemonHarness;
+	release: () => void;
+	directory: string;
+	pids: { plain: number; grandchild: number; detached: number; orphan: number };
+}> {
+	const directory = realpathSync(mkdtempSync(join(tmpdir(), "volt-worker-process-tree-")));
+	const started: number[] = [];
+	cleanups.push(async () => {
+		killStarted(started);
+		rmSync(directory, { recursive: true, force: true });
+	});
+	const sleeper = writeSleeper(directory);
+	const pidFile = (name: string) => join(directory, `${name}.pid`);
+	const starts: SleeperStart[] = [
+		{ args: [pidFile("plain"), "child", pidFile("grandchild")] },
+		{ args: [pidFile("detached")], detached: true },
+		{ args: [pidFile("launcher"), "orphan", pidFile("orphan")] },
+	];
+	const names = ["plain", "grandchild", "detached", "orphan"] as const;
+	const extension = join(directory, "spawner.ts");
+	writeFileSync(extension, spawnerExtension(sleeper, starts, names.map(pidFile), then?.(directory)));
+	const harness = await startHarness(launcher, { workerExtensions: [extension] });
+	// A conversation's extensions load as its first client attaches.
+	const { release } = await harness.openWorker(await harness.createSession(), { attach: "remote" });
+	const [plain, grandchild, detached, orphan] = await Promise.all(
+		names.map((name) => waitForPid(pidFile(name), started, PROCESS_TEST_TIMEOUT_MS - 30_000)),
+	);
+	const pids = { plain, grandchild, detached, orphan };
+	for (const pid of Object.values(pids)) expect(processIsAlive(pid)).toBe(true);
+	return { harness, release, directory, pids };
 }
 
 /** Whether this process can take the session's lock: nobody else has the log open. */
@@ -195,6 +245,90 @@ describe("conversation workers as processes", () => {
 			);
 			expect(await lockIsFree(ref)).toBe(true);
 			expect(await waitForWorkerGate(harness.agentDir, { timeoutMs: 0 })).toMatchObject({ status: "open" });
+		},
+		PROCESS_TEST_TIMEOUT_MS,
+	);
+});
+
+describe("a worker's process tree", () => {
+	it(
+		"ends what its conversation's extensions started when it stops, and leaves running a process that left its tree",
+		async () => {
+			// Regression for #971: a plain spawn outlived its worker, reparented to init.
+			const { harness, release, pids } = await startSpawningWorker(new ProcessWorkerLauncher());
+			const [worker] = (await harness.status()).workers;
+			if (!worker) throw new Error("No worker");
+			release();
+
+			expect(await harness.shutdown()).toBe(0);
+			await expectEnded([pids.plain, pids.grandchild, pids.detached]);
+			expect(processIsAlive(pids.orphan)).toBe(true);
+			// The daemon ended the tree as the worker asked (`worker_exit`), during its own shutdown.
+			expect(harness.audit()).toContainEqual(
+				expect.objectContaining({
+					type: "worker_exited",
+					success: true,
+					details: expect.objectContaining({ workerId: worker.workerId, reason: "stopped" }),
+				}),
+			);
+		},
+		PROCESS_TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"ends what its conversation's extensions started, then the worker, when the daemon kills it",
+		async () => {
+			const launcher = new RecordingProcessLauncher();
+			const { harness, pids } = await startSpawningWorker(launcher);
+			const [worker] = (await harness.status()).workers;
+			const [launched] = launcher.launched;
+			if (!worker || !launched) throw new Error("No worker");
+
+			// What a forced stop that times out does.
+			launched.kill();
+			await launched.exited;
+			expect(processIsAlive(worker.pid)).toBe(false);
+			await expectEnded([pids.plain, pids.grandchild, pids.detached]);
+			expect(processIsAlive(pids.orphan)).toBe(true);
+		},
+		PROCESS_TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"ends what its conversation's extensions started when it is killed from outside",
+		async () => {
+			const { harness, pids } = await startSpawningWorker(new ProcessWorkerLauncher());
+			const [worker] = (await harness.status()).workers;
+			if (!worker) throw new Error("No worker");
+
+			process.kill(worker.pid, "SIGKILL");
+			// What can still be found: on macOS and Linux the worker's process group, on Windows its tree. A plain
+			// child and its own are in both.
+			await expectEnded([pids.plain, pids.grandchild]);
+		},
+		PROCESS_TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"ends what its conversation's extensions started when an extension exits the worker, and reports a crash",
+		async () => {
+			const launcher = new RecordingProcessLauncher();
+			// The extension exits the worker once the test writes `exit`, skipping the worker's own cleanup.
+			const { directory, pids } = await startSpawningWorker(
+				launcher,
+				(dir) => `void (async () => {
+		while (!existsSync(${JSON.stringify(join(dir, "exit"))})) await new Promise((resolve) => setTimeout(resolve, 20));
+		process.exit(0);
+	})();`,
+			);
+			const [launched] = launcher.launched;
+			if (!launched) throw new Error("No worker");
+
+			writeFileSync(join(directory, "exit"), "");
+			// A bare exit 0 says nothing: the worker did not tell the daemon it exits (`worker_exit`).
+			expect(await launched.exited).toEqual({ reason: "crashed", error: "exit code 0" });
+			// What the daemon still finds: on macOS and Linux the worker's process group, on Windows its tree.
+			await expectEnded([pids.plain, pids.grandchild]);
 		},
 		PROCESS_TEST_TIMEOUT_MS,
 	);
