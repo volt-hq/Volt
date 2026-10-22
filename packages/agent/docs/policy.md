@@ -165,7 +165,7 @@ interface ConversationSummarizer {
 The summarizer produces summaries; the kernel decides when they run and commits them. Each request carries the `state`, the resolved `model`, the `thinkingLevel`, optional `instructions`, the operation `signal`, and a `stream` that sends requests with the conversation's stream options and provider hooks.
 
 - `compact` also receives the `cause` (`manual`, `overflow`, or `threshold`). Return `{ summary, firstKeptEntryId, tokensBefore, details?, fromHook?, messages? }` or `undefined` to skip. The kernel commits the `compaction` entry and then `messages` in one batch.
-- `summarizeBranch` also receives `fromLeafId`, `targetId`, `commonAncestorId`, and the abandoned `entries`, oldest first. Return `{ summary, details?, fromHook? }` or `undefined` for no summary.
+- `summarizeBranch` also receives `fromLeafId`, `targetId`, `commonAncestorId`, and the abandoned `entries`, oldest first. Return `{ summary, readFiles, modifiedFiles, details?, fromHook? }` or `undefined` for no summary. `readFiles` and `modifiedFiles` are the abandoned branch's sorted read-only and modified files.
 
 A throwing `compact` reports `compaction_end` with status `failed`; `compact()` rethrows the error, and inside a turn it counts as skipped. A throwing `summarizeBranch` rejects `navigate()`.
 
@@ -186,7 +186,7 @@ interface ConversationNavigationOptions {
 ```
 
 - Navigation aborts an active compaction, or a turn that has not yet committed a delivery or started a request, and runs after it. It is rejected with `busy` while a navigation, a host operation, or a turn past that point runs.
-- `prepare` runs inside the navigation operation before the summarizer, with the `state`, `fromLeafId`, `targetId`, `commonAncestorId`, abandoned `entries`, `summarize`, `instructions`, `label`, and `signal`. Return `{ cancel: true }` to cancel (status `cancelled`), or `{ summary?, label?, instructions? }`: a summary to commit instead of running the summarizer, and overrides.
+- `prepare` runs inside the navigation operation before the summarizer, with the `state`, `fromLeafId`, `targetId`, `commonAncestorId`, abandoned `entries`, `summarize`, `instructions`, `label`, and `signal`. Return `{ cancel: true }` to cancel (status `cancelled`), or `{ summary?, label?, instructions? }`: a summary to commit instead of running the summarizer (the `summarizeBranch` shape), and overrides.
 - With `summarize: true` and no summary from `prepare`, the summarizer's `summarizeBranch` runs when the leaf moves. A model is required only then. `summarize` needs a summarizer unless `prepare` is given.
 - The move commits as one batch: a `leaf` entry when the leaf changes, the `branch_summary` entry, and a `label` on the summary entry, or on the target when nothing is summarized.
 
