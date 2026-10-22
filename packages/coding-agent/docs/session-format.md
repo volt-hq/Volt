@@ -154,13 +154,15 @@ The latest snapshot on the branch is the session's plan state. A session with a 
 |-------|------|-------|
 | `fromId` | entry ID | Equals the entry's `parentId`, or `"root"` for a summary at the top of the tree. |
 | `summary` | string | Summary of the branch left behind. An empty summary contributes nothing to context. |
-| `details` | JSON, optional | Producer data. Built-in summarization stores `{readFiles, modifiedFiles}`. |
+| `readFiles` | string array | Files the branch left behind only read, sorted. Volt records them for every summary; see [Compaction](compaction.md#cumulative-file-tracking). |
+| `modifiedFiles` | string array | Files the branch left behind wrote or edited, sorted. |
+| `details` | JSON, optional | Producer data. Built-in summarization stores none. |
 | `fromHook` | boolean, optional | `true` when an extension produced the summary. |
 
 `/tree` writes one when it leaves a branch with a summary: the leaf moves to the target and the summary is appended as the target's child in the same commit.
 
 ```json
-{"type":"branch_summary","id":"a7b8c9d0","parentId":"a1b2c3d4","timestamp":"2026-10-06T12:15:00.000Z","ordinal":11,"fromId":"a1b2c3d4","summary":"Branch explored approach A..."}
+{"type":"branch_summary","id":"a7b8c9d0","parentId":"a1b2c3d4","timestamp":"2026-10-06T12:15:00.000Z","ordinal":11,"fromId":"a1b2c3d4","summary":"Branch explored approach A...","readFiles":["src/a.ts"],"modifiedFiles":["src/b.ts"]}
 ```
 
 ### label
@@ -848,7 +850,7 @@ Tree reads return public entries only.
 - `recordStartingGitContext(gitContext)`, `recordPrReviewBinding(placement)`
 - `recordReviewState(build)` - Append the review entries `build` returns from the committed review state; no other review entry of the session commits in between.
 
-`LogWriter` also moves the leaf, compacts, and queues host messages before a session opens: `appendCompaction(...)`, `branch(entryId)`, `resetLeaf()`, `branchWithSummary(entryId, summary, details?, fromHook?)`, and `queueHostMessages(delivery, messages)`. A live session does these through `session.compact()`, `session.navigateTree()`, and its message APIs.
+`LogWriter` also moves the leaf, compacts, and queues host messages before a session opens: `appendCompaction(...)`, `branch(entryId)`, `resetLeaf()`, `branchWithSummary(entryId, summary, details?, fromHook?)` (which records the files of the branch it leaves), and `queueHostMessages(delivery, messages)`. A live session does these through `session.compact()`, `session.navigateTree()`, and its message APIs.
 
 ## Source Files
 

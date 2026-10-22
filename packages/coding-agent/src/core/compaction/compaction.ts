@@ -32,9 +32,8 @@ import {
 	userMessagesBefore,
 } from "./checkpoint.ts";
 import {
+	collectFileOps,
 	computeFileLists,
-	createFileOps,
-	extractFileOpsFromMessage,
 	type FileOperations,
 	getConversationCharBudget,
 	getSummarizationOutputTokenBudget,
@@ -96,39 +95,6 @@ export type CompactionDetails = {
 	 */
 	tokensAfter?: number;
 };
-
-/**
- * Extract file operations from messages and previous compaction entries.
- */
-function extractFileOperations(
-	messages: AgentMessage[],
-	entries: SessionEntry[],
-	prevCompactionIndex: number,
-): FileOperations {
-	const fileOps = createFileOps();
-
-	// Collect from previous compaction's details (if volt-generated)
-	if (prevCompactionIndex >= 0) {
-		const prevCompaction = entries[prevCompactionIndex] as CompactionEntry;
-		if (!prevCompaction.fromHook && prevCompaction.details) {
-			// fromHook field kept for session file compatibility
-			const details = prevCompaction.details as CompactionDetails;
-			if (Array.isArray(details.readFiles)) {
-				for (const f of details.readFiles) fileOps.read.add(f);
-			}
-			if (Array.isArray(details.modifiedFiles)) {
-				for (const f of details.modifiedFiles) fileOps.edited.add(f);
-			}
-		}
-	}
-
-	// Extract from tool calls in messages
-	for (const msg of messages) {
-		extractFileOpsFromMessage(msg, fileOps);
-	}
-
-	return fileOps;
-}
 
 // ============================================================================
 // Message Extraction
@@ -867,21 +833,6 @@ export function compactionBoundaryError(pathEntries: SessionEntry[], firstKeptEn
 }
 
 /**
- * File operations a compaction that keeps entries from `firstKeptIndex` on
- * summarizes: those the branch's latest built-in compaction recorded, then
- * those of the context messages from where that compaction's kept span starts.
- */
-function summarizedFileOperations(pathEntries: SessionEntry[], firstKeptIndex: number): FileOperations {
-	const { previousIndex, start } = compactionSpan(pathEntries);
-	const messages: AgentMessage[] = [];
-	for (let i = start; i < firstKeptIndex; i++) {
-		const message = getMessageFromEntryForCompaction(pathEntries[i]);
-		if (message) messages.push(message);
-	}
-	return extractFileOperations(messages, pathEntries, previousIndex);
-}
-
-/**
  * The host-owned blocks of a checkpoint that keeps entries from
  * `firstKeptEntryId` on the branch `pathEntries`: the user's earlier messages
  * verbatim, then the files the summarized history read and modified. Session
@@ -893,8 +844,9 @@ export function checkpointHostBlocks(
 	contextWindow: number,
 ): string | undefined {
 	const firstKeptIndex = pathEntries.findIndex((entry) => entry.id === firstKeptEntryId);
+	// The whole branch before the boundary: earlier compactions' summarized history included.
 	const { readFiles, modifiedFiles } = computeFileLists(
-		summarizedFileOperations(pathEntries, firstKeptIndex < 0 ? pathEntries.length : firstKeptIndex),
+		collectFileOps(pathEntries.slice(0, firstKeptIndex < 0 ? pathEntries.length : firstKeptIndex)),
 	);
 	return formatHostBlocks(
 		{ userMessages: userMessagesBefore(pathEntries, firstKeptEntryId), readFiles, modifiedFiles },
@@ -974,8 +926,8 @@ export function planCompaction(
 		}
 	}
 
-	// File operations of the previous compaction, the summarized history and any turn prefix.
-	const fileOps = summarizedFileOperations(pathEntries, cutPoint.firstKeptEntryIndex);
+	// File operations of the whole branch before the boundary, earlier compactions' history included.
+	const fileOps = collectFileOps(pathEntries.slice(0, cutPoint.firstKeptEntryIndex));
 
 	return {
 		preparation: {

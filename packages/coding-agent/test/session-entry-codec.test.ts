@@ -79,7 +79,13 @@ function validEntries(): Array<Record<string, unknown>> {
 			firstKeptEntryId: "message",
 			tokensBefore: 10,
 		},
-		{ ...base("branch_summary", "branch", 10), fromId: "root", summary: "branch summary" },
+		{
+			...base("branch_summary", "branch", 10),
+			fromId: "root",
+			summary: "branch summary",
+			readFiles: ["a.ts"],
+			modifiedFiles: ["b.ts"],
+		},
 		{ ...base("custom", "custom", 11), customType: "extension", data: { value: true } },
 		{
 			...base("custom_message", "custom-message", 12),
@@ -376,6 +382,17 @@ describe("session entry codec", () => {
 			const missing = structuredClone(value);
 			delete missing[REQUIRED_TYPE_FIELD[String(value.type)]!];
 			expect(() => parsePersistedSessionEntry(missing)).toThrow();
+		}
+		const branchSummary = everyEntryType().find((value) => value.type === "branch_summary")!;
+		for (const key of ["readFiles", "modifiedFiles"]) {
+			const { [key]: _files, ...withoutFiles } = branchSummary;
+			expect(() => parsePersistedSessionEntry(withoutFiles)).toThrow(`$.${key}: missing property`);
+			expect(() => parsePersistedSessionEntry({ ...branchSummary, [key]: "a.ts" })).toThrow(
+				`$.${key}: expected an array`,
+			);
+			expect(() => parsePersistedSessionEntry({ ...branchSummary, [key]: ["a.ts", 1] })).toThrow(
+				`$.${key}[1]: expected a string`,
+			);
 		}
 	});
 
@@ -674,7 +691,13 @@ describe("session entry codec", () => {
 		expect(() =>
 			validatePersistedSessionEntrySequence([
 				root,
-				{ ...base("branch_summary", "branch", 2, "message"), fromId: "root", summary: "summary" },
+				{
+					...base("branch_summary", "branch", 2, "message"),
+					fromId: "root",
+					summary: "summary",
+					readFiles: [],
+					modifiedFiles: [],
+				},
 			]),
 		).toThrow("invalid source");
 		expect(() =>

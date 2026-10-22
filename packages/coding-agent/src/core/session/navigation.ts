@@ -19,7 +19,12 @@ import type {
 	ConversationGenerationChange,
 	ConversationGenerationListener,
 } from "../agent-session.ts";
-import { collectEntriesForBranchSummary, generateBranchSummary } from "../compaction/index.ts";
+import {
+	collectEntriesForBranchSummary,
+	collectFileOps,
+	computeFileLists,
+	generateBranchSummary,
+} from "../compaction/index.ts";
 import type { ExtensionRunner, SessionBeforeTreeResult, TreePreparation } from "../extensions/index.ts";
 import type { BranchSummaryEntry, SessionEntry, SessionManager } from "../session-manager.ts";
 import type { SettingsManager } from "../settings-manager.ts";
@@ -72,7 +77,12 @@ export class SessionNavigation {
 	private readonly generationListeners = new Set<ConversationGenerationListener>();
 	/** The branch summary navigation prepared for the summarizer. */
 	private pendingBranchSummary:
-		| { entries: SessionEntry[]; customInstructions?: string; replaceInstructions?: boolean }
+		| {
+				entries: SessionEntry[];
+				files: { readFiles: string[]; modifiedFiles: string[] };
+				customInstructions?: string;
+				replaceInstructions?: boolean;
+		  }
 		| undefined;
 
 	constructor(host: SessionNavigationHost) {
@@ -196,6 +206,8 @@ export class SessionNavigation {
 					oldLeafId,
 					targetId,
 				);
+				// Host-owned: recorded on the summary whichever summarizer produces it.
+				const files = computeFileLists(collectFileOps(entriesToSummarize));
 				let customInstructions = options.customInstructions;
 				let replaceInstructions = options.replaceInstructions;
 				let extensionSummary: ConversationBranchSummary | undefined;
@@ -224,6 +236,7 @@ export class SessionNavigation {
 					if (hookResult?.summary && options.summarize) {
 						extensionSummary = {
 							summary: hookResult.summary.summary,
+							...files,
 							...(hookResult.summary.details === undefined ? {} : { details: hookResult.summary.details }),
 							fromHook: true,
 						};
@@ -247,6 +260,7 @@ export class SessionNavigation {
 				this.pendingBranchSummary = summarized
 					? {
 							entries: entriesToSummarize,
+							files,
 							...(customInstructions === undefined ? {} : { customInstructions }),
 							...(replaceInstructions === undefined ? {} : { replaceInstructions }),
 						}
@@ -329,12 +343,6 @@ export class SessionNavigation {
 		if (result.aborted) return undefined;
 		if (result.error) throw new Error(result.error);
 		if (!result.summary) return undefined;
-		return {
-			summary: result.summary,
-			details: {
-				readFiles: result.readFiles || [],
-				modifiedFiles: result.modifiedFiles || [],
-			},
-		};
+		return { summary: result.summary, ...pending.files };
 	}
 }

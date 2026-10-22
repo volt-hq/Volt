@@ -14957,7 +14957,9 @@
 			"type": "object",
 			"required": [
 				"fromId",
-				"summary"
+				"summary",
+				"readFiles",
+				"modifiedFiles"
 			],
 			"properties": {
 				"fromId": {
@@ -14968,6 +14970,18 @@
 				},
 				"summary": {
 					"type": "string"
+				},
+				"readFiles": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"modifiedFiles": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
 				},
 				"details": {
 					"x-volt-opaque": "lossless JSON data owned by the entry's producer"

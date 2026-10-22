@@ -326,6 +326,8 @@ describe("findCutPoint", () => {
 			timestamp: new Date().toISOString(),
 			fromId: "source-branch-id",
 			summary: "a".repeat(2400),
+			readFiles: [],
+			modifiedFiles: [],
 		};
 		const customMessage: SessionEntry = {
 			type: "custom_message",

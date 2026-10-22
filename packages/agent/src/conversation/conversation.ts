@@ -2159,6 +2159,8 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 						payload: {
 							fromId: targetId ?? "root",
 							summary: summary.summary,
+							readFiles: [...summary.readFiles],
+							modifiedFiles: [...summary.modifiedFiles],
 							...(summary.details === undefined ? {} : { details: summary.details }),
 							...(summary.fromHook === undefined ? {} : { fromHook: summary.fromHook }),
 						},

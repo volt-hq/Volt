@@ -346,6 +346,14 @@ export const BranchSummaryEntryPayloadSchema = Type.Object(
 		/** The parent entry id, or `root` for a summary at the top of the tree. */
 		fromId: LogEntryIdSchema,
 		summary: Type.String(),
+		/**
+		 * Files the branch left behind read without modifying, sorted. The host
+		 * records them for every summary, whoever produced it.
+		 */
+		readFiles: Type.Array(Type.String()),
+		/** Files the branch left behind wrote or edited, sorted. The host records them for every summary. */
+		modifiedFiles: Type.Array(Type.String()),
+		/** Producer-specific JSON. */
 		details: Type.Optional(jsonData),
 		fromHook: Type.Optional(Type.Boolean()),
 	},

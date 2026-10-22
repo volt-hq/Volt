@@ -67,7 +67,8 @@ const summarizer: ConversationSummarizer = {
 						: {}),
 				};
 	},
-	summarizeBranch: async ({ entries }) => (entries.length === 0 ? undefined : { summary: "branch" }),
+	summarizeBranch: async ({ entries }) =>
+		entries.length === 0 ? undefined : { summary: "branch", readFiles: [], modifiedFiles: [] },
 };
 
 async function settle(promises: Promise<unknown>[]): Promise<void> {
@@ -181,7 +182,15 @@ describe("Conversation properties", () => {
 													prepare: () =>
 														step.prepare === 1
 															? { cancel: true as const }
-															: { summary: { summary: "prepared", fromHook: true }, label: message },
+															: {
+																	summary: {
+																		summary: "prepared",
+																		readFiles: [],
+																		modifiedFiles: [],
+																		fromHook: true,
+																	},
+																	label: message,
+																},
 												}),
 									}),
 								);

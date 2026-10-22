@@ -337,6 +337,43 @@ describe("SessionManager append and tree traversal", () => {
 			}
 		});
 
+		it("records the files the abandoned branch read and modified, whatever the caller's details", async () => {
+			const session = SessionManager.inMemory();
+			const kept = await session.logWriter.appendMessage(userMsg("1"));
+			await session.logWriter.appendMessage({
+				...assistantMsg(""),
+				content: [
+					{ type: "toolCall", id: "read-a", name: "read", arguments: { path: "a.ts" } },
+					{ type: "toolCall", id: "edit-b", name: "edit", arguments: { path: "b.ts" } },
+					{ type: "toolCall", id: "read-b", name: "read", arguments: { path: "b.ts" } },
+				],
+				stopReason: "toolUse",
+			});
+			// An extension-style summary: its details are its own, and never count as files.
+			const nestedId = await session.logWriter.branchWithSummary(
+				kept,
+				"nested",
+				{ readFiles: ["ignored.ts"] },
+				true,
+			);
+			expect(session.getEntry(nestedId)).toMatchObject({
+				readFiles: ["a.ts"],
+				modifiedFiles: ["b.ts"],
+				details: { readFiles: ["ignored.ts"] },
+				fromHook: true,
+			});
+
+			// Leaving the branch that holds the nested summary carries its files forward.
+			const summaryId = await session.logWriter.branchWithSummary(null, "Summary of abandoned work");
+
+			expect(session.getEntry(summaryId)).toMatchObject({
+				parentId: null,
+				fromId: "root",
+				readFiles: ["a.ts"],
+				modifiedFiles: ["b.ts"],
+			});
+		});
+
 		it("throws for non-existent entry", async () => {
 			const session = SessionManager.inMemory();
 			await session.logWriter.appendMessage(userMsg("hello"));

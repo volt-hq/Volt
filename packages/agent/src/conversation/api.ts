@@ -329,6 +329,10 @@ export interface ConversationBranchSummaryRequest extends ConversationSummaryReq
 
 export interface ConversationBranchSummary {
 	readonly summary: string;
+	/** Files the abandoned branch read without modifying, sorted. */
+	readonly readFiles: readonly string[];
+	/** Files the abandoned branch wrote or edited, sorted. */
+	readonly modifiedFiles: readonly string[];
 	readonly details?: JsonValue;
 	readonly fromHook?: boolean;
 }

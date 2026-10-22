@@ -17,9 +17,8 @@ import {
 import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
 import { estimateTokens } from "./compaction.ts";
 import {
+	collectFileOps,
 	computeFileLists,
-	createFileOps,
-	extractFileOpsFromMessage,
 	type FileOperations,
 	formatFileOperations,
 	getConversationCharBudget,
@@ -40,18 +39,12 @@ export interface BranchSummaryResult {
 	error?: string;
 }
 
-/** Details stored in BranchSummaryEntry.details for file tracking */
-export interface BranchSummaryDetails {
-	readFiles: string[];
-	modifiedFiles: string[];
-}
-
 export type { FileOperations } from "./utils.ts";
 
 export interface BranchPreparation {
 	/** Messages extracted for summarization, in chronological order */
 	messages: AgentMessage[];
-	/** File operations extracted from tool calls */
+	/** File operations of every entry, including those beyond the token budget */
 	fileOps: FileOperations;
 	/** Total estimated tokens in messages */
 	totalTokens: number;
@@ -95,13 +88,13 @@ export interface GenerateBranchSummaryOptions {
  *
  * @param session - Session manager (read-only access)
  * @param oldLeafId - Current position (where we're navigating from)
- * @param targetId - Target position (where we're navigating to)
+ * @param targetId - Target position (where we're navigating to), or `null` for before the first entry
  * @returns Entries to summarize and the common ancestor
  */
 export function collectEntriesForBranchSummary(
 	session: ReadonlySessionManager,
 	oldLeafId: string | null,
-	targetId: string,
+	targetId: string | null,
 ): CollectEntriesResult {
 	// If no old position, nothing to summarize
 	if (!oldLeafId) {
@@ -110,7 +103,7 @@ export function collectEntriesForBranchSummary(
 
 	// Find common ancestor (deepest node that's on both paths)
 	const oldPath = new Set(session.getBranch(oldLeafId).map((e) => e.id));
-	const targetPath = session.getBranch(targetId);
+	const targetPath = targetId === null ? [] : session.getBranch(targetId);
 
 	// targetPath is root-first, so iterate backwards to find deepest common ancestor
 	let commonAncestorId: string | null = null;
@@ -179,44 +172,22 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
  * Walks entries from NEWEST to OLDEST, adding messages until we hit the token budget.
  * This ensures we keep the most recent context when the branch is too long.
  *
- * Also collects file operations from:
- * - Tool calls in assistant messages
- * - Existing branch_summary entries' details (for cumulative tracking)
+ * File operations come from every entry, whether or not it fits the budget
+ * (see {@link collectFileOps}).
  *
  * @param entries - Entries in chronological order
  * @param tokenBudget - Maximum tokens to include (0 = no limit)
  */
 export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: number = 0): BranchPreparation {
 	const messages: AgentMessage[] = [];
-	const fileOps = createFileOps();
+	const fileOps = collectFileOps(entries);
 	let totalTokens = 0;
 
-	// First pass: collect file ops from ALL entries (even if they don't fit in token budget)
-	// This ensures we capture cumulative file tracking from nested branch summaries
-	// Only extract from volt-generated summaries (fromHook !== true), not extension-generated ones
-	for (const entry of entries) {
-		if (entry.type === "branch_summary" && !entry.fromHook && entry.details) {
-			const details = entry.details as unknown as BranchSummaryDetails;
-			if (Array.isArray(details.readFiles)) {
-				for (const f of details.readFiles) fileOps.read.add(f);
-			}
-			if (Array.isArray(details.modifiedFiles)) {
-				// Modified files go into both edited and written for proper deduplication
-				for (const f of details.modifiedFiles) {
-					fileOps.edited.add(f);
-				}
-			}
-		}
-	}
-
-	// Second pass: walk from newest to oldest, adding messages until token budget
+	// Walk from newest to oldest, adding messages until token budget
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
 		const message = getMessageFromEntry(entry);
 		if (!message) continue;
-
-		// Extract file ops from assistant messages (tool calls)
-		extractFileOpsFromMessage(message, fileOps);
 
 		const tokens = estimateTokens(message);
 
