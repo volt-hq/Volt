@@ -33,6 +33,8 @@ const number = Type.String({
 });
 const headRefOid = Type.String({ maxLength: 64, pattern: `${RPC_GIT_CONTEXT_OID_PATTERN}(?![\\s\\S])` });
 const url = Type.String({ minLength: 1, maxLength: 2048, pattern: "^https://[^\\s]+$(?![\\s\\S])" });
+// Registered code-host provider id, e.g. "github".
+const provider = Type.String({ minLength: 1, maxLength: 64, pattern: "^[^\\s\\x00-\\x1f\\x7f]+$(?![\\s\\S])" });
 const sourceProperties = {
 	workingDirectory: Type.Optional(workingDirectory),
 	sourceWorktreeId: Type.Optional(worktreeId),
@@ -55,7 +57,7 @@ export const RpcPrReviewPrepareRequestSchema = Type.Object(
 );
 export const RpcPrReviewPullRequestSchema = Type.Object(
 	{
-		provider: Type.Literal("github"),
+		provider,
 		url,
 		number: Type.Integer({ minimum: 1, maximum: 2147483647 }),
 		title: Type.String({ maxLength: 512 }),

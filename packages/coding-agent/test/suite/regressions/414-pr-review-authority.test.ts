@@ -207,6 +207,10 @@ async function fixture(grant = capabilities) {
 	git(source, "commit", "-m", "base");
 	const head = git(source, "rev-parse", "HEAD");
 	git(source, "update-ref", "refs/pull/414/head", head);
+	// Track a GitHub branch so code-host resolution selects the stubbed GitHub provider.
+	git(source, "remote", "add", "origin", "https://github.com/owner/project.git");
+	git(source, "config", "branch.main.remote", "origin");
+	git(source, "config", "branch.main.merge", "refs/heads/topic");
 	const target: ResolvedPullRequestCheckout = {
 		pullRequest: {
 			provider: "github",

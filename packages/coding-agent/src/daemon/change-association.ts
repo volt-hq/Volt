@@ -1,8 +1,8 @@
 import { tmpdir } from "node:os";
 import {
-	githubCliPullRequestDiscoveryProvider,
-	githubCliPullRequestStatusProvider,
-} from "../core/code-host/github-cli-discovery.ts";
+	codeHostPullRequestDiscoveryProvider,
+	listCodeHostPullRequestStatusProviders,
+} from "../core/code-host/registry.ts";
 import type {
 	CodeHostPullRequestDiscoveryOutcome,
 	CodeHostPullRequestDiscoveryProvider,
@@ -79,8 +79,9 @@ export type ChangeAssociationRefreshFailurePhase = "discovery" | "scheduled_refr
 
 export interface ChangeAssociationServiceOptions {
 	store: ChangeStore;
+	/** Defaults to discovery across every registered code-host provider. */
 	discoveryProvider?: CodeHostPullRequestDiscoveryProvider;
-	/** Batched status refresh for already-associated pull requests. */
+	/** Batched status refresh for already-associated pull requests; defaults to every registered provider. */
 	statusProvider?: CodeHostPullRequestStatusProvider;
 	/** Neutral working directory for status refresh; never a repository checkout. */
 	statusCwd?: string;
@@ -187,7 +188,7 @@ export class ChangeAssociationService {
 	private readonly inFlight = new Map<string, Promise<CodeHostPullRequestDiscoveryOutcome>>();
 	private readonly providerWaiters: Array<() => void> = [];
 	private readonly abortController = new AbortController();
-	private readonly statusProvider: CodeHostPullRequestStatusProvider;
+	private readonly statusProvider: CodeHostPullRequestStatusProvider | undefined;
 	private readonly statusCwd: string;
 	private activeProviderCalls = 0;
 	private closed = false;
@@ -203,8 +204,8 @@ export class ChangeAssociationService {
 
 	constructor(options: ChangeAssociationServiceOptions) {
 		this.store = options.store;
-		this.discoveryProvider = options.discoveryProvider ?? githubCliPullRequestDiscoveryProvider;
-		this.statusProvider = options.statusProvider ?? githubCliPullRequestStatusProvider;
+		this.discoveryProvider = options.discoveryProvider ?? codeHostPullRequestDiscoveryProvider;
+		this.statusProvider = options.statusProvider;
 		this.statusCwd = options.statusCwd ?? tmpdir();
 		this.enabled = options.enabled !== false;
 		this.isOnline = options.isOnline ?? (() => true);
@@ -430,36 +431,50 @@ export class ChangeAssociationService {
 			});
 	}
 
-	/** Refresh every watched pull request with one batched provider call per host. */
+	/** Refresh every watched pull request with one batched provider call per provider and host. */
 	private async pollStatuses(): Promise<StatusPollResult> {
+		const providers = new Map(
+			(this.statusProvider ? [this.statusProvider] : listCodeHostPullRequestStatusProviders()).map((provider) => [
+				provider.id,
+				provider,
+			]),
+		);
 		const watched = this.store
 			.listWatchedPullRequests(STATUS_WATCH_LIMIT)
-			.filter((entry) => entry.provider === this.statusProvider.id);
+			.filter((entry) => providers.has(entry.provider));
 		if (watched.length === 0) return "idle";
 		const targetKey = (entry: (typeof watched)[number]): string =>
 			`${entry.repository.owner}\0${entry.repository.name}\0${entry.number}`;
-		const targetsByHost = new Map<string, Map<string, CodeHostPullRequestStatusTarget>>();
-		for (const entry of watched) {
-			let targets = targetsByHost.get(entry.repository.host);
-			if (!targets) {
-				targets = new Map();
-				targetsByHost.set(entry.repository.host, targets);
+		const hostKey = (entry: (typeof watched)[number]): string => `${entry.provider}\0${entry.repository.host}`;
+		const targetsByHost = new Map<
+			string,
+			{
+				provider: CodeHostPullRequestStatusProvider;
+				host: string;
+				targets: Map<string, CodeHostPullRequestStatusTarget>;
 			}
-			targets.set(targetKey(entry), {
+		>();
+		for (const entry of watched) {
+			let group = targetsByHost.get(hostKey(entry));
+			if (!group) {
+				group = { provider: providers.get(entry.provider)!, host: entry.repository.host, targets: new Map() };
+				targetsByHost.set(hostKey(entry), group);
+			}
+			group.targets.set(targetKey(entry), {
 				owner: entry.repository.owner,
 				name: entry.repository.name,
 				number: entry.number,
 			});
 		}
 		const outcomes = new Map<string, CodeHostPullRequestStatusOutcome>();
-		for (const [host, targets] of targetsByHost) {
+		for (const [groupKey, { provider, host, targets }] of targetsByHost) {
 			const keys = [...targets.keys()];
 			let hostOutcomes: CodeHostPullRequestStatusOutcome[];
 			if (!this.isOnline()) {
 				hostOutcomes = keys.map(() => ({ state: "unavailable", reason: "network" }));
 			} else {
 				try {
-					hostOutcomes = await this.statusProvider.refreshPullRequestStatuses({
+					hostOutcomes = await provider.refreshPullRequestStatuses({
 						cwd: this.statusCwd,
 						host,
 						pullRequests: [...targets.values()],
@@ -474,13 +489,13 @@ export class ChangeAssociationService {
 			if (this.closed) return "idle";
 			keys.forEach((key, index) => {
 				outcomes.set(
-					`${host}\0${key}`,
+					`${groupKey}\0${key}`,
 					hostOutcomes[index] ?? { state: "unavailable", reason: "invalid_response" },
 				);
 			});
 		}
 		const updates: ChangePullRequestStatusUpdate[] = watched.map((entry) => {
-			const outcome = outcomes.get(`${entry.repository.host}\0${targetKey(entry)}`);
+			const outcome = outcomes.get(`${hostKey(entry)}\0${targetKey(entry)}`);
 			return {
 				...entry,
 				outcome:

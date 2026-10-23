@@ -8,10 +8,10 @@ import { spawnProcess } from "../utils/child-process.ts";
 import { terminateProcessTree } from "../utils/shell.ts";
 import {
 	type CodeHostProvider,
-	githubCliCodeHostProvider,
 	type PullRequestFetchPlan,
 	type ReviewCodeHostContext,
 	type ReviewPullRequestIdentity,
+	resolveCodeHostProvider,
 } from "./code-host/index.ts";
 
 export type { ReviewPullRequestIdentity } from "./code-host/index.ts";
@@ -3302,7 +3302,16 @@ export async function resolveReviewSnapshot(
 						error: `PR number must be a canonical positive decimal no greater than ${options.maxPullRequestNumber}.`,
 					};
 				}
-				const codeHostProvider = options.codeHostProvider ?? githubCliCodeHostProvider;
+				let codeHostProvider = options.codeHostProvider;
+				if (!codeHostProvider) {
+					const resolved = await resolveCodeHostProvider({
+						cwd: root,
+						...(normalized ? { number: normalized } : {}),
+						signal: options.signal,
+					});
+					if (!resolved.ok) return resolved;
+					codeHostProvider = resolved.provider;
+				}
 				const capture = {
 					cwd: root,
 					...(normalized ? { number: normalized } : {}),

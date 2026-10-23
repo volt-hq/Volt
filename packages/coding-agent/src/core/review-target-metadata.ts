@@ -5,6 +5,7 @@
  */
 
 import { Buffer } from "node:buffer";
+import { findCodeHostIdentity } from "./code-host/identity.ts";
 import type { ReviewChangedFile, ReviewPullRequestIdentity, ReviewSnapshotIdentity } from "./review-snapshot.ts";
 
 interface ReviewPullRequestReference {
@@ -118,13 +119,16 @@ function boundedWebUrl(value: string, maximumBytes: number): string | undefined 
 	}
 }
 
-function boundedAvatarUrl(value: string | undefined, pullRequestUrl: string): string | undefined {
+function boundedAvatarUrl(value: string | undefined, pullRequestUrl: string, providerId: string): string | undefined {
 	if (!value || Buffer.byteLength(value, "utf8") > REVIEW_PULL_REQUEST_URL_MAX_UTF8_BYTES) return undefined;
 	try {
 		const avatar = new URL(value);
 		const pullRequest = new URL(pullRequestUrl);
 		if (avatar.protocol !== "https:") return undefined;
-		if (avatar.hostname !== pullRequest.hostname && avatar.hostname !== "avatars.githubusercontent.com")
+		if (
+			avatar.hostname !== pullRequest.hostname &&
+			!findCodeHostIdentity(providerId)?.avatarHosts?.includes(avatar.hostname)
+		)
 			return undefined;
 		return avatar.toString();
 	} catch {
@@ -168,7 +172,7 @@ export function createReviewPullRequestMetadata(
 		return undefined;
 	}
 	const observedAt = pullRequest.observedAt;
-	const avatarUrl = boundedAvatarUrl(pullRequest.author?.avatarUrl, url);
+	const avatarUrl = boundedAvatarUrl(pullRequest.author?.avatarUrl, url, reference.provider);
 	const authorLogin = pullRequest.author?.login.trim();
 	const reviewState = ["draft", "ready", "merged", "closed"].includes(pullRequest.reviewState ?? "")
 		? pullRequest.reviewState

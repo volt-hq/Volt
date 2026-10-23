@@ -375,6 +375,10 @@ no session, conversation, checkout or discussion snapshot.
 {"type":"result","queryId":"resolve-1","data":{"workspaceName":"myrepo","pullRequest":{"provider":"github","url":"https://github.com/owner/myrepo/pull/414","number":414,"title":"Fix value","repository":"owner/myrepo","headRefName":"fix-value","headRefOid":"0123456789abcdef0123456789abcdef01234567"}}}
 ```
 
+`pullRequest.provider` is the id of the code-host provider the host selected
+from the source remote (currently always `github`). Treat it as an open string;
+the URL and repository formats belong to that provider.
+
 Then open `workspaceManagement:{"purpose":"manage_worktrees"}` and send the
 `prepare_pr_review` intent with the same source, a caller-generated `sessionId`,
 the resolved explicit PR number and the expected URL/head. Expected identity is

@@ -26,6 +26,7 @@ import {
 import { type WorkEntryPayload, workPayloadBoundsError } from "@hansjm10/volt-protocol/work";
 import { Check } from "typebox/value";
 import { cloneCanonicalData } from "./canonical-data.ts";
+import { findCodeHostIdentity } from "./code-host/identity.ts";
 import { parsePlanningState } from "./planning.ts";
 import { REVIEW_DISCUSSION_CONTEXT_MAX_BYTES, SESSION_ENTRY_TYPES } from "./session-entry-types.ts";
 import type {
@@ -348,7 +349,8 @@ function validatePrReviewPlacement(value: unknown): void {
 		"headRefName",
 		"headRefOid",
 	]);
-	if (pr.provider !== "github") fail(`${path}.pullRequest.provider`, "unsupported provider");
+	const provider = typeof pr.provider === "string" ? findCodeHostIdentity(pr.provider) : undefined;
+	if (!provider) fail(`${path}.pullRequest.provider`, "unsupported provider");
 	const number = positiveSafeInteger(pr.number, `${path}.pullRequest.number`);
 	if (number > 2147483647) fail(`${path}.pullRequest.number`, "PR number exceeds limit");
 	for (const key of ["url", "title", "repository", "headRefName", "headRefOid"]) {
@@ -358,21 +360,20 @@ function validatePrReviewPlacement(value: unknown): void {
 	}
 	if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(pr.headRefOid as string))
 		fail(`${path}.pullRequest.headRefOid`, "invalid Git object id");
-	const url = new URL(pr.url as string);
-	const repository = pr.repository as string;
 	if (
-		url.protocol !== "https:" ||
-		url.href !== pr.url ||
-		url.username ||
-		url.password ||
-		url.port ||
-		url.search ||
-		url.hash ||
-		!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) ||
-		url.pathname.toLowerCase() !== `/${repository}/pull/${number}`.toLowerCase() ||
-		placement.repositoryId !== `github:${url.hostname}/${repository}`.toLowerCase() ||
-		!/^github:[a-z0-9.-]+\/[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(placement.headRepositoryId as string) ||
-		!(placement.headRepositoryId as string).startsWith(`github:${url.hostname}/`)
+		!provider.isCanonicalPullRequestCheckout(
+			{
+				provider: provider.id,
+				url: pr.url as string,
+				number,
+				title: pr.title as string,
+				repository: pr.repository as string,
+				headRefName: pr.headRefName as string,
+				headRefOid: pr.headRefOid as string,
+			},
+			placement.repositoryId as string,
+			placement.headRepositoryId as string,
+		)
 	)
 		fail(`${path}.pullRequest`, "inconsistent canonical repository identity");
 }

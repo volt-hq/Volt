@@ -1,12 +1,19 @@
-import { githubCliCodeHostProvider } from "./github-cli-provider.ts";
-import type { CodeHostProvider } from "./types.ts";
-
 export {
 	canonicalizeGitHubRemoteUrl,
 	discoverPullRequestWithGitHubCli,
 	githubCliPullRequestDiscoveryProvider,
 } from "./github-cli-discovery.ts";
 export { githubCliCodeHostProvider } from "./github-cli-provider.ts";
+export {
+	codeHostPullRequestDiscoveryProvider,
+	findCodeHostProvider,
+	getCodeHostProvider,
+	listCodeHostPullRequestStatusProviders,
+	type ResolveCodeHostProviderOptions,
+	type ResolveCodeHostProviderResult,
+	registerCodeHostProvider,
+	resolveCodeHostProvider,
+} from "./registry.ts";
 export type {
 	CanonicalCodeHostRepository,
 	CodeHostCommandOptions,
@@ -43,8 +50,3 @@ export type {
 	ReviewPullRequestMergeability,
 	ReviewPullRequestReviewState,
 } from "./types.ts";
-
-export function getCodeHostProvider(providerId: string): CodeHostProvider {
-	if (providerId === githubCliCodeHostProvider.id) return githubCliCodeHostProvider;
-	throw new Error(`Unsupported code-host provider: ${JSON.stringify(providerId)}.`);
-}
