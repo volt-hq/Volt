@@ -466,6 +466,10 @@ describe("protocol client of an in-process host", () => {
 		git(repo, "commit", "-m", "first change");
 		writeFileSync(join(repo, "file.txt"), "two\n");
 		git(repo, "commit", "-am", "second change");
+		// Track a GitHub branch so code-host resolution selects the stubbed GitHub provider.
+		git(repo, "remote", "add", "origin", "https://github.com/owner/project.git");
+		git(repo, "config", "branch.main.remote", "origin");
+		git(repo, "config", "branch.main.merge", "refs/heads/topic");
 		const [second, first] = execFileSync("git", ["log", "--pretty=format:%h"], { cwd: repo, encoding: "utf8" }).split(
 			"\n",
 		);

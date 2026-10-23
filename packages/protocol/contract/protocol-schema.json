@@ -12229,7 +12229,9 @@
 					"properties": {
 						"provider": {
 							"type": "string",
-							"const": "github"
+							"minLength": 1,
+							"maxLength": 64,
+							"pattern": "^[^\\s\\x00-\\x1f\\x7f]+$(?![\\s\\S])"
 						},
 						"url": {
 							"type": "string",
@@ -17716,7 +17718,9 @@
 					"properties": {
 						"provider": {
 							"type": "string",
-							"const": "github"
+							"minLength": 1,
+							"maxLength": 64,
+							"pattern": "^[^\\s\\x00-\\x1f\\x7f]+$(?![\\s\\S])"
 						},
 						"url": {
 							"type": "string",

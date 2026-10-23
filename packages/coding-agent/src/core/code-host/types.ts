@@ -164,7 +164,8 @@ export interface CanonicalCodeHostRepository {
 /** Host-only checkout identity and validated base repository transport; never project transport to clients. */
 export interface ResolvedPullRequestCheckout {
 	pullRequest: {
-		provider: "github";
+		/** Registered code-host provider id. */
+		provider: string;
 		url: string;
 		number: number;
 		title: string;
@@ -176,7 +177,7 @@ export interface ResolvedPullRequestCheckout {
 	headRepository: CanonicalCodeHostRepository;
 	remote: string;
 	remoteUrl: string;
-	/** GitHub's PR head ref in the selected base repository, including for fork PRs. */
+	/** Provider ref in the selected base repository that resolves to the PR head, including for fork PRs. */
 	headRef: string;
 }
 
@@ -300,9 +301,23 @@ export interface ReviewCodeHostPublishResult {
 	url?: string;
 }
 
-export interface CodeHostProvider {
+/** Pure identity rules for persisted pull request data; must not load provider CLIs or transports. */
+export interface CodeHostIdentity {
 	readonly id: string;
 	readonly displayName: string;
+	/** Hosts trusted to serve pull request author avatars in addition to the pull request host. */
+	readonly avatarHosts?: readonly string[];
+	/** Host-only consistency check for a persisted checkout identity this provider produced. */
+	isCanonicalPullRequestCheckout(
+		pullRequest: ResolvedPullRequestCheckout["pullRequest"],
+		repositoryId: string,
+		headRepositoryId: string,
+	): boolean;
+}
+
+export interface CodeHostProvider extends CodeHostIdentity {
+	/** Parse a credential-free remote URL this provider serves; null selects another provider. */
+	canonicalizeRemoteUrl(url: string): CanonicalCodeHostRepository | null;
 	probeCurrentPullRequest(cwd: string, signal?: AbortSignal): Promise<CodeHostPullRequestSummary | undefined>;
 	resolvePullRequestCheckout(options: ResolvePullRequestCheckoutOptions): Promise<ResolvePullRequestCheckoutResult>;
 	capturePullRequestContext(options: ReviewCodeHostContextCaptureOptions): Promise<ReviewCodeHostContextCaptureResult>;
@@ -319,4 +334,8 @@ export interface CodeHostProvider {
 		options?: CodeHostCommandOptions,
 	): Promise<void>;
 	publishPullRequestReview(request: ReviewCodeHostPublishRequest): Promise<ReviewCodeHostPublishResult>;
+	/** Daemon change association; report unsupported_repository when no remote belongs to this provider. */
+	discoverPullRequest?(request: CodeHostPullRequestDiscoveryRequest): Promise<CodeHostPullRequestDiscoveryOutcome>;
+	/** Daemon change status refresh for pull requests this provider associated. */
+	refreshPullRequestStatuses?(request: CodeHostPullRequestStatusRequest): Promise<CodeHostPullRequestStatusOutcome[]>;
 }

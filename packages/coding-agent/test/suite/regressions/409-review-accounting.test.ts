@@ -703,6 +703,8 @@ describe("#409 initial review accounting", () => {
 		const provider: CodeHostProvider = {
 			id: "mock",
 			displayName: "Mock",
+			canonicalizeRemoteUrl: vi.fn(() => null),
+			isCanonicalPullRequestCheckout: vi.fn(() => false),
 			probeCurrentPullRequest: vi.fn(),
 			resolvePullRequestCheckout: vi.fn(),
 			capturePullRequestContext: vi.fn(),

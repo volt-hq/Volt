@@ -5,8 +5,9 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
 	type CodeHostProvider,
-	githubCliCodeHostProvider,
+	findCodeHostProvider,
 	type ResolvedPullRequestCheckout,
+	resolveCodeHostProvider,
 } from "../core/code-host/index.ts";
 import type { PrReviewLaunch, PrReviewPlacement } from "../core/pr-review-placement.ts";
 import { hasIrohRemoteRpcCapability } from "../core/remote/iroh/access-grant.ts";
@@ -128,18 +129,29 @@ export class PrReviewCheckoutManager {
 		};
 	}
 
+	/** Resolve through the bound provider when one is known, otherwise through the source remote's provider. */
 	private async target(
 		source: Source,
 		request: PrReviewSource,
 		signal?: AbortSignal,
+		boundProviderId?: string,
 	): Promise<ResolvedPullRequestCheckout> {
-		const result = await (this.options.provider ?? githubCliCodeHostProvider).resolvePullRequestCheckout({
+		let provider =
+			this.options.provider ?? (boundProviderId === undefined ? undefined : findCodeHostProvider(boundProviderId));
+		if (!provider && boundProviderId === undefined) {
+			const resolved = await resolveCodeHostProvider({ cwd: source.cwd, number: request.number, signal }).catch(
+				() => undefined,
+			);
+			if (resolved?.ok) provider = resolved.provider;
+		}
+		if (!provider) throw new PrReviewCheckoutError();
+		const result = await provider.resolvePullRequestCheckout({
 			cwd: source.cwd,
 			number: request.number,
 			maxPullRequestNumber: 2147483647,
 			signal,
 		});
-		if (!result.ok) throw new PrReviewCheckoutError();
+		if (!result.ok || result.target.pullRequest.provider !== provider.id) throw new PrReviewCheckoutError();
 		return result.target;
 	}
 
@@ -425,6 +437,7 @@ export class PrReviewCheckoutManager {
 			{ ...root, cwd: placement.sourceCwd },
 			{ number: String(placement.pullRequest.number) },
 			authority.signal,
+			placement.pullRequest.provider,
 		);
 		if (
 			current.repository.canonicalId !== placement.repositoryId ||

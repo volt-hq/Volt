@@ -250,6 +250,8 @@ switch (args.slice(0, 2).join(" ")) {
 		const provider: CodeHostProvider = {
 			id: "test-host",
 			displayName: "Test Host",
+			canonicalizeRemoteUrl: () => null,
+			isCanonicalPullRequestCheckout: () => false,
 			probeCurrentPullRequest: async () => undefined,
 			resolvePullRequestCheckout: async () => ({ ok: false, error: "unused" }),
 			capturePullRequestContext: async () => ({ ok: false, error: "unused" }),
@@ -299,6 +301,8 @@ switch (args.slice(0, 2).join(" ")) {
 			const provider: CodeHostProvider = {
 				id: "test-host",
 				displayName: "Test Host",
+				canonicalizeRemoteUrl: () => null,
+				isCanonicalPullRequestCheckout: () => false,
 				probeCurrentPullRequest: async () => undefined,
 				resolvePullRequestCheckout: async () => ({ ok: false, error: "unused" }),
 				capturePullRequestContext: async () => ({ ok: false, error: "unused" }),

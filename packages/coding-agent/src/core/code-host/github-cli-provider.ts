@@ -4,7 +4,13 @@ import {
 	capturePullRequestContextWithGitHubCli,
 	capturePullRequestIdentityWithGitHubCli,
 } from "./github-cli-context.ts";
+import {
+	canonicalizeGitHubRemoteUrl,
+	discoverPullRequestWithGitHubCli,
+	refreshPullRequestStatusesWithGitHubCli,
+} from "./github-cli-discovery.ts";
 import { parseGitHubPullRequestUrl, resolveCurrentReviewPullRequest } from "./github-cli-review-target.ts";
+import { githubCodeHostIdentity } from "./github-identity.ts";
 import type {
 	CodeHostCommandOptions,
 	CodeHostProvider,
@@ -111,12 +117,15 @@ async function publishPullRequestReview(request: ReviewCodeHostPublishRequest) {
 }
 
 export const githubCliCodeHostProvider: CodeHostProvider = {
-	id: "github",
-	displayName: "GitHub",
+	...githubCodeHostIdentity,
+	// Call through the module binding so remote canonicalization stays replaceable in tests.
+	canonicalizeRemoteUrl: (url) => canonicalizeGitHubRemoteUrl(url),
 	probeCurrentPullRequest,
 	resolvePullRequestCheckout: resolvePullRequestCheckoutWithGitHubCli,
 	capturePullRequestContext: capturePullRequestContextWithGitHubCli,
 	capturePullRequestIdentity: capturePullRequestIdentityWithGitHubCli,
 	verifyPullRequestHead,
 	publishPullRequestReview,
+	discoverPullRequest: discoverPullRequestWithGitHubCli,
+	refreshPullRequestStatuses: refreshPullRequestStatusesWithGitHubCli,
 };

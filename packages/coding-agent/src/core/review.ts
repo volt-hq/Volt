@@ -13,8 +13,9 @@ import { executeBashWithOperations } from "./bash-executor.ts";
 import {
 	type CodeHostProvider,
 	type CodeHostPullRequestSummary,
-	githubCliCodeHostProvider,
+	getCodeHostProvider,
 	type ReviewCodeHostContextCaptureOptions,
+	resolveCodeHostProvider,
 } from "./code-host/index.ts";
 import { createExtensionRuntime } from "./extensions/loader.ts";
 import type { SessionIntentResult, ToolDefinition } from "./extensions/types.ts";
@@ -240,13 +241,17 @@ function truncateProbeTitle(value: string): string {
 
 export async function probeCurrentBranchPullRequest(
 	cwd: string,
-	provider: CodeHostProvider = githubCliCodeHostProvider,
+	provider?: CodeHostProvider,
 ): Promise<CurrentBranchPullRequest | undefined> {
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), CURRENT_PR_PROBE_TIMEOUT_MS);
 	timer.unref?.();
 	try {
-		const pullRequest = await provider.probeCurrentPullRequest(cwd, controller.signal);
+		const resolved = provider
+			? { ok: true as const, provider }
+			: await resolveCodeHostProvider({ cwd, signal: controller.signal }).catch(() => undefined);
+		if (!resolved?.ok) return undefined;
+		const pullRequest = await resolved.provider.probeCurrentPullRequest(cwd, controller.signal);
 		if (!pullRequest || pullRequest.number > MAX_PULL_REQUEST_NUMBER) return undefined;
 		const title = truncateProbeTitle(pullRequest.title);
 		return title ? { number: pullRequest.number, title, url: pullRequest.url } : undefined;
@@ -1073,15 +1078,16 @@ export async function resolveBoundReviewSnapshot(
 			number,
 			expectedUrl: binding.pullRequest.url,
 		});
+		const boundProvider = getCodeHostProvider(binding.pullRequest.provider);
 		codeHostProvider = {
-			...githubCliCodeHostProvider,
+			...boundProvider,
 			async capturePullRequestContext(captureOptions) {
-				const captured = await githubCliCodeHostProvider.capturePullRequestContext(bound(captureOptions));
+				const captured = await boundProvider.capturePullRequestContext(bound(captureOptions));
 				if (captured.ok) assertBoundPullRequest(binding, captured.pullRequest);
 				return captured;
 			},
 			async capturePullRequestIdentity(captureOptions) {
-				const captured = await githubCliCodeHostProvider.capturePullRequestIdentity(bound(captureOptions));
+				const captured = await boundProvider.capturePullRequestIdentity(bound(captureOptions));
 				if (captured.ok) assertBoundPullRequest(binding, captured.pullRequest);
 				return captured;
 			},
@@ -1130,7 +1136,7 @@ export async function verifyBoundPullRequest(
 		throw new Error(PR_CHECKOUT_CHANGED);
 	}
 	assertBoundPullRequest(binding, identity);
-	await githubCliCodeHostProvider.verifyPullRequestHead(binding.sourceCwd, identity);
+	await getCodeHostProvider(binding.pullRequest.provider).verifyPullRequestHead(binding.sourceCwd, identity);
 	await assertPrReviewCheckout(binding, cwd, signal);
 }
 

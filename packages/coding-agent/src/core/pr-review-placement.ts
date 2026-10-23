@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import { Compile } from "typebox/compile";
+import { findCodeHostIdentity } from "./code-host/identity.ts";
 import type { ResolvedPullRequestCheckout } from "./code-host/types.ts";
 
 /** Host-owned placement. Never accept this object from a client or imported transcript. */
@@ -39,7 +40,7 @@ export const PrReviewPlacementSchema = Type.Object(
 		commonDirectory: text,
 		pullRequest: Type.Object(
 			{
-				provider: Type.Literal("github"),
+				provider: Type.String({ minLength: 1, maxLength: 64, pattern: "^[^\\s\\u0000-\\u001f\\u007f]+$" }),
 				url: Type.String({ minLength: 1, maxLength: 2000 }),
 				number: Type.Integer({ minimum: 1, maximum: 2147483647 }),
 				title: text,
@@ -75,6 +76,9 @@ export function parsePrReviewLaunches(value: unknown): PrReviewLaunch[] {
 		throw new Error("Invalid PR review worktree launch metadata");
 	}
 	const launches = value as PrReviewLaunch[];
+	if (launches.some((entry) => !findCodeHostIdentity(entry.placement.pullRequest.provider))) {
+		throw new Error("Invalid PR review worktree launch metadata");
+	}
 	if (
 		new Set(launches.map((entry) => entry.sessionId)).size !== launches.length ||
 		launches.some((entry) => (entry.sessionGeneration === undefined) !== (entry.storeId === undefined))

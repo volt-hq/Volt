@@ -1,8 +1,12 @@
-import { Buffer } from "node:buffer";
-import { spawnProcess } from "../../utils/child-process.ts";
-import { terminateProcessTree } from "../../utils/shell.ts";
 import { runGitHubCli } from "./github-cli.ts";
 import { canonicalizeGitHubRemoteUrl } from "./github-cli-discovery.ts";
+import {
+	reviewTargetFailure as failure,
+	type ReviewTargetFailure,
+	readReviewRemoteUrls,
+	selectCurrentReviewRemote,
+	selectNumberedReviewRemote,
+} from "./review-remote.ts";
 import type { CodeHostPullRequestSummary, ReviewCodeHostContextCaptureOptions } from "./types.ts";
 
 interface GitHubPullRequestLocator {
@@ -38,60 +42,6 @@ export function parseGitHubPullRequestUrl(value: string): GitHubPullRequestLocat
 	}
 }
 
-/** Local metadata only; never retain Git stderr, which can contain credential-bearing URLs. */
-async function readGit(args: string[], cwd: string, signal?: AbortSignal): Promise<string | undefined> {
-	if (signal?.aborted) throw new Error("GitHub context capture was cancelled.");
-	const env = { ...process.env };
-	for (const key of Object.keys(env)) {
-		if (
-			/^GIT_(?:DIR|WORK_TREE|COMMON_DIR|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|CEILING_DIRECTORIES|CONFIG(?:_.*)?)$/.test(
-				key,
-			)
-		)
-			delete env[key];
-	}
-	env.GIT_TERMINAL_PROMPT = "0";
-	env.GIT_OPTIONAL_LOCKS = "0";
-	env.GIT_PAGER = "cat";
-	const result = await new Promise<string | undefined>((resolve, reject) => {
-		const child = spawnProcess("git", args, { cwd, env, stdio: ["ignore", "pipe", "ignore"] });
-		const chunks: Buffer[] = [];
-		let bytes = 0;
-		let failed = false;
-		const terminate = (): void => {
-			failed = true;
-			if (child.pid) void terminateProcessTree(child.pid);
-			else child.kill();
-		};
-		const timeout = setTimeout(terminate, 2_500);
-		timeout.unref?.();
-		const finish = (code: number | null): void => {
-			clearTimeout(timeout);
-			signal?.removeEventListener("abort", terminate);
-			if (failed)
-				reject(new Error("Could not inspect Git tracking configuration. Check Git on the host and retry."));
-			else resolve(code === 0 ? Buffer.concat(chunks, bytes).toString("utf8").trim() : undefined);
-		};
-		child.stdout?.on("data", (chunk: Buffer) => {
-			if (failed) return;
-			bytes += chunk.length;
-			if (bytes > 64 * 1024) terminate();
-			else chunks.push(chunk);
-		});
-		child.once("error", () => {
-			failed = true;
-			finish(null);
-		});
-		child.once("close", finish);
-		signal?.addEventListener("abort", terminate, { once: true });
-		if (signal?.aborted) terminate();
-	});
-	if (signal?.aborted) throw new Error("GitHub context capture was cancelled.");
-	return result;
-}
-
-type PullRequestTargetFailure = { ok: false; error: string; remoteError: string };
-
 type CurrentPullRequestTarget =
 	| (CodeHostPullRequestSummary & {
 			ok: true;
@@ -101,21 +51,14 @@ type CurrentPullRequestTarget =
 			remote: string;
 			remoteUrl: string;
 	  })
-	| PullRequestTargetFailure;
-
-function failure(message: string): PullRequestTargetFailure {
-	return { ok: false, error: message, remoteError: message };
-}
+	| ReviewTargetFailure;
 
 async function resolveReviewRemoteRepository(
 	remote: string,
 	options: ReviewCodeHostContextCaptureOptions,
-): Promise<{ ok: true; repository: string; remoteUrl: string } | PullRequestTargetFailure> {
-	if (!/^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(remote)) {
-		return failure("The review remote is invalid. Check its configuration on the host.");
-	}
-	const urls =
-		(await readGit(["remote", "get-url", "--all", remote], options.cwd, options.signal))?.split(/\r?\n/) ?? [];
+): Promise<{ ok: true; repository: string; remoteUrl: string } | ReviewTargetFailure> {
+	const urls = await readReviewRemoteUrls(remote, options);
+	if (!Array.isArray(urls)) return urls;
 	const repositories = new Set<string>();
 	for (const value of urls) {
 		const repository = canonicalizeGitHubRemoteUrl(value);
@@ -140,26 +83,11 @@ async function resolveReviewRemoteRepository(
 /** Pin numbered lookups too: gh otherwise prefers a fork's parent repository. */
 export async function resolveNumberedReviewPullRequest(
 	options: ReviewCodeHostContextCaptureOptions,
-): Promise<{ ok: true; kind: "numbered"; url: string; remote: string; remoteUrl: string } | PullRequestTargetFailure> {
+): Promise<{ ok: true; kind: "numbered"; url: string; remote: string; remoteUrl: string } | ReviewTargetFailure> {
 	try {
-		const ref = await readGit(["symbolic-ref", "--quiet", "HEAD"], options.cwd, options.signal);
-		let remote: string | undefined;
-		if (ref !== undefined) {
-			if (!ref.startsWith("refs/heads/") || /[\0\r\n]/.test(ref)) throw new Error();
-			remote = await readGit(
-				["config", "--get", `branch.${ref.slice("refs/heads/".length)}.remote`],
-				options.cwd,
-				options.signal,
-			);
-		}
-		if (!remote || remote === ".") {
-			const names = (await readGit(["remote"], options.cwd, options.signal))?.split(/\r?\n/) ?? [];
-			remote = names.includes("origin") ? "origin" : names.length === 1 ? names[0] : undefined;
-			if (!remote)
-				return failure(
-					"Could not select a repository for the numbered PR. Configure a tracking remote, origin, or a single remote on the host.",
-				);
-		}
+		const selected = await selectNumberedReviewRemote(options);
+		if (!selected.ok) return selected;
+		const { remote } = selected;
 		const repository = await resolveReviewRemoteRepository(remote, options);
 		if (!repository.ok) return repository;
 		const locator = parseGitHubPullRequestUrl(`https://${repository.repository}/pull/${options.number}`);
@@ -179,36 +107,12 @@ export async function resolveCurrentReviewPullRequest(
 	options: ReviewCodeHostContextCaptureOptions,
 ): Promise<CurrentPullRequestTarget> {
 	try {
-		const ref = await readGit(["symbolic-ref", "--quiet", "HEAD"], options.cwd, options.signal);
-		if (!ref?.startsWith("refs/heads/") || /[\0\r\n]/.test(ref)) {
-			return failure(
-				"Current-PR review requires a checked-out branch. Check out the intended branch or specify a PR number.",
-			);
-		}
-		const upstream = await readGit(
-			["for-each-ref", "--format=%(refname)%00%(upstream:remotename)%00%(upstream:remoteref)", ref],
-			options.cwd,
-			options.signal,
-		);
-		const [observedRef, remote, remoteRef, extra] = upstream?.split("\0") ?? [];
-		if (
-			observedRef !== ref ||
-			extra !== undefined ||
-			!remote ||
-			remote === "." ||
-			!/^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(remote) ||
-			!remoteRef?.startsWith("refs/heads/") ||
-			remoteRef.length <= "refs/heads/".length ||
-			/[\0\r\n]/.test(remoteRef)
-		) {
-			return failure(
-				"Current-PR review requires a remote tracking branch. Configure the intended upstream on the host or specify a PR number.",
-			);
-		}
+		const selected = await selectCurrentReviewRemote(options);
+		if (!selected.ok) return selected;
+		const { remote, headBranch } = selected;
 		const resolvedRepository = await resolveReviewRemoteRepository(remote, options);
 		if (!resolvedRepository.ok) return resolvedRepository;
 		const { repository } = resolvedRepository;
-		const headBranch = remoteRef.slice("refs/heads/".length);
 		const result = await runGitHubCli(
 			[
 				"pr",

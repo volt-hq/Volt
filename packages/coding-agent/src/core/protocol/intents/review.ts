@@ -392,7 +392,7 @@ export const reviewIntent = defineIntent({
 	name: "review",
 	label: "Review",
 	description:
-		"Review code changes. uncommitted: the uncommitted workspace changes. branch: the current branch against a refreshed upstream merge base, using host Git credentials and network; full refs use local cached state. branch_uncommitted: the same comparison, plus the uncommitted and untracked changes in the workspace. pr: a pull request using the built-in GitHub CLI code-host provider, host credentials, and network; its metadata, diff, authoritative linked issues, comments, submitted review summaries, and inline review threads are sent to discovery and verification, while retained finding prose is rendered separately without code-host context. commit: a commit from workspace history; its metadata and diff are sent to the review model.",
+		"Review code changes. uncommitted: the uncommitted workspace changes. branch: the current branch against a refreshed upstream merge base, using host Git credentials and network; full refs use local cached state. branch_uncommitted: the same comparison, plus the uncommitted and untracked changes in the workspace. pr: a pull request using the built-in code-host provider that matches the repository remote (GitHub CLI), host credentials, and network; its metadata, diff, authoritative linked issues, comments, submitted review summaries, and inline review threads are sent to discovery and verification, while retained finding prose is rendered separately without code-host context. commit: a commit from workspace history; its metadata and diff are sent to the review model.",
 	presentation: { kind: "card", group: "Review", priority: 100, icon: "magnifyingglass" },
 	slash: {
 		name: "review",
