@@ -162,6 +162,31 @@ export class McpMetadataCache {
 		return tool ? structuredClone(tool) : undefined;
 	}
 
+	/**
+	 * Whether any requested category is older than `refreshMs` on this cache's clock, the same clock that
+	 * stamps refreshes. Missing metadata and reset or unparseable timestamps are stale.
+	 */
+	isStale(
+		metadata: Pick<McpServerMetadata, "toolsLastSeenAt" | "resourcesLastSeenAt" | "promptsLastSeenAt"> | undefined,
+		refreshMs: number,
+		categories: readonly McpMetadataCategory[],
+	): boolean {
+		if (!metadata) {
+			return true;
+		}
+		const now = this.now();
+		return categories.some((category) => {
+			const value =
+				category === "tools"
+					? metadata.toolsLastSeenAt
+					: category === "resources"
+						? metadata.resourcesLastSeenAt
+						: metadata.promptsLastSeenAt;
+			const seenAt = Date.parse(value);
+			return !Number.isFinite(seenAt) || now - seenAt > refreshMs;
+		});
+	}
+
 	getDiscovery(server: string): McpDiscoveryMetadata | undefined {
 		const metadata = this.servers.get(server);
 		if (!metadata) return undefined;
