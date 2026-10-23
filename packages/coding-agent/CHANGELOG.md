@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.6.0] - 2026-10-23
+
+Standalone Windows executables in this release are not code-signed. Windows may show a SmartScreen warning when you first run them.
+
+### Breaking Changes
+
+- **compaction:** Compaction and branch summaries now keep every file the session read or modified, including files from before an extension's compaction, files recorded by branch summaries, and files in a long abandoned branch. ([#953](https://github.com/volt-hq/Volt/issues/953))
+  Every `branch_summary` entry now records the abandoned branch's files in required `readFiles` and `modifiedFiles` fields, whether Volt or an extension wrote the summary; built-in branch summaries no longer store them in `details`, and `BranchSummaryDetails` is removed. Sessions saved before this release that contain a branch summary no longer open; start a new session, or fork it from an entry before its first branch summary with an earlier release.
+
+  SDK callers: a `ConversationSummarizer.summarizeBranch` result and a navigation `prepare` summary must include `readFiles` and `modifiedFiles`. Protocol clients receive both fields on `branch_summary` entries.
+
+### Improvements
+
+- **tools:** Bash calls can carry a short description, up to 10 words, that tool cards show as their title, with the command shown beneath it.
+
+### Fixes
+
+- **daemon:** Conversation workers and extension inventories now end every process still descended from them when they exit, however they exit, the same way on macOS, Linux, and Windows. ([#952](https://github.com/volt-hq/Volt/issues/952), [#971](https://github.com/volt-hq/Volt/issues/971))
+  A process whose parent exited first, such as a server started with `nohup … &` through the bash tool, keeps running when a worker stops; on macOS and Linux a worker crash can still end it. See [daemon.md](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/daemon.md#processes-a-conversation-started).
+- **examples:** Updated the sandbox extension example's shell-quote dependency to 1.12.0 for GHSA-pqg4-j6r4-53mv, which also fixes sandboxed commands containing both `'` and `!` (for example `echo 'hi!'` printed `hi\!`). ([#844](https://github.com/volt-hq/Volt/issues/844))
+- **remote:** A phone opening a conversation in use by another client now gets a conversation_in_use rejection naming its workspace and session instead of a handshake protocol error. ([#962](https://github.com/volt-hq/Volt/issues/962))
+
 ## [0.5.0] - 2026-10-21
 
 Standalone Windows executables in this release are not code-signed. Windows may show a SmartScreen warning when you first run them.
