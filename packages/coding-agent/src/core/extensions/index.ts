@@ -93,6 +93,8 @@ export {
 export type {
 	AfterProviderResponseEvent,
 	AgentEndEvent,
+	AgentSettledEvent,
+	AgentSettledEventResult,
 	AgentStartEvent,
 	// Re-exports
 	AgentToolResult,

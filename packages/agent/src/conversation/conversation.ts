@@ -572,7 +572,7 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 	): Promise<ConversationInputAdmission> {
 		this.assertActive();
 		const reserved = options.reservation === undefined ? undefined : this.takeReservation(options.reservation);
-		return await this.admit("prompt", input, { reserved });
+		return await this.admit("prompt", input, { reserved, assertCurrent: options.assertCurrent });
 	}
 
 	steer(input: ConversationInput): Promise<ConversationInputAdmission> {
@@ -814,6 +814,7 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		options: {
 			readonly reserved?: OperationLease<ConversationOperationKind> | undefined;
 			readonly deliver?: boolean;
+			readonly assertCurrent?: (() => void) | undefined;
 		} = {},
 	): Promise<ConversationInputAdmission> {
 		const reserved = options.reserved;
@@ -822,8 +823,22 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		let clientMessageId: string;
 		let payload: ClientInputPayload;
 		let immediate: boolean;
+		let revoked = false;
+		let ownsInput = false;
+		const assertCurrent = () => {
+			try {
+				options.assertCurrent?.();
+			} catch (error) {
+				revoked = true;
+				throw error;
+			}
+		};
 		try {
 			this.assertActive();
+			if (options.assertCurrent && !reserved) {
+				throw new ConversationError("invalid_argument", "An admission authority check requires a reservation");
+			}
+			assertCurrent();
 			if (command !== "prompt" && input.streamingBehavior !== undefined) {
 				throw new ConversationError("invalid_argument", "Only a prompt may set streamingBehavior");
 			}
@@ -877,6 +892,8 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 					return { admission: this.readmit(record, command, origin, digest), delivered: false };
 				}
 				if (record) this.assertSameInput(record, command, origin, digest);
+				ownsInput = true;
+				assertCurrent();
 				const entries = await this.commitInLane((drafts) => {
 					const receiptId =
 						record?.receiptId ??
@@ -928,8 +945,18 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		let result: Awaited<typeof admission>;
 		try {
 			result = await admission;
+			// The reservation still excludes every other turn. Revoke before its
+			// queued delivery can be consumed, including cancellation during append.
+			assertCurrent();
 		} catch (error) {
-			if (lease) this.coordinator.finish(lease);
+			try {
+				const record = this.foldState.clientInputs.inputs.get(clientMessageId);
+				if (revoked && ownsInput && (record?.state === "accepted" || record?.state === "started")) {
+					await this.settleClientInput(clientMessageId, { state: "failed", error: toError(error).message });
+				}
+			} finally {
+				if (lease) this.coordinator.finish(lease);
+			}
 			throw error;
 		} finally {
 			if (this.admitting.get(clientMessageId) === admission) this.admitting.delete(clientMessageId);
@@ -1936,15 +1963,18 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		};
 	}
 
-	private async handleAgentEvent(event: AgentEvent, run: TurnRun): Promise<AgentMessage | undefined> {
+	private async handleAgentEvent(event: AgentEvent, run: TurnRun, recover = true): Promise<AgentMessage | undefined> {
 		switch (event.type) {
 			case "message_end": {
 				if (run.committedMessages.has(event.message)) {
 					await this.publishAgent(event);
 					return undefined;
 				}
-				const terminal = event.message.role === "assistant" && event.message.stopReason !== "toolUse";
-				run.terminalSettling = terminal && !this.hasWakingInput();
+				// A failed request ends the loop even with queued input: decide recovery before it settles.
+				run.terminalSettling =
+					event.message.role === "assistant" &&
+					event.message.stopReason !== "toolUse" &&
+					(event.message.stopReason === "error" || !this.hasWakingInput());
 				let message = this.withAbortDiagnostic(event.message, run);
 				const hook = this.policy.messageEnd;
 				if (hook) {
@@ -1960,8 +1990,17 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 				if (message.role === "assistant") run.lastAssistantEntryId = entry?.id;
 				run.committedMessages.add(message);
 				run.newMessages.push(message);
+				if (
+					run.retryAttempt > 0 &&
+					message.role === "assistant" &&
+					(message.stopReason === "stop" || message.stopReason === "toolUse") &&
+					!run.signal.aborted
+				) {
+					// Recovery belongs to this request, not the whole tool-calling operation.
+					void this.publishRetryEnd(run, true);
+				}
 				if (run.terminalSettling && message.role === "assistant" && !run.signal.aborted) {
-					run.followUp = await this.decideFollowUp(run, message);
+					run.followUp = recover ? await this.decideFollowUp(run, message) : undefined;
 					if (!run.followUp) this.coordinator.sealTerminal(run.lease);
 				}
 				await this.publishAgent({ ...event, message });
@@ -2051,7 +2090,8 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 	private async settleLoopFailure(run: TurnRun, model: Model<Api>, error: unknown): Promise<void> {
 		const attempt = async (event: AgentEvent): Promise<AgentMessage | undefined> => {
 			try {
-				return await this.handleAgentEvent(event, run);
+				// A failed delivery transaction must settle, not replay through provider recovery.
+				return await this.handleAgentEvent(event, run, !(error instanceof AgentDeliverySettlementError));
 			} catch {
 				return undefined;
 			}

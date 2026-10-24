@@ -293,7 +293,7 @@ export interface ExtensionContext {
 	isIdle(): boolean;
 	/** Whether project-local trust is active for this context. */
 	isProjectTrusted(): boolean;
-	/** The current abort signal, or undefined when the agent is not streaming. */
+	/** The current run's abort signal, or the proposal-revocation signal inside `agent_settled`; otherwise undefined. */
 	signal: AbortSignal | undefined;
 	/** Abort the current agent operation */
 	abort(): void;
@@ -1124,6 +1124,23 @@ export interface AgentEndEvent {
 	messages: AgentMessage[];
 }
 
+/** A foreground operation ended, after retries, compaction, and queued successors. */
+export interface AgentSettledEvent {
+	type: "agent_settled";
+	outcome: "completed" | "aborted" | "failed" | "stopped";
+	/**
+	 * Revoked by abort, newer input, or extension retirement. Never reuse a revoked proposal.
+	 * Host reasons: `aborted`, `superseded`, or `failed` (dispatch failed).
+	 * Retirement/closure may use the platform's default abort reason.
+	 */
+	signal: AbortSignal;
+}
+
+export interface AgentSettledEventResult {
+	/** Propose a fresh extension-source prompt. Only successful, still-current settlements may continue. */
+	prompt: string;
+}
+
 /** Fired at the start of each turn */
 export interface TurnStartEvent {
 	type: "turn_start";
@@ -1496,6 +1513,7 @@ export type ExtensionEvent =
 	| BeforeAgentStartEvent
 	| AgentStartEvent
 	| AgentEndEvent
+	| AgentSettledEvent
 	| TurnStartEvent
 	| TurnEndEvent
 	| MessageStartEvent
@@ -1534,6 +1552,7 @@ const EXTENSION_EVENTS: { readonly [Name in ExtensionEvent["type"]]: true } = {
 	before_agent_start: true,
 	agent_start: true,
 	agent_end: true,
+	agent_settled: true,
 	turn_start: true,
 	turn_end: true,
 	message_start: true,
@@ -1811,6 +1830,8 @@ export interface ExtensionAPI<TSettings extends ExtensionSettingsShape = Extensi
 	on(event: "before_agent_start", handler: ExtensionHandler<BeforeAgentStartEvent, BeforeAgentStartEventResult>): void;
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
+	/** Return a proposal instead of sending input here. First proposal wins; handled commands emit no event. */
+	on(event: "agent_settled", handler: ExtensionHandler<AgentSettledEvent, AgentSettledEventResult>): void;
 	on(event: "turn_start", handler: ExtensionHandler<TurnStartEvent>): void;
 	on(event: "turn_end", handler: ExtensionHandler<TurnEndEvent>): void;
 	on(event: "message_start", handler: ExtensionHandler<MessageStartEvent>): void;

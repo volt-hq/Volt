@@ -12,7 +12,7 @@ Every hook is optional. Treat arguments as read-only and return changes instead 
 4. The response: `messageEnd` (origin `"loop"`), then its commit.
 5. Each tool call: `beforeToolCall`, execution, `afterToolCall`, then `messageEnd` (origin `"loop"`) and the commit of its result.
 6. After a completed request the turn returns to step 1. Before `nextAction`, `compaction` runs when the turn would continue.
-7. After the turn's final message: `retry` when it failed, otherwise `compaction` (also for a failure that overflowed the context).
+7. After a failed request, even with input queued: `retry`, or `compaction` for a context overflow. After the turn's successful final message: `compaction`.
 
 ## nextAction
 
@@ -122,7 +122,9 @@ A throwing tool hook produces an error tool result with the thrown message.
 retry?: (error: ProviderError, attempt: number, message: AssistantMessage) => number | undefined;
 ```
 
-Consulted when a turn's final assistant message failed (`stopReason: "error"` with a typed `error`). Return a backoff in milliseconds to retry, or `undefined` to stop. `attempt` counts from 1 within one turn operation. The backoff runs inside the turn operation, so no other operation is admitted between the failure and the retry; an abort during the backoff ends the turn. The kernel publishes `retry_start` before the backoff and `retry_end` when the retries end.
+Consulted when an assistant request failed (`stopReason: "error"` with a typed `error`), even when input is queued. A failed response ends the low-level loop, so pending prompts, steering, follow-ups, and background-job notices cannot replace this recovery decision. Return a backoff in milliseconds to retry, or `undefined` to stop. `attempt` counts consecutive failures from 1. A committed successful assistant response (`stopReason: "stop"` or `"toolUse"`) ends recovery and resets the count, even when tools or compaction continue the same turn operation. Sporadic failures separated by successful requests therefore do not exhaust a shared turn-wide retry budget; consecutive failures still exhaust the host's configured limit. The backoff runs inside the turn operation, so no other operation is admitted between the failure and the retry; an abort during the backoff ends the turn. The kernel publishes `retry_start` before the backoff and `retry_end` when the retries end.
+
+On recovery, queued input follows the usual delivery order: steering can join the retried request, and follow-ups wait until the turn would otherwise stop. If recovery is declined or exhausted, already-queued input remains pending; it does not turn the failure into a successful settlement. A failed input delivery transaction ends the turn without invoking provider recovery; it is not automatically replayed.
 
 A context overflow on the current model goes to `compaction` instead, once per turn operation, when the conversation has a summarizer and a `compaction` hook. If the hook declines, the turn ends without a retry.
 

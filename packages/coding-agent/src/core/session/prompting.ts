@@ -30,6 +30,7 @@ import type { ResourceLoader } from "../resource-loader.ts";
 import type { SessionWriter } from "../session-writer.ts";
 import type { SessionBash } from "./bash.ts";
 import { createLocalClientInputId, type LiveClientInput, type SessionClientInputs } from "./client-inputs.ts";
+import { SessionContinuations, type SettlementScope } from "./continuations.ts";
 import type { SessionEvents } from "./events.ts";
 import type { SessionExtensionServices } from "./extension-services.ts";
 import type { SessionLifecycle } from "./lifecycle.ts";
@@ -71,6 +72,10 @@ export interface SessionPromptingHost {
 	waitForIdle(): Promise<void>;
 	/** An `isBusy` input changed. */
 	activityChanged(): void;
+	/** Host policy permits autonomous fresh prompts (never Plan or review-discussion mode). */
+	canContinue(): boolean;
+	promptingCommandRunning(): boolean;
+	continuePrompt(text: string, scope: SettlementScope, assertCurrent: () => void, admitted: () => void): Promise<void>;
 	/** The session's prompt, which extension user messages go through. */
 	prompt(text: string, options?: PromptOptions): Promise<void>;
 	emit(event: AgentSessionEvent): void;
@@ -78,6 +83,7 @@ export interface SessionPromptingHost {
 
 export class SessionPrompting {
 	private readonly host: SessionPromptingHost;
+	readonly continuations: SessionContinuations;
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private readonly pendingNextTurnMessages: CustomMessage[] = [];
 	/** Inputs extensions sent (`sendUserMessage`) that have not settled; they start no extension tasks. */
@@ -90,6 +96,7 @@ export class SessionPrompting {
 
 	constructor(host: SessionPromptingHost) {
 		this.host = host;
+		this.continuations = new SessionContinuations(host);
 	}
 
 	/** Whether an extension command handler is running. */
@@ -131,7 +138,16 @@ export class SessionPrompting {
 	}
 
 	/** A prompt, admitted as prompt work: see {@link AgentSession.prompt}. */
-	async promptAdmitted(text: string, options?: PromptOptions): Promise<void> {
+	async promptAdmitted(text: string, options?: PromptOptions, scope?: SettlementScope): Promise<void> {
+		const prepared = this.continuations.input(scope);
+		try {
+			await this.preparePrompt(text, options, prepared);
+		} finally {
+			prepared();
+		}
+	}
+
+	private async preparePrompt(text: string, options: PromptOptions | undefined, prepared: () => void): Promise<void> {
 		if (this.host.isDisposed()) {
 			throw new Error("Cannot prompt a disposed session");
 		}
@@ -213,6 +229,7 @@ export class SessionPrompting {
 				live,
 				reservation,
 				assertConversationGenerationCurrent,
+				prepared,
 			);
 		} catch (error) {
 			const normalized = clientInputs.inputError(error);
@@ -264,6 +281,7 @@ export class SessionPrompting {
 		live: LiveClientInput | undefined,
 		initialReservation: ConversationTurnReservation | undefined,
 		assertConversationGenerationCurrent: () => void,
+		prepared: () => void,
 	): Promise<PromptDispatchOutcome> {
 		const clientInputs = this.host.clientInputs();
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
@@ -463,6 +481,7 @@ export class SessionPrompting {
 			throw error;
 		}
 
+		prepared();
 		// The turn's requests use the before_agent_start override as admitted.
 		if (reservation) this.turnSystemPromptOverrides.set(reservation.id, systemPromptOverride);
 		const clientMessageId = input.clientMessageId!;
@@ -470,9 +489,17 @@ export class SessionPrompting {
 		if (!live) clientInputs.live.set(clientMessageId, tracked);
 		let admitted: ConversationInputAdmission;
 		try {
-			admitted = await this.host
-				.conversation()
-				.prompt({ ...input, attachments }, reservation === undefined ? {} : { reservation });
+			admitted = await this.host.conversation().prompt(
+				{ ...input, attachments },
+				reservation === undefined
+					? {}
+					: {
+							reservation,
+							...(options?.assertConversationGenerationCurrent
+								? { assertCurrent: assertConversationGenerationCurrent }
+								: {}),
+						},
+			);
 		} catch (error) {
 			if (reservation) this.turnSystemPromptOverrides.delete(reservation.id);
 			if (!live && clientInputs.live.get(clientMessageId) === tracked) {
@@ -622,6 +649,7 @@ export class SessionPrompting {
 	 * rethrown.
 	 */
 	async runExtensionIntent(intent: RegisteredIntent, input: unknown): Promise<void> {
+		this.continuations.invalidate("superseded");
 		const ctx = this.host
 			.extensionRunner()
 			.createCommandContext(() => this.host.waitForIdle(), this.host.lifetimeSignal, intent.extensionId);
@@ -679,6 +707,20 @@ export class SessionPrompting {
 
 	/** Queue durable steering or follow-up input; it is acknowledged once its queue intent commits. */
 	async queueInput(
+		command: "steer" | "follow_up",
+		text: string,
+		images: ImageContent[] | undefined,
+		clientMessageId: string | undefined,
+	): Promise<void> {
+		const prepared = this.continuations.input();
+		try {
+			await this.prepareQueueInput(command, text, images, clientMessageId);
+		} finally {
+			prepared();
+		}
+	}
+
+	private async prepareQueueInput(
 		command: "steer" | "follow_up",
 		text: string,
 		images: ImageContent[] | undefined,
@@ -759,6 +801,7 @@ export class SessionPrompting {
 		if (this.host.hasSessionOperationBarrier()) {
 			throw new Error("Cannot append a custom message while a session mutation is active");
 		}
+		if (options?.triggerTurn || this.host.turnActive()) this.continuations.invalidate("superseded");
 		const ownedInput = cloneCanonicalData(message, "Custom message input");
 		const appMessage = cloneCanonicalData(
 			{

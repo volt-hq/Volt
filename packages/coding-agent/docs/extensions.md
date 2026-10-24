@@ -716,7 +716,7 @@ Inside `before_agent_start`, `event.systemPrompt` and `ctx.getSystemPrompt()` bo
 
 #### agent_start / agent_end
 
-Fired once per user prompt.
+Fired for each agent loop. Retries and compaction recovery can run additional loops for one prompt. `agent_end` is **not** successful foreground settlement; use `agent_settled` for automatic continuation.
 
 ```typescript
 volt.on("agent_start", async (_event, ctx) => {});
@@ -725,6 +725,28 @@ volt.on("agent_end", async (event, ctx) => {
   // event.messages - messages from this prompt
 });
 ```
+
+#### agent_settled
+
+Fired after an actual foreground operation finishes, including automatic retries, compaction, and queued successors. Handled commands and intercepted inputs that run no agent do not fire this extension event. It is distinct from the SDK's notification-only `agent_settled` event.
+
+`event.outcome` is `completed`, `aborted`, `failed` (including failed recovery), or `stopped` (policy/tool stop). Return `{ prompt }` to **propose** a fresh extension-source prompt; do not send input from this handler. The first valid proposal in extension load/registration order wins. All handlers may observe the settlement.
+
+```typescript
+volt.on("agent_settled", async (event, ctx) => {
+  if (event.outcome !== "completed" || event.signal.aborted) return;
+  // Read your extension's current, explicitly enabled automation state here.
+  // Return undefined when finished, paused, blocked, or awaiting user input.
+  if (!goalIsActive()) return;
+  return { prompt: "Continue the confirmed goal; stop if blocked or complete." };
+});
+```
+
+Volt admits a proposal only while its originating operation, branch, extension instance, and stop generation are still current, with no newer or pending input. Plan mode and review discussions never admit these proposals. Abort (including a late abort after terminal notification), input, navigation, reload, disable, or closure can revoke one. Revoked proposals are discarded, not queued for replay. Ordinary input and `before_agent_start` hooks still run for an admitted prompt; the host rechecks its authority after asynchronous preflight and receipt persistence, before starting the reserved turn.
+
+`event.signal` and this handler's `ctx.signal` represent proposal cancellation, not the already-ended operation's signal. Check it after awaits and use it to pause extension-owned automation if cancellation arrives while preparing a proposal. Host cancellation reasons are `aborted`, `superseded` (newer input or session changes), and `failed` (dispatch failed); retirement/closure may use the platform's default abort reason. A superseded notification must not mutate newer automation state. Remove extension-owned listeners when no longer needed, and retain no session contexts across retirement. Hooks run outside the conversation's serialized event-delivery tail. `session.waitForIdle()` includes pending proposals and turns they start, whereas the SDK settlement notification still describes the operation just ended.
+
+There is no built-in continuation count. Extensions must stop on completion, explicit pause/abort, failure, or host policy; they must not reinterpret cancellation as permission to try again. Daemon sessions may continue after clients detach, so make that behavior explicit before enabling automation.
 
 #### turn_start / turn_end
 
