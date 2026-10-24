@@ -102,27 +102,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isMetadataStale(
-	metadata: Pick<McpServerMetadata, "toolsLastSeenAt" | "resourcesLastSeenAt" | "promptsLastSeenAt"> | undefined,
-	maxAgeMs: number,
-	categories: readonly McpMetadataCategory[],
-): boolean {
-	if (!metadata) {
-		return true;
-	}
-	const now = Date.now();
-	return categories.some((category) => {
-		const value =
-			category === "tools"
-				? metadata.toolsLastSeenAt
-				: category === "resources"
-					? metadata.resourcesLastSeenAt
-					: metadata.promptsLastSeenAt;
-		const seenAt = Date.parse(value);
-		return !Number.isFinite(seenAt) || now - seenAt > maxAgeMs;
-	});
-}
-
 const ALL_METADATA_CATEGORIES: readonly McpMetadataCategory[] = Object.freeze(["tools", "resources", "prompts"]);
 const TOOL_METADATA_CATEGORIES: readonly McpMetadataCategory[] = Object.freeze(["tools"]);
 const TOOLS_ONLY_METADATA_REFRESH: McpMetadataRefreshOptions = Object.freeze({
@@ -1274,7 +1253,7 @@ export class McpManager {
 		if (metadata && metadata.configHash !== hashMcpServerConfig(supervisor.server)) {
 			return true;
 		}
-		return isMetadataStale(
+		return this.metadataCache.isStale(
 			metadata,
 			getServerTimeoutMs(supervisor.server, this.config.settings, "refresh"),
 			categories,

@@ -6,6 +6,7 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	createEmptyMcpMergedConfig,
+	DEFAULT_MCP_SETTINGS,
 	finalizeMcpConfig,
 	mergeMcpConfigFile,
 	sourceForMcpConfigPath,
@@ -113,7 +114,13 @@ async function createFixture(
 		sessionId: "469",
 		workspaceId: "fixture",
 	});
-	const metadataCache = new McpMetadataCache({ agentDir: directory, maxBytes: options.metadataBytes });
+	// MCP metadata freshness is stamped and evaluated on this one clock; tests advance it explicitly.
+	const clock = { now: Date.now() };
+	const metadataCache = new McpMetadataCache({
+		agentDir: directory,
+		maxBytes: options.metadataBytes,
+		now: () => clock.now,
+	});
 	const manager = new McpManager({
 		config,
 		clientFactory: { connect: async () => connection },
@@ -151,7 +158,7 @@ async function createFixture(
 		} while (cursor);
 		return restored;
 	};
-	return { manager, gateway, connection, harness, store, directory, metadataCache, execute, readAll };
+	return { manager, gateway, connection, harness, store, directory, metadataCache, clock, execute, readAll };
 }
 
 describe("#469 bounded MCP model output", () => {
@@ -353,10 +360,13 @@ describe("#469 bounded MCP model output", () => {
 	});
 
 	it("retains stale-state reporting and treats cancellation as cancellation", async () => {
-		const { manager, gateway, connection, execute } = await createFixture();
+		const { manager, gateway, connection, clock, execute } = await createFixture();
 		await manager.listTools("fake");
-		vi.spyOn(Date, "now").mockReturnValue(Date.now() + 86_400_000);
 		vi.spyOn(connection, "listTools").mockRejectedValue(new Error("offline"));
+		clock.now += DEFAULT_MCP_SETTINGS.metadataRefreshMs;
+		const atWindow = await execute({ action: "list_tools", server: "fake" });
+		expect(atWindow.result.details.result).toMatchObject({ stale: false, tools: [{ name: "read_note" }] });
+		clock.now += 1;
 		const { result } = await execute({ action: "list_tools", server: "fake" });
 		expect(result.details.result).toMatchObject({ stale: true, tools: [{ name: "read_note" }] });
 		await expect(
@@ -436,7 +446,7 @@ describe("#469 bounded MCP model output", () => {
 	});
 
 	it("reports search coverage without starting cold servers or cloning schemas", async () => {
-		const { execute, manager, connection, metadataCache } = await createFixture();
+		const { execute, manager, connection, metadataCache, clock } = await createFixture();
 		const list = vi.spyOn(connection, "listTools");
 		const cold = await execute({ action: "search", query: "read note", server: "FAKE" });
 		expect(cold.data.coverage).toEqual({ searchedServers: [], missingServers: ["fake"], staleServers: [] });
@@ -447,7 +457,7 @@ describe("#469 bounded MCP model output", () => {
 		expect(warm.data.matches?.[0].tool).toBe("read_note");
 		expect(warm.data.coverage?.searchedServers).toEqual(["fake"]);
 		expect(clone).not.toHaveBeenCalled();
-		vi.spyOn(Date, "now").mockReturnValue(Date.now() + 86_400_000);
+		clock.now += DEFAULT_MCP_SETTINGS.metadataRefreshMs + 1;
 		const stale = await execute({ action: "search", query: "read note", server: "fake" });
 		expect(stale.data.matches).toEqual([]);
 		expect(stale.data.coverage?.staleServers).toEqual(["fake"]);
