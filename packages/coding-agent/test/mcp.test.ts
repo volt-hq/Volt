@@ -831,7 +831,66 @@ describe("MCP support", () => {
 		expect(reloaded.getAll()).toEqual([]);
 	});
 
-	it("measures the exact pretty-printed metadata cache payload against the byte cap", () => {
+	it("retains searchable schema-heavy catalogs without spending the cache budget on indentation", async () => {
+		const tempDir = makeTempDir();
+		tempDirs.push(tempDir);
+		const maxBytes = 64 * 1024;
+		const tool: SdkTool = {
+			name: "read_note",
+			description: "Read a note",
+			inputSchema: {
+				type: "object",
+				properties: Object.fromEntries(
+					Array.from({ length: 500 }, (_, index) => [
+						`field_${index}`,
+						{ type: "string", description: "Read a value.", enum: ["first", "second"] },
+					]),
+				),
+				required: ["field_0"],
+			},
+			outputSchema: { type: "object", properties: { note: { type: "string" } }, required: ["note"] },
+		};
+		const config = createTestConfig(tempDir);
+		const metadataCache = new McpMetadataCache({ agentDir: tempDir, maxBytes });
+		let metadataReads = 0;
+		const manager = new McpManager({
+			config,
+			clientFactory: {
+				connect: async () => ({
+					...(await createFakeFactory("note").connect(config.servers.fake, {})),
+					listTools: async () => {
+						metadataReads++;
+						return { tools: [tool] };
+					},
+				}),
+			},
+			metadataCache,
+			outputStore: new McpOutputStore({ agentDir: tempDir }),
+		});
+		try {
+			await manager.connectServer("fake");
+			expect(manager.search("read_note").matches).toEqual([expect.objectContaining({ tool: "read_note" })]);
+			expect(manager.getServer("fake").toolCounts).toEqual({ cached: 1, live: 1, enabled: 1 });
+			expect(await manager.describe("fake", "read_note")).toMatchObject({
+				inputSchema: tool.inputSchema,
+				outputSchema: tool.outputSchema,
+			});
+			await manager.callTool({ action: "call", server: "fake", tool: "read_note" }, createGatewayContext());
+			expect(metadataReads).toBe(1);
+
+			const metadata = metadataCache.get("fake");
+			const prettyBytes = Buffer.byteLength(JSON.stringify({ version: 2, servers: { fake: metadata } }, null, 2));
+			expect(prettyBytes).toBeGreaterThan(maxBytes);
+			expect(statSync(join(tempDir, "mcp", "metadata-cache.json")).size).toBeLessThanOrEqual(maxBytes);
+			const reloaded = new McpMetadataCache({ agentDir: tempDir, maxBytes });
+			expect(reloaded.get("fake")).toEqual(metadata);
+			expect(reloaded.getTool("fake", "read_note")).toEqual(tool);
+		} finally {
+			await manager.dispose();
+		}
+	});
+
+	it("measures the exact serialized metadata cache payload against the byte cap", () => {
 		const tempDir = makeTempDir();
 		tempDirs.push(tempDir);
 		const cache = new McpMetadataCache({ agentDir: tempDir, maxBytes: 240 });

@@ -93,6 +93,7 @@ export class McpServerSupervisor {
 	private lastConnectedAtValue: string | undefined;
 	private liveToolCountValue: number | undefined;
 	private idleTimer: NodeJS.Timeout | undefined;
+	private activeRequests = 0;
 	private connecting: Promise<McpClientConnection> | undefined;
 	private metadataCommitQueue: Promise<void> = Promise.resolve();
 	private connectGeneration = 0;
@@ -263,79 +264,76 @@ export class McpServerSupervisor {
 		if (refreshedCategories.length === 0) {
 			throw new Error(`MCP metadata refresh requires at least one category: ${this.server.id}`);
 		}
-		const connection = await this.connect(signal);
-		this.setState({ status: "discovering" });
-		try {
-			const tools = refreshTools ? await this.listAllTools(connection, signal) : undefined;
-			const resources = refreshResources
-				? options.strict
-					? await this.listAllResources(connection, signal)
-					: await this.listAllResources(connection, signal).catch((): Resource[] => [])
-				: undefined;
-			const prompts = refreshPrompts
-				? options.strict
-					? await this.listAllPrompts(connection, signal)
-					: await this.listAllPrompts(connection, signal).catch((): Prompt[] => [])
-				: undefined;
-			const serverVersion = connection.getServerVersion();
-			const metadata = await this.commitMetadata(() => {
-				const cached = this.cachedMetadata;
-				return this.metadataCache.set(
-					this.server.id,
-					{
-						server: this.server.id,
-						...(serverVersion ? { serverVersion: `${serverVersion.name}@${serverVersion.version}` } : {}),
-						configHash: hashMcpServerConfig(this.server),
-						tools: refreshTools
-							? uniqueByName(tools ?? []).filter((tool) => serverMatchesToolFilters(this.server, tool.name))
-							: (cached?.tools ?? []),
-						resources: refreshResources ? (resources ?? []) : (cached?.resources ?? []),
-						prompts: refreshPrompts ? (prompts ?? []) : (cached?.prompts ?? []),
-					},
-					refreshedCategories,
-				);
-			});
-			if (refreshTools) {
-				this.liveToolCountValue = metadata.tools.length;
+		return this.withConnection(signal, async (connection) => {
+			this.setState({ status: "discovering" });
+			try {
+				const tools = refreshTools ? await this.listAllTools(connection, signal) : undefined;
+				const resources = refreshResources
+					? options.strict
+						? await this.listAllResources(connection, signal)
+						: await this.listAllResources(connection, signal).catch((): Resource[] => [])
+					: undefined;
+				const prompts = refreshPrompts
+					? options.strict
+						? await this.listAllPrompts(connection, signal)
+						: await this.listAllPrompts(connection, signal).catch((): Prompt[] => [])
+					: undefined;
+				const serverVersion = connection.getServerVersion();
+				const metadata = await this.commitMetadata(() => {
+					const cached = this.cachedMetadata;
+					return this.metadataCache.set(
+						this.server.id,
+						{
+							server: this.server.id,
+							...(serverVersion ? { serverVersion: `${serverVersion.name}@${serverVersion.version}` } : {}),
+							configHash: hashMcpServerConfig(this.server),
+							tools: refreshTools
+								? uniqueByName(tools ?? []).filter((tool) => serverMatchesToolFilters(this.server, tool.name))
+								: (cached?.tools ?? []),
+							resources: refreshResources ? (resources ?? []) : (cached?.resources ?? []),
+							prompts: refreshPrompts ? (prompts ?? []) : (cached?.prompts ?? []),
+						},
+						refreshedCategories,
+					);
+				});
+				if (refreshTools) {
+					this.liveToolCountValue = metadata.tools.length;
+				}
+				this.setState({ status: "ready" });
+				return metadata;
+			} catch (error) {
+				this.lastErrorValue = messageFromError(error);
+				this.setState({ status: isAbortError(error) ? "disconnected" : "error" });
+				throw error;
 			}
-			this.setState({ status: "ready" });
-			this.resetIdleTimer();
-			return metadata;
-		} catch (error) {
-			this.lastErrorValue = messageFromError(error);
-			this.setState({ status: isAbortError(error) ? "disconnected" : "error" });
-			throw error;
-		}
+		});
 	}
 
 	async listResources(cursor: string | undefined, signal?: AbortSignal): Promise<ListResourcesResult> {
-		const connection = await this.connect(signal);
-		const result = await connection.listResources(
-			cursor ? { cursor } : undefined,
-			requestOptions(signal, getServerTimeoutMs(this.server, this.settings, "metadata")),
+		return this.withConnection(signal, (connection) =>
+			connection.listResources(
+				cursor ? { cursor } : undefined,
+				requestOptions(signal, getServerTimeoutMs(this.server, this.settings, "metadata")),
+			),
 		);
-		this.resetIdleTimer();
-		return result;
 	}
 
 	async readResource(uri: string, signal?: AbortSignal): Promise<ReadResourceResult> {
-		const connection = await this.connect(signal);
-		const result = await connection.readResource(
-			{ uri },
-			requestOptions(signal, getServerTimeoutMs(this.server, this.settings, "call")),
+		return this.withConnection(signal, (connection) =>
+			connection.readResource(
+				{ uri },
+				requestOptions(signal, getServerTimeoutMs(this.server, this.settings, "call")),
+			),
 		);
-		this.resetIdleTimer();
-		return result;
 	}
 
 	async listPrompts(cursor: string | undefined, signal?: AbortSignal): Promise<ListPromptsResult> {
-		const connection = await this.connect(signal);
-		const result = await connection.listPrompts(
-			cursor ? { cursor } : undefined,
-			requestOptions(signal, getServerTimeoutMs(this.server, this.settings, "metadata")),
+		return this.withConnection(signal, (connection) =>
+			connection.listPrompts(
+				cursor ? { cursor } : undefined,
+				requestOptions(signal, getServerTimeoutMs(this.server, this.settings, "metadata")),
+			),
 		);
-		this.resetIdleTimer();
-		return result;
 	}
 
 	async getPrompt(
@@ -343,13 +341,12 @@ export class McpServerSupervisor {
 		args: Record<string, unknown> | undefined,
 		signal?: AbortSignal,
 	): Promise<GetPromptResult> {
-		const connection = await this.connect(signal);
-		const result = await connection.getPrompt(
-			{ name, ...(args ? { arguments: args } : {}) },
-			requestOptions(signal, getServerTimeoutMs(this.server, this.settings, "call")),
+		return this.withConnection(signal, (connection) =>
+			connection.getPrompt(
+				{ name, ...(args ? { arguments: args } : {}) },
+				requestOptions(signal, getServerTimeoutMs(this.server, this.settings, "call")),
+			),
 		);
-		this.resetIdleTimer();
-		return result;
 	}
 
 	async callTool(
@@ -358,16 +355,15 @@ export class McpServerSupervisor {
 		signal?: AbortSignal,
 		onProgress?: (progress: McpCallProgress) => void,
 	): Promise<CallToolResult> {
-		const connection = await this.connect(signal);
-		const result = await connection.callTool(
-			{ name, arguments: args },
-			{
-				...requestOptions(signal, getServerTimeoutMs(this.server, this.settings, "call")),
-				...(onProgress ? { onProgress } : {}),
-			},
+		return this.withConnection(signal, (connection) =>
+			connection.callTool(
+				{ name, arguments: args },
+				{
+					...requestOptions(signal, getServerTimeoutMs(this.server, this.settings, "call")),
+					...(onProgress ? { onProgress } : {}),
+				},
+			),
 		);
-		this.resetIdleTimer();
-		return result;
 	}
 
 	recordCall(call: McpRecentCallSummary): void {
@@ -469,9 +465,24 @@ export class McpServerSupervisor {
 		return result;
 	}
 
+	private async withConnection<T>(
+		signal: AbortSignal | undefined,
+		request: (connection: McpClientConnection) => Promise<T>,
+	): Promise<T> {
+		// Count requests before connecting so concurrent callers cannot arm an idle timer.
+		this.activeRequests++;
+		this.clearIdleTimer();
+		try {
+			return await request(await this.connect(signal));
+		} finally {
+			this.activeRequests--;
+			this.resetIdleTimer();
+		}
+	}
+
 	private resetIdleTimer(): void {
 		this.clearIdleTimer();
-		if (!this.connection || this.server.lifecycle === "keep-alive") {
+		if (!this.connection || this.activeRequests > 0 || this.server.lifecycle === "keep-alive") {
 			return;
 		}
 		const timeoutMs = getServerTimeoutMs(this.server, this.settings, "idle");
