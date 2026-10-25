@@ -1,7 +1,13 @@
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { describe, expect, it, vi } from "vitest";
 import { fold } from "../../src/conversation/fold.ts";
-import { openConversation, promptAndSettle, readLog, userTexts } from "./conversation-test-utils.ts";
+import {
+	openConversation,
+	promptAndSettle,
+	readLog,
+	type TestConversation,
+	userTexts,
+} from "./conversation-test-utils.ts";
 
 describe("reserved prompt authority", () => {
 	it("requires an exclusive reservation", async () => {
@@ -71,6 +77,53 @@ describe("reserved prompt authority", () => {
 		faux.setResponses([fauxAssistantMessage("fresh")]);
 		await promptAndSettle(conversation, "fresh");
 		expect(userTexts(conversation.state.context.messages)).toEqual(["fresh"]);
+	});
+
+	it.each([
+		{
+			name: "a steer",
+			queue: (conversation: TestConversation["conversation"]) => conversation.steer({ message: "newer" }),
+		},
+		{
+			name: "host messages",
+			queue: (conversation: TestConversation["conversation"]) =>
+				conversation.queueMessages("followUp", [{ role: "user", content: "newer", timestamp: 1 }]),
+		},
+	])("starts a turn for $name queued behind a revoked reservation", async ({ queue }) => {
+		const { conversation, log, faux } = await openConversation();
+		faux.setResponses([fauxAssistantMessage("newer reply")]);
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const append = log.append.bind(log);
+		vi.spyOn(log, "append").mockImplementationOnce(async (batch) => {
+			entered.resolve();
+			await release.promise;
+			return append(batch);
+		});
+		let current = true;
+		const pending = conversation.prompt(
+			{ clientMessageId: "proposal", message: "stale" },
+			{
+				reservation: conversation.reserve(),
+				assertCurrent: () => {
+					if (!current) throw new Error("revoked");
+				},
+			},
+		);
+		const rejected = expect(pending).rejects.toThrow("revoked");
+		await entered.promise;
+		// Newer input revokes the proposal and waits behind its reservation.
+		current = false;
+		const queued = queue(conversation);
+		release.resolve();
+		await rejected;
+		const admission = await queued;
+		await expect(admission.completion).resolves.toMatchObject({ state: "completed" });
+		await conversation.waitForIdle();
+		expect(conversation.state.clientInputs.inputs.get("proposal")).toMatchObject({ state: "failed" });
+		expect(conversation.queue).toEqual({ prompt: [], steer: [], followUp: [] });
+		expect(userTexts(conversation.state.context.messages)).toEqual(["newer"]);
+		expect(faux.state.callCount).toBe(1);
 	});
 
 	it("admits a current proposal normally", async () => {

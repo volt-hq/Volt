@@ -808,6 +808,12 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		if (held) this.coordinator.finish(held.lease);
 	}
 
+	/** Finish an admission lease that ran no turn; input queued behind it was waiting for that turn. */
+	private finishAdmissionLease(lease: OperationLease<ConversationOperationKind>): void {
+		this.coordinator.finish(lease);
+		if (this.hasWakingInput()) this.startTurnForQueuedInput();
+	}
+
 	private async admit(
 		command: ClientInputCommand,
 		input: ConversationInput,
@@ -869,7 +875,7 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 				if (!lease) throw new ConversationError("ended", "The conversation has ended");
 			}
 		} catch (error) {
-			if (lease) this.coordinator.finish(lease);
+			if (lease) this.finishAdmissionLease(lease);
 			throw error;
 		}
 		const origin = input.origin === "host" ? "host" : undefined;
@@ -955,7 +961,7 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 					await this.settleClientInput(clientMessageId, { state: "failed", error: toError(error).message });
 				}
 			} finally {
-				if (lease) this.coordinator.finish(lease);
+				if (lease) this.finishAdmissionLease(lease);
 			}
 			throw error;
 		} finally {
@@ -963,7 +969,7 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		}
 		if (lease) {
 			if (!result.delivered) {
-				this.coordinator.finish(lease);
+				this.finishAdmissionLease(lease);
 			} else {
 				// A new prompt starts fresh: a paused continuation does not carry over to it.
 				this.continuation = undefined;
