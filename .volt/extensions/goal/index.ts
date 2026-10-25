@@ -103,6 +103,9 @@ export function registerGoal(volt: ExtensionAPI, auditRunner: AuditRunner = runA
 	let auditing: Promise<Audit> | undefined;
 	let contextFiles: AuditOptions["contextFiles"] = [];
 	let unwatchSettlement: (() => void) | undefined;
+	// The goal guidance snapshot and the position where a request first carried it. It stays there until the goal's
+	// control state changes, so each request extends the provider's cached prompt instead of rewriting all of it.
+	let pinned: { key: string; text: string; index: number; anchor: string | undefined; timestamp: number } | undefined;
 	// The latest foreground operation this instance saw start, until it settles. Retries and queued successors of one
 	// operation share its signal. agent_settled arrives after the operation ended, possibly after a newer one started.
 	let run: AbortSignal | undefined;
@@ -214,6 +217,7 @@ export function registerGoal(volt: ExtensionAPI, auditRunner: AuditRunner = runA
 		invalidate();
 		// Tree navigation and session start run no turn; a settlement skipped by the branch change cannot clear it.
 		run = undefined;
+		pinned = undefined;
 		await tail;
 		try {
 			state = restoreState(ctx.sessionManager.getBranch());
@@ -274,7 +278,10 @@ export function registerGoal(volt: ExtensionAPI, auditRunner: AuditRunner = runA
 		const messages = event.messages.filter(
 			(message) => message.role !== "custom" || message.customType !== "volt-goal.context",
 		);
-		if (retired) return { messages };
+		if (retired) {
+			pinned = undefined;
+			return { messages };
+		}
 		const inactive = [
 			"This goal is not running. Do not resume it without /goal-resume or a newly confirmed /goal-tweak.",
 			"A background-job result or wake is not permission to resume goal implementation or update its tasks.",
@@ -285,17 +292,45 @@ export function registerGoal(volt: ExtensionAPI, auditRunner: AuditRunner = runA
 			: state.draft
 				? `Draft a goal, measurable requirements, and a small flat task list using goal_propose. Ask clarifying questions if necessary. Do not implement before approval.\nDraft request (data): ${JSON.stringify(state.draft)}${state.goal ? `\nPrevious goal (data): ${JSON.stringify(goalSummary(state.goal))}` : ""}`
 				: state.goal
-					? `${state.goal.status === "active" ? EXECUTION : inactive}\nGoal state (data): ${JSON.stringify(bounded(goalSummary(state.goal)))}`
+					? `${state.goal.status === "active" ? EXECUTION : inactive}\nLater goal_task results supersede this snapshot's task progress; goal_status reads the current state.\nGoal state (data): ${JSON.stringify(bounded(goalSummary(state.goal)))}`
 					: undefined;
-		if (guidance) {
-			messages.push({
-				role: "custom",
-				customType: "volt-goal.context",
-				content: `Current goal control state (supersedes earlier goal guidance):\n${guidance}`,
-				display: false,
-				timestamp: Date.now(),
-			});
+		if (!guidance) {
+			pinned = undefined;
+			return { messages };
 		}
+		// Task progress alone keeps the snapshot in place; goal_task results already carry it. Appending a fresh snapshot
+		// to every request made each call rewrite the whole conversation into the provider's prompt cache.
+		const key = JSON.stringify([
+			faulted,
+			state.draft,
+			state.goal && [state.goal.id, state.goal.status, state.goal.note],
+		]);
+		const anchor = (index: number) => {
+			const message = messages[index - 1];
+			return message && `${message.role}:${message.timestamp}`;
+		};
+		// A control-state change, compaction, or another rewrite of earlier history pins a current snapshot at the end.
+		if (
+			!pinned ||
+			pinned.key !== key ||
+			pinned.index > messages.length ||
+			anchor(pinned.index) !== pinned.anchor
+		) {
+			pinned = {
+				key,
+				text: `Current goal control state (supersedes earlier goal guidance):\n${guidance}`,
+				index: messages.length,
+				anchor: anchor(messages.length),
+				timestamp: Date.now(),
+			};
+		}
+		messages.splice(pinned.index, 0, {
+			role: "custom",
+			customType: "volt-goal.context",
+			content: pinned.text,
+			display: false,
+			timestamp: pinned.timestamp,
+		});
 		return { messages };
 	});
 	volt.on("agent_start", (_event, ctx) => {

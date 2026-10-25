@@ -1,4 +1,4 @@
-import { fauxAssistantMessage, fauxToolCall, type JsonObject } from "@hansjm10/volt-ai";
+import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall, type JsonObject } from "@hansjm10/volt-ai";
 import type { HostRequest, HostResponse } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runAudit } from "../../../../.volt/extensions/goal/auditor.ts";
@@ -110,9 +110,8 @@ describe("goal extension lifecycle", () => {
 			),
 			fauxAssistantMessage("Implementation and verification done; audit next."),
 			(context) => {
-				expect(
-					context.messages.some((message) => getMessageText(message).includes("valid-input fixture passed")),
-				).toBe(true);
+				// Recorded evidence reaches the model through its goal_task calls; the guidance snapshot stays in place.
+				expect(JSON.stringify(context.messages)).toContain("valid-input fixture passed");
 				return call("goal_complete", { evidence: "Both focused fixtures passed." });
 			},
 			(context) => {
@@ -192,6 +191,40 @@ describe("goal extension lifecycle", () => {
 		});
 		expect(stateOf(other.harness)).toEqual(emptyState());
 		expect(other.harness.eventsOfType("agent_start")).toHaveLength(0);
+	});
+
+	it("keeps goal guidance in place across task progress so each request extends the previous prompt", async () => {
+		const { harness, errors } = await setup(undefined, { sessionManager: await seeded() });
+		const requests: string[][] = [];
+		const replies = [
+			call("goal_task", { id: "1", status: "active", evidence: "Starting." }),
+			call("goal_task", { id: "1", status: "complete", evidence: "valid-input fixture passed" }),
+			fauxAssistantMessage("Progress."),
+			call("goal_block", { reason: "Need user input." }),
+		];
+		harness.setResponses(
+			replies.map(
+				(reply): FauxResponseFactory =>
+					(context) => {
+						requests.push(context.messages.map((message) => JSON.stringify(message)));
+						return reply;
+					},
+			),
+		);
+		await harness.session.prompt("/goal-resume");
+		await harness.session.waitForIdle();
+		expect(requests).toHaveLength(4);
+		for (const [index, messages] of requests.entries()) {
+			expect(messages.filter((text) => text.includes("Goal state (data):"))).toHaveLength(1);
+			// An unchanged prefix lets providers reuse the cached prompt instead of rewriting the conversation.
+			if (index > 0) expect(messages.slice(0, requests[index - 1].length)).toEqual(requests[index - 1]);
+		}
+		expect(requests[3].some((text) => text.includes("Continue the confirmed goal"))).toBe(true);
+		expect(stateOf(harness).goal).toMatchObject({
+			status: "blocked",
+			tasks: [{ status: "complete", evidence: "valid-input fixture passed" }, { status: "pending" }],
+		});
+		expect(errors).toEqual([]);
 	});
 
 	it.each(["paused", "blocked"] as const)(
