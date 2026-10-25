@@ -307,7 +307,14 @@ export interface AgentSessionState {
 /** Options for AgentSession.prompt() */
 export type PromptAdmissionOutcome = "admitted" | "completed";
 
-export type PromptPreflightResult = { success: true; outcome: PromptAdmissionOutcome } | { success: false };
+export type PromptPreflightResult =
+	| {
+			success: true;
+			outcome: PromptAdmissionOutcome;
+			/** An unidentified prompt a command or `input` hook handled: no turn runs for it. */
+			handled?: true;
+	  }
+	| { success: false };
 
 export interface PromptOptions {
 	/** Whether to expand file-based prompt templates (default: true) */
@@ -1326,7 +1333,8 @@ export class AgentSession {
 	}
 
 	private async _drainAdmittedWork(includePromptWork: boolean): Promise<void> {
-		await this._prompting.continuations.wait();
+		// A continuation delivery runs prompt work; its agent_settled hooks already race the lifetime signal.
+		if (includePromptWork) await this._prompting.continuations.wait();
 		while (this._admittedAncillaryWork.size > 0 || (includePromptWork && this._admittedPromptWork.size > 0)) {
 			await Promise.allSettled([
 				...this._admittedAncillaryWork,
@@ -1915,10 +1923,11 @@ export class AgentSession {
 	 *
 	 * @param content User message content (string or content array)
 	 * @param options.deliverAs Delivery mode when streaming: "steer" or "followUp"
+	 * @param options.preflightResult Hears whether the message was admitted, as for prompt()
 	 */
 	sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
-		options?: { deliverAs?: "steer" | "followUp" },
+		options?: { deliverAs?: "steer" | "followUp"; preflightResult?: PromptOptions["preflightResult"] },
 	): Promise<void> {
 		return this._prompting.sendUserMessage(content, options);
 	}

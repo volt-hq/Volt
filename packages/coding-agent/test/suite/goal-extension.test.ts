@@ -14,6 +14,7 @@ import {
 } from "../../../../.volt/extensions/goal/state.ts";
 import { AgentSession } from "../../src/core/agent-session.ts";
 import type { ExtensionError } from "../../src/core/extensions/types.ts";
+import { ClientScope } from "../../src/core/host/client-scope.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import type { BashOperations } from "../../src/core/tools/bash.ts";
 import * as nativeTools from "../../src/core/tools/index.ts";
@@ -767,7 +768,301 @@ describe("goal extension lifecycle", () => {
 		finish.resolve(approved);
 		await pausing;
 		await harness.session.waitForIdle();
+		expect(harness.faux.state.callCount).toBe(2); // The live foreground run was stopped.
 		expect(stateOf(harness).goal?.status).toBe("paused");
 		expect(stateOf(harness).goal?.audit?.verdict).not.toBe("approved");
+	});
+
+	it.each(["/goal-pause", "/goal Draft later"])(
+		"%s leaves unrelated background jobs running when no foreground run is active",
+		async (command) => {
+			const finish = Promise.withResolvers<void>();
+			let jobSignal: AbortSignal | undefined;
+			const operations: BashOperations = {
+				exec: async (_command, _cwd, options) => {
+					jobSignal = options.signal;
+					await finish.promise;
+					return { exitCode: 0 };
+				},
+			};
+			const definitions = nativeTools.createAllToolDefinitions;
+			vi.spyOn(nativeTools, "createAllToolDefinitions").mockImplementation((cwd, options) =>
+				definitions(cwd, { ...options, bash: { ...options?.bash, operations } }),
+			);
+			const { harness, errors } = await setup();
+			harness.setResponses([
+				call("bash", { command: "controlled unrelated work", background: true }),
+				fauxAssistantMessage("Started unrelated work."),
+				...(command === "/goal-pause" ? [] : [fauxAssistantMessage("Drafting waits for the user.")]),
+			]);
+			try {
+				await harness.session.prompt("Start unrelated background work.");
+				await harness.session.waitForIdle();
+				const job = harness.session.jobs.list()[0];
+				expect(job.status).toBe("running");
+				await harness.session.prompt(command);
+				await vi.waitFor(() => expect(harness.getPendingResponseCount()).toBe(0));
+				await harness.session.waitForIdle();
+				expect(harness.session.jobs.get(job.id).status).toBe("running");
+				expect(jobSignal?.aborted).toBe(false);
+				harness.setResponses([fauxAssistantMessage("Collected the unrelated result.")]);
+				finish.resolve();
+				await harness.session.work.waitForIdle();
+				await harness.session.waitForIdle();
+				expect(harness.session.jobs.get(job.id).status).toBe("completed");
+				expect(errors).toEqual([]);
+			} finally {
+				finish.resolve();
+			}
+		},
+	);
+
+	it.each(["error", "rejected"] as const)(
+		"stores at most 16,000 characters of an audit %s report",
+		async (verdict) => {
+			const report = "x".repeat(20_000);
+			const { harness, answer } = await setup(async () => {
+				if (verdict === "error") throw new Error(report);
+				return { verdict, report, model: "faux/faux-1" };
+			});
+			harness.setResponses([
+				call("goal_propose", { ...proposal, tasks: [] }),
+				call("goal_complete", { evidence: "Done." }),
+				verdict === "error"
+					? fauxAssistantMessage("Audit failed.")
+					: call("goal_block", { reason: "Need user review." }),
+			]);
+			await harness.session.prompt("/goal Fix parser");
+			await answer("confirm", { confirmed: true });
+			await harness.session.waitForIdle();
+			expect(stateOf(harness).goal).toMatchObject({ status: "blocked", audit: { verdict } });
+			expect(stateOf(harness).goal?.audit?.report).toBe(report.slice(0, 16_000));
+		},
+	);
+
+	it.each(["none", "complete"] as const)(
+		"rejects goal_block without an unfinished goal (%s) and continues the unrelated run",
+		async (existing) => {
+			const sessionManager = SessionManager.inMemory();
+			if (existing === "complete") {
+				const state: GoalState = {
+					...emptyState(),
+					goal: { ...createGoal(proposal, "regular"), status: "complete", audit: approved },
+				};
+				await sessionManager.logWriter.appendCustomEntry(STATE_ENTRY, state);
+			}
+			const { harness, errors } = await setup(undefined, { sessionManager });
+			const before = stateOf(harness);
+			harness.setResponses([
+				call("goal_block", { reason: "Need user input." }),
+				fauxAssistantMessage("Answered the unrelated request."),
+			]);
+			await harness.session.prompt("Unrelated request.");
+			await harness.session.waitForIdle();
+			const rejected = harness.session.messages.findLast(
+				(message) => message.role === "toolResult" && message.toolName === "goal_block",
+			);
+			expect(rejected).toMatchObject({ isError: true });
+			expect(getMessageText(rejected)).toContain("No unfinished goal to block.");
+			expect(harness.getPendingResponseCount()).toBe(0);
+			expect(stateOf(harness)).toEqual(before);
+			expect(errors).toEqual([]);
+		},
+	);
+
+	it.each(["steer", "followUp"] as const)(
+		"pauses when %s input arrives during a goal run and resumes explicitly",
+		async (kind) => {
+			const { harness, errors } = await setup(undefined, { sessionManager: await seeded() });
+			harness.setResponses([
+				async () => {
+					await harness.session[kind]("Also check the error path.");
+					return fauxAssistantMessage("Progress.");
+				},
+				fauxAssistantMessage("Handled the queued input."),
+				fauxAssistantMessage("Must not continue automatically."),
+			]);
+			await harness.session.prompt("/goal-resume");
+			await harness.session.waitForIdle();
+			expect(harness.faux.state.callCount).toBe(2);
+			expect(stateOf(harness).goal).toMatchObject({ status: "paused", note: expect.stringContaining("input") });
+			harness.setResponses([call("goal_block", { reason: "Need user input." })]);
+			await harness.session.prompt("/goal-resume");
+			await harness.session.waitForIdle();
+			expect(stateOf(harness).goal).toMatchObject({ status: "blocked", note: "Need user input." });
+			expect(errors).toEqual([]);
+		},
+	);
+
+	it.each(["steer", "followUp"] as const)(
+		"keeps a draft when %s input arrives during its drafting run",
+		async (kind) => {
+			const { harness, answer, errors } = await setup();
+			harness.setResponses([
+				async () => {
+					await harness.session[kind]("Also cover the error path.");
+					return fauxAssistantMessage("Which parser should the goal cover?");
+				},
+				fauxAssistantMessage("Noted the queued input."),
+			]);
+			const drafting = harness.session.prompt("/goal");
+			await answer("form", { values: { objective: proposal.objective, requirements: proposal.requirements[0] } });
+			await drafting;
+			await harness.session.waitForIdle();
+			expect(harness.faux.state.callCount).toBe(2);
+			expect(stateOf(harness).draft).not.toBeNull();
+			expect(errors).toEqual([]);
+		},
+	);
+
+	it("pauses when another extension's command runs during a goal run", async () => {
+		let ran = 0;
+		const { harness, errors } = await setup(undefined, {
+			sessionManager: await seeded(),
+			extensionFactories: [
+				{
+					id: "noop-command",
+					factory: (volt) => {
+						volt.registerCommand("noop", {
+							handler: async () => {
+								ran++;
+							},
+						});
+					},
+				},
+			],
+		});
+		harness.setResponses([
+			async () => {
+				await harness.session.prompt("/noop");
+				return fauxAssistantMessage("Progress.");
+			},
+			fauxAssistantMessage("Must not continue automatically."),
+		]);
+		await harness.session.prompt("/goal-resume");
+		await harness.session.waitForIdle();
+		expect(ran).toBe(1);
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(stateOf(harness).goal?.status).toBe("paused");
+		expect(errors).toEqual([]);
+	});
+
+	it("pauses when Plan mode refuses the continuation", async () => {
+		const { harness, errors } = await setup(undefined, { sessionManager: await seeded() });
+		harness.setResponses([
+			async () => {
+				await harness.session.setAgentMode("plan");
+				return fauxAssistantMessage("Progress.");
+			},
+			fauxAssistantMessage("Must not continue automatically."),
+		]);
+		await harness.session.prompt("/goal-resume");
+		await harness.session.waitForIdle();
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(stateOf(harness).goal).toMatchObject({ status: "paused", note: expect.stringContaining("refused") });
+		expect(errors).toEqual([]);
+	});
+
+	it.each(["model", "auth"] as const)("blocks a resume whose prompt cannot start (no %s)", async (missing) => {
+		const { harness, errors } = await setup(undefined, {
+			sessionManager: await seeded(),
+			...(missing === "model" ? { selectModel: false } : { withConfiguredAuth: false }),
+		});
+		await harness.session.prompt("/goal-resume");
+		await harness.session.waitForIdle();
+		expect(harness.eventsOfType("agent_start")).toHaveLength(0);
+		expect(stateOf(harness).goal).toMatchObject({
+			status: "blocked",
+			note: expect.stringContaining("could not start"),
+		});
+		expect(errors.map((error) => error.event)).toEqual(["send_user_message"]);
+	});
+
+	it.each([
+		["/goal Fix parser", false],
+		["/goal-tweak Replace the parser", true],
+	] as const)("pauses and clears a draft whose prompt cannot start (%s)", async (command, existing) => {
+		const { harness, errors } = await setup(undefined, {
+			...(existing ? { sessionManager: await seeded() } : {}),
+			withConfiguredAuth: false,
+		});
+		await harness.session.prompt(command);
+		await harness.session.waitForIdle();
+		expect(harness.eventsOfType("agent_start")).toHaveLength(0);
+		expect(stateOf(harness).draft).toBeNull();
+		if (existing) {
+			expect(stateOf(harness).goal).toMatchObject({
+				status: "paused",
+				note: expect.stringContaining("could not start"),
+			});
+		} else expect(stateOf(harness).goal).toBeNull();
+		expect(errors.map((error) => error.event)).toEqual(["send_user_message"]);
+	});
+
+	it("ignores a remote-invoked /goal-resume", async () => {
+		const { harness, errors } = await setup(undefined, { sessionManager: await seeded() });
+		const before = stateOf(harness);
+		harness.setResponses([fauxAssistantMessage("Must not run.")]);
+		await ClientScope.run("paired-device", () => harness.session.prompt("/goal-resume"));
+		await harness.session.waitForIdle();
+		expect(stateOf(harness)).toEqual(before);
+		expect(harness.faux.state.callCount).toBe(0);
+		expect(errors).toEqual([]);
+	});
+
+	it("resumes from an SDK settlement listener after unrelated input", async () => {
+		const { harness, errors } = await setup(undefined, { sessionManager: await seeded() });
+		harness.setResponses([fauxAssistantMessage("Answered."), call("goal_block", { reason: "Need user input." })]);
+		let resuming: Promise<void> | undefined;
+		harness.session.subscribe((event) => {
+			if (event.type === "agent_settled" && !resuming) resuming = harness.session.prompt("/goal-resume");
+		});
+		await harness.session.prompt("Unrelated request.");
+		await resuming;
+		await harness.session.waitForIdle();
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(stateOf(harness).goal).toMatchObject({ status: "blocked", note: "Need user input." });
+		expect(errors).toEqual([]);
+	});
+
+	it("continues a goal run whose background job result arrives mid-run", async () => {
+		const finish = Promise.withResolvers<void>();
+		const operations: BashOperations = {
+			exec: async () => {
+				await finish.promise;
+				return { exitCode: 0 };
+			},
+		};
+		const definitions = nativeTools.createAllToolDefinitions;
+		vi.spyOn(nativeTools, "createAllToolDefinitions").mockImplementation((cwd, options) =>
+			definitions(cwd, { ...options, bash: { ...options?.bash, operations } }),
+		);
+		const { harness, errors } = await setup(undefined, { sessionManager: await seeded() });
+		harness.setResponses([
+			call("bash", { command: "controlled authorized work", background: true }),
+			async () => {
+				finish.resolve();
+				await harness.session.work.waitForIdle();
+				expect(harness.control.conversation.queue.steer).toHaveLength(1);
+				return fauxAssistantMessage("Waiting for the job.");
+			},
+			fauxAssistantMessage("Collected the job result."),
+			(context) => {
+				expect(
+					context.messages.some((message) => getMessageText(message).startsWith("Continue the confirmed goal")),
+				).toBe(true);
+				return call("goal_block", { reason: "Need user input." });
+			},
+		]);
+		try {
+			await harness.session.prompt("/goal-resume");
+			await harness.session.waitForIdle();
+		} finally {
+			finish.resolve();
+		}
+		expect(harness.faux.state.callCount).toBe(4);
+		expect(harness.eventsOfType("agent_settled")).toHaveLength(2);
+		expect(stateOf(harness).goal).toMatchObject({ status: "blocked", note: "Need user input." });
+		expect(errors).toEqual([]);
 	});
 });

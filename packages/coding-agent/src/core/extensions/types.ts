@@ -1129,8 +1129,10 @@ export interface AgentSettledEvent {
 	type: "agent_settled";
 	outcome: "completed" | "aborted" | "failed" | "stopped";
 	/**
-	 * Revoked by abort, newer input, or extension retirement. Never reuse a revoked proposal.
-	 * Host reasons: `aborted`, `superseded`, or `failed` (dispatch failed).
+	 * Revoked by abort, newer input, host policy, or extension retirement. Never reuse a revoked proposal.
+	 * A proposal the host does not admit is always revoked here, with a host reason: `aborted` (a stop),
+	 * `superseded` (newer input, work, or session changes), `refused` (Plan mode, a review discussion, or a
+	 * closed admission gate or session operation), or `failed` (dispatch failed; also reported as an error).
 	 * Retirement/closure may use the platform's default abort reason.
 	 */
 	signal: AbortSignal;
@@ -1961,11 +1963,12 @@ export interface ExtensionAPI<TSettings extends ExtensionSettingsShape = Extensi
 	/**
 	 * Send a user message to the agent. Always triggers a turn.
 	 * When the agent is streaming, use deliverAs to specify how to queue the message.
+	 * Resolves once the host admitted or refused the message; it never rejects.
 	 */
 	sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
 		options?: { deliverAs?: "steer" | "followUp" },
-	): void;
+	): Promise<SendUserMessageResult>;
 
 	/**
 	 * Append a custom entry to the session for state persistence (not sent to LLM).
@@ -2219,10 +2222,21 @@ export type SendMessageHandler = <T>(
 	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 ) => void;
 
+/**
+ * What became of an extension's `sendUserMessage()`:
+ * - `admitted`: the message starts a turn, or was queued for the running one (`deliverAs`).
+ * - `handled`: an extension's `input` hook handled it; no turn runs for it.
+ * - `success: false`: the host refused it before admission (no model or auth, the agent busy without
+ *   `deliverAs`, a stop or session change, closure). `error` says why; it is also reported as an extension error.
+ */
+export type SendUserMessageResult =
+	| { success: true; outcome: "admitted" | "handled" }
+	| { success: false; error: string };
+
 export type SendUserMessageHandler = (
 	content: string | (TextContent | ImageContent)[],
 	options?: { deliverAs?: "steer" | "followUp" },
-) => void;
+) => Promise<SendUserMessageResult>;
 
 export type AppendEntryHandler = <T>(customType: string, data?: JsonCompatibleInput<T>) => Promise<void>;
 

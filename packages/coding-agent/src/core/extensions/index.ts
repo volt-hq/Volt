@@ -221,6 +221,7 @@ export type {
 	ReviewEngineOptions,
 	SendMessageHandler,
 	SendUserMessageHandler,
+	SendUserMessageResult,
 	SessionBeforeCompactEvent,
 	SessionBeforeCompactResult,
 	SessionBeforeForkEvent,

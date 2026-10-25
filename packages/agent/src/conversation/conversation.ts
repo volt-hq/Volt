@@ -1999,6 +1999,11 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 					// Recovery belongs to this request, not the whole tool-calling operation.
 					void this.publishRetryEnd(run, true);
 				}
+				// The loop continues from the replaced message, so settle on it rather than the provider's.
+				run.terminalSettling =
+					message.role === "assistant" &&
+					message.stopReason !== "toolUse" &&
+					(message.stopReason === "error" || !this.hasWakingInput());
 				if (run.terminalSettling && message.role === "assistant" && !run.signal.aborted) {
 					run.followUp = recover ? await this.decideFollowUp(run, message) : undefined;
 					if (!run.followUp) this.coordinator.sealTerminal(run.lease);

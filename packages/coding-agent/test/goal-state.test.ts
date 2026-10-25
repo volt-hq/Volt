@@ -1,3 +1,4 @@
+import type { AgentTool } from "@hansjm10/volt-agent-core";
 import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
@@ -13,6 +14,7 @@ import {
 	STATE_ENTRY,
 	updateTask,
 } from "../../../.volt/extensions/goal/state.ts";
+import { createHarness, type Harness } from "./suite/harness.ts";
 
 const proposal: Proposal = {
 	objective: "Fix the parser",
@@ -105,5 +107,35 @@ describe("goal audit boundary", () => {
 			auditTools({ getActiveTools: () => ["read", "bash", "write", "mcp"], getAllTools: () => metadata }),
 		).toEqual(["read"]);
 		expect(auditTools({ getActiveTools: () => ["bash"], getAllTools: () => metadata })).toEqual([]);
+	});
+
+	it("reports base tool overrides as SDK tools, so the auditor never swaps them for native read/bash", async () => {
+		const restricted = (name: string): AgentTool => ({
+			name,
+			label: name,
+			description: `Restricted ${name}`,
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [{ type: "text", text: "restricted" }], details: {} }),
+		});
+		const toolsOf = (harness: Harness) => ({
+			getActiveTools: () => harness.session.getActiveToolNames(),
+			getAllTools: () => harness.session.getAllTools(),
+		});
+		const overridden = await createHarness({ tools: [restricted("read"), restricted("bash")] });
+		const native = await createHarness();
+		try {
+			const overrides = overridden.session.getAllTools().filter((tool) => ["read", "bash"].includes(tool.name));
+			expect(overrides.map((tool) => tool.name).sort()).toEqual(["bash", "read"]);
+			for (const tool of overrides) {
+				expect(tool.sourceInfo).toMatchObject({ path: `<sdk:${tool.name}>`, source: "sdk" });
+			}
+			expect(overridden.session.getActiveToolNames().sort()).toEqual(["bash", "read"]);
+			expect(auditTools(toolsOf(overridden))).toEqual([]);
+
+			expect(auditTools(toolsOf(native)).sort()).toEqual(["bash", "read"]);
+		} finally {
+			overridden.cleanup();
+			native.cleanup();
+		}
 	});
 });

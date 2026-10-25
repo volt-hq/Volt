@@ -744,7 +744,7 @@ volt.on("agent_settled", async (event, ctx) => {
 
 Volt admits a proposal only while its originating operation, branch, extension instance, and stop generation are still current, with no newer or pending input. Plan mode and review discussions never admit these proposals. Abort (including a late abort after terminal notification), input, navigation, reload, disable, or closure can revoke one. Revoked proposals are discarded, not queued for replay. Ordinary input and `before_agent_start` hooks still run for an admitted prompt; the host rechecks its authority after asynchronous preflight and receipt persistence, before starting the reserved turn.
 
-`event.signal` and this handler's `ctx.signal` represent proposal cancellation, not the already-ended operation's signal. Check it after awaits and use it to pause extension-owned automation if cancellation arrives while preparing a proposal. Host cancellation reasons are `aborted`, `superseded` (newer input or session changes), and `failed` (dispatch failed); retirement/closure may use the platform's default abort reason. A superseded notification must not mutate newer automation state. Remove extension-owned listeners when no longer needed, and retain no session contexts across retirement. Hooks run outside the conversation's serialized event-delivery tail. `session.waitForIdle()` includes pending proposals and turns they start, whereas the SDK settlement notification still describes the operation just ended.
+`event.signal` and this handler's `ctx.signal` represent proposal cancellation, not the already-ended operation's signal. Check it after awaits and use it to pause extension-owned automation if cancellation arrives while preparing a proposal. Host cancellation reasons are `aborted` (a stop), `superseded` (newer input, newer work, or session changes), `refused` (Plan mode, a review discussion, a closed admission gate, or a session operation or extension command still running), and `failed` (dispatch failed; also reported as an extension error); retirement/closure may use the platform's default abort reason. A returned proposal is either admitted or its signal is aborted with one of these reasons, so automation that waits on the signal never strands. Steering, follow-ups, and slash commands emit no `input` event but still supersede pending settlements. A superseded notification must not mutate newer automation state. Remove extension-owned listeners when no longer needed, and retain no session contexts across retirement. Hooks run outside the conversation's serialized event-delivery tail. `session.waitForIdle()` includes pending proposals and turns they start, whereas the SDK settlement notification still describes the operation just ended.
 
 There is no built-in continuation count. Extensions must stop on completion, explicit pause/abort, failure, or host policy; they must not reinterpret cancellation as permission to try again. Daemon sessions may continue after clients detach, so make that behavior explicit before enabling automation.
 
@@ -1768,7 +1768,18 @@ volt.sendUserMessage("And then summarize", { deliverAs: "followUp" });
   - `"steer"` - Queues the message for delivery after the current assistant turn finishes executing its tool calls
   - `"followUp"` - Waits for agent to finish all tools
 
-When not streaming, the message is sent immediately and triggers a new turn. When streaming without `deliverAs`, throws an error.
+When not streaming, the message is sent immediately and triggers a new turn. When streaming without `deliverAs`, the message is refused.
+
+`sendUserMessage()` returns a promise that resolves once the host admitted or refused the message; it never rejects, so ignoring it is safe:
+
+- `{ success: true, outcome: "admitted" }` - the message starts a turn, or was queued for the running one.
+- `{ success: true, outcome: "handled" }` - an extension's `input` hook handled it; no turn runs for it.
+- `{ success: false, error }` - refused before admission (no model or credentials, the agent busy without `deliverAs`, a stop or session change, closure). The error is also reported as an extension error.
+
+```typescript
+const sent = await volt.sendUserMessage("Resume the task.");
+if (!sent.success) ctx.ui.notify(`Could not start: ${sent.error}`, "warning");
+```
 
 See [send-user-message.ts](../examples/extensions/send-user-message.ts) for a complete example.
 

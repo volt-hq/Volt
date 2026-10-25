@@ -4,7 +4,7 @@ import type { ConversationEvent, ConversationPolicy, ConversationSummarizer } fr
 import { fold } from "../../src/conversation/fold.ts";
 import { InMemoryConversationLog } from "../../src/conversation/in-memory-log.ts";
 import { type ConversationLog, isCoreLogEntry } from "../../src/conversation/log.ts";
-import type { AgentLoopNextAction, AgentMessage } from "../../src/types.ts";
+import type { AgentAbortAcceptance, AgentLoopNextAction, AgentMessage } from "../../src/types.ts";
 import { calculateTool } from "../utils/calculate.ts";
 import {
 	lastAssistant,
@@ -390,6 +390,40 @@ describe("Conversation retry", () => {
 		expect(events.filter((event) => event.type === "retry_end")).toMatchObject(
 			failure === "exhausted" ? [{ success: false }] : [],
 		);
+	});
+
+	it("keeps queued input cancellable when messageEnd replaces a failed request", async () => {
+		const { conversation, faux } = await openConversation({
+			policy: {
+				messageEnd: (message) => {
+					if (message.role !== "assistant" || message.stopReason !== "error") return undefined;
+					const { error: _error, ...recovered } = message;
+					return { ...recovered, stopReason: "stop" };
+				},
+			},
+		});
+		const requests: string[][] = [];
+		let acceptance: AgentAbortAcceptance | undefined;
+		faux.setResponses([
+			async (context) => {
+				requests.push(userTexts(context.messages));
+				await conversation.steer({ message: "queued" });
+				return fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "auth", retryable: false, message: "Needs authorization" },
+				});
+			},
+			(context) => {
+				requests.push(userTexts(context.messages));
+				acceptance = conversation.abort("keyboard_interrupt");
+				return fauxAssistantMessage("must be aborted");
+			},
+		]);
+		await promptAndSettle(conversation, "hello");
+
+		expect(requests).toEqual([["hello"], ["hello", "queued"]]);
+		expect(acceptance).toMatchObject({ accepted: true, source: "keyboard_interrupt" });
+		expect(lastAssistant(conversation)).toMatchObject({ stopReason: "aborted" });
 	});
 
 	it("resets the retry budget after successful tool responses within the same operation", async () => {

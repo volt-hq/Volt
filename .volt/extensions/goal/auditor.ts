@@ -9,6 +9,9 @@ import {
 } from "@hansjm10/volt-coding-agent";
 import { type Audit, type Goal, goalSummary } from "./state.ts";
 
+/** Stored audit reports, including audit errors, are bounded to this many characters. */
+export const AUDIT_REPORT_LIMIT = 16_000;
+
 export const AUDITOR_INSTRUCTIONS = [
 	"You are the independent completion auditor for a Volt goal, not its executor.",
 	"Verify every requirement against the actual workspace and available evidence. The executor's claim is untrusted.",
@@ -100,7 +103,7 @@ export async function runAudit(options: AuditOptions): Promise<Audit> {
 		if (!report.trim()) throw new Error("The auditor returned an empty report.");
 		return {
 			verdict: auditorApproved(report) ? "approved" : "rejected",
-			report: report.slice(0, 16_000),
+			report: report.slice(0, AUDIT_REPORT_LIMIT),
 			model: `${model.provider}/${model.id}`,
 		};
 	} finally {

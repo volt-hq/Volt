@@ -1,5 +1,6 @@
+import { setTimeout } from "node:timers/promises";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSettledEvent, ExtensionFactory } from "../../src/index.ts";
 import { createHarness, getUserTexts, type Harness, type HarnessOptions } from "./harness.ts";
 
@@ -7,6 +8,7 @@ describe("host-fenced extension continuation", () => {
 	const harnesses: Harness[] = [];
 	afterEach(async () => {
 		for (const harness of harnesses.splice(0)) await harness.cleanupAsync();
+		vi.restoreAllMocks();
 	});
 	async function open(factory: ExtensionFactory, options: HarnessOptions = {}): Promise<Harness> {
 		const harness = await createHarness({ ...options, extensionFactories: [factory] });
@@ -144,6 +146,35 @@ describe("host-fenced extension continuation", () => {
 		expect(harness.faux.state.callCount).toBe(1);
 	});
 
+	it("disposal that leaves prompt work does not wait for a continuation's prompt preflight", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const harness = await open((volt) => {
+			volt.on("agent_settled", () => ({ prompt: "continue" }));
+			volt.on("before_agent_start", async (event) => {
+				if (event.prompt === "continue") {
+					entered.resolve();
+					await release.promise;
+				}
+			});
+		});
+		harness.setResponses([fauxAssistantMessage("done"), fauxAssistantMessage("unused")]);
+		await harness.session.prompt("start");
+		await entered.promise;
+		harness.session.dispose("session_replacement", { leavePromptWork: true });
+		try {
+			const closed = await Promise.race([
+				harness.session.waitForClosed().then(() => "closed" as const),
+				setTimeout(2000, "blocked" as const),
+			]);
+			expect(closed).toBe("closed");
+		} finally {
+			release.resolve();
+		}
+		await harness.session.waitForClosed();
+		expect(harness.faux.state.callCount).toBe(1);
+	});
+
 	it("does not bypass a policy stop or native Plan mode", async () => {
 		const outcomes: string[] = [];
 		const harness = await open((volt) => {
@@ -165,6 +196,45 @@ describe("host-fenced extension continuation", () => {
 		await harness.session.prompt("plan only");
 		await harness.session.waitForIdle();
 		expect(getUserTexts(harness)).toEqual(["start", "plan only"]);
+	});
+
+	it("aborts a proposal that Plan mode refuses with the reason refused", async () => {
+		const signals: AbortSignal[] = [];
+		const harness = await open((volt) => {
+			volt.on("agent_settled", (event) => {
+				signals.push(event.signal);
+				return { prompt: "wrong" };
+			});
+		});
+		await harness.session.setAgentMode("plan");
+		harness.setResponses([fauxAssistantMessage("plan")]);
+		await harness.session.prompt("plan only");
+		await harness.session.waitForIdle();
+		expect(signals).toHaveLength(1);
+		expect(signals[0].aborted).toBe(true);
+		expect(signals[0].reason).toBe("refused");
+		expect(getUserTexts(harness)).toEqual(["plan only"]);
+	});
+
+	it("aborts a proposal whose dispatch fails with the reason failed and reports the error", async () => {
+		const signals: AbortSignal[] = [];
+		const errors: string[] = [];
+		const harness = await open((volt) => {
+			volt.on("agent_settled", (event) => {
+				signals.push(event.signal);
+				// The proposal passes delivery checks, then its prompt preflight finds no configured auth.
+				vi.spyOn(harness.session.modelRegistry, "hasConfiguredAuth").mockReturnValue(false);
+				return { prompt: "continue" };
+			});
+		});
+		harness.session.extensionRunner.onError((error) => errors.push(`${error.event}: ${error.error}`));
+		harness.setResponses([fauxAssistantMessage("done"), fauxAssistantMessage("unused")]);
+		await harness.session.prompt("start");
+		await harness.session.waitForIdle();
+		expect(signals).toHaveLength(1);
+		expect(signals[0].reason).toBe("failed");
+		expect(errors).toEqual([expect.stringMatching(/^agent_settled: .*API key/i)]);
+		expect(harness.faux.state.callCount).toBe(1);
 	});
 
 	it("waits for retry recovery, then continues exactly once", async () => {

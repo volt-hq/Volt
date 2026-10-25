@@ -7,7 +7,7 @@ import {
 	truncateHead,
 } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
-import { type AuditOptions, runAudit } from "./auditor.ts";
+import { AUDIT_REPORT_LIMIT, type AuditOptions, runAudit } from "./auditor.ts";
 import {
 	type Audit,
 	assertCompletable,
@@ -30,6 +30,36 @@ export const manifest = defineManifest({
 });
 
 export type AuditRunner = (options: AuditOptions) => Promise<Audit>;
+
+type Sent = Awaited<ReturnType<ExtensionAPI["sendUserMessage"]>>;
+
+/** Why a prompt this extension sent starts no run: the host refused it, or another extension's input hook took it. */
+function unstarted(sent: Sent): string | undefined {
+	if (!sent.success) return sent.error.split("\n", 1)[0].slice(0, 500);
+	return sent.outcome === "handled" ? "another extension handled its prompt" : undefined;
+}
+
+/** How a revoked settlement or continuation leaves the goal, by its signal's reason. */
+function revoked(reason: unknown): { note: string; status: "paused" | "blocked" } {
+	switch (reason) {
+		case "failed":
+			return { status: "blocked", note: "The automatic continuation failed to start; explicit resume required." };
+		case "aborted":
+			return { status: "paused", note: "Stopped by an abort; explicit resume required." };
+		case "superseded":
+			return {
+				status: "paused",
+				note: "New input, a command, or a session change paused automatic goal execution. Use /goal-resume when ready.",
+			};
+		case "refused":
+			return {
+				status: "paused",
+				note: "Volt refused the automatic continuation (Plan mode, a review discussion, or a host operation). Use /goal-resume when ready.",
+			};
+		default:
+			return { status: "paused", note: "Continuation cancelled; explicit resume required." };
+	}
+}
 
 /** Never re-enable an excluded tool or replace a parent override with a native implementation. */
 export function auditTools(volt: Pick<ExtensionAPI, "getActiveTools" | "getAllTools">): string[] {
@@ -73,6 +103,10 @@ export function registerGoal(volt: ExtensionAPI, auditRunner: AuditRunner = runA
 	let auditing: Promise<Audit> | undefined;
 	let contextFiles: AuditOptions["contextFiles"] = [];
 	let unwatchSettlement: (() => void) | undefined;
+	// The latest foreground operation this instance saw start, until it settles. Retries and queued successors of one
+	// operation share its signal. agent_settled arrives after the operation ended, possibly after a newer one started.
+	let run: AbortSignal | undefined;
+	let ended: AbortSignal | undefined;
 	const clearSettlementWatch = () => {
 		unwatchSettlement?.();
 		unwatchSettlement = undefined;
@@ -154,8 +188,9 @@ export function registerGoal(volt: ExtensionAPI, auditRunner: AuditRunner = runA
 		note: string,
 		status: "paused" | "blocked" = "paused",
 		options: { closing?: boolean; replaceReason?: boolean } = {},
-	) => {
+	): Promise<boolean> => {
 		invalidate();
+		let changed = false;
 		await change(
 			ctx,
 			(current) => {
@@ -167,14 +202,18 @@ export function registerGoal(volt: ExtensionAPI, auditRunner: AuditRunner = runA
 						(!options.replaceReason && (goal.status === "blocked" || goal.status === "paused")))
 				)
 					return;
+				changed = true;
 				return { ...current, draft: null, goal: goal && goal.status !== "complete" ? { ...goal, status, note } : goal };
 			},
 			epoch,
 			options.closing,
 		);
+		return changed;
 	};
 	const restore = async (ctx: ExtensionContext) => {
 		invalidate();
+		// Tree navigation and session start run no turn; a settlement skipped by the branch change cannot clear it.
+		run = undefined;
 		await tail;
 		try {
 			state = restoreState(ctx.sessionManager.getBranch());
@@ -259,15 +298,27 @@ export function registerGoal(volt: ExtensionAPI, auditRunner: AuditRunner = runA
 		}
 		return { messages };
 	});
-	volt.on("agent_start", clearSettlementWatch);
+	volt.on("agent_start", (_event, ctx) => {
+		clearSettlementWatch();
+		run = ctx.signal;
+	});
+	volt.on("agent_end", () => {
+		ended = run;
+	});
 	volt.on("agent_settled", async (event, ctx) => {
+		if (run === ended) run = undefined;
 		const expected = epoch;
 		await tail;
 		if (retired || faulted || expected !== epoch) return;
 		if (event.signal.aborted) {
-			// A superseded notification belongs to older input, not a newly resumed goal.
-			if (event.signal.reason === "aborted" || event.signal.reason === "failed") {
-				await pause(ctx, "Continuation cancelled; explicit resume required.", event.signal.reason === "failed" ? "blocked" : "paused");
+			// Any revocation stops automatic execution: steering, commands, and session changes emit no input event.
+			// /goal-resume drains older settlements before it activates, so this cannot pause a newer resume. With
+			// nothing running, a late notification must not invalidate newer goal operations either. Like the input
+			// hook, newer input keeps a draft; stops and failures still discard it.
+			const running = state.goal?.status === "active" || state.goal?.status === "auditing";
+			if (running || (state.draft && event.signal.reason !== "superseded")) {
+				const { note, status } = revoked(event.signal.reason);
+				await pause(ctx, note, status);
 			}
 			return;
 		}
@@ -290,8 +341,10 @@ export function registerGoal(volt: ExtensionAPI, auditRunner: AuditRunner = runA
 			clearSettlementWatch();
 			const cancelled = () => {
 				if (retired || faulted || expected !== epoch) return;
-				void pause(ctx, "Continuation cancelled; explicit resume required.", event.signal.reason === "failed" ? "blocked" : "paused")
-					.catch((error: unknown) => ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"));
+				const { note, status } = revoked(event.signal.reason);
+				void pause(ctx, note, status).catch((error: unknown) =>
+					ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"),
+				);
 			};
 			event.signal.addEventListener("abort", cancelled, { once: true });
 			unwatchSettlement = () => event.signal.removeEventListener("abort", cancelled);
@@ -302,6 +355,12 @@ export function registerGoal(volt: ExtensionAPI, auditRunner: AuditRunner = runA
 		}
 	});
 
+	// A running command counts as conversation activity, so ctx.isIdle() is always false here, and ctx.abort() also
+	// cancels every running background job. Abort only a live foreground run, then wait for any operation to finish.
+	const stopRun = async (ctx: ExtensionCommandContext) => {
+		if (run && !run.aborted) ctx.abort();
+		await ctx.waitForIdle();
+	};
 	const startDraft = async (args: string, ctx: ExtensionCommandContext, mode: GoalMode, revise: boolean) => {
 		if (!ctx.hasUI || ctx.invokedBy !== "local") {
 			ctx.ui.notify("Goal drafting requires a local UI and affirmative user approval.", "warning");
@@ -309,10 +368,7 @@ export function registerGoal(volt: ExtensionAPI, auditRunner: AuditRunner = runA
 		}
 		if (revise && !state.goal) throw new Error("No goal to tweak.");
 		await pause(ctx, "Paused while drafting a goal.");
-		if (!ctx.isIdle()) {
-			ctx.abort();
-			await ctx.waitForIdle();
-		}
+		await stopRun(ctx);
 		const expected = epoch;
 		const signal = AbortSignal.any([ctx.signal, control.signal]);
 		let request = args.trim();
@@ -348,9 +404,14 @@ export function registerGoal(volt: ExtensionAPI, auditRunner: AuditRunner = runA
 		if (request.length > 12_000) throw new Error("Keep the draft request below 12,000 characters.");
 		await change(ctx, (current) => ({ ...current, draft: { request, mode, revise } }), expected);
 		ensureCurrent(expected, signal);
-		volt.sendUserMessage(
-			"Help draft the requested goal. Call goal_propose for the user's approval; do not implement it yet.",
+		const reason = unstarted(
+			await volt.sendUserMessage(
+				"Help draft the requested goal. Call goal_propose for the user's approval; do not implement it yet.",
+			),
 		);
+		if (reason === undefined || retired || faulted || expected !== epoch) return;
+		await pause(ctx, `Goal drafting could not start: ${reason}`);
+		ctx.ui.notify(`Goal drafting could not start: ${reason}`, "warning");
 	};
 	volt.registerCommand("goal", {
 		description: "Draft a goal for confirmation",
@@ -368,20 +429,22 @@ export function registerGoal(volt: ExtensionAPI, auditRunner: AuditRunner = runA
 		description: "Pause the goal and stop its current run or audit",
 		handler: async (_args, ctx) => {
 			await pause(ctx, "Paused by the user.");
-			if (!ctx.isIdle()) {
-				ctx.abort();
-				await ctx.waitForIdle();
-			}
+			await stopRun(ctx);
 		},
 	});
 	volt.registerCommand("goal-resume", {
 		description: "Resume the previously confirmed goal",
 		handler: async (_args, ctx) => {
+			if (ctx.invokedBy !== "local") {
+				ctx.ui.notify("Resuming a goal requires a local command.", "warning");
+				return;
+			}
 			if (state.goal?.status === "active" || state.goal?.status === "auditing")
 				throw new Error("The goal is already running; pause it first.");
+			// Older settlements, which this command's input revoked, pause first; none can revoke the resume after it.
+			await ctx.waitForIdle();
 			invalidate();
 			const expected = epoch;
-			await ctx.waitForIdle();
 			await change(
 				ctx,
 				(current) => {
@@ -393,7 +456,12 @@ export function registerGoal(volt: ExtensionAPI, auditRunner: AuditRunner = runA
 				expected,
 			);
 			ensureCurrent(expected, ctx.signal);
-			volt.sendUserMessage("Resume the confirmed goal. Follow its current requirements and task state.");
+			const reason = unstarted(
+				await volt.sendUserMessage("Resume the confirmed goal. Follow its current requirements and task state."),
+			);
+			if (reason === undefined || retired || faulted || expected !== epoch) return;
+			const note = `The resumed goal could not start; fix the cause, then use /goal-resume. Cause: ${reason}`;
+			await pause(ctx, note, "blocked", { replaceReason: true });
 		},
 	});
 	volt.registerCommand("goal-status", {
@@ -504,7 +572,8 @@ export function registerGoal(volt: ExtensionAPI, auditRunner: AuditRunner = runA
 		parameters: Type.Object({ reason: Type.String({ minLength: 1, maxLength: 2000 }) }),
 		async execute(_id, params, _signal, _update, ctx) {
 			if (!params.reason.trim()) throw new Error("Explain the blocker.");
-			await pause(ctx, params.reason.trim(), "blocked", { replaceReason: true });
+			if (!(await pause(ctx, params.reason.trim(), "blocked", { replaceReason: true })))
+				throw new Error("No unfinished goal to block.");
 			return {
 				...result("Goal blocked. Wait for the user to resolve it and use /goal-resume or /goal-tweak."),
 				disposition: "stop" as const,
@@ -552,7 +621,8 @@ export function registerGoal(volt: ExtensionAPI, auditRunner: AuditRunner = runA
 						if (!signal.aborted && !retired) onUpdate?.(result(text));
 					},
 				});
-				const audit = await auditing;
+				const reported = await auditing;
+				const audit = { ...reported, report: reported.report.slice(0, AUDIT_REPORT_LIMIT) };
 				ensureCurrent(expected, signal);
 				await change(
 					ctx,
@@ -580,6 +650,7 @@ export function registerGoal(volt: ExtensionAPI, auditRunner: AuditRunner = runA
 				};
 			} catch (error) {
 				if (!retired && !faulted && expected === epoch) {
+					const report = (error instanceof Error ? error.message : String(error)).slice(0, AUDIT_REPORT_LIMIT);
 					await change(
 						ctx,
 						(current) => ({
@@ -593,7 +664,7 @@ export function registerGoal(volt: ExtensionAPI, auditRunner: AuditRunner = runA
 											: "Audit failed; explicit resume required.",
 										audit: {
 											verdict: "error",
-											report: error instanceof Error ? error.message : String(error),
+											report,
 											model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unavailable",
 										},
 									}
