@@ -9,7 +9,8 @@
  * idle one in place, once, and refuses a busy one with guidance.
  */
 
-import { mkdirSync, realpathSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -20,10 +21,12 @@ import {
 } from "../src/client/conversation-connector.ts";
 import type { ProtocolClient } from "../src/client/protocol-client.ts";
 import { VERSION } from "../src/config.ts";
+import * as sessionMetadata from "../src/core/session-manager.ts";
 import { getDefaultSessionDirPath, SessionManager } from "../src/core/session-manager.ts";
 import type { ControlRequest, ConversationOpenTarget, WorkerSpawnOptions } from "../src/daemon/control-protocol.ts";
 import { startControlServer } from "../src/daemon/control-server.ts";
 import { probeDaemon } from "../src/daemon/spawn.ts";
+import { getWorktreesRoot } from "../src/daemon/worktree-manager.ts";
 import { DaemonConnector, type DaemonConnectorDaemon } from "../src/modes/interactive/daemon-connector.ts";
 import { createTestSocketEndpoint } from "./socket-test-helpers.ts";
 import { createDaemonHarness, type DaemonHarness } from "./suite/daemon-harness.ts";
@@ -31,6 +34,7 @@ import { createDaemonHarness, type DaemonHarness } from "./suite/daemon-harness.
 const cleanups: Array<() => Promise<unknown> | unknown> = [];
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	vi.unstubAllEnvs();
 	for (const cleanup of cleanups.splice(0).reverse()) await Promise.resolve(cleanup()).catch(() => undefined);
 });
@@ -126,6 +130,74 @@ describe("the daemon connector", () => {
 		]);
 		expect(after[0]?.workerId).not.toBe(before.workerId);
 	}, 60_000);
+
+	it("reattaches without rereading checkout metadata when the working directory exists", async () => {
+		const harness = await startHarness();
+		const stored = await harness.createSession();
+		const metadata = vi.spyOn(sessionMetadata, "findSessionInfoById");
+		const tui = connector(harness, harness.workspacePath, {
+			kind: "session",
+			sessionId: stored.sessionId,
+			sessionDir: stored.sessionDirectory,
+		});
+
+		const client = await connect(tui);
+		expect(client.conversation).toBe(stored.sessionId);
+		expect(metadata).not.toHaveBeenCalled();
+	}, 60_000);
+
+	it.each([false, true])("checks a managed checkout only when it is missing (missing=%s)", async (missing) => {
+		const root = realpathSync.native(mkdtempSync(join(tmpdir(), "volt-connector-checkout-")));
+		cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+		const agentDir = join(root, "agent");
+		const cwd = join(getWorktreesRoot(agentDir), "project", "checkout");
+		mkdirSync(cwd, { recursive: true });
+		const manager = await SessionManager.create(cwd, join(agentDir, "sessions"));
+		const ref = manager.getSessionRef()!;
+		await manager.closePersistence();
+		if (missing) rmSync(cwd, { recursive: true });
+
+		const endpoint = createTestSocketEndpoint("volt-connector-checkout");
+		cleanups.push(endpoint.cleanup);
+		const requests: ControlRequest[] = [];
+		const server = await startControlServer({
+			socketPath: endpoint.socketPath,
+			version: VERSION,
+			handlers: {
+				onRequest(connection, request) {
+					requests.push(request);
+					if (request.type === "worktree_restore") {
+						mkdirSync(request.path, { recursive: true });
+						connection.send({ type: "ok", id: request.id });
+					} else {
+						connection.send({ type: "error", id: request.id, code: "open_failed", message: "Open reached" });
+					}
+				},
+			},
+		});
+		cleanups.push(() => server.close());
+		const healthy = { healthy: true, state: "healthy", socketPath: endpoint.socketPath, spawned: false } as const;
+		const tui = new DaemonConnector({
+			agentDir,
+			startup: { target: { kind: "session", sessionId: ref.sessionId, sessionDir: ref.sessionDirectory }, cwd },
+			spawn: spawnOptions(cwd),
+			daemon: {
+				ensure: async () => healthy,
+				probe: async () => healthy,
+				waitForExit: async () => "exited",
+				isServiceProcess: async () => false,
+			},
+		});
+		cleanups.push(() => tui.dispose());
+		const metadata = vi.spyOn(sessionMetadata, "findSessionInfoById");
+
+		await expect(tui.open({ kind: "startup" })).rejects.toThrow("Open reached");
+		expect(metadata).toHaveBeenCalledTimes(missing ? 1 : 0);
+		expect(requests.map((request) => request.type)).toEqual(
+			missing ? ["worktree_restore", "conversation_open"] : ["conversation_open"],
+		);
+		if (missing) expect(requests[0]).toMatchObject({ type: "worktree_restore", path: cwd, sessionRef: ref });
+	});
 
 	it("opens a stored conversation a move leads to where it is stored, another project's session directory", async () => {
 		const harness = await startHarness();

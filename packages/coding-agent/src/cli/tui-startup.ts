@@ -8,14 +8,22 @@
  */
 
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import chalk from "chalk";
 import { formatMissingSessionCwdPrompt } from "../core/session-cwd.ts";
 import { findLocalSessionByExactId, type ResolvedSession, resolveSessionArgument } from "../core/session-lookup.ts";
-import { findSessionInfoById, SessionManager, type SessionReference } from "../core/session-manager.ts";
+import {
+	findSessionInfoById,
+	getDefaultSessionDirPath,
+	SessionManager,
+	type SessionReference,
+} from "../core/session-manager.ts";
+import { acquireSharedSQLiteSessionStore, SESSION_STORE_DATABASE_FILENAME } from "../core/session-store/index.ts";
 import type { SettingsManager } from "../core/settings-manager.ts";
 import { initTheme, stopThemeWatcher } from "../core/theme/runtime.ts";
 import type { ConversationOpenTarget } from "../daemon/control-protocol.ts";
 import { isPathUnderWorktreesRoot } from "../daemon/worktree-manager.ts";
+import { resolvePath } from "../utils/paths.ts";
 import type { Args } from "./args.ts";
 import { selectSession } from "./session-picker.ts";
 import { showStartupSelector } from "./startup-ui.ts";
@@ -126,6 +134,26 @@ async function storedTarget(
  * the latest one, `--session-id` that one, else a new one.
  */
 export async function resolveTuiStartupTarget(
+	parsed: Args,
+	context: TuiStartupContext,
+): Promise<TuiStartupTarget | TuiStartupExit> {
+	const readsStore =
+		!parsed.noSession &&
+		Boolean(parsed.fork || parsed.session || parsed.resume || parsed.continue || parsed.sessionId);
+	const directory = resolvePath(context.sessionDir ?? getDefaultSessionDirPath(context.agentDir));
+	// Keep sequential lookups on one worker, only while choosing the startup target. Never create a store here.
+	const lease =
+		readsStore && existsSync(join(directory, SESSION_STORE_DATABASE_FILENAME))
+			? await acquireSharedSQLiteSessionStore(directory)
+			: undefined;
+	try {
+		return await resolveStartupTarget(parsed, context);
+	} finally {
+		await lease?.release();
+	}
+}
+
+async function resolveStartupTarget(
 	parsed: Args,
 	context: TuiStartupContext,
 ): Promise<TuiStartupTarget | TuiStartupExit> {
