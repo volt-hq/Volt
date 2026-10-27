@@ -136,15 +136,13 @@ async function fixture(nested = false, workspaceName = "project") {
 		repository: {
 			providerId: "github",
 			host: "github.com",
-			owner: "owner",
-			name: "project",
+			path: "owner/project",
 			canonicalId: "github:github.com/owner/project",
 		},
 		headRepository: {
 			providerId: "github",
 			host: "github.com",
-			owner: "contributor",
-			name: "fork",
+			path: "contributor/fork",
 			canonicalId: "github:github.com/contributor/fork",
 		},
 		remote: "origin",

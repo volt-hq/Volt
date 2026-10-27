@@ -73,8 +73,7 @@ async function fixture(maxWorktreesPerWorkspace = 1, runReviewGit?: WorktreeGitR
 	const repository: ResolvedPullRequestCheckout["repository"] = {
 		providerId: "github",
 		host: "github.com",
-		owner: "owner",
-		name: "project",
+		path: "owner/project",
 		canonicalId: "github:github.com/owner/project",
 	};
 	const target: ResolvedPullRequestCheckout = {

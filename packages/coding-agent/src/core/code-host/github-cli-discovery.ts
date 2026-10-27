@@ -151,12 +151,12 @@ function normalizedRepository(host: string, owner: string, name: string): Canoni
 	) {
 		return null;
 	}
+	const path = `${normalizedOwner}/${normalizedName}`;
 	return Object.freeze({
 		providerId: "github",
 		host: normalizedHost,
-		owner: normalizedOwner,
-		name: normalizedName,
-		canonicalId: `github:${normalizedHost}/${normalizedOwner}/${normalizedName}`,
+		path,
+		canonicalId: `github:${normalizedHost}/${path}`,
 	});
 }
 
@@ -182,8 +182,7 @@ export function canonicalizeGitHubRemoteUrl(value: string): CanonicalCodeHostRep
 }
 
 function repositorySlug(repository: CanonicalCodeHostRepository): string {
-	const path = `${repository.owner}/${repository.name}`;
-	return repository.host === "github.com" ? path : `${repository.host}/${path}`;
+	return repository.host === "github.com" ? repository.path : `${repository.host}/${repository.path}`;
 }
 
 async function discoverRemoteRepositories(
@@ -499,7 +498,9 @@ export const githubCliPullRequestDiscoveryProvider: CodeHostPullRequestDiscovery
 
 interface StatusChunkEntry {
 	readonly index: number;
-	readonly target: CodeHostPullRequestStatusTarget;
+	readonly owner: string;
+	readonly name: string;
+	readonly number: number;
 }
 
 interface StatusQuery {
@@ -522,24 +523,30 @@ function isStatusIdentityPart(value: unknown, maximum: number): value is string 
 	);
 }
 
-function isValidStatusTarget(target: CodeHostPullRequestStatusTarget): boolean {
-	return (
-		isStatusIdentityPart(target.owner, 100) &&
-		isStatusIdentityPart(target.name, 100) &&
-		Number.isSafeInteger(target.number) &&
-		target.number >= 1 &&
-		target.number <= MAX_GRAPHQL_INT
-	);
+/** A target whose path is a GitHub `owner/name` and whose number fits a GraphQL Int; null otherwise. */
+function statusChunkEntry(target: CodeHostPullRequestStatusTarget, index: number): StatusChunkEntry | null {
+	const [owner, name, ...rest] = target.path.split("/");
+	if (
+		rest.length > 0 ||
+		!isStatusIdentityPart(owner, 100) ||
+		!isStatusIdentityPart(name, 100) ||
+		!Number.isSafeInteger(target.number) ||
+		target.number < 1 ||
+		target.number > MAX_GRAPHQL_INT
+	) {
+		return null;
+	}
+	return { index, owner, name, number: target.number };
 }
 
 /** Build one aliased query; every owner, name, and number travels as a GraphQL variable. */
 function buildStatusQuery(chunk: readonly StatusChunkEntry[]): StatusQuery {
 	const groups = new Map<string, { index: number; owner: string; name: string; members: number[] }>();
 	chunk.forEach((entry, position) => {
-		const key = `${entry.target.owner}\0${entry.target.name}`;
+		const key = `${entry.owner}\0${entry.name}`;
 		let group = groups.get(key);
 		if (!group) {
-			group = { index: groups.size, owner: entry.target.owner, name: entry.target.name, members: [] };
+			group = { index: groups.size, owner: entry.owner, name: entry.name, members: [] };
 			groups.set(key, group);
 		}
 		group.members.push(position);
@@ -556,7 +563,7 @@ function buildStatusQuery(chunk: readonly StatusChunkEntry[]): StatusQuery {
 		const fields = group.members.map((position, memberIndex) => {
 			const variable = `p${group.index}_${memberIndex}`;
 			const pullRequestAlias = `${repositoryAlias}p${memberIndex}`;
-			variables[variable] = chunk[position]!.target.number;
+			variables[variable] = chunk[position]!.number;
 			declarations.push(`$${variable}:Int!`);
 			aliases[position] = { repository: repositoryAlias, pullRequest: pullRequestAlias };
 			return `${pullRequestAlias}: pullRequest(number:$${variable}){ state isDraft title }`;
@@ -667,7 +674,8 @@ export async function refreshPullRequestStatusesWithGitHubCli(
 	if (!isStatusIdentityPart(request.host, 253) || request.host.startsWith("-")) return outcomes;
 	const valid: StatusChunkEntry[] = [];
 	request.pullRequests.forEach((target, index) => {
-		if (isValidStatusTarget(target)) valid.push({ index, target });
+		const entry = statusChunkEntry(target, index);
+		if (entry) valid.push(entry);
 	});
 	for (let offset = 0; offset < valid.length; offset += STATUS_CHUNK_SIZE) {
 		const chunk = valid.slice(offset, offset + STATUS_CHUNK_SIZE);

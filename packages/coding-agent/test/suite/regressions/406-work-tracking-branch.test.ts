@@ -104,7 +104,7 @@ describe("#406 Work tracked head identity", () => {
 		git("remote", "add", "origin", "https://github.com/other/project.git");
 		expect(await discover()).toMatchObject({
 			state: "resolved",
-			pullRequest: { headBranch: REMOTE_BRANCH, headRepository: { owner: "contributor" } },
+			pullRequest: { headBranch: REMOTE_BRANCH, headRepository: { path: "contributor/fork" } },
 		});
 	});
 
@@ -122,7 +122,10 @@ describe("#406 Work tracked head identity", () => {
 			pullRequest({ headRefName: LOCAL_BRANCH }),
 			pullRequest({ headRefOid: "f".repeat(40) }),
 		];
-		expect(await discover()).toMatchObject({ state: "resolved", pullRequest: { repository: { owner: "volt-hq" } } });
+		expect(await discover()).toMatchObject({
+			state: "resolved",
+			pullRequest: { repository: { path: "volt-hq/volt" } },
+		});
 		responses["volt-hq/volt"] = [];
 		expect(await discover()).toEqual({ state: "none" });
 	});

@@ -74,7 +74,7 @@ export async function resolvePullRequestCheckoutWithGitHubCli(
 			!value ||
 			!locator ||
 			!repository ||
-			locator.repository !== `${repository.host}/${repository.owner}/${repository.name}` ||
+			locator.repository !== `${repository.host}/${repository.path}` ||
 			locator.url.toLowerCase() !== selected.url.toLowerCase() ||
 			locator.number !== value.number ||
 			locator.number > options.maxPullRequestNumber ||
@@ -121,8 +121,7 @@ export async function resolvePullRequestCheckoutWithGitHubCli(
 		const headRepository = canonicalizeGitHubRemoteUrl(`https://${repository.host}/${owner.login}/${head.name}`);
 		if (
 			!headRepository ||
-			headRepository.owner !== owner.login.toLowerCase() ||
-			headRepository.name !== head.name.toLowerCase() ||
+			headRepository.path !== `${owner.login}/${head.name}`.toLowerCase() ||
 			(selected.kind === "current" && headRepository.canonicalId !== repository.canonicalId)
 		) {
 			return failure(
@@ -137,7 +136,7 @@ export async function resolvePullRequestCheckoutWithGitHubCli(
 					url: locator.url,
 					number: locator.number,
 					title: value.title,
-					repository: `${repository.owner}/${repository.name}`,
+					repository: repository.path,
 					headRefName: value.headRefName,
 					headRefOid: value.headRefOid,
 				},

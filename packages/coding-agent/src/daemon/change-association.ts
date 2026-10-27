@@ -123,8 +123,7 @@ function toStoreOutcome(outcome: CodeHostPullRequestDiscoveryOutcome): ChangeDis
 			provider: outcome.pullRequest.providerId.slice(0, 64),
 			repository: {
 				host: outcome.pullRequest.repository.host,
-				owner: outcome.pullRequest.repository.owner,
-				name: outcome.pullRequest.repository.name,
+				path: outcome.pullRequest.repository.path,
 			},
 			number: outcome.pullRequest.number,
 			title: outcome.pullRequest.title.slice(0, 512),
@@ -443,8 +442,7 @@ export class ChangeAssociationService {
 			.listWatchedPullRequests(STATUS_WATCH_LIMIT)
 			.filter((entry) => providers.has(entry.provider));
 		if (watched.length === 0) return "idle";
-		const targetKey = (entry: (typeof watched)[number]): string =>
-			`${entry.repository.owner}\0${entry.repository.name}\0${entry.number}`;
+		const targetKey = (entry: (typeof watched)[number]): string => `${entry.repository.path}\0${entry.number}`;
 		const hostKey = (entry: (typeof watched)[number]): string => `${entry.provider}\0${entry.repository.host}`;
 		const targetsByHost = new Map<
 			string,
@@ -460,11 +458,7 @@ export class ChangeAssociationService {
 				group = { provider: providers.get(entry.provider)!, host: entry.repository.host, targets: new Map() };
 				targetsByHost.set(hostKey(entry), group);
 			}
-			group.targets.set(targetKey(entry), {
-				owner: entry.repository.owner,
-				name: entry.repository.name,
-				number: entry.number,
-			});
+			group.targets.set(targetKey(entry), { path: entry.repository.path, number: entry.number });
 		}
 		const outcomes = new Map<string, CodeHostPullRequestStatusOutcome>();
 		for (const [groupKey, { provider, host, targets }] of targetsByHost) {

@@ -100,15 +100,13 @@ describe("#414 lightweight PR checkout target", () => {
 				repository: {
 					providerId: "github",
 					host: "github.com",
-					owner: "volt-hq",
-					name: "project",
+					path: "volt-hq/project",
 					canonicalId: "github:github.com/volt-hq/project",
 				},
 				headRepository: {
 					providerId: "github",
 					host: "github.com",
-					owner: "volt-hq",
-					name: "project",
+					path: "volt-hq/project",
 					canonicalId: "github:github.com/volt-hq/project",
 				},
 				remote: "origin",
@@ -137,7 +135,7 @@ describe("#414 lightweight PR checkout target", () => {
 		await expect(resolve()).resolves.toMatchObject({
 			ok: true,
 			target: {
-				headRepository: { owner: "contributor", name: "forked-project" },
+				headRepository: { path: "contributor/forked-project" },
 				remoteUrl: REMOTE_URL,
 				headRef: "refs/pull/414/head",
 			},
