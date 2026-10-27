@@ -188,7 +188,7 @@ describe("#411 current-PR picker identity", () => {
 	it("refuses a pinned URL that is not a pull request, or whose number differs", async () => {
 		await expect(
 			client.intent("review", { target: "pr", url: "https://github.com/contributor/project" }),
-		).rejects.toThrow("Not a GitHub pull request URL");
+		).rejects.toThrow("Not a supported pull request URL");
 		await expect(client.intent("review", { target: "pr", number: "41", url: FORK_URL })).rejects.toThrow(
 			"does not match its URL",
 		);

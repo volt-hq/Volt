@@ -1,3 +1,4 @@
+import { azureDevOpsCodeHostProvider } from "./azure-devops-provider.ts";
 import { githubCliCodeHostProvider } from "./github-cli-provider.ts";
 import { registerCodeHostIdentity } from "./identity.ts";
 import {
@@ -20,7 +21,7 @@ import type {
  * Resolution order: the first provider that accepts every URL of the selected remote serves the review.
  * Built-in identity rules are listed separately in identity.ts; keep both lists in step.
  */
-const providers: CodeHostProvider[] = [githubCliCodeHostProvider];
+const providers: CodeHostProvider[] = [githubCliCodeHostProvider, azureDevOpsCodeHostProvider];
 
 /** Add a code-host provider and its identity rules after the built-ins. Returns a function that removes both. */
 export function registerCodeHostProvider(provider: CodeHostProvider): () => void {

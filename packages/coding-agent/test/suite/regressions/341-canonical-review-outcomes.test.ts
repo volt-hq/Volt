@@ -371,6 +371,7 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 			id: "test",
 			displayName: "Test",
 			canonicalizeRemoteUrl: () => null,
+			parsePullRequestUrl: () => undefined,
 			isCanonicalPullRequestCheckout: () => false,
 			probeCurrentPullRequest: async () => undefined,
 			resolvePullRequestCheckout: async () => ({ ok: false, error: "unused" }),

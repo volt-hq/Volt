@@ -9,8 +9,8 @@ import {
 	discoverPullRequestWithGitHubCli,
 	refreshPullRequestStatusesWithGitHubCli,
 } from "./github-cli-discovery.ts";
-import { parseGitHubPullRequestUrl, resolveCurrentReviewPullRequest } from "./github-cli-review-target.ts";
-import { githubCodeHostIdentity } from "./github-identity.ts";
+import { resolveCurrentReviewPullRequest } from "./github-cli-review-target.ts";
+import { githubCodeHostIdentity, parseGitHubPullRequestUrl } from "./github-identity.ts";
 import type {
 	CodeHostCommandOptions,
 	CodeHostProvider,
