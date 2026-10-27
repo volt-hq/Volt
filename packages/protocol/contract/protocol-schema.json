@@ -1539,6 +1539,66 @@
 			},
 			"additionalProperties": false
 		},
+		"Control.PeerConversation": {
+			"type": "object",
+			"required": [
+				"workspace",
+				"sessionId",
+				"firstMessage",
+				"modifiedAt",
+				"runtimeState"
+			],
+			"properties": {
+				"workspace": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				},
+				"name": {
+					"type": "string"
+				},
+				"firstMessage": {
+					"type": "string"
+				},
+				"modifiedAt": {
+					"type": "string"
+				},
+				"runtimeState": {
+					"type": "string",
+					"enum": [
+						"attached",
+						"detached"
+					]
+				},
+				"branch": {
+					"type": "string"
+				},
+				"workingDirectory": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.PeerReply": {
+			"type": "object",
+			"required": [
+				"text",
+				"truncated"
+			],
+			"properties": {
+				"text": {
+					"type": "string"
+				},
+				"truncated": {
+					"type": "boolean"
+				},
+				"stopReason": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Control.PeerStatus": {
 			"type": "object",
 			"required": [
@@ -1560,6 +1620,35 @@
 				},
 				"addedAtMs": {
 					"$ref": "#/$defs/RpcEpochMilliseconds"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.PeerTranscriptItem": {
+			"type": "object",
+			"required": [
+				"role",
+				"text",
+				"truncated"
+			],
+			"properties": {
+				"role": {
+					"type": "string",
+					"enum": [
+						"user",
+						"assistant",
+						"system",
+						"tool"
+					]
+				},
+				"text": {
+					"type": "string"
+				},
+				"truncated": {
+					"type": "boolean"
+				},
+				"toolName": {
+					"type": "string"
 				}
 			},
 			"additionalProperties": false
@@ -2070,7 +2159,13 @@
 					"$ref": "#/$defs/Control.Request.worker_peers_list"
 				},
 				{
-					"$ref": "#/$defs/Control.Request.worker_peer_run"
+					"$ref": "#/$defs/Control.Request.worker_peer_conversations"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_peer_read"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_peer_send"
 				},
 				{
 					"$ref": "#/$defs/Control.Request.worker_peer_cancel"
@@ -2965,19 +3060,82 @@
 			},
 			"additionalProperties": false
 		},
-		"Control.Request.worker_peer_run": {
+		"Control.Request.worker_peer_conversations": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"peer"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_peer_conversations"
+				},
+				"id": {
+					"type": "string"
+				},
+				"peer": {
+					"type": "string",
+					"maxLength": 64,
+					"pattern": "^[^\\u0000\\r\\n]{1,64}$"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_peer_read": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"peer",
+				"sessionId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_peer_read"
+				},
+				"id": {
+					"type": "string"
+				},
+				"peer": {
+					"type": "string",
+					"maxLength": 64,
+					"pattern": "^[^\\u0000\\r\\n]{1,64}$"
+				},
+				"workspace": {
+					"type": "string",
+					"maxLength": 256,
+					"pattern": "^[^\\u0000\\r\\n]{1,256}$"
+				},
+				"sessionId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 128
+				},
+				"limit": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 100
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_peer_send": {
 			"type": "object",
 			"required": [
 				"type",
 				"id",
 				"runId",
 				"peer",
-				"task"
+				"message",
+				"wait"
 			],
 			"properties": {
 				"type": {
 					"type": "string",
-					"const": "worker_peer_run"
+					"const": "worker_peer_send"
 				},
 				"id": {
 					"type": "string"
@@ -2992,10 +3150,26 @@
 					"maxLength": 64,
 					"pattern": "^[^\\u0000\\r\\n]{1,64}$"
 				},
-				"task": {
+				"workspace": {
+					"type": "string",
+					"maxLength": 256,
+					"pattern": "^[^\\u0000\\r\\n]{1,256}$"
+				},
+				"sessionId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 128
+				},
+				"message": {
 					"type": "string",
 					"maxLength": 65536,
 					"pattern": "^[\\s\\S]{1,65536}$"
+				},
+				"delivery": {
+					"$ref": "#/$defs/RpcStreamingBehavior"
+				},
+				"wait": {
+					"type": "boolean"
 				}
 			},
 			"additionalProperties": false
@@ -3544,7 +3718,13 @@
 					"$ref": "#/$defs/Control.Response.peers_result"
 				},
 				{
-					"$ref": "#/$defs/Control.Response.peer_run_result"
+					"$ref": "#/$defs/Control.Response.peer_conversations_result"
+				},
+				{
+					"$ref": "#/$defs/Control.Response.peer_transcript_result"
+				},
+				{
+					"$ref": "#/$defs/Control.Response.peer_send_result"
 				},
 				{
 					"$ref": "#/$defs/Control.Response.worktree_resolve_result"
@@ -3768,6 +3948,30 @@
 			},
 			"additionalProperties": false
 		},
+		"Control.Response.peer_conversations_result": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"conversations"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "peer_conversations_result"
+				},
+				"id": {
+					"type": "string"
+				},
+				"conversations": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/Control.PeerConversation"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
 		"Control.Response.peer_result": {
 			"type": "object",
 			"required": [
@@ -3789,34 +3993,70 @@
 			},
 			"additionalProperties": false
 		},
-		"Control.Response.peer_run_result": {
+		"Control.Response.peer_send_result": {
 			"type": "object",
 			"required": [
 				"type",
 				"id",
+				"workspace",
 				"sessionId",
-				"text",
-				"truncated"
+				"created"
 			],
 			"properties": {
 				"type": {
 					"type": "string",
-					"const": "peer_run_result"
+					"const": "peer_send_result"
 				},
 				"id": {
+					"type": "string"
+				},
+				"workspace": {
 					"type": "string"
 				},
 				"sessionId": {
 					"type": "string"
 				},
-				"text": {
-					"type": "string"
-				},
-				"truncated": {
+				"created": {
 					"type": "boolean"
 				},
-				"stopReason": {
+				"reply": {
+					"$ref": "#/$defs/Control.PeerReply"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.peer_transcript_result": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"workspace",
+				"sessionId",
+				"busy",
+				"items"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "peer_transcript_result"
+				},
+				"id": {
 					"type": "string"
+				},
+				"workspace": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				},
+				"busy": {
+					"type": "boolean"
+				},
+				"items": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/Control.PeerTranscriptItem"
+					}
 				}
 			},
 			"additionalProperties": false

@@ -172,6 +172,50 @@ export const ControlPeerStatusSchema = Type.Object(
 );
 export type ControlPeerStatus = Static<typeof ControlPeerStatusSchema>;
 
+/** A conversation open on a peer host (experimental): one a terminal, an app, or a peer has open now, or one kept warm. */
+export const ControlPeerConversationSchema = Type.Object(
+	{
+		/** The registered workspace on the peer host the conversation belongs to. */
+		workspace: Type.String(),
+		sessionId: Type.String(),
+		name: Type.Optional(Type.String()),
+		firstMessage: Type.String(),
+		modifiedAt: Type.String(),
+		/** `attached` while a client has it open; `detached` while its worker keeps it open with none. */
+		runtimeState: stringEnum(["attached", "detached"]),
+		branch: Type.Optional(Type.String()),
+		/** Relative to the workspace root; absent at the root. */
+		workingDirectory: Type.Optional(Type.String()),
+	},
+	closed,
+);
+export type ControlPeerConversation = Static<typeof ControlPeerConversationSchema>;
+
+/** One transcript item of a peer conversation, as the peer host's remote profile shows it, cut to a bound. */
+export const ControlPeerTranscriptItemSchema = Type.Object(
+	{
+		role: stringEnum(["user", "assistant", "system", "tool"]),
+		text: Type.String(),
+		truncated: Type.Boolean(),
+		toolName: Type.Optional(Type.String()),
+	},
+	closed,
+);
+export type ControlPeerTranscriptItem = Static<typeof ControlPeerTranscriptItemSchema>;
+
+/** A peer agent's reply: its last assistant message after the message it was sent. */
+export const ControlPeerReplySchema = Type.Object(
+	{
+		text: Type.String(),
+		/** The peer host cut `text` to its transcript bound. */
+		truncated: Type.Boolean(),
+		/** How the reply's turn ended, when it reported one. */
+		stopReason: Type.Optional(Type.String()),
+	},
+	closed,
+);
+export type ControlPeerReply = Static<typeof ControlPeerReplySchema>;
+
 export const DaemonRemotePolicyStatusSchema = Type.Object(
 	{
 		/** Daemon-wide override; null delegates to workspace and device grants. */
@@ -1081,17 +1125,42 @@ export const CONTROL_REQUEST_SCHEMAS = {
 	}),
 	/** Worker: the saved peers its conversations' `peer` tool may delegate to. Answered by `peers_result`. */
 	worker_peers_list: withId("worker_peers_list", {}),
+	/** Worker: the conversations open on the host of peer `peer`, in every workspace it shares. Answered by `peer_conversations_result`. */
+	worker_peer_conversations: withId("worker_peer_conversations", { peer: codePoints(1, 64, SINGLE_LINE) }),
 	/**
-	 * Worker: run `task` as the first prompt of a new conversation on the host
-	 * of peer `peer`, and answer once that conversation is idle again. Answered
-	 * by `peer_run_result`; `worker_peer_cancel` with the same `runId` stops it.
+	 * Worker: the newest `limit` transcript items (20 by default) of conversation
+	 * `sessionId` on the host of peer `peer`, in `workspace` (the peer's own by
+	 * default). Answered by `peer_transcript_result`.
 	 */
-	worker_peer_run: withId("worker_peer_run", {
+	worker_peer_read: withId("worker_peer_read", {
+		peer: codePoints(1, 64, SINGLE_LINE),
+		workspace: Type.Optional(codePoints(1, 256, SINGLE_LINE)),
+		sessionId: Type.String({ minLength: 1, maxLength: 128 }),
+		limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+	}),
+	/**
+	 * Worker: send `message` to conversation `sessionId` on the host of peer
+	 * `peer` (a new conversation without one), in `workspace` (the peer's own by
+	 * default): while the conversation runs, as `delivery` (`steer` by
+	 * default); else it starts a turn. With `wait`, answered once the
+	 * conversation is idle again, with the peer agent's reply; else once the
+	 * message is admitted. Answered by `peer_send_result`;
+	 * `worker_peer_cancel` with the same `runId` stops the wait.
+	 */
+	worker_peer_send: withId("worker_peer_send", {
 		runId: Type.String({ minLength: 1, maxLength: 64 }),
 		peer: codePoints(1, 64, SINGLE_LINE),
-		task: codePoints(1, 65_536),
+		workspace: Type.Optional(codePoints(1, 256, SINGLE_LINE)),
+		sessionId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+		message: codePoints(1, 65_536),
+		delivery: Type.Optional(stringEnum(["steer", "followUp"])),
+		wait: Type.Boolean(),
 	}),
-	/** Worker: stop its run `runId`: abort the peer's turn and close the stream. Answered by `ok`. */
+	/**
+	 * Worker: stop its run `runId`. A wait on a conversation the run created
+	 * stops that conversation's turn; a wait on another conversation only stops
+	 * waiting. Answered by `ok`.
+	 */
 	worker_peer_cancel: withId("worker_peer_cancel", { runId: Type.String({ minLength: 1, maxLength: 64 }) }),
 } as const;
 
@@ -1118,7 +1187,9 @@ export const WORKER_REQUEST_TYPES = [
 	"worker_worktree_list",
 	"worker_worktree_remove",
 	"worker_peers_list",
-	"worker_peer_run",
+	"worker_peer_conversations",
+	"worker_peer_read",
+	"worker_peer_send",
 	"worker_peer_cancel",
 ] as const satisfies readonly (keyof typeof CONTROL_REQUEST_SCHEMAS)[];
 export type WorkerRequestType = (typeof WORKER_REQUEST_TYPES)[number];
@@ -1173,7 +1244,9 @@ export const ControlRequestSchema = Type.Union([
 	CONTROL_REQUEST_SCHEMAS.worker_worktree_list,
 	CONTROL_REQUEST_SCHEMAS.worker_worktree_remove,
 	CONTROL_REQUEST_SCHEMAS.worker_peers_list,
-	CONTROL_REQUEST_SCHEMAS.worker_peer_run,
+	CONTROL_REQUEST_SCHEMAS.worker_peer_conversations,
+	CONTROL_REQUEST_SCHEMAS.worker_peer_read,
+	CONTROL_REQUEST_SCHEMAS.worker_peer_send,
 	CONTROL_REQUEST_SCHEMAS.worker_peer_cancel,
 ]);
 export type ControlRequest = Static<typeof ControlRequestSchema>;
@@ -1212,15 +1285,23 @@ export const CONTROL_RESPONSE_SCHEMAS = {
 	worktrees_result: withId("worktrees_result", { worktrees: Type.Array(ControlWorktreeStatusSchema) }),
 	peer_result: withId("peer_result", { peer: ControlPeerStatusSchema }),
 	peers_result: withId("peers_result", { peers: Type.Array(ControlPeerStatusSchema) }),
-	/** A peer run's conversation went idle: its last assistant reply, as the peer's remote profile bounds it. */
-	peer_run_result: withId("peer_run_result", {
-		/** The conversation the run opened on the peer host. */
+	peer_conversations_result: withId("peer_conversations_result", {
+		conversations: Type.Array(ControlPeerConversationSchema),
+	}),
+	peer_transcript_result: withId("peer_transcript_result", {
+		workspace: Type.String(),
 		sessionId: Type.String(),
-		text: Type.String(),
-		/** The peer host cut `text` to its transcript bound. */
-		truncated: Type.Boolean(),
-		/** How the reply's turn ended, when it reported one. */
-		stopReason: Type.Optional(Type.String()),
+		/** A turn or other operation runs, or input waits, in the conversation. */
+		busy: Type.Boolean(),
+		items: Type.Array(ControlPeerTranscriptItemSchema),
+	}),
+	/** A peer message was admitted; with `reply` once its conversation went idle again (a `wait`). */
+	peer_send_result: withId("peer_send_result", {
+		workspace: Type.String(),
+		sessionId: Type.String(),
+		/** The message started a new conversation. */
+		created: Type.Boolean(),
+		reply: Type.Optional(ControlPeerReplySchema),
 	}),
 	worktree_resolve_result: withId("worktree_resolve_result", {
 		/** Parent workspace the worktree belongs to. */
@@ -1305,7 +1386,9 @@ export const ControlResponseSchema = Type.Union([
 	CONTROL_RESPONSE_SCHEMAS.worktrees_result,
 	CONTROL_RESPONSE_SCHEMAS.peer_result,
 	CONTROL_RESPONSE_SCHEMAS.peers_result,
-	CONTROL_RESPONSE_SCHEMAS.peer_run_result,
+	CONTROL_RESPONSE_SCHEMAS.peer_conversations_result,
+	CONTROL_RESPONSE_SCHEMAS.peer_transcript_result,
+	CONTROL_RESPONSE_SCHEMAS.peer_send_result,
 	CONTROL_RESPONSE_SCHEMAS.worktree_resolve_result,
 	CONTROL_RESPONSE_SCHEMAS.worktree_prune_result,
 	CONTROL_RESPONSE_SCHEMAS.pair_started,

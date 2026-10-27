@@ -286,7 +286,9 @@ async function openConversation(
 						// Peer runs go through the daemon, which dials the peer hosts.
 						peers: {
 							list: () => client.listPeers(),
-							run: (runId, peer, task) => client.runPeer(runId, peer, task),
+							conversations: (peer) => client.listPeerConversations(peer),
+							read: (peer, workspace, sessionId, limit) => client.readPeer(peer, workspace, sessionId, limit),
+							send: (options) => client.sendPeer(options),
 							cancel: (runId) => client.cancelPeerRun(runId),
 						},
 					},

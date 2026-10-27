@@ -22,6 +22,7 @@ import {
 } from "../control-client.ts";
 import {
 	type ControlEvent,
+	type ControlPeerConversation,
 	type ControlPeerStatus,
 	type ControlRequest,
 	type ControlResponse,
@@ -35,7 +36,7 @@ import {
 	type WorkerStopReason,
 } from "../control-protocol.ts";
 import type { SessionWorktreeCreateOptions } from "../session-worktree.ts";
-import type { PeerAgentRun } from "./peer-tool.ts";
+import type { PeerAgentSend, PeerAgentSendOptions, PeerAgentTranscript } from "./peer-tool.ts";
 
 /** A `worker_stop` the daemon sent: answer it once with `stopResult`. */
 export interface WorkerStopEvent {
@@ -379,15 +380,38 @@ export class WorkerDaemonClient {
 		return response.peers;
 	}
 
-	/** Have the daemon run `task` on the peer `peer`; resolves once the peer's conversation is idle. */
-	async runPeer(runId: string, peer: string, task: string): Promise<PeerAgentRun> {
-		const response = await this.request({ type: "worker_peer_run", runId, peer, task });
-		if (response.type !== "peer_run_result") throw new Error(`Unexpected ${response.type}`);
+	/** Conversations open on the peer host, across its shared workspaces. */
+	async listPeerConversations(peer: string): Promise<ControlPeerConversation[]> {
+		const response = await this.request({ type: "worker_peer_conversations", peer });
+		if (response.type !== "peer_conversations_result") throw new Error(`Unexpected ${response.type}`);
+		return response.conversations;
+	}
+
+	async readPeer(
+		peer: string,
+		workspace: string | undefined,
+		sessionId: string,
+		limit?: number,
+	): Promise<PeerAgentTranscript> {
+		const response = await this.request({ type: "worker_peer_read", peer, workspace, sessionId, limit });
+		if (response.type !== "peer_transcript_result") throw new Error(`Unexpected ${response.type}`);
 		return {
+			workspace: response.workspace,
 			sessionId: response.sessionId,
-			text: response.text,
-			truncated: response.truncated,
-			...(response.stopReason === undefined ? {} : { stopReason: response.stopReason }),
+			busy: response.busy,
+			items: response.items,
+		};
+	}
+
+	/** Send into a peer conversation; with `wait`, return its reply when it becomes idle. */
+	async sendPeer(options: PeerAgentSendOptions): Promise<PeerAgentSend> {
+		const response = await this.request({ type: "worker_peer_send", ...options });
+		if (response.type !== "peer_send_result") throw new Error(`Unexpected ${response.type}`);
+		return {
+			workspace: response.workspace,
+			sessionId: response.sessionId,
+			created: response.created,
+			...(response.reply === undefined ? {} : { reply: response.reply }),
 		};
 	}
 
