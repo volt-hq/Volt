@@ -155,13 +155,11 @@ describe("GitHub remote canonicalization", () => {
 	it("accepts credential-free GitHub and GHES remote forms", () => {
 		expect(canonicalizeGitHubRemoteUrl("git@github.com:Volt-HQ/Volt.git")).toMatchObject({
 			host: "github.com",
-			owner: "volt-hq",
-			name: "volt",
+			path: "volt-hq/volt",
 		});
 		expect(canonicalizeGitHubRemoteUrl("ssh://git@git.example.test/Team/Repo.git")).toMatchObject({
 			host: "git.example.test",
-			owner: "team",
-			name: "repo",
+			path: "team/repo",
 		});
 		expect(canonicalizeGitHubRemoteUrl("https://token@example.test/team/repo.git")).toBeNull();
 		expect(canonicalizeGitHubRemoteUrl("https://example.test/nested/team/repo.git")).toBeNull();

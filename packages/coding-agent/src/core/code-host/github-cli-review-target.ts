@@ -62,9 +62,7 @@ async function resolveReviewRemoteRepository(
 	const repositories = new Set<string>();
 	for (const value of urls) {
 		const repository = canonicalizeGitHubRemoteUrl(value);
-		const locator =
-			repository &&
-			parseGitHubPullRequestUrl(`https://${repository.host}/${repository.owner}/${repository.name}/pull/1`);
+		const locator = repository && parseGitHubPullRequestUrl(`https://${repository.host}/${repository.path}/pull/1`);
 		if (!locator)
 			return failure(
 				"The review remote is not a supported credential-free GitHub URL. Check its configuration on the host.",

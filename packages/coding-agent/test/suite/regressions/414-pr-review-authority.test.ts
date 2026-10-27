@@ -224,15 +224,13 @@ async function fixture(grant = capabilities) {
 		repository: {
 			providerId: "github",
 			host: "github.com",
-			owner: "owner",
-			name: "project",
+			path: "owner/project",
 			canonicalId: "github:github.com/owner/project",
 		},
 		headRepository: {
 			providerId: "github",
 			host: "github.com",
-			owner: "owner",
-			name: "project",
+			path: "owner/project",
 			canonicalId: "github:github.com/owner/project",
 		},
 		remote: "origin",

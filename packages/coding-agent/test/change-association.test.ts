@@ -18,12 +18,13 @@ import {
 	CHANGE_STORE_MAX_REPOSITORIES,
 	type ChangeBindingMutationResult,
 	ChangeStore,
+	type ChangesFileV1,
 	parseChangesFile,
 } from "../src/daemon/changes-store.ts";
 
 const OID_A = "0123456789abcdef0123456789abcdef01234567";
 const OID_B = "abcdef0123456789abcdef0123456789abcdef01";
-const PR_REPOSITORY = { host: "github.com", owner: "volt-hq", name: "volt" };
+const PR_REPOSITORY = { host: "github.com", path: "volt-hq/volt" };
 const tempDirectories: string[] = [];
 
 function tempDirectory(label: string): string {
@@ -40,8 +41,7 @@ function repository(owner: string, name: string): CanonicalCodeHostRepository {
 	return {
 		providerId: "github",
 		host: "github.com",
-		owner,
-		name,
+		path: `${owner}/${name}`,
 		canonicalId: `github:github.com/${owner}/${name}`,
 	};
 }
@@ -355,6 +355,52 @@ describe("ChangeStore", () => {
 		await reopened.close();
 	});
 
+	it("round-trips provider-defined repository paths and rejects malformed ones", async () => {
+		const path = statePath("changes-repository-path");
+		const store = new ChangeStore({ path });
+		await store.load();
+		const binding = await store.bindObservation({ ...observation(), baseBranch: false, now: 100 });
+		const azureRepository = { host: "dev.azure.com", path: "fabrikam/Fabrikam Fiber/fiber" };
+		await store.applyDiscovery(
+			binding.fence,
+			{
+				state: "resolved",
+				pullRequest: {
+					provider: "azure-devops",
+					repository: azureRepository,
+					number: 7,
+					title: "Azure PR",
+					status: "open",
+					matchedHeadOid: OID_A,
+				},
+			},
+			{ now: 101, nextRefreshAt: 1000, refreshSucceeded: true },
+		);
+		await store.close();
+		const persisted = JSON.parse(readFileSync(path, "utf8")) as ChangesFileV1;
+		expect(parseChangesFile(persisted).changes[0]?.pullRequest?.repository).toEqual(azureRepository);
+
+		const withRepository = (repository: unknown): unknown => ({
+			...persisted,
+			changes: [{ ...persisted.changes[0]!, pullRequest: { ...persisted.changes[0]!.pullRequest!, repository } }],
+		});
+		for (const malformed of [
+			"",
+			"fabrikam//fiber",
+			"fabrikam/fiber/",
+			"fabrikam/fi\u0001ber",
+			`${"x".repeat(101)}/fiber`,
+			`${"a/".repeat(128)}b`,
+		]) {
+			expect(() => parseChangesFile(withRepository({ host: "dev.azure.com", path: malformed }))).toThrow(
+				/repository/,
+			);
+		}
+		expect(() => parseChangesFile(withRepository({ host: "github.com", owner: "volt-hq", name: "volt" }))).toThrow(
+			/repository/,
+		);
+	});
+
 	it("trims by serialized bytes while retaining the successful mutation", async () => {
 		const path = statePath("changes-byte-trim");
 		let persisted = "";
@@ -560,7 +606,7 @@ describe("ChangeStore", () => {
 				},
 				{
 					...watched.get("moved")!,
-					repository: { ...PR_REPOSITORY, owner: "someone-else" },
+					repository: { ...PR_REPOSITORY, path: "someone-else/volt" },
 					outcome: { state: "resolved", status: "closed", title: "Wrong repository" },
 				},
 				{
@@ -1098,7 +1144,7 @@ describe("ChangeAssociationService background PR status refresh", () => {
 		expect(status.requests[0]).toMatchObject({
 			cwd: "/neutral",
 			host: "github.com",
-			pullRequests: [{ owner: "volt-hq", name: "volt", number: 42 }],
+			pullRequests: [{ path: "volt-hq/volt", number: 42 }],
 		});
 		await vi.advanceTimersByTimeAsync(15 * 60_000 - 1);
 		expect(status.requests).toHaveLength(1);

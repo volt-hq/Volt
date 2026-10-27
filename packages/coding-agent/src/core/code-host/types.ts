@@ -156,8 +156,8 @@ export interface CodeHostPullRequestSummary {
 export interface CanonicalCodeHostRepository {
 	providerId: string;
 	host: string;
-	owner: string;
-	name: string;
+	/** Provider-defined `/`-separated repository path under `host`, normalized for comparison (GitHub: `owner/name`). */
+	path: string;
 	canonicalId: string;
 }
 
@@ -236,8 +236,8 @@ export interface CodeHostPullRequestDiscoveryProvider {
 
 /** One already-associated pull request, identified by its base repository and number. */
 export interface CodeHostPullRequestStatusTarget {
-	owner: string;
-	name: string;
+	/** The base repository's provider-defined path, as in `CanonicalCodeHostRepository.path`. */
+	path: string;
 	number: number;
 }
 

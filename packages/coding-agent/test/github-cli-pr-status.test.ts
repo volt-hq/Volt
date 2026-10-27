@@ -57,7 +57,7 @@ function respond(input: string): GitHubCliResult {
 }
 
 function target(owner: string, name: string, number: number): CodeHostPullRequestStatusTarget {
-	return { owner, name, number };
+	return { path: `${owner}/${name}`, number };
 }
 
 function refresh(pullRequests: CodeHostPullRequestStatusTarget[], signal?: AbortSignal) {
@@ -208,16 +208,25 @@ describe("batched GitHub pull request status refresh", () => {
 		);
 	});
 
-	it("rejects invalid hosts and out-of-range numbers without sending them", async () => {
+	it("rejects invalid hosts, non-owner/name paths, and out-of-range numbers without sending them", async () => {
 		fixtures = { "volt-hq/volt#5": { state: "OPEN", isDraft: false, title: "Valid" } };
-		expect(await refresh([target("volt-hq", "volt", 2 ** 31), target("volt-hq", "volt", 5)])).toEqual([
+		const invalidPaths = ["volt-hq", "org/project/repo", "volt-hq/", "volt hq/volt"];
+		expect(
+			await refresh([
+				target("volt-hq", "volt", 2 ** 31),
+				...invalidPaths.map((path) => ({ path, number: 6 })),
+				target("volt-hq", "volt", 5),
+			]),
+		).toEqual([
 			{ state: "unavailable", reason: "invalid_response" },
+			...invalidPaths.map(() => ({ state: "unavailable", reason: "invalid_response" })),
 			{ state: "resolved", status: "open", title: "Valid" },
 		]);
 		const body = JSON.parse(vi.mocked(runGitHubCli).mock.calls[0]![1].input!) as {
 			variables: Record<string, unknown>;
 		};
 		expect(Object.values(body.variables)).not.toContain(2 ** 31);
+		expect(Object.values(body.variables)).not.toContain(6);
 
 		vi.mocked(runGitHubCli).mockClear();
 		expect(

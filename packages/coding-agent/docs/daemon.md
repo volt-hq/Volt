@@ -681,8 +681,8 @@ GitHub; they return the stored status.
 
 Associations are stored separately in private `changes.json`. The file uses
 opaque local IDs and a salted hash of the common Git directory, and stores each
-linked PR's repository host, owner, and name so its status can be refreshed
-after the branch is gone. Checkout paths, repository identities, credentials,
+linked PR's repository host and path (`owner/name` on GitHub) so its status can
+be refreshed after the branch is gone. Checkout paths, repository identities, credentials,
 raw provider output, and provider diagnostics are not projected to phones. A
 `sessions` entry's `changeContext` contains only the opaque change ID,
 repository display name, effective branch, resolution state, and bounded PR

@@ -64,8 +64,7 @@ function createFixture(): Fixture {
 const REPOSITORY: CanonicalCodeHostRepository = {
 	providerId: "test-host",
 	host: "code.example.test",
-	owner: "acme",
-	name: "widgets",
+	path: "acme/widgets",
 	canonicalId: "test-host:code.example.test/acme/widgets",
 };
 
