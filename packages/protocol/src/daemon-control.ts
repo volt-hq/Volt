@@ -152,6 +152,26 @@ export const ControlRevokedClientStatusSchema = Type.Object(
 );
 export type ControlRevokedClientStatus = Static<typeof ControlRevokedClientStatusSchema>;
 
+/** A peer name: lowercase letters, digits, `-`, and `_`, starting with a letter or digit. */
+export const PEER_NAME_PATTERN_SOURCE = "^[a-z0-9][a-z0-9_-]{0,63}$";
+
+/**
+ * A peer (experimental): another host's workspace this daemon paired with as
+ * a client, whose agent it delegates tasks to.
+ */
+export const ControlPeerStatusSchema = Type.Object(
+	{
+		name: Type.String({ pattern: PEER_NAME_PATTERN_SOURCE }),
+		/** The peer host's Iroh node ID. */
+		hostNodeId: Type.String(),
+		/** The registered workspace on the peer host that delegated tasks run in. */
+		workspace: Type.String(),
+		addedAtMs: RpcEpochMillisecondsSchema,
+	},
+	closed,
+);
+export type ControlPeerStatus = Static<typeof ControlPeerStatusSchema>;
+
 export const DaemonRemotePolicyStatusSchema = Type.Object(
 	{
 		/** Daemon-wide override; null delegates to workspace and device grants. */
@@ -890,6 +910,19 @@ export const CONTROL_REQUEST_SCHEMAS = {
 	/** Hold or release the host sleep-prevention assertion. */
 	keep_awake_set: withId("keep_awake_set", { enabled: Type.Boolean() }),
 	/**
+	 * Pair with another host as its client (experimental), from a pairing
+	 * ticket that host issued, and save it as the peer `name`. Answered by
+	 * `peer_result`.
+	 */
+	peer_add: withId("peer_add", {
+		name: Type.String({ pattern: PEER_NAME_PATTERN_SOURCE }),
+		ticket: codePoints(1, 16_384, SINGLE_LINE),
+	}),
+	/** Forget the peer `name`. The peer host keeps its pairing until it revokes it. Answered by `ok`. */
+	peer_remove: withId("peer_remove", { name: Type.String({ pattern: PEER_NAME_PATTERN_SOURCE }) }),
+	/** The saved peers. Answered by `peers_result`. */
+	peers_list: withId("peers_list", {}),
+	/**
 	 * TUI: open a conversation in a worker (Phase 7 plan §1). The daemon
 	 * resolves its workspace from the conversation's working directory
 	 * (registering that directory when no workspace holds it, D17), then
@@ -1046,6 +1079,20 @@ export const CONTROL_REQUEST_SCHEMAS = {
 		cwd: codePoints(1, 4096),
 		worktreeId: Type.String({ minLength: 1, maxLength: 128 }),
 	}),
+	/** Worker: the saved peers its conversations' `peer` tool may delegate to. Answered by `peers_result`. */
+	worker_peers_list: withId("worker_peers_list", {}),
+	/**
+	 * Worker: run `task` as the first prompt of a new conversation on the host
+	 * of peer `peer`, and answer once that conversation is idle again. Answered
+	 * by `peer_run_result`; `worker_peer_cancel` with the same `runId` stops it.
+	 */
+	worker_peer_run: withId("worker_peer_run", {
+		runId: Type.String({ minLength: 1, maxLength: 64 }),
+		peer: codePoints(1, 64, SINGLE_LINE),
+		task: codePoints(1, 65_536),
+	}),
+	/** Worker: stop its run `runId`: abort the peer's turn and close the stream. Answered by `ok`. */
+	worker_peer_cancel: withId("worker_peer_cancel", { runId: Type.String({ minLength: 1, maxLength: 64 }) }),
 } as const;
 
 /** The requests a worker connection may send; a control connection may send none of them. */
@@ -1070,6 +1117,9 @@ export const WORKER_REQUEST_TYPES = [
 	"worker_worktree_create",
 	"worker_worktree_list",
 	"worker_worktree_remove",
+	"worker_peers_list",
+	"worker_peer_run",
+	"worker_peer_cancel",
 ] as const satisfies readonly (keyof typeof CONTROL_REQUEST_SCHEMAS)[];
 export type WorkerRequestType = (typeof WORKER_REQUEST_TYPES)[number];
 
@@ -1097,6 +1147,9 @@ export const ControlRequestSchema = Type.Union([
 	CONTROL_REQUEST_SCHEMAS.worktree_bind,
 	CONTROL_REQUEST_SCHEMAS.theme_set,
 	CONTROL_REQUEST_SCHEMAS.keep_awake_set,
+	CONTROL_REQUEST_SCHEMAS.peer_add,
+	CONTROL_REQUEST_SCHEMAS.peer_remove,
+	CONTROL_REQUEST_SCHEMAS.peers_list,
 	CONTROL_REQUEST_SCHEMAS.conversation_open,
 	CONTROL_REQUEST_SCHEMAS.conversation_host_response,
 	CONTROL_REQUEST_SCHEMAS.worker_host_request,
@@ -1119,6 +1172,9 @@ export const ControlRequestSchema = Type.Union([
 	CONTROL_REQUEST_SCHEMAS.worker_worktree_create,
 	CONTROL_REQUEST_SCHEMAS.worker_worktree_list,
 	CONTROL_REQUEST_SCHEMAS.worker_worktree_remove,
+	CONTROL_REQUEST_SCHEMAS.worker_peers_list,
+	CONTROL_REQUEST_SCHEMAS.worker_peer_run,
+	CONTROL_REQUEST_SCHEMAS.worker_peer_cancel,
 ]);
 export type ControlRequest = Static<typeof ControlRequestSchema>;
 
@@ -1154,6 +1210,18 @@ export const CONTROL_RESPONSE_SCHEMAS = {
 	client_access_updated: withId("client_access_updated", { client: ControlClientStatusSchema }),
 	worktree_result: withId("worktree_result", { worktree: ControlWorktreeStatusSchema }),
 	worktrees_result: withId("worktrees_result", { worktrees: Type.Array(ControlWorktreeStatusSchema) }),
+	peer_result: withId("peer_result", { peer: ControlPeerStatusSchema }),
+	peers_result: withId("peers_result", { peers: Type.Array(ControlPeerStatusSchema) }),
+	/** A peer run's conversation went idle: its last assistant reply, as the peer's remote profile bounds it. */
+	peer_run_result: withId("peer_run_result", {
+		/** The conversation the run opened on the peer host. */
+		sessionId: Type.String(),
+		text: Type.String(),
+		/** The peer host cut `text` to its transcript bound. */
+		truncated: Type.Boolean(),
+		/** How the reply's turn ended, when it reported one. */
+		stopReason: Type.Optional(Type.String()),
+	}),
 	worktree_resolve_result: withId("worktree_resolve_result", {
 		/** Parent workspace the worktree belongs to. */
 		workspaceName: Type.String(),
@@ -1235,6 +1303,9 @@ export const ControlResponseSchema = Type.Union([
 	CONTROL_RESPONSE_SCHEMAS.client_access_updated,
 	CONTROL_RESPONSE_SCHEMAS.worktree_result,
 	CONTROL_RESPONSE_SCHEMAS.worktrees_result,
+	CONTROL_RESPONSE_SCHEMAS.peer_result,
+	CONTROL_RESPONSE_SCHEMAS.peers_result,
+	CONTROL_RESPONSE_SCHEMAS.peer_run_result,
 	CONTROL_RESPONSE_SCHEMAS.worktree_resolve_result,
 	CONTROL_RESPONSE_SCHEMAS.worktree_prune_result,
 	CONTROL_RESPONSE_SCHEMAS.pair_started,

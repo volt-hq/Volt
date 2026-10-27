@@ -1539,6 +1539,31 @@
 			},
 			"additionalProperties": false
 		},
+		"Control.PeerStatus": {
+			"type": "object",
+			"required": [
+				"name",
+				"hostNodeId",
+				"workspace",
+				"addedAtMs"
+			],
+			"properties": {
+				"name": {
+					"type": "string",
+					"pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+				},
+				"hostNodeId": {
+					"type": "string"
+				},
+				"workspace": {
+					"type": "string"
+				},
+				"addedAtMs": {
+					"$ref": "#/$defs/RpcEpochMilliseconds"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Control.RelayCloseReason": {
 			"type": "string",
 			"enum": [
@@ -1967,6 +1992,15 @@
 					"$ref": "#/$defs/Control.Request.keep_awake_set"
 				},
 				{
+					"$ref": "#/$defs/Control.Request.peer_add"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.peer_remove"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.peers_list"
+				},
+				{
 					"$ref": "#/$defs/Control.Request.conversation_open"
 				},
 				{
@@ -2031,6 +2065,15 @@
 				},
 				{
 					"$ref": "#/$defs/Control.Request.worker_worktree_remove"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_peers_list"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_peer_run"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_peer_cancel"
 				}
 			]
 		},
@@ -2414,6 +2457,73 @@
 					"additionalProperties": false
 				}
 			]
+		},
+		"Control.Request.peer_add": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"name",
+				"ticket"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "peer_add"
+				},
+				"id": {
+					"type": "string"
+				},
+				"name": {
+					"type": "string",
+					"pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+				},
+				"ticket": {
+					"type": "string",
+					"maxLength": 16384,
+					"pattern": "^[^\\u0000\\r\\n]{1,16384}$"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.peer_remove": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"name"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "peer_remove"
+				},
+				"id": {
+					"type": "string"
+				},
+				"name": {
+					"type": "string",
+					"pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.peers_list": {
+			"type": "object",
+			"required": [
+				"type",
+				"id"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "peers_list"
+				},
+				"id": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
 		},
 		"Control.Request.relay_credential_check": {
 			"type": "object",
@@ -2828,6 +2938,81 @@
 					"type": "string",
 					"maxLength": 1024,
 					"pattern": "^[\\s\\S]{0,1024}$"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_peer_cancel": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"runId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_peer_cancel"
+				},
+				"id": {
+					"type": "string"
+				},
+				"runId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 64
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_peer_run": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"runId",
+				"peer",
+				"task"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_peer_run"
+				},
+				"id": {
+					"type": "string"
+				},
+				"runId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 64
+				},
+				"peer": {
+					"type": "string",
+					"maxLength": 64,
+					"pattern": "^[^\\u0000\\r\\n]{1,64}$"
+				},
+				"task": {
+					"type": "string",
+					"maxLength": 65536,
+					"pattern": "^[\\s\\S]{1,65536}$"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_peers_list": {
+			"type": "object",
+			"required": [
+				"type",
+				"id"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_peers_list"
+				},
+				"id": {
+					"type": "string"
 				}
 			},
 			"additionalProperties": false
@@ -3353,6 +3538,15 @@
 					"$ref": "#/$defs/Control.Response.worktrees_result"
 				},
 				{
+					"$ref": "#/$defs/Control.Response.peer_result"
+				},
+				{
+					"$ref": "#/$defs/Control.Response.peers_result"
+				},
+				{
+					"$ref": "#/$defs/Control.Response.peer_run_result"
+				},
+				{
 					"$ref": "#/$defs/Control.Response.worktree_resolve_result"
 				},
 				{
@@ -3570,6 +3764,83 @@
 				},
 				"requestId": {
 					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.peer_result": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"peer"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "peer_result"
+				},
+				"id": {
+					"type": "string"
+				},
+				"peer": {
+					"$ref": "#/$defs/Control.PeerStatus"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.peer_run_result": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"sessionId",
+				"text",
+				"truncated"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "peer_run_result"
+				},
+				"id": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				},
+				"text": {
+					"type": "string"
+				},
+				"truncated": {
+					"type": "boolean"
+				},
+				"stopReason": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.peers_result": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"peers"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "peers_result"
+				},
+				"id": {
+					"type": "string"
+				},
+				"peers": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/Control.PeerStatus"
+					}
 				}
 			},
 			"additionalProperties": false

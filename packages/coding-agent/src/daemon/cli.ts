@@ -13,6 +13,7 @@ import {
 } from "./login-environment.ts";
 import { DAEMON_IDLE_EXIT_MS, type PidfileContents, readPidfile, runVoltDaemon } from "./main.ts";
 import { getDaemonPaths } from "./paths.ts";
+import { createPeerDaemonService } from "./peers.ts";
 import { verifyPidfileProcess } from "./process-identity.ts";
 import { endOwnDescendants } from "./process-tree.ts";
 import { formatRelayAccessStatus, isPhoneTransportAbsent, isRemoteAccessReady } from "./relay-access-status.ts";
@@ -638,7 +639,7 @@ export async function handleDaemonCommand(args: string[], options: DaemonCommand
 					// The login service keeps its daemon; one started on demand exits once nothing needs it (D8).
 					...(serviceStart ? {} : { idleExitMs: DAEMON_IDLE_EXIT_MS }),
 				},
-				[createIrohDaemonService()],
+				[createIrohDaemonService(), createPeerDaemonService()],
 			);
 			// The run loop resolves after durable quiescing and bounded native disposal, but
 			// the native iroh handle can keep the event loop alive afterwards (notably

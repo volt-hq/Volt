@@ -22,6 +22,7 @@ import {
 } from "../control-client.ts";
 import {
 	type ControlEvent,
+	type ControlPeerStatus,
 	type ControlRequest,
 	type ControlResponse,
 	ControlValidators,
@@ -34,6 +35,7 @@ import {
 	type WorkerStopReason,
 } from "../control-protocol.ts";
 import type { SessionWorktreeCreateOptions } from "../session-worktree.ts";
+import type { PeerAgentRun } from "./peer-tool.ts";
 
 /** A `worker_stop` the daemon sent: answer it once with `stopResult`. */
 export interface WorkerStopEvent {
@@ -368,6 +370,30 @@ export class WorkerDaemonClient {
 		const response = await this.request({ type: "worker_worktree_list", cwd });
 		if (response.type !== "worktrees_result") throw new Error(`Unexpected ${response.type}`);
 		return response.worktrees;
+	}
+
+	/** The peers the daemon paired with (experimental). */
+	async listPeers(): Promise<ControlPeerStatus[]> {
+		const response = await this.request({ type: "worker_peers_list" });
+		if (response.type !== "peers_result") throw new Error(`Unexpected ${response.type}`);
+		return response.peers;
+	}
+
+	/** Have the daemon run `task` on the peer `peer`; resolves once the peer's conversation is idle. */
+	async runPeer(runId: string, peer: string, task: string): Promise<PeerAgentRun> {
+		const response = await this.request({ type: "worker_peer_run", runId, peer, task });
+		if (response.type !== "peer_run_result") throw new Error(`Unexpected ${response.type}`);
+		return {
+			sessionId: response.sessionId,
+			text: response.text,
+			truncated: response.truncated,
+			...(response.stopReason === undefined ? {} : { stopReason: response.stopReason }),
+		};
+	}
+
+	/** Stop the peer run `runId`. */
+	async cancelPeerRun(runId: string): Promise<void> {
+		await this.request({ type: "worker_peer_cancel", runId });
 	}
 
 	close(): Promise<void> {

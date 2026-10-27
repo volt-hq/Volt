@@ -1,5 +1,6 @@
 import { realpath } from "node:fs/promises";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
+import { PEER_NAME_PATTERN_SOURCE } from "@hansjm10/volt-protocol/daemon-control";
 import { getAgentDir, VERSION } from "../config.ts";
 import { type IrohRemoteAccessPresetName, isIrohRemoteAccessPresetName } from "../core/remote/iroh/access-grant.ts";
 import { formatIrohRemoteTicketQrCode } from "../core/remote/iroh/qr.ts";
@@ -44,6 +45,9 @@ Commands:
                                 Reconcile records; explicitly purge unowned recovery checkouts.
   worktree diff <id> [--workspace <name>]
                                 Show the worktree branch's diff against its base ref.
+  peer add <name> <ticket>      Pair with another host's workspace as a peer (experimental).
+  peer list                     List paired peers.
+  peer remove <name>            Forget a peer.
 
 "volt remote host" has been replaced by the background daemon, which interactive volt
 starts. Run "volt daemon start" to start it without a terminal. See docs/daemon.md.
@@ -355,6 +359,62 @@ async function handleClientsCommand(): Promise<void> {
 			return;
 		}
 		console.log(JSON.stringify(response.clients, null, 2));
+	} finally {
+		await session.close();
+	}
+}
+
+const PEER_NAME_PATTERN = new RegExp(PEER_NAME_PATTERN_SOURCE);
+
+async function handlePeerCommand(args: string[]): Promise<void> {
+	const [action, ...rest] = args;
+	const valid =
+		(action === "add" && rest.length === 2) ||
+		(action === "remove" && rest.length === 1) ||
+		(action === "list" && rest.length === 0);
+	if (!valid) {
+		console.error("Error: usage: volt remote peer add <name> <ticket> | list | remove <name>");
+		process.exitCode = 1;
+		return;
+	}
+	const name = rest[0];
+	if (name !== undefined && !PEER_NAME_PATTERN.test(name)) {
+		console.error(
+			"Error: a peer name is 1-64 lowercase letters, digits, '-', or '_', starting with a letter or digit",
+		);
+		process.exitCode = 1;
+		return;
+	}
+	const session = await connectToDaemon({ autoStart: action === "add" });
+	if (!session) return;
+	try {
+		if (action === "add" && name !== undefined) {
+			const response = await session.client.request({ type: "peer_add", name, ticket: rest[1] ?? "" });
+			if (response.type !== "peer_result") {
+				reportControlError(response, "peer add");
+				return;
+			}
+			console.error(
+				`added peer ${response.peer.name}: workspace ${response.peer.workspace} on host ${response.peer.hostNodeId}`,
+			);
+			console.error(
+				'Terminal conversations offer the experimental peer tool with "remote": { "peers": true } in settings.json.',
+			);
+		} else if (action === "remove" && name !== undefined) {
+			const response = await session.client.request({ type: "peer_remove", name });
+			if (reportControlError(response, "peer remove")) return;
+			console.error(`removed peer ${name}; its host keeps the pairing until it revokes it`);
+		} else {
+			const response = await session.client.request({ type: "peers_list" });
+			if (response.type !== "peers_result") {
+				reportControlError(response, "peer list");
+				return;
+			}
+			if (response.peers.length === 0) console.error("No paired peers");
+			for (const peer of response.peers) {
+				console.log(`${peer.name}\tworkspace ${peer.workspace}\thost ${peer.hostNodeId}`);
+			}
+		}
 	} finally {
 		await session.close();
 	}
@@ -862,6 +922,9 @@ export async function handleRemoteControlCommand(args: string[]): Promise<boolea
 			return true;
 		case "worktree":
 			await handleWorktreeCommand(rest);
+			return true;
+		case "peer":
+			await handlePeerCommand(rest);
 			return true;
 		default:
 			console.error(`Error: Unknown remote command: ${command}`);

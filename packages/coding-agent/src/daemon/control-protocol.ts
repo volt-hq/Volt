@@ -45,6 +45,7 @@ export type {
 	ControlFatal,
 	ControlHelloChallenge,
 	ControlKeepAwakeStatus,
+	ControlPeerStatus,
 	ControlRelayCredentialStatus,
 	ControlRequest,
 	ControlResponse,

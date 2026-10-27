@@ -213,6 +213,8 @@ export interface RemoteSettings {
 	allowTools?: string[];
 	/** Discover exact pull-request associations for trusted Work sessions. Default: true. */
 	pullRequestDiscovery?: boolean;
+	/** Experimental: offer the `peer` tool in terminal conversations, to delegate tasks to paired peers' agents. Default: false. */
+	peers?: boolean;
 }
 
 /** Deep merge records: overrides take precedence, nested objects merge recursively, arrays replace. */

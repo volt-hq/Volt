@@ -398,6 +398,7 @@ Settings the background daemon reads; see [Background daemon](daemon.md). The da
 |---------|------|---------|-------------|
 | `remote.allowTools` | string[] | - | Additional tool ceiling for conversations a paired phone opens, intersected with the phone's persisted grant and any workspace ceiling; `[]` denies all tools. A conversation a terminal opened uses that terminal's full tool set, also for phone prompts. |
 | `remote.pullRequestDiscovery` | boolean | `true` | Let the daemon use local Git metadata and the authenticated GitHub CLI to discover exact repository + branch + head-OID pull-request associations for trusted sessions. Linked open or draft PRs keep their status refreshed in the background with batched GitHub CLI queries. Set `false` to disable provider calls, including background PR status refresh; existing private Work state remains local. |
+| `remote.peers` | boolean | `false` | Experimental. Offer the `peer` tool in terminal conversations, which delegates a task to the agent of a peer paired with `volt remote peer add` over the local network. Read from global settings when a conversation opens; no daemon restart needed. See the [peer agents design](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/peer-agents-design.md). |
 
 How long a conversation no client is attached to stays open once it is idle (30 minutes by default) is a setting of the daemon itself, not of `settings.json`; see [Background daemon](daemon.md#retention-and-background).
 

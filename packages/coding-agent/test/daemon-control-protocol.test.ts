@@ -190,6 +190,18 @@ const REQUESTS: ByType<ControlRequest> = {
 	},
 	worker_worktree_list: { type: "worker_worktree_list", id: "43", cwd: "/workspace" },
 	worker_worktree_remove: { type: "worker_worktree_remove", id: "44", cwd: "/workspace", worktreeId: "issue-12" },
+	peer_add: { type: "peer_add", id: "46", name: "bob", ticket: "volt+iroh://v1/e30" },
+	peer_remove: { type: "peer_remove", id: "47", name: "bob" },
+	peers_list: { type: "peers_list", id: "48" },
+	worker_peers_list: { type: "worker_peers_list", id: "49" },
+	worker_peer_run: {
+		type: "worker_peer_run",
+		id: "50",
+		runId: "run-1",
+		peer: "bob",
+		task: "Summarize the API change",
+	},
+	worker_peer_cancel: { type: "worker_peer_cancel", id: "51", runId: "run-1" },
 	worker_forward: {
 		type: "worker_forward",
 		id: "35",
@@ -357,6 +369,10 @@ const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, u
 		{ worktreeId: "w".repeat(129) },
 		{ worktreeId: undefined },
 	],
+	peer_add: [{ name: "Bob" }, { name: "-bob" }, { name: "b".repeat(65) }, { ticket: "" }, { ticket: "a\nb" }],
+	peer_remove: [{ name: undefined }, { name: "bob smith" }],
+	worker_peer_run: [{ runId: "" }, { runId: "r".repeat(65) }, { peer: "" }, { task: "" }, { task: undefined }],
+	worker_peer_cancel: [{ runId: undefined }],
 	worker_moved: [{ to: undefined }],
 	worker_last_session: [{ sessionId: undefined }],
 	worker_session_owned: [{ sessionId: undefined }, { relayId: undefined }],
@@ -416,6 +432,8 @@ const WORKTREE = {
 	aheadBehind: { ahead: 1, behind: 0 },
 };
 
+const PEER = { name: "bob", hostNodeId: "n-9", workspace: "volt", addedAtMs: 1_000 };
+
 const RESPONSES: ByType<ControlResponse> = {
 	ok: { type: "ok", id: "1" },
 	error: { type: "error", id: "2", code: "not_hosted", message: "the worker does not host that conversation" },
@@ -439,6 +457,16 @@ const RESPONSES: ByType<ControlResponse> = {
 	},
 	worktree_result: { type: "worktree_result", id: "10", worktree: WORKTREE },
 	worktrees_result: { type: "worktrees_result", id: "11", worktrees: [WORKTREE] },
+	peer_result: { type: "peer_result", id: "22", peer: PEER },
+	peers_result: { type: "peers_result", id: "23", peers: [PEER] },
+	peer_run_result: {
+		type: "peer_run_result",
+		id: "24",
+		sessionId: "0b5f3f9e-2a59-4b1e-9d8f-6c1f6d3b8a10",
+		text: "The API change renames list_sessions to sessions.",
+		truncated: false,
+		stopReason: "stop",
+	},
 	worktree_resolve_result: {
 		type: "worktree_resolve_result",
 		id: "12",
@@ -511,6 +539,9 @@ const INVALID_RESPONSES: { [K in ControlResponse["type"]]?: Array<Record<string,
 	client_access_updated: [{ client: { clientNodeId: "n-1" } }],
 	worktree_result: [{ worktree: { id: "x" } }, { worktree: "x" }],
 	worktrees_result: [{ worktrees: {} }],
+	peer_result: [{ peer: { ...PEER, name: "Bob" } }, { peer: { ...PEER, irohTicket: "t" } }],
+	peers_result: [{ peers: {} }],
+	peer_run_result: [{ text: undefined }, { truncated: "no" }],
 	worktree_resolve_result: [{ worktreePath: undefined }],
 	worktree_prune_result: [{ results: {} }],
 	pair_started: [{ requestId: undefined }],

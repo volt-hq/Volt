@@ -59,6 +59,7 @@ import {
 } from "../session-target.ts";
 import type { SessionWorktreeDaemon } from "../session-worktree.ts";
 import { createConversationSettings } from "./conversation-settings.ts";
+import { createPeerToolDefinition, type PeerAgentDaemon } from "./peer-tool.ts";
 
 /** What a TUI opened its worker with: every conversation the worker creates is built from it. */
 export interface WorkerCliOptions {
@@ -67,6 +68,8 @@ export interface WorkerCliOptions {
 	readonly modelScopePatterns?: readonly string[];
 	/** How the conversations decide project trust where no override applies. */
 	readonly trust: WorkerTrustOptions;
+	/** The daemon's paired peers, for the experimental `peer` tool (`remote.peers`). */
+	readonly peers?: PeerAgentDaemon;
 }
 
 /** Where a TUI-opened conversation's project trust prompts go, and what its opener decided before. */
@@ -369,10 +372,16 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 						});
 					}
 				}
+				// The experimental `peer` tool, when the user's global settings enable it (never a project's).
+				const peerTools =
+					cli.peers !== undefined && settingsManager.getGlobalEffectiveSettings().remote?.peers === true
+						? [createPeerToolDefinition(cli.peers)]
+						: [];
 				created = await createAgentSessionFromServices({
 					services,
 					sessionManager,
 					sessionStartEvent,
+					customTools: peerTools,
 					model: sessionOptions.model,
 					thinkingLevel: sessionOptions.thinkingLevel,
 					agentMode: sessionStartEvent ? undefined : sessionOptions.agentMode,

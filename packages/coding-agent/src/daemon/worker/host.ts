@@ -283,6 +283,12 @@ async function openConversation(
 							opener: (cwd) => openerTrustContext(client, primary.sessionId, cwd),
 							session: trustSession(trustSessions, spec.clientKey),
 						},
+						// Peer runs go through the daemon, which dials the peer hosts.
+						peers: {
+							list: () => client.listPeers(),
+							run: (runId, peer, task) => client.runPeer(runId, peer, task),
+							cancel: (runId) => client.cancelPeerRun(runId),
+						},
 					},
 					...(spec.config.profile === undefined ? {} : { profile: spec.config.profile }),
 				}),
