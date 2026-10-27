@@ -15,6 +15,7 @@ import { resolveTuiStartupTarget, type TuiStartupContext } from "../src/cli/tui-
 import { ENV_AGENT_DIR } from "../src/config.ts";
 import { exportSessionToJsonl } from "../src/core/session/session-info.ts";
 import { getDefaultSessionDirPath, SessionManager, type SessionReference } from "../src/core/session-manager.ts";
+import { acquireSharedSQLiteSessionStore, SQLiteSessionStoreClient } from "../src/core/session-store/index.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
 let root: string;
@@ -87,6 +88,75 @@ describe("the TUI's startup conversation", () => {
 		expect(await resolveTuiStartupTarget(parseArgs(["--session", ref.sessionId]), context())).toEqual(resumed);
 		expect(await resolveTuiStartupTarget(parseArgs(["--session-id", ref.sessionId]), context())).toEqual(resumed);
 		expect(open).not.toHaveBeenCalled();
+	});
+
+	it.each(["-c", "--session", "--session-id"])(
+		"shares one store worker while resolving %s, then closes it",
+		async (flag) => {
+			const sessionDir = join(root, "custom-sessions");
+			const ref = await storedSession(project, sessionDir);
+			const open = vi.spyOn(SQLiteSessionStoreClient, "open");
+			const close = vi.spyOn(SQLiteSessionStoreClient.prototype, "close");
+			const args = flag === "-c" ? [flag] : [flag, ref.sessionId];
+
+			expect(await resolveTuiStartupTarget(parseArgs(args), context({ sessionDir }))).toEqual({
+				target: { kind: "session", sessionId: ref.sessionId, sessionDir },
+				cwd: project,
+			});
+			expect(open).toHaveBeenCalledOnce();
+			expect(close).toHaveBeenCalledOnce();
+			const client = await open.mock.results[0]!.value;
+			await expect(client.findSessionSummaryById(ref.sessionId)).rejects.toMatchObject({ code: "closed" });
+		},
+	);
+
+	it("does not open an existing store for a new or in-memory startup", async () => {
+		await storedSession(project);
+		const open = vi.spyOn(SQLiteSessionStoreClient, "open");
+		await resolveTuiStartupTarget(parseArgs([]), context());
+		await resolveTuiStartupTarget(parseArgs(["--no-session"]), context());
+		expect(open).not.toHaveBeenCalled();
+	});
+
+	it("releases the startup store when resolution fails", async () => {
+		await storedSession(project);
+		const failure = new Error("Continuation lookup failed");
+		vi.spyOn(SessionManager, "findContinuation").mockRejectedValueOnce(failure);
+		const open = vi.spyOn(SQLiteSessionStoreClient, "open");
+		const close = vi.spyOn(SQLiteSessionStoreClient.prototype, "close");
+
+		await expect(resolveTuiStartupTarget(parseArgs(["-c"]), context())).rejects.toBe(failure);
+		expect(open).toHaveBeenCalledOnce();
+		expect(close).toHaveBeenCalledOnce();
+	});
+
+	it("releases the startup store when the missing-directory prompt is cancelled", async () => {
+		const gone = join(root, "removed-project");
+		mkdirSync(gone);
+		const ref = await storedSession(gone);
+		rmSync(gone, { recursive: true });
+		const open = vi.spyOn(SQLiteSessionStoreClient, "open");
+		const close = vi.spyOn(SQLiteSessionStoreClient.prototype, "close");
+		vi.spyOn(startupUi, "showStartupSelector").mockResolvedValueOnce(undefined);
+
+		expect(await resolveTuiStartupTarget(parseArgs(["--session", ref.sessionId]), context({ cwd: gone }))).toEqual({
+			exit: 0,
+		});
+		expect(open).toHaveBeenCalledOnce();
+		expect(close).toHaveBeenCalledOnce();
+	});
+
+	it("does not close a store another owner still holds", async () => {
+		const ref = await storedSession(project);
+		const lease = await acquireSharedSQLiteSessionStore(ref.sessionDirectory);
+		try {
+			const open = vi.spyOn(SQLiteSessionStoreClient, "open");
+			await resolveTuiStartupTarget(parseArgs(["--session", ref.sessionId]), context());
+			expect(open).not.toHaveBeenCalled();
+			expect(await lease.client.findSessionSummaryById(ref.sessionId)).toMatchObject({ id: ref.sessionId });
+		} finally {
+			await lease.release();
+		}
 	});
 
 	it("forks a session by id, and offers a fork of another project's session", async () => {

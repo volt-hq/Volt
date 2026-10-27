@@ -53,6 +53,7 @@ const PHONE_COMPATIBILITY = {
 } as const;
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	vi.unstubAllEnvs();
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup().catch(() => undefined);
 });
@@ -197,6 +198,34 @@ describe("conversations TUIs open in workers", () => {
 		await client.stop();
 		await expect.poll(async () => (await harness.status()).workers[0]?.clients.local, { timeout: 10_000 }).toBe(0);
 		expect((await harness.status()).workers).toHaveLength(1);
+	}, 60_000);
+
+	it("resolves a stored conversation from its summary and leaves transcript loading to its worker", async () => {
+		const harness = await startHarness();
+		const sessionDir = join(harness.agentDir, "custom-sessions");
+		const manager = await SessionManager.create(harness.workspacePath, sessionDir);
+		const sessionId = manager.getSessionId();
+		try {
+			await manager.logWriter.appendMessage({ role: "user", content: "stored conversation", timestamp: 1 });
+		} finally {
+			await manager.closePersistence();
+		}
+		const readOnly = vi.spyOn(SessionManager, "openReadOnly");
+		const tui = await harness.connect("tui");
+		const { opened, client } = await openTui(tui, {
+			target: { kind: "session", sessionId, sessionDir },
+			spawn: spawnOptions(harness.workspacePath),
+			clientKey: "tui-1",
+		});
+
+		expect(opened).toMatchObject({ selection: "resumed", workspaceName: "ws", sessionId });
+		expect(client.state.entries).toContainEqual(
+			expect.objectContaining({
+				type: "message",
+				payload: expect.objectContaining({ message: expect.objectContaining({ content: "stored conversation" }) }),
+			}),
+		);
+		expect(readOnly).not.toHaveBeenCalled();
 	}, 60_000);
 
 	it("tells its TUI the host shut down when the daemon stops", async () => {
