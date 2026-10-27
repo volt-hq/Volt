@@ -34,7 +34,7 @@
 		"check:changesets": "node scripts/check-changesets.mjs",
 		"check:release-security": "node --test scripts/release-security.test.mjs scripts/bootstrap-npm-packages.test.mjs scripts/changelog.test.mjs scripts/ci-changed-areas.test.mjs scripts/check-changesets.test.mjs scripts/draft-changeset.test.mjs scripts/edit-tool-stats.test.mjs scripts/pe-certificate.test.mjs",
 		"check:protocol-contract": "node --conditions=volt-source scripts/generate-protocol-schema.ts --check",
-		"check:source-launchers": "node --test scripts/source-launchers.test.mjs",
+		"check:source-launchers": "node --test scripts/source-launchers.test.mjs scripts/profile-coding-agent-node.test.mjs",
 		"check:shrinkwrap": "node scripts/generate-coding-agent-shrinkwrap.mjs --check",
 		"check:ts-imports": "node scripts/check-ts-relative-imports.mjs",
 		"contract:protocol": "node --conditions=volt-source scripts/generate-protocol-schema.ts",
