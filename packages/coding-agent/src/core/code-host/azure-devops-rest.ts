@@ -60,8 +60,16 @@ interface AzureCliToken {
 	expiresAt: number;
 }
 
+interface Credentials {
+	authorization: string;
+	/** The personal access token the authorization carries; absent for the Azure CLI account's token. */
+	personalAccessToken?: string;
+}
+
 let azureCliToken: AzureCliToken | undefined;
 let pendingAzureCliToken: Promise<AzureCliToken | undefined> | undefined;
+/** A personal access token Azure DevOps did not accept as a credential: it is not sent again. */
+let refusedPersonalAccessToken: string | undefined;
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -142,13 +150,17 @@ async function readAzureCliToken(): Promise<AzureCliToken | undefined> {
 	};
 }
 
-/** A personal access token from the environment, else the signed-in Azure CLI account's token. */
-async function authorization(): Promise<string | undefined> {
+/** The environment's personal access token, by variable precedence; undefined when none is set. */
+function personalAccessToken(): string | undefined {
 	for (const variable of PAT_VARIABLES) {
 		const token = process.env[variable]?.trim();
-		if (!token) continue;
-		return /^[\x21-\x7e]+$/.test(token) ? `Basic ${Buffer.from(`:${token}`, "utf8").toString("base64")}` : undefined;
+		if (token) return token;
 	}
+	return undefined;
+}
+
+/** The signed-in Azure CLI account's token, cached until shortly before it expires. */
+async function azureCliAuthorization(): Promise<string | undefined> {
 	if (azureCliToken && azureCliToken.expiresAt - TOKEN_RENEWAL_MARGIN_MS > Date.now()) {
 		return azureCliToken.authorization;
 	}
@@ -159,6 +171,19 @@ async function authorization(): Promise<string | undefined> {
 	const token = await pendingAzureCliToken;
 	if (token) azureCliToken = token;
 	return token?.authorization;
+}
+
+/** The environment's personal access token unless it cannot be used, else the Azure CLI account's token. */
+async function credentials(): Promise<Credentials | undefined> {
+	const token = personalAccessToken();
+	if (token !== undefined && token !== refusedPersonalAccessToken && /^[\x21-\x7e]+$/.test(token)) {
+		return {
+			authorization: `Basic ${Buffer.from(`:${token}`, "utf8").toString("base64")}`,
+			personalAccessToken: token,
+		};
+	}
+	const authorization = await azureCliAuthorization();
+	return authorization === undefined ? undefined : { authorization };
 }
 
 function abortable<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
@@ -231,15 +256,22 @@ export async function requestAzureDevOps(request: AzureDevOpsRequest): Promise<A
 	const url = new URL(`https://${AZURE_DEVOPS_HOST}/${encodeURIComponent(request.organization)}${request.path}`);
 	for (const [key, value] of Object.entries(request.query ?? {})) url.searchParams.set(key, value);
 	url.searchParams.set("api-version", request.apiVersion ?? DEFAULT_API_VERSION);
-	const credentials = await abortable(authorization(), signal);
-	if (!credentials) return { ok: false, failure: "no-credentials" };
+	const first = await abortable(credentials(), signal);
+	if (!first) {
+		// A personal access token Azure DevOps refused, with no Azure CLI account to use instead, is denied access.
+		const token = personalAccessToken();
+		return {
+			ok: false,
+			failure: token !== undefined && token === refusedPersonalAccessToken ? "access-denied" : "no-credentials",
+		};
+	}
 	const timeout = AbortSignal.timeout(request.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-	try {
-		const response = await fetch(url, {
+	const send = (authorization: string): Promise<Response> =>
+		fetch(url, {
 			...(request.body === undefined ? {} : { method: "POST", body: JSON.stringify(request.body) }),
 			headers: {
 				Accept: "application/json",
-				Authorization: credentials,
+				Authorization: authorization,
 				...(request.body === undefined ? {} : { "Content-Type": "application/json" }),
 				// Answer 401 instead of redirecting to an interactive sign-in page.
 				"X-TFS-FedAuthRedirect": "Suppress",
@@ -247,6 +279,18 @@ export async function requestAzureDevOps(request: AzureDevOpsRequest): Promise<A
 			redirect: "error",
 			signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
 		});
+	try {
+		let response = await send(first.authorization);
+		if (first.personalAccessToken !== undefined && statusFailure(response) === "access-denied") {
+			// The request was refused before it took effect, so the Azure CLI account sends it again. A token Azure
+			// DevOps did not accept is not sent again; one that only may not do this request is kept for others.
+			if (response.status !== 403) refusedPersonalAccessToken = first.personalAccessToken;
+			const fallback = await abortable(azureCliAuthorization(), signal);
+			if (fallback !== undefined) {
+				await response.body?.cancel().catch(() => {});
+				response = await send(fallback);
+			}
+		}
 		const failure = statusFailure(response);
 		if (failure) {
 			const message =

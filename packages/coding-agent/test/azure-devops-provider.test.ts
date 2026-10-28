@@ -97,6 +97,8 @@ interface FakeAzureDevOps {
 	changes?: unknown[];
 	/** Responses that replace creating a thread, by the 1-based number of the thread POST. */
 	postFailures?: Record<number, { status: number; body?: unknown }>;
+	/** An `Authorization` header every request carrying it is refused for, with the status refusing it. */
+	refused?: { authorization: string; status: number };
 }
 
 interface RecordedRequest {
@@ -123,6 +125,12 @@ function installFakeAzureDevOps(state: FakeAzureDevOps): RecordedRequest[] {
 			contentType: headers.get("content-type"),
 			...(body === undefined ? {} : { body }),
 		});
+		if (state.refused && headers.get("authorization") === state.refused.authorization) {
+			return new Response(JSON.stringify({ message: "TF400813: The user is not authorized." }), {
+				status: state.refused.status,
+				headers: { "content-type": "application/json; charset=utf-8" },
+			});
+		}
 		const json = (body: unknown, status = 200): Response =>
 			new Response(JSON.stringify(body), {
 				status,
@@ -673,6 +681,56 @@ describe("Azure DevOps code-host provider", () => {
 		await expect(publish()).rejects.toThrow(
 			"Could not confirm a comment thread was posted. Azure DevOps rejected the request. The review may be partly on the pull request. Publish the review again to post the rest; threads already posted are not posted again.",
 		);
+	});
+
+	it("uses the Azure CLI account when Azure DevOps refuses the personal access token", async () => {
+		const basic = (token: string) => `Basic ${Buffer.from(`:${token}`).toString("base64")}`;
+		const capture = () =>
+			azureDevOpsCodeHostProvider.capturePullRequestIdentity({
+				cwd: fixture.repository,
+				number: "5",
+				maxPullRequestNumber: MAX_PULL_REQUEST_NUMBER,
+			});
+		const state: FakeAzureDevOps = {
+			pullRequest: pullRequestJson(fixture),
+			refused: { authorization: basic("expired-pat"), status: 401 },
+		};
+		const requests = installFakeAzureDevOps(state);
+		// A token this close to expiry is never reused from the cache, so each fallback runs `az` again.
+		const bin = installAzureCli(
+			fixture.root,
+			`process.stdout.write(JSON.stringify({ accessToken: "cli-token", expires_on: Math.floor(Date.now() / 1000) + 60 }));\n`,
+		);
+		process.env.PATH = `${bin}${delimiter}${saved.get("PATH") ?? ""}`;
+		delete process.env.VOLT_ADO_PAT;
+		process.env.AZURE_DEVOPS_EXT_PAT = "expired-pat";
+
+		// A token Azure DevOps does not accept is sent once; the Azure CLI account sends every request from then on.
+		await expect(capture()).resolves.toMatchObject({ ok: true, pullRequest: { number: 5 } });
+		await expect(capture()).resolves.toMatchObject({ ok: true, pullRequest: { number: 5 } });
+		expect(requests.filter((request) => request.authorization === basic("expired-pat"))).toHaveLength(1);
+		expect(requests.filter((request) => request.authorization === "Bearer cli-token").length).toBeGreaterThan(2);
+
+		// A token that only may not do a request is tried again on the next one.
+		requests.length = 0;
+		process.env.AZURE_DEVOPS_EXT_PAT = "limited-pat";
+		state.refused = { authorization: basic("limited-pat"), status: 403 };
+		await expect(capture()).resolves.toMatchObject({ ok: true, pullRequest: { number: 5 } });
+		const limited = requests.filter((request) => request.authorization === basic("limited-pat"));
+		expect(limited.length).toBeGreaterThan(1);
+		expect(requests).toHaveLength(limited.length * 2);
+
+		// Without an Azure CLI account, a refused token is denied access rather than missing, then and later.
+		installAzureCli(fixture.root, "process.exit(1);\n");
+		process.env.AZURE_DEVOPS_EXT_PAT = "revoked-pat";
+		state.refused = { authorization: basic("revoked-pat"), status: 401 };
+		for (let attempt = 0; attempt < 2; attempt++) {
+			await expect(capture()).resolves.toMatchObject({
+				ok: false,
+				error: expect.stringContaining("Azure DevOps denied access."),
+			});
+		}
+		expect(requests.filter((request) => request.authorization === basic("revoked-pat"))).toHaveLength(1);
 	});
 
 	it("falls back to the Azure CLI account's token when no personal access token is set", async () => {
