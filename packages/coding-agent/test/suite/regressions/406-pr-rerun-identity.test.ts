@@ -197,7 +197,7 @@ describe("#406 PR rerun identity", () => {
 		git("remote", "set-url", "origin", "https://credential:private-token@github.com/contributor/project.git");
 		await expect(prepareRerun()).rejects.toMatchObject({
 			message:
-				"The review remote is not a supported credential-free GitHub URL. Check its configuration on the host.",
+				"The review remote is not a supported credential-free GitHub or Azure DevOps URL. Check its configuration on the host.",
 		});
 		expect(runGitHubCli).not.toHaveBeenCalled();
 	});

@@ -307,6 +307,8 @@ export interface CodeHostIdentity {
 	readonly displayName: string;
 	/** Hosts trusted to serve pull request author avatars in addition to the pull request host. */
 	readonly avatarHosts?: readonly string[];
+	/** The pull request a web URL of this provider names, with the URL normalized; undefined for any other URL. */
+	parsePullRequestUrl(url: string): { url: string; number: number } | undefined;
 	/** Host-only consistency check for a persisted checkout identity this provider produced. */
 	isCanonicalPullRequestCheckout(
 		pullRequest: ResolvedPullRequestCheckout["pullRequest"],

@@ -1,10 +1,7 @@
 import { runGitHubCli } from "./github-cli.ts";
 import { canonicalizeGitHubRemoteUrl } from "./github-cli-discovery.ts";
-import {
-	parseGitHubPullRequestUrl,
-	resolveCurrentReviewPullRequest,
-	resolveNumberedReviewPullRequest,
-} from "./github-cli-review-target.ts";
+import { resolveCurrentReviewPullRequest, resolveNumberedReviewPullRequest } from "./github-cli-review-target.ts";
+import { parseGitHubPullRequestUrl } from "./github-identity.ts";
 import type { ResolvePullRequestCheckoutOptions, ResolvePullRequestCheckoutResult } from "./types.ts";
 
 function failure(error: string): ResolvePullRequestCheckoutResult {

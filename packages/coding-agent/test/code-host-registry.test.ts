@@ -114,6 +114,7 @@ function createProvider(fixture: Fixture) {
 		id: "test-host",
 		displayName: "Test Host",
 		canonicalizeRemoteUrl: (url) => (url === fixture.remoteUrl ? REPOSITORY : null),
+		parsePullRequestUrl: (url) => (url === PULL_REQUEST_URL ? { url, number: 5 } : undefined),
 		isCanonicalPullRequestCheckout: (checkout, repositoryId) =>
 			checkout.url === PULL_REQUEST_URL && repositoryId === REPOSITORY.canonicalId,
 		probeCurrentPullRequest: async () => ({ number: 5, title: pullRequest.title, url: PULL_REQUEST_URL }),
@@ -212,14 +213,14 @@ describe("code-host provider registry", () => {
 	it("reports remotes no registered provider recognizes", async () => {
 		await expect(resolveCodeHostProvider({ cwd: fixture.repository })).resolves.toMatchObject({
 			ok: false,
-			error: "The review remote is not a supported credential-free GitHub URL. Check its configuration on the host.",
+			error: "The review remote is not a supported credential-free GitHub or Azure DevOps URL. Check its configuration on the host.",
 		});
 		const { provider } = createProvider(fixture);
 		cleanups.push(registerCodeHostProvider(provider));
 		git(fixture.repository, "remote", "set-url", "origin", "https://code.example.test/acme/_git/widgets");
 		await expect(resolveCodeHostProvider({ cwd: fixture.repository, number: "5" })).resolves.toMatchObject({
 			ok: false,
-			error: "The review remote is not a supported credential-free GitHub or Test Host URL. Check its configuration on the host.",
+			error: "The review remote is not a supported credential-free GitHub or Azure DevOps or Test Host URL. Check its configuration on the host.",
 		});
 	});
 
