@@ -370,10 +370,14 @@ async function captureWorkItems(
 		return [];
 	}
 	const ids: number[] = [];
+	const seen = new Set<number>();
 	for (const value of values) {
 		const id = isRecord(value) ? Number(value.id) : Number.NaN;
 		if (!Number.isSafeInteger(id) || id < 1) addLimitation(limitations, "invalid-api-response", source);
-		else if (!ids.includes(id)) ids.push(id);
+		else if (!seen.has(id)) {
+			seen.add(id);
+			ids.push(id);
+		}
 	}
 	if (ids.length > REVIEW_CODE_HOST_LINKED_ISSUE_LIMIT) {
 		addLimitation(limitations, "linked-issue-limit", source);
