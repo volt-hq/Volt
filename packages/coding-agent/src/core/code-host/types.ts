@@ -296,6 +296,8 @@ export interface ReviewCodeHostPublishRequest extends CodeHostCommandOptions {
 	/** The published review run: a provider that posts a review in parts recognizes the parts it already posted by it. */
 	runId: string;
 	pullRequest: ReviewPullRequestIdentity;
+	/** The commit the review read the base side of the diff from: the merge base of the pull request's base and head. */
+	mergeBaseCommit?: string;
 	body: string;
 	comments: ReviewCodeHostInlineComment[];
 }

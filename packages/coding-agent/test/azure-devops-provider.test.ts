@@ -529,8 +529,10 @@ describe("Azure DevOps code-host provider", () => {
 			pullRequest: pullRequestJson(fixture),
 			threads: [{ id: 1, status: "active", comments: [{ id: 1, content: "Earlier", commentType: "text" }] }],
 			iterations: [
-				{ id: 1, sourceRefCommit: { commitId: fixture.baseOid } },
-				{ id: 2, sourceRefCommit: { commitId: fixture.headOid } },
+				{ id: 1, sourceRefCommit: { commitId: fixture.baseOid }, commonRefCommit: { commitId: fixture.baseOid } },
+				{ id: 2, sourceRefCommit: { commitId: fixture.headOid }, commonRefCommit: { commitId: fixture.baseOid } },
+				// Retargeted after the review: the same head against another merge base is not the reviewed diff.
+				{ id: 3, sourceRefCommit: { commitId: fixture.headOid }, commonRefCommit: { commitId: "e".repeat(40) } },
 			],
 			// More changes than one page holds, so the reviewed files are on the second page.
 			changes: [
@@ -549,6 +551,7 @@ describe("Azure DevOps code-host provider", () => {
 				cwd: fixture.repository,
 				runId: "review:7",
 				pullRequest: pullRequestIdentity(fixture),
+				mergeBaseCommit: fixture.baseOid,
 				body: "Volt review (review:7)",
 				comments: [
 					{ findingId: "f1", path: "value.txt", side: "head", startLine: 1, endLine: 1, body: "Finding one" },
@@ -613,7 +616,9 @@ describe("Azure DevOps code-host provider", () => {
 	it("refuses to post what it cannot place, and reports a post it could not confirm", async () => {
 		const state: FakeAzureDevOps = {
 			pullRequest: pullRequestJson(fixture),
-			iterations: [{ id: 1, sourceRefCommit: { commitId: fixture.baseOid } }],
+			iterations: [
+				{ id: 1, sourceRefCommit: { commitId: fixture.baseOid }, commonRefCommit: { commitId: fixture.baseOid } },
+			],
 			changes: [{ changeTrackingId: 1, item: { path: "/value.txt" } }],
 		};
 		const requests = installFakeAzureDevOps(state);
@@ -630,6 +635,7 @@ describe("Azure DevOps code-host provider", () => {
 				cwd: fixture.repository,
 				runId: "review:8",
 				pullRequest: pullRequestIdentity(fixture),
+				mergeBaseCommit: fixture.baseOid,
 				body: "Summary",
 				comments: [comment],
 				...overrides,
@@ -644,7 +650,20 @@ describe("Azure DevOps code-host provider", () => {
 		await expect(publish()).rejects.toThrow(
 			"Could not find the reviewed pull request iteration. None of the pull request's iterations has the reviewed commit as its source. Run a new review. Nothing was published.",
 		);
-		state.iterations = [{ id: 1, sourceRefCommit: { commitId: fixture.headOid } }];
+		state.iterations = [
+			{ id: 1, sourceRefCommit: { commitId: fixture.headOid }, commonRefCommit: { commitId: "e".repeat(40) } },
+		];
+		await expect(publish()).rejects.toThrow(
+			"The pull request's target changed after the review, so the reviewed diff is not one of its iterations. Run a new review. Nothing was published.",
+		);
+		await expect(publish({ mergeBaseCommit: undefined })).rejects.toThrow(
+			"The review did not record the merge base it compared against, so its findings cannot be placed. Run a new review. Nothing was published.",
+		);
+		state.iterations.push({
+			id: 2,
+			sourceRefCommit: { commitId: fixture.headOid },
+			commonRefCommit: { commitId: fixture.baseOid },
+		});
 		await expect(publish({ comments: [{ ...comment, path: "missing.txt" }] })).rejects.toThrow(
 			'Azure DevOps does not list "missing.txt" among the reviewed iteration\'s changes, so its finding cannot be placed on its lines. Nothing was published.',
 		);

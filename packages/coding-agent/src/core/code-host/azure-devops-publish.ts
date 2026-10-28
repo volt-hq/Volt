@@ -50,6 +50,10 @@ function positiveInteger(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
+function commitId(ref: unknown): unknown {
+	return isRecord(ref) ? ref.commitId : undefined;
+}
+
 function stringProperty(properties: unknown, key: string): string | undefined {
 	if (!isRecord(properties)) return undefined;
 	const property = properties[key];
@@ -83,11 +87,15 @@ async function readPostedParts(
 	return posted;
 }
 
-/** The latest iteration whose source commit is the reviewed head: the diff the review's lines refer to. */
+/**
+ * The latest iteration that compares the reviewed head with the reviewed merge base: the diff the review's lines
+ * refer to. A pull request retargeted since the review has the same head in an iteration with another merge base.
+ */
 async function readReviewedIteration(
 	locator: AzureDevOpsPullRequestLocator,
 	path: string,
 	headRefOid: string,
+	mergeBaseCommit: string,
 ): Promise<number | string> {
 	const response = await requestAzureDevOps({
 		organization: locator.repository.organization,
@@ -97,13 +105,21 @@ async function readReviewedIteration(
 	const iterations = isRecord(response.value) ? response.value.value : undefined;
 	if (!Array.isArray(iterations)) return azureDevOpsFailureMessage("invalid-response");
 	let reviewed: number | undefined;
+	let reviewedHead = false;
 	for (const iteration of iterations) {
-		const id = isRecord(iteration) ? positiveInteger(iteration.id) : undefined;
+		if (!isRecord(iteration)) return azureDevOpsFailureMessage("invalid-response");
+		const id = positiveInteger(iteration.id);
 		if (id === undefined) return azureDevOpsFailureMessage("invalid-response");
-		const source = isRecord(iteration) && isRecord(iteration.sourceRefCommit) ? iteration.sourceRefCommit : undefined;
-		if (source?.commitId === headRefOid && (reviewed === undefined || id > reviewed)) reviewed = id;
+		if (commitId(iteration.sourceRefCommit) !== headRefOid) continue;
+		reviewedHead = true;
+		if (commitId(iteration.commonRefCommit) === mergeBaseCommit && (reviewed === undefined || id > reviewed)) {
+			reviewed = id;
+		}
 	}
-	return reviewed ?? "None of the pull request's iterations has the reviewed commit as its source. Run a new review.";
+	if (reviewed !== undefined) return reviewed;
+	return reviewedHead
+		? "The pull request's target changed after the review, so the reviewed diff is not one of its iterations. Run a new review."
+		: "None of the pull request's iterations has the reviewed commit as its source. Run a new review.";
 }
 
 /**
@@ -209,7 +225,17 @@ export async function publishAzureDevOpsReview(
 	const inline = pending.flatMap((part) => (part.comment ? [part.comment] : []));
 	let position: { iteration: number; changeTrackingIds: ReadonlyMap<string, number> } | undefined;
 	if (inline.length > 0) {
-		const iteration = await readReviewedIteration(locator, path, request.pullRequest.headRefOid);
+		if (request.mergeBaseCommit === undefined) {
+			throw fail(
+				"The review did not record the merge base it compared against, so its findings cannot be placed. Run a new review.",
+			);
+		}
+		const iteration = await readReviewedIteration(
+			locator,
+			path,
+			request.pullRequest.headRefOid,
+			request.mergeBaseCommit,
+		);
 		if (typeof iteration === "string") throw fail(`Could not find the reviewed pull request iteration. ${iteration}`);
 		const ids = await readChangeTrackingIds(locator, path, iteration, new Set(inline.map((comment) => comment.path)));
 		if (typeof ids === "string") throw fail(`Could not read the pull request iteration's changes. ${ids}`);

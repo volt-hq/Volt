@@ -100,6 +100,9 @@ export async function publishReviewRun(
 		cwd,
 		runId: run.runId,
 		pullRequest,
+		...(run.target.identity.mergeBaseCommit === undefined
+			? {}
+			: { mergeBaseCommit: run.target.identity.mergeBaseCommit }),
 		body,
 		comments,
 		...command,
