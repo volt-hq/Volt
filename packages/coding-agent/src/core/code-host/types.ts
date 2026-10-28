@@ -276,6 +276,8 @@ export interface PullRequestFetchPlan {
 }
 
 export interface ReviewCodeHostInlineComment {
+	/** The finding the comment posts, unique within its review. */
+	findingId: string;
 	path: string;
 	side: "base" | "head";
 	startLine: number;
@@ -291,6 +293,8 @@ export interface CodeHostCommandOptions {
 
 export interface ReviewCodeHostPublishRequest extends CodeHostCommandOptions {
 	cwd: string;
+	/** The published review run: a provider that posts a review in parts recognizes the parts it already posted by it. */
+	runId: string;
 	pullRequest: ReviewPullRequestIdentity;
 	body: string;
 	comments: ReviewCodeHostInlineComment[];

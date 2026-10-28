@@ -8,7 +8,11 @@ import { azureDevOpsCodeHostProvider } from "../src/core/code-host/azure-devops-
 import * as azureRemote from "../src/core/code-host/azure-devops-remote.ts";
 import { canonicalizeGitHubRemoteUrl } from "../src/core/code-host/github-cli-discovery.ts";
 import { findCodeHostIdentity, parseCodeHostPullRequestUrl } from "../src/core/code-host/identity.ts";
-import { type ReviewPullRequestIdentity, resolveCodeHostProvider } from "../src/core/code-host/index.ts";
+import {
+	type ReviewCodeHostPublishRequest,
+	type ReviewPullRequestIdentity,
+	resolveCodeHostProvider,
+} from "../src/core/code-host/index.ts";
 import { probeCurrentBranchPullRequest } from "../src/core/review.ts";
 import { resolveReviewSnapshot } from "../src/core/review-snapshot.ts";
 
@@ -88,19 +92,37 @@ interface FakeAzureDevOps {
 	workItemReferences?: unknown[];
 	workItems?: unknown[];
 	workItemComments?: Record<string, unknown[]>;
+	iterations?: unknown[];
+	/** Change entries of every iteration against the common commit, served in pages. */
+	changes?: unknown[];
+	/** Responses that replace creating a thread, by the 1-based number of the thread POST. */
+	postFailures?: Record<number, { status: number; body?: unknown }>;
 }
 
 interface RecordedRequest {
 	url: URL;
+	method: string;
 	authorization: string | null;
+	contentType: string | null;
+	body?: unknown;
 }
 
 function installFakeAzureDevOps(state: FakeAzureDevOps): RecordedRequest[] {
 	const requests: RecordedRequest[] = [];
 	let pullRequestReads = 0;
+	let threadPosts = 0;
 	vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 		const url = new URL(input instanceof Request ? input.url : String(input));
-		requests.push({ url, authorization: new Headers(init?.headers).get("authorization") });
+		const headers = new Headers(init?.headers);
+		const method = init?.method ?? "GET";
+		const body = typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : undefined;
+		requests.push({
+			url,
+			method,
+			authorization: headers.get("authorization"),
+			contentType: headers.get("content-type"),
+			...(body === undefined ? {} : { body }),
+		});
 		const json = (body: unknown, status = 200): Response =>
 			new Response(JSON.stringify(body), {
 				status,
@@ -117,6 +139,34 @@ function installFakeAzureDevOps(state: FakeAzureDevOps): RecordedRequest[] {
 					? { ...state.pullRequest, lastMergeSourceCommit: { commitId: state.laterHeadOid } }
 					: state.pullRequest,
 			);
+		}
+		if (path === `${byName}/5/threads` && method === "POST") {
+			threadPosts++;
+			const failure = state.postFailures?.[threadPosts];
+			if (failure) return json(failure.body ?? { message: "Service unavailable" }, failure.status);
+			state.threads ??= [];
+			const threads = state.threads;
+			const id = Math.max(0, ...threads.map((thread) => Number((thread as { id: number }).id))) + 1;
+			const thread = { ...(body as Record<string, unknown>), id, isDeleted: false };
+			threads.push(thread);
+			return json(thread);
+		}
+		if (path === `${byName}/5/threads`) return json({ value: state.threads ?? [] });
+		if (path === `${byName}/5/iterations`) return json({ value: state.iterations ?? [] });
+		if (
+			/^\/fabrikam\/fabrikam fiber\/_apis\/git\/repositories\/fiber\/pullrequests\/5\/iterations\/\d+\/changes$/.test(
+				path,
+			)
+		) {
+			const changes = state.changes ?? [];
+			const top = Number(url.searchParams.get("$top"));
+			const skip = Number(url.searchParams.get("$skip"));
+			const more = skip + top < changes.length;
+			return json({
+				changeEntries: changes.slice(skip, skip + top),
+				nextSkip: more ? skip + top : 0,
+				nextTop: more ? top : 0,
+			});
 		}
 		if (path === `${byId}/statuses`) return json({ value: state.statuses ?? [] });
 		if (path === `${byId}/threads`) return json({ value: state.threads ?? [] });
@@ -149,6 +199,20 @@ function installAzureCli(directory: string, source: string): string {
 }
 
 const MAX_PULL_REQUEST_NUMBER = 2_147_483_647;
+
+function pullRequestIdentity(fixture: Fixture): ReviewPullRequestIdentity {
+	return {
+		providerId: "azure-devops",
+		number: 5,
+		title: "Change value",
+		body: "",
+		url: PULL_REQUEST_URL,
+		baseRefName: "main",
+		headRefName: "topic",
+		baseRefOid: fixture.baseOid,
+		headRefOid: fixture.headOid,
+	};
+}
 
 describe("Azure DevOps code-host provider", () => {
 	let fixture: Fixture;
@@ -437,20 +501,10 @@ describe("Azure DevOps code-host provider", () => {
 		});
 	});
 
-	it("verifies the head without a CLI and does not publish or check out yet", async () => {
+	it("verifies the head without a CLI and does not check out yet", async () => {
 		const state: FakeAzureDevOps = { pullRequest: pullRequestJson(fixture) };
 		installFakeAzureDevOps(state);
-		const identity: ReviewPullRequestIdentity = {
-			providerId: "azure-devops",
-			number: 5,
-			title: "Change value",
-			body: "",
-			url: PULL_REQUEST_URL,
-			baseRefName: "main",
-			headRefName: "topic",
-			baseRefOid: fixture.baseOid,
-			headRefOid: fixture.headOid,
-		};
+		const identity = pullRequestIdentity(fixture);
 		await expect(azureDevOpsCodeHostProvider.verifyPullRequestHead(fixture.repository, identity)).resolves.toBe(
 			undefined,
 		);
@@ -462,20 +516,144 @@ describe("Azure DevOps code-host provider", () => {
 			"The pull request head moved after this review was captured.",
 		);
 		await expect(
-			azureDevOpsCodeHostProvider.publishPullRequestReview({
-				cwd: fixture.repository,
-				pullRequest: identity,
-				body: "Review",
-				comments: [],
-			}),
-		).rejects.toThrow("Publishing reviews to Azure DevOps is not supported yet");
-		await expect(
 			azureDevOpsCodeHostProvider.resolvePullRequestCheckout({
 				cwd: fixture.repository,
 				number: "5",
 				maxPullRequestNumber: MAX_PULL_REQUEST_NUMBER,
 			}),
 		).resolves.toMatchObject({ ok: false, error: expect.stringContaining("not supported for Azure DevOps") });
+	});
+
+	it("publishes findings and the summary as marked threads, posting only missing ones when published again", async () => {
+		const state: FakeAzureDevOps = {
+			pullRequest: pullRequestJson(fixture),
+			threads: [{ id: 1, status: "active", comments: [{ id: 1, content: "Earlier", commentType: "text" }] }],
+			iterations: [
+				{ id: 1, sourceRefCommit: { commitId: fixture.baseOid } },
+				{ id: 2, sourceRefCommit: { commitId: fixture.headOid } },
+			],
+			// More changes than one page holds, so the reviewed files are on the second page.
+			changes: [
+				...Array.from({ length: 2_000 }, (_, index) => ({
+					changeTrackingId: index + 10,
+					item: { path: `/filler/${index}.txt` },
+				})),
+				{ changeTrackingId: 3, item: { path: "/other.txt" } },
+				{ changeTrackingId: 4, item: { path: "/value.txt" } },
+			],
+			postFailures: { 2: { status: 400, body: { message: "Line 3 is outside\nthe file." } } },
+		};
+		const requests = installFakeAzureDevOps(state);
+		const publish = () =>
+			azureDevOpsCodeHostProvider.publishPullRequestReview({
+				cwd: fixture.repository,
+				runId: "review:7",
+				pullRequest: pullRequestIdentity(fixture),
+				body: "Volt review (review:7)",
+				comments: [
+					{ findingId: "f1", path: "value.txt", side: "head", startLine: 1, endLine: 1, body: "Finding one" },
+					{ findingId: "f2", path: "other.txt", side: "base", startLine: 2, endLine: 3, body: "Finding two" },
+				],
+			});
+		const posts = () => requests.filter((request) => request.method === "POST").map((request) => request.body);
+		const marker = (value: string) => ({ $type: "System.String", $value: value });
+		const reviewed = { firstComparingIteration: 2, secondComparingIteration: 2 };
+
+		await expect(publish()).rejects.toThrow(
+			"Azure DevOps did not post a comment thread of the review. Azure DevOps rejected the request. Azure DevOps said: Line 3 is outside the file. 1 of 3 comment threads of this review are on the pull request. Publish the review again to post the rest; threads already posted are not posted again.",
+		);
+		expect(posts()[0]).toEqual({
+			comments: [{ parentCommentId: 0, content: "Finding one", commentType: 1 }],
+			status: 1,
+			properties: { "Volt.ReviewRunId": marker("review:7"), "Volt.ReviewPart": marker("finding:f1") },
+			threadContext: {
+				filePath: "/value.txt",
+				rightFileStart: { line: 1, offset: 1 },
+				rightFileEnd: { line: 1, offset: 1 },
+			},
+			pullRequestThreadContext: { changeTrackingId: 4, iterationContext: reviewed },
+		});
+		expect(posts()).toHaveLength(2);
+
+		requests.length = 0;
+		const result = { reviewId: 4, url: `${PULL_REQUEST_URL}?discussionId=4` };
+		await expect(publish()).resolves.toEqual(result);
+		expect(posts()).toEqual([
+			{
+				comments: [{ parentCommentId: 0, content: "Finding two", commentType: 1 }],
+				status: 1,
+				properties: { "Volt.ReviewRunId": marker("review:7"), "Volt.ReviewPart": marker("finding:f2") },
+				threadContext: {
+					filePath: "/other.txt",
+					leftFileStart: { line: 2, offset: 1 },
+					leftFileEnd: { line: 3, offset: 1 },
+				},
+				pullRequestThreadContext: { changeTrackingId: 3, iterationContext: reviewed },
+			},
+			{
+				comments: [{ parentCommentId: 0, content: "Volt review (review:7)", commentType: 1 }],
+				status: 1,
+				properties: { "Volt.ReviewRunId": marker("review:7"), "Volt.ReviewPart": marker("summary") },
+			},
+		]);
+		for (const request of requests) {
+			expect(request.url.host).toBe("dev.azure.com");
+			expect(request.authorization).toBe(`Basic ${Buffer.from(":test-pat").toString("base64")}`);
+			if (request.method === "POST") expect(request.contentType).toBe("application/json");
+		}
+
+		// Published in full, publishing again posts nothing and reads nothing but the threads.
+		requests.length = 0;
+		await expect(publish()).resolves.toEqual(result);
+		expect(requests.map((request) => [request.method, decodeURIComponent(request.url.pathname)])).toEqual([
+			["GET", "/fabrikam/Fabrikam Fiber/_apis/git/repositories/Fiber/pullRequests/5/threads"],
+		]);
+	});
+
+	it("refuses to post what it cannot place, and reports a post it could not confirm", async () => {
+		const state: FakeAzureDevOps = {
+			pullRequest: pullRequestJson(fixture),
+			iterations: [{ id: 1, sourceRefCommit: { commitId: fixture.baseOid } }],
+			changes: [{ changeTrackingId: 1, item: { path: "/value.txt" } }],
+		};
+		const requests = installFakeAzureDevOps(state);
+		const comment = {
+			findingId: "f1",
+			path: "value.txt",
+			side: "head" as const,
+			startLine: 1,
+			endLine: 1,
+			body: "F",
+		};
+		const publish = (overrides: Partial<ReviewCodeHostPublishRequest> = {}) =>
+			azureDevOpsCodeHostProvider.publishPullRequestReview({
+				cwd: fixture.repository,
+				runId: "review:8",
+				pullRequest: pullRequestIdentity(fixture),
+				body: "Summary",
+				comments: [comment],
+				...overrides,
+			});
+
+		await expect(publish({ command: ["az"] })).rejects.toThrow("no CLI command applies");
+		await expect(
+			publish({ pullRequest: { ...pullRequestIdentity(fixture), url: "https://github.com/fabrikam/fiber/pull/5" } }),
+		).rejects.toThrow("The captured Azure DevOps pull request identity is invalid.");
+		expect(requests).toHaveLength(0);
+
+		await expect(publish()).rejects.toThrow(
+			"Could not find the reviewed pull request iteration. None of the pull request's iterations has the reviewed commit as its source. Run a new review. Nothing was published.",
+		);
+		state.iterations = [{ id: 1, sourceRefCommit: { commitId: fixture.headOid } }];
+		await expect(publish({ comments: [{ ...comment, path: "missing.txt" }] })).rejects.toThrow(
+			'Azure DevOps does not list "missing.txt" among the reviewed iteration\'s changes, so its finding cannot be placed on its lines. Nothing was published.',
+		);
+		expect(requests.filter((request) => request.method === "POST")).toHaveLength(0);
+
+		state.postFailures = { 1: { status: 503 } };
+		await expect(publish()).rejects.toThrow(
+			"Could not confirm a comment thread was posted. Azure DevOps rejected the request. The review may be partly on the pull request. Publish the review again to post the rest; threads already posted are not posted again.",
+		);
 	});
 
 	it("falls back to the Azure CLI account's token when no personal access token is set", async () => {

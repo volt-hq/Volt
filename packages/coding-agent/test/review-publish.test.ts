@@ -271,9 +271,11 @@ switch (args.slice(0, 2).join(" ")) {
 		expect(verifiedHead).toBe("head-oid");
 		expect(publishRequest).toMatchObject({
 			cwd: "/workspace",
+			runId: run.runId,
 			pullRequest: { providerId: "test-host", number: 7 },
 			comments: [
 				{
+					findingId: "finding-inline",
 					path: "src/value.ts",
 					side: "head",
 					startLine: 2,

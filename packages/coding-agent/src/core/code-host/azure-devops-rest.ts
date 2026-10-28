@@ -11,6 +11,8 @@ const DEFAULT_RESPONSE_MAX_BYTES = 8 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const AZURE_CLI_TIMEOUT_MS = 30_000;
 const AZURE_CLI_OUTPUT_MAX_BYTES = 64 * 1024;
+const ERROR_RESPONSE_MAX_BYTES = 64 * 1024;
+const ERROR_MESSAGE_MAX_CHARS = 500;
 /** A cached Azure CLI token is renewed this long before it expires. */
 const TOKEN_RENEWAL_MARGIN_MS = 5 * 60_000;
 /** Lifetime assumed for an Azure CLI token that reports no expiry. */
@@ -31,13 +33,22 @@ export type AzureDevOpsFailure =
 	| "invalid-response"
 	| "http-error";
 
-export type AzureDevOpsResponse = { ok: true; value: unknown } | { ok: false; failure: AzureDevOpsFailure };
+export type AzureDevOpsResponse =
+	| { ok: true; value: unknown }
+	| {
+			ok: false;
+			failure: AzureDevOpsFailure;
+			/** The reason Azure DevOps gave for refusing a request with a client error, bounded. */
+			message?: string;
+	  };
 
 export interface AzureDevOpsRequest {
 	organization: string;
 	/** Path under the organization: `/`-prefixed, with its segments already percent-encoded. */
 	path: string;
 	query?: Readonly<Record<string, string>>;
+	/** JSON request body: a request with one is a POST. */
+	body?: unknown;
 	apiVersion?: string;
 	signal?: AbortSignal;
 	maxBytes?: number;
@@ -198,7 +209,22 @@ async function readBoundedBody(response: Response, maxBytes: number): Promise<Bu
 	}
 }
 
-/** One read-only Azure DevOps Services REST request. Throws only when `signal` cancels it. */
+/** The `message` of an Azure DevOps error response, bounded; undefined when it has none. */
+async function errorMessage(response: Response): Promise<string | undefined> {
+	if (!/^application\/json\b/i.test(response.headers.get("content-type") ?? "")) return undefined;
+	const body = await readBoundedBody(response, ERROR_RESPONSE_MAX_BYTES).catch(() => undefined);
+	if (!body) return undefined;
+	try {
+		const value = JSON.parse(body.toString("utf8")) as unknown;
+		const message = isRecord(value) && typeof value.message === "string" ? value.message : undefined;
+		const text = message?.replace(/[\u0000-\u001f\u007f]+/gu, " ").trim();
+		return text ? text.slice(0, ERROR_MESSAGE_MAX_CHARS) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** One Azure DevOps Services REST request. Throws only when `signal` cancels it. */
 export async function requestAzureDevOps(request: AzureDevOpsRequest): Promise<AzureDevOpsResponse> {
 	const { signal } = request;
 	if (signal?.aborted) throw new Error(AZURE_DEVOPS_REQUEST_CANCELLED);
@@ -210,9 +236,11 @@ export async function requestAzureDevOps(request: AzureDevOpsRequest): Promise<A
 	const timeout = AbortSignal.timeout(request.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 	try {
 		const response = await fetch(url, {
+			...(request.body === undefined ? {} : { method: "POST", body: JSON.stringify(request.body) }),
 			headers: {
 				Accept: "application/json",
 				Authorization: credentials,
+				...(request.body === undefined ? {} : { "Content-Type": "application/json" }),
 				// Answer 401 instead of redirecting to an interactive sign-in page.
 				"X-TFS-FedAuthRedirect": "Suppress",
 			},
@@ -221,8 +249,12 @@ export async function requestAzureDevOps(request: AzureDevOpsRequest): Promise<A
 		});
 		const failure = statusFailure(response);
 		if (failure) {
+			const message =
+				failure === "http-error" && response.status >= 400 && response.status < 500
+					? await errorMessage(response)
+					: undefined;
 			await response.body?.cancel().catch(() => {});
-			return { ok: false, failure };
+			return { ok: false, failure, ...(message === undefined ? {} : { message }) };
 		}
 		const body = await readBoundedBody(response, request.maxBytes ?? DEFAULT_RESPONSE_MAX_BYTES);
 		if (!body) return { ok: false, failure: "output-limit" };
