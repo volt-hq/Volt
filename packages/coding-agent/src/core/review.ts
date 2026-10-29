@@ -1,11 +1,11 @@
 import { Buffer } from "node:buffer";
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { Api, DeepReadonly, Model } from "@hansjm10/volt-ai";
 import { minimatch } from "minimatch";
+import { spawnProcess } from "../utils/child-process.ts";
 import type { AgentSession, AgentSessionEvent } from "./agent-session.ts";
 import type { AgentSessionServices } from "./agent-session-services.ts";
 import type { AuthStorage } from "./auth-storage.ts";
@@ -174,7 +174,7 @@ interface CommandResult {
 
 function runCommand(command: string, args: string[], cwd: string): Promise<CommandResult> {
 	return new Promise((resolveResult) => {
-		const proc = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"], env: process.env });
+		const proc = spawnProcess(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"], env: process.env });
 		let stdout = "";
 		let stderr = "";
 		proc.stdout?.on("data", (data: Buffer) => {
