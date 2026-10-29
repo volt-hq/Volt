@@ -133,6 +133,7 @@ describe("#411 pinned PR publication", () => {
 		await expect(
 			githubCliCodeHostProvider.publishPullRequestReview({
 				cwd: harness.tempDir,
+				runId: "review:411",
 				pullRequest,
 				body: "Review",
 				comments: [],
@@ -149,6 +150,7 @@ describe("#411 pinned PR publication", () => {
 		await expect(
 			githubCliCodeHostProvider.publishPullRequestReview({
 				cwd: harness.tempDir,
+				runId: "review:411",
 				pullRequest,
 				body: "Review",
 				comments: [],

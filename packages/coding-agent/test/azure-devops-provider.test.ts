@@ -6,9 +6,14 @@ import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { azureDevOpsCodeHostProvider } from "../src/core/code-host/azure-devops-provider.ts";
 import * as azureRemote from "../src/core/code-host/azure-devops-remote.ts";
+import { requestAzureDevOps } from "../src/core/code-host/azure-devops-rest.ts";
 import { canonicalizeGitHubRemoteUrl } from "../src/core/code-host/github-cli-discovery.ts";
 import { findCodeHostIdentity, parseCodeHostPullRequestUrl } from "../src/core/code-host/identity.ts";
-import { type ReviewPullRequestIdentity, resolveCodeHostProvider } from "../src/core/code-host/index.ts";
+import {
+	type ReviewCodeHostPublishRequest,
+	type ReviewPullRequestIdentity,
+	resolveCodeHostProvider,
+} from "../src/core/code-host/index.ts";
 import { probeCurrentBranchPullRequest } from "../src/core/review.ts";
 import { resolveReviewSnapshot } from "../src/core/review-snapshot.ts";
 
@@ -88,25 +93,62 @@ interface FakeAzureDevOps {
 	workItemReferences?: unknown[];
 	workItems?: unknown[];
 	workItemComments?: Record<string, unknown[]>;
+	iterations?: unknown[];
+	/** Change entries of every iteration against the common commit, served in pages. */
+	changes?: unknown[];
+	/** Responses that replace creating a thread, by the 1-based number of the thread POST. */
+	postFailures?: Record<number, { status: number; body?: unknown }>;
+	/**
+	 * An `Authorization` header refused with `status`, by every organization or by `organization` only. With
+	 * `connectionData`, the organization still serves its connection data to it, as to a token that only lacks a scope.
+	 */
+	refused?: { authorization: string; status: number; organization?: string; connectionData?: boolean };
 }
 
 interface RecordedRequest {
 	url: URL;
+	method: string;
 	authorization: string | null;
+	contentType: string | null;
+	body?: unknown;
 }
 
 function installFakeAzureDevOps(state: FakeAzureDevOps): RecordedRequest[] {
 	const requests: RecordedRequest[] = [];
 	let pullRequestReads = 0;
+	let threadPosts = 0;
 	vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 		const url = new URL(input instanceof Request ? input.url : String(input));
-		requests.push({ url, authorization: new Headers(init?.headers).get("authorization") });
+		const headers = new Headers(init?.headers);
+		const method = init?.method ?? "GET";
+		const body = typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : undefined;
+		// Like `fetch`, a request whose signal already aborted is not sent.
+		if (init?.signal?.aborted) throw init.signal.reason;
+		requests.push({
+			url,
+			method,
+			authorization: headers.get("authorization"),
+			contentType: headers.get("content-type"),
+			...(body === undefined ? {} : { body }),
+		});
+		const path = decodeURIComponent(url.pathname).toLowerCase();
+		const refused = state.refused;
+		if (
+			refused &&
+			headers.get("authorization") === refused.authorization &&
+			(refused.organization === undefined || path.startsWith(`/${refused.organization}/`)) &&
+			!(refused.connectionData && path.endsWith("/_apis/connectiondata"))
+		) {
+			return new Response(JSON.stringify({ message: "TF400813: The user is not authorized." }), {
+				status: refused.status,
+				headers: { "content-type": "application/json; charset=utf-8" },
+			});
+		}
 		const json = (body: unknown, status = 200): Response =>
 			new Response(JSON.stringify(body), {
 				status,
 				headers: { "content-type": "application/json; charset=utf-8; api-version=7.1" },
 			});
-		const path = decodeURIComponent(url.pathname).toLowerCase();
 		const byName = "/fabrikam/fabrikam fiber/_apis/git/repositories/fiber/pullrequests";
 		const byId = `/fabrikam/${PROJECT_ID}/_apis/git/repositories/${REPOSITORY_ID}/pullrequests/5`;
 		if (path === byName) return json({ value: state.pullRequests ?? [] });
@@ -118,6 +160,35 @@ function installFakeAzureDevOps(state: FakeAzureDevOps): RecordedRequest[] {
 					: state.pullRequest,
 			);
 		}
+		if (path === `${byName}/5/threads` && method === "POST") {
+			threadPosts++;
+			const failure = state.postFailures?.[threadPosts];
+			if (failure) return json(failure.body ?? { message: "Service unavailable" }, failure.status);
+			state.threads ??= [];
+			const threads = state.threads;
+			const id = Math.max(0, ...threads.map((thread) => Number((thread as { id: number }).id))) + 1;
+			const thread = { ...(body as Record<string, unknown>), id, isDeleted: false };
+			threads.push(thread);
+			return json(thread);
+		}
+		if (path === `${byName}/5/threads`) return json({ value: state.threads ?? [] });
+		if (path === `${byName}/5/iterations`) return json({ value: state.iterations ?? [] });
+		if (
+			/^\/fabrikam\/fabrikam fiber\/_apis\/git\/repositories\/fiber\/pullrequests\/5\/iterations\/\d+\/changes$/.test(
+				path,
+			)
+		) {
+			const changes = state.changes ?? [];
+			const top = Number(url.searchParams.get("$top"));
+			const skip = Number(url.searchParams.get("$skip"));
+			const more = skip + top < changes.length;
+			return json({
+				changeEntries: changes.slice(skip, skip + top),
+				nextSkip: more ? skip + top : 0,
+				nextTop: more ? top : 0,
+			});
+		}
+		if (/^\/[^/]+\/_apis\/connectiondata$/.test(path)) return json({ authenticatedUser: { id: "user" } });
 		if (path === `${byId}/statuses`) return json({ value: state.statuses ?? [] });
 		if (path === `${byId}/threads`) return json({ value: state.threads ?? [] });
 		if (path === `${byId}/workitems`) return json({ value: state.workItemReferences ?? [] });
@@ -149,6 +220,20 @@ function installAzureCli(directory: string, source: string): string {
 }
 
 const MAX_PULL_REQUEST_NUMBER = 2_147_483_647;
+
+function pullRequestIdentity(fixture: Fixture): ReviewPullRequestIdentity {
+	return {
+		providerId: "azure-devops",
+		number: 5,
+		title: "Change value",
+		body: "",
+		url: PULL_REQUEST_URL,
+		baseRefName: "main",
+		headRefName: "topic",
+		baseRefOid: fixture.baseOid,
+		headRefOid: fixture.headOid,
+	};
+}
 
 describe("Azure DevOps code-host provider", () => {
 	let fixture: Fixture;
@@ -437,20 +522,10 @@ describe("Azure DevOps code-host provider", () => {
 		});
 	});
 
-	it("verifies the head without a CLI and does not publish or check out yet", async () => {
+	it("verifies the head without a CLI and does not check out yet", async () => {
 		const state: FakeAzureDevOps = { pullRequest: pullRequestJson(fixture) };
 		installFakeAzureDevOps(state);
-		const identity: ReviewPullRequestIdentity = {
-			providerId: "azure-devops",
-			number: 5,
-			title: "Change value",
-			body: "",
-			url: PULL_REQUEST_URL,
-			baseRefName: "main",
-			headRefName: "topic",
-			baseRefOid: fixture.baseOid,
-			headRefOid: fixture.headOid,
-		};
+		const identity = pullRequestIdentity(fixture);
 		await expect(azureDevOpsCodeHostProvider.verifyPullRequestHead(fixture.repository, identity)).resolves.toBe(
 			undefined,
 		);
@@ -462,20 +537,303 @@ describe("Azure DevOps code-host provider", () => {
 			"The pull request head moved after this review was captured.",
 		);
 		await expect(
-			azureDevOpsCodeHostProvider.publishPullRequestReview({
-				cwd: fixture.repository,
-				pullRequest: identity,
-				body: "Review",
-				comments: [],
-			}),
-		).rejects.toThrow("Publishing reviews to Azure DevOps is not supported yet");
-		await expect(
 			azureDevOpsCodeHostProvider.resolvePullRequestCheckout({
 				cwd: fixture.repository,
 				number: "5",
 				maxPullRequestNumber: MAX_PULL_REQUEST_NUMBER,
 			}),
 		).resolves.toMatchObject({ ok: false, error: expect.stringContaining("not supported for Azure DevOps") });
+	});
+
+	it("publishes findings and the summary as marked threads, posting only missing ones when published again", async () => {
+		const state: FakeAzureDevOps = {
+			pullRequest: pullRequestJson(fixture),
+			threads: [{ id: 1, status: "active", comments: [{ id: 1, content: "Earlier", commentType: "text" }] }],
+			iterations: [
+				{ id: 1, sourceRefCommit: { commitId: fixture.baseOid }, commonRefCommit: { commitId: fixture.baseOid } },
+				{ id: 2, sourceRefCommit: { commitId: fixture.headOid }, commonRefCommit: { commitId: fixture.baseOid } },
+				// Retargeted after the review: the same head against another merge base is not the reviewed diff.
+				{ id: 3, sourceRefCommit: { commitId: fixture.headOid }, commonRefCommit: { commitId: "e".repeat(40) } },
+			],
+			// More changes than one page holds, so the reviewed files are on the second page.
+			changes: [
+				...Array.from({ length: 2_000 }, (_, index) => ({
+					changeTrackingId: index + 10,
+					item: { path: `/filler/${index}.txt` },
+				})),
+				{ changeTrackingId: 3, item: { path: "/other.txt" } },
+				{ changeTrackingId: 4, item: { path: "/value.txt" } },
+			],
+			postFailures: { 2: { status: 400, body: { message: "Line 3 is outside\nthe file." } } },
+		};
+		const requests = installFakeAzureDevOps(state);
+		const publish = () =>
+			azureDevOpsCodeHostProvider.publishPullRequestReview({
+				cwd: fixture.repository,
+				runId: "review:7",
+				pullRequest: pullRequestIdentity(fixture),
+				mergeBaseCommit: fixture.baseOid,
+				body: "Volt review (review:7)",
+				comments: [
+					{ findingId: "f1", path: "value.txt", side: "head", startLine: 1, endLine: 1, body: "Finding one" },
+					{ findingId: "f2", path: "other.txt", side: "base", startLine: 2, endLine: 3, body: "Finding two" },
+				],
+			});
+		const posts = () => requests.filter((request) => request.method === "POST").map((request) => request.body);
+		const marker = (value: string) => ({ $type: "System.String", $value: value });
+		const reviewed = { firstComparingIteration: 2, secondComparingIteration: 2 };
+
+		await expect(publish()).rejects.toThrow(
+			"Azure DevOps did not post a comment thread of the review. Azure DevOps rejected the request. Azure DevOps said: Line 3 is outside the file. 1 of 3 comment threads of this review are on the pull request. Publish the review again to post the rest; threads already posted are not posted again.",
+		);
+		expect(posts()[0]).toEqual({
+			comments: [{ parentCommentId: 0, content: "Finding one", commentType: 1 }],
+			status: 1,
+			properties: { "Volt.ReviewRunId": marker("review:7"), "Volt.ReviewPart": marker("finding:f1") },
+			threadContext: {
+				filePath: "/value.txt",
+				rightFileStart: { line: 1, offset: 1 },
+				rightFileEnd: { line: 1, offset: 1 },
+			},
+			pullRequestThreadContext: { changeTrackingId: 4, iterationContext: reviewed },
+		});
+		expect(posts()).toHaveLength(2);
+
+		// Retargeted before the retry, the rest cannot be placed, so publishing this review again is not suggested.
+		const iterations = state.iterations ?? [];
+		state.iterations = iterations.filter((iteration) => (iteration as { id: number }).id !== 2);
+		await expect(publish()).rejects.toThrow(
+			new Error(
+				"Could not find the reviewed pull request iteration. The pull request's target changed after the review, so the reviewed diff is not one of its iterations. Run a new review. 1 of 3 comment threads of this review are on the pull request.",
+			),
+		);
+		state.iterations = iterations;
+		expect(posts()).toHaveLength(2);
+
+		requests.length = 0;
+		const result = { reviewId: 4, url: `${PULL_REQUEST_URL}?discussionId=4` };
+		await expect(publish()).resolves.toEqual(result);
+		expect(posts()).toEqual([
+			{
+				comments: [{ parentCommentId: 0, content: "Finding two", commentType: 1 }],
+				status: 1,
+				properties: { "Volt.ReviewRunId": marker("review:7"), "Volt.ReviewPart": marker("finding:f2") },
+				threadContext: {
+					filePath: "/other.txt",
+					leftFileStart: { line: 2, offset: 1 },
+					leftFileEnd: { line: 3, offset: 1 },
+				},
+				pullRequestThreadContext: { changeTrackingId: 3, iterationContext: reviewed },
+			},
+			{
+				comments: [{ parentCommentId: 0, content: "Volt review (review:7)", commentType: 1 }],
+				status: 1,
+				properties: { "Volt.ReviewRunId": marker("review:7"), "Volt.ReviewPart": marker("summary") },
+			},
+		]);
+		for (const request of requests) {
+			expect(request.url.host).toBe("dev.azure.com");
+			expect(request.authorization).toBe(`Basic ${Buffer.from(":test-pat").toString("base64")}`);
+			if (request.method === "POST") expect(request.contentType).toBe("application/json");
+		}
+
+		// Published in full, publishing again posts nothing and reads nothing but the threads.
+		requests.length = 0;
+		await expect(publish()).resolves.toEqual(result);
+		expect(requests.map((request) => [request.method, decodeURIComponent(request.url.pathname)])).toEqual([
+			["GET", "/fabrikam/Fabrikam Fiber/_apis/git/repositories/Fiber/pullRequests/5/threads"],
+		]);
+	});
+
+	it("refuses to post what it cannot place, and reports a post it could not confirm", async () => {
+		const state: FakeAzureDevOps = {
+			pullRequest: pullRequestJson(fixture),
+			iterations: [
+				{ id: 1, sourceRefCommit: { commitId: fixture.baseOid }, commonRefCommit: { commitId: fixture.baseOid } },
+			],
+			changes: [{ changeTrackingId: 1, item: { path: "/value.txt" } }],
+		};
+		const requests = installFakeAzureDevOps(state);
+		const comment = {
+			findingId: "f1",
+			path: "value.txt",
+			side: "head" as const,
+			startLine: 1,
+			endLine: 1,
+			body: "F",
+		};
+		const publish = (overrides: Partial<ReviewCodeHostPublishRequest> = {}) =>
+			azureDevOpsCodeHostProvider.publishPullRequestReview({
+				cwd: fixture.repository,
+				runId: "review:8",
+				pullRequest: pullRequestIdentity(fixture),
+				mergeBaseCommit: fixture.baseOid,
+				body: "Summary",
+				comments: [comment],
+				...overrides,
+			});
+
+		await expect(publish({ command: ["az"] })).rejects.toThrow("no CLI command applies");
+		await expect(
+			publish({ pullRequest: { ...pullRequestIdentity(fixture), url: "https://github.com/fabrikam/fiber/pull/5" } }),
+		).rejects.toThrow("The captured Azure DevOps pull request identity is invalid.");
+		expect(requests).toHaveLength(0);
+
+		await expect(publish()).rejects.toThrow(
+			"Could not find the reviewed pull request iteration. None of the pull request's iterations has the reviewed commit as its source. Run a new review. Nothing was published.",
+		);
+		state.iterations = [
+			{ id: 1, sourceRefCommit: { commitId: fixture.headOid }, commonRefCommit: { commitId: "e".repeat(40) } },
+		];
+		await expect(publish()).rejects.toThrow(
+			"The pull request's target changed after the review, so the reviewed diff is not one of its iterations. Run a new review. Nothing was published.",
+		);
+		await expect(publish({ mergeBaseCommit: undefined })).rejects.toThrow(
+			"The review did not record the merge base it compared against, so its findings cannot be placed. Run a new review. Nothing was published.",
+		);
+		state.iterations.push({
+			id: 2,
+			sourceRefCommit: { commitId: fixture.headOid },
+			commonRefCommit: { commitId: fixture.baseOid },
+		});
+		await expect(publish({ comments: [{ ...comment, path: "missing.txt" }] })).rejects.toThrow(
+			'Azure DevOps does not list "missing.txt" among the reviewed iteration\'s changes, so its finding cannot be placed on its lines. Nothing was published.',
+		);
+		expect(requests.filter((request) => request.method === "POST")).toHaveLength(0);
+
+		state.postFailures = { 1: { status: 503 } };
+		await expect(publish()).rejects.toThrow(
+			"Could not confirm a comment thread was posted. Azure DevOps rejected the request. The review may be partly on the pull request. Publish the review again to post the rest; threads already posted are not posted again.",
+		);
+	});
+
+	it("uses the Azure CLI account when Azure DevOps refuses the personal access token", async () => {
+		const basic = (token: string) => `Basic ${Buffer.from(`:${token}`).toString("base64")}`;
+		const capture = () =>
+			azureDevOpsCodeHostProvider.capturePullRequestIdentity({
+				cwd: fixture.repository,
+				number: "5",
+				maxPullRequestNumber: MAX_PULL_REQUEST_NUMBER,
+			});
+		const state: FakeAzureDevOps = {
+			pullRequest: pullRequestJson(fixture),
+			refused: { authorization: basic("expired-pat"), status: 401 },
+		};
+		const requests = installFakeAzureDevOps(state);
+		// A token this close to expiry is never reused from the cache, so each fallback runs `az` again.
+		const bin = installAzureCli(
+			fixture.root,
+			`process.stdout.write(JSON.stringify({ accessToken: "cli-token", expires_on: Math.floor(Date.now() / 1000) + 60 }));\n`,
+		);
+		process.env.PATH = `${bin}${delimiter}${saved.get("PATH") ?? ""}`;
+		delete process.env.VOLT_ADO_PAT;
+		process.env.AZURE_DEVOPS_EXT_PAT = "expired-pat";
+
+		// A token the organization refuses, its connection data included, is not sent to it again; the Azure CLI
+		// account sends every request from then on.
+		await expect(capture()).resolves.toMatchObject({ ok: true, pullRequest: { number: 5 } });
+		await expect(capture()).resolves.toMatchObject({ ok: true, pullRequest: { number: 5 } });
+		const expired = requests.filter((request) => request.authorization === basic("expired-pat"));
+		expect(expired).toHaveLength(2);
+		expect(expired[1]?.url.pathname).toBe("/fabrikam/_apis/connectionData");
+		expect(requests.filter((request) => request.authorization === "Bearer cli-token").length).toBeGreaterThan(2);
+
+		// A token that only may not do a request is tried again on the next one.
+		requests.length = 0;
+		process.env.AZURE_DEVOPS_EXT_PAT = "limited-pat";
+		state.refused = { authorization: basic("limited-pat"), status: 403 };
+		await expect(capture()).resolves.toMatchObject({ ok: true, pullRequest: { number: 5 } });
+		const limited = requests.filter((request) => request.authorization === basic("limited-pat"));
+		expect(limited.length).toBeGreaterThan(1);
+		expect(requests).toHaveLength(limited.length * 2);
+
+		// A 401 to a token the organization still accepts refuses that request only, as for one lacking a scope.
+		requests.length = 0;
+		process.env.AZURE_DEVOPS_EXT_PAT = "scoped-pat";
+		state.refused = { authorization: basic("scoped-pat"), status: 401, connectionData: true };
+		await expect(capture()).resolves.toMatchObject({ ok: true, pullRequest: { number: 5 } });
+		const scoped = requests.filter(
+			(request) =>
+				request.authorization === basic("scoped-pat") && request.url.pathname !== "/fabrikam/_apis/connectionData",
+		);
+		expect(scoped.length).toBeGreaterThan(1);
+		// Each request: the token, its check against the organization, and the Azure CLI account.
+		expect(requests).toHaveLength(scoped.length * 3);
+
+		// Without an Azure CLI account, a refused token is denied access rather than missing, then and later.
+		installAzureCli(fixture.root, "process.exit(1);\n");
+		process.env.AZURE_DEVOPS_EXT_PAT = "revoked-pat";
+		state.refused = { authorization: basic("revoked-pat"), status: 401 };
+		for (let attempt = 0; attempt < 2; attempt++) {
+			await expect(capture()).resolves.toMatchObject({
+				ok: false,
+				error: expect.stringContaining("Azure DevOps denied access."),
+			});
+		}
+		const revoked = requests.filter((request) => request.authorization === basic("revoked-pat"));
+		expect(revoked).toHaveLength(2);
+		expect(revoked[1]?.url.pathname).toBe("/fabrikam/_apis/connectionData");
+	});
+
+	it("sets a refused personal access token aside only for the organization refusing it", async () => {
+		const basic = (token: string) => `Basic ${Buffer.from(`:${token}`).toString("base64")}`;
+		const requests = installFakeAzureDevOps({
+			pullRequest: pullRequestJson(fixture),
+			refused: { authorization: basic("fabrikam-pat"), status: 401, organization: "contoso" },
+		});
+		const bin = installAzureCli(
+			fixture.root,
+			`process.stdout.write(JSON.stringify({ accessToken: "cli-token", expires_on: Math.floor(Date.now() / 1000) + 60 }));\n`,
+		);
+		process.env.PATH = `${bin}${delimiter}${saved.get("PATH") ?? ""}`;
+		process.env.VOLT_ADO_PAT = "fabrikam-pat";
+
+		await requestAzureDevOps({ organization: "Contoso", path: "/_apis/projects" });
+		await expect(
+			azureDevOpsCodeHostProvider.capturePullRequestIdentity({
+				cwd: fixture.repository,
+				number: "5",
+				maxPullRequestNumber: MAX_PULL_REQUEST_NUMBER,
+			}),
+		).resolves.toMatchObject({ ok: true, pullRequest: { number: 5 } });
+		await requestAzureDevOps({ organization: "contoso", path: "/_apis/projects" });
+
+		const sentTo = (organization: string) =>
+			requests
+				.filter((request) => request.url.pathname.toLowerCase().startsWith(`/${organization}/`))
+				.map((request) => [request.url.pathname, request.authorization]);
+		expect(sentTo("contoso")).toEqual([
+			["/Contoso/_apis/projects", basic("fabrikam-pat")],
+			["/Contoso/_apis/connectionData", basic("fabrikam-pat")],
+			["/Contoso/_apis/projects", "Bearer cli-token"],
+			["/contoso/_apis/projects", "Bearer cli-token"],
+		]);
+		const fabrikam = sentTo("fabrikam");
+		expect(fabrikam.length).toBeGreaterThan(0);
+		for (const [, authorization] of fabrikam) expect(authorization).toBe(basic("fabrikam-pat"));
+	});
+
+	it("gives a request the Azure CLI account sends again a deadline of its own", async () => {
+		const basic = (token: string) => `Basic ${Buffer.from(`:${token}`).toString("base64")}`;
+		installFakeAzureDevOps({
+			pullRequest: pullRequestJson(fixture),
+			refused: { authorization: basic("slow-expired-pat"), status: 401 },
+		});
+		// `az` takes longer than the request's whole deadline to print its token.
+		const bin = installAzureCli(
+			fixture.root,
+			`setTimeout(() => process.stdout.write(JSON.stringify({ accessToken: "cli-token", expires_on: Math.floor(Date.now() / 1000) + 60 })), 600);\n`,
+		);
+		process.env.PATH = `${bin}${delimiter}${saved.get("PATH") ?? ""}`;
+		process.env.VOLT_ADO_PAT = "slow-expired-pat";
+
+		await expect(
+			requestAzureDevOps({
+				organization: "fabrikam",
+				path: "/Fabrikam%20Fiber/_apis/git/repositories/Fiber/pullrequests/5",
+				timeoutMs: 300,
+			}),
+		).resolves.toMatchObject({ ok: true, value: { pullRequestId: 5 } });
 	});
 
 	it("falls back to the Azure CLI account's token when no personal access token is set", async () => {
@@ -510,5 +868,14 @@ process.stdout.write(JSON.stringify({ accessToken: "cli-token", expires_on: Math
 		);
 		expect(requests.length).toBeGreaterThan(0);
 		for (const request of requests) expect(request.authorization).toBe("Bearer cli-token");
+
+		// A personal access token no header can carry is reported missing rather than replaced by the account.
+		requests.length = 0;
+		process.env.VOLT_ADO_PAT = "not a token";
+		await expect(capture()).resolves.toMatchObject({
+			ok: false,
+			error: expect.stringContaining("No Azure DevOps credentials are available on the host"),
+		});
+		expect(requests).toHaveLength(0);
 	});
 });

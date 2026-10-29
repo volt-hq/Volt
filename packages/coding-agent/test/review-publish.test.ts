@@ -22,6 +22,7 @@ function reviewRun(headRefOid = "head-oid"): ReviewRunRecord {
 				kind: "pr",
 				baseTree: "base-tree",
 				headTree: "head-tree",
+				mergeBaseCommit: "merge-base-oid",
 				pullRequest: {
 					providerId: "github",
 					number: 7,
@@ -271,9 +272,12 @@ switch (args.slice(0, 2).join(" ")) {
 		expect(verifiedHead).toBe("head-oid");
 		expect(publishRequest).toMatchObject({
 			cwd: "/workspace",
+			runId: run.runId,
 			pullRequest: { providerId: "test-host", number: 7 },
+			mergeBaseCommit: "merge-base-oid",
 			comments: [
 				{
+					findingId: "finding-inline",
 					path: "src/value.ts",
 					side: "head",
 					startLine: 2,

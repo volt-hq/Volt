@@ -11,6 +11,8 @@ const DEFAULT_RESPONSE_MAX_BYTES = 8 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const AZURE_CLI_TIMEOUT_MS = 30_000;
 const AZURE_CLI_OUTPUT_MAX_BYTES = 64 * 1024;
+const ERROR_RESPONSE_MAX_BYTES = 64 * 1024;
+const ERROR_MESSAGE_MAX_CHARS = 500;
 /** A cached Azure CLI token is renewed this long before it expires. */
 const TOKEN_RENEWAL_MARGIN_MS = 5 * 60_000;
 /** Lifetime assumed for an Azure CLI token that reports no expiry. */
@@ -31,13 +33,22 @@ export type AzureDevOpsFailure =
 	| "invalid-response"
 	| "http-error";
 
-export type AzureDevOpsResponse = { ok: true; value: unknown } | { ok: false; failure: AzureDevOpsFailure };
+export type AzureDevOpsResponse =
+	| { ok: true; value: unknown }
+	| {
+			ok: false;
+			failure: AzureDevOpsFailure;
+			/** The reason Azure DevOps gave for refusing a request with a client error, bounded. */
+			message?: string;
+	  };
 
 export interface AzureDevOpsRequest {
 	organization: string;
 	/** Path under the organization: `/`-prefixed, with its segments already percent-encoded. */
 	path: string;
 	query?: Readonly<Record<string, string>>;
+	/** JSON request body: a request with one is a POST. */
+	body?: unknown;
 	apiVersion?: string;
 	signal?: AbortSignal;
 	maxBytes?: number;
@@ -49,8 +60,19 @@ interface AzureCliToken {
 	expiresAt: number;
 }
 
+interface Credentials {
+	authorization: string;
+	/** The personal access token the authorization carries; absent for the Azure CLI account's token. */
+	personalAccessToken?: string;
+}
+
 let azureCliToken: AzureCliToken | undefined;
 let pendingAzureCliToken: Promise<AzureCliToken | undefined> | undefined;
+/**
+ * Personal access tokens an organization did not accept as a credential, by lowercase organization name: not sent
+ * to that organization again. Other organizations, such as the one a token was created for, still receive it.
+ */
+const refusedPersonalAccessTokens = new Map<string, string>();
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -131,13 +153,17 @@ async function readAzureCliToken(): Promise<AzureCliToken | undefined> {
 	};
 }
 
-/** A personal access token from the environment, else the signed-in Azure CLI account's token. */
-async function authorization(): Promise<string | undefined> {
+/** The environment's personal access token, by variable precedence; undefined when none is set. */
+function personalAccessToken(): string | undefined {
 	for (const variable of PAT_VARIABLES) {
 		const token = process.env[variable]?.trim();
-		if (!token) continue;
-		return /^[\x21-\x7e]+$/.test(token) ? `Basic ${Buffer.from(`:${token}`, "utf8").toString("base64")}` : undefined;
+		if (token) return token;
 	}
+	return undefined;
+}
+
+/** The signed-in Azure CLI account's token, cached until shortly before it expires. */
+async function azureCliAuthorization(): Promise<string | undefined> {
 	if (azureCliToken && azureCliToken.expiresAt - TOKEN_RENEWAL_MARGIN_MS > Date.now()) {
 		return azureCliToken.authorization;
 	}
@@ -148,6 +174,23 @@ async function authorization(): Promise<string | undefined> {
 	const token = await pendingAzureCliToken;
 	if (token) azureCliToken = token;
 	return token?.authorization;
+}
+
+/**
+ * The environment's personal access token unless the organization refused it, else the Azure CLI account's token.
+ * A token no header can carry is reported missing rather than replaced.
+ */
+async function credentials(organization: string): Promise<Credentials | undefined> {
+	const token = personalAccessToken();
+	if (token !== undefined && !/^[\x21-\x7e]+$/.test(token)) return undefined;
+	if (token !== undefined && refusedPersonalAccessTokens.get(organization.toLowerCase()) !== token) {
+		return {
+			authorization: `Basic ${Buffer.from(`:${token}`, "utf8").toString("base64")}`,
+			personalAccessToken: token,
+		};
+	}
+	const authorization = await azureCliAuthorization();
+	return authorization === undefined ? undefined : { authorization };
 }
 
 function abortable<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
@@ -198,31 +241,112 @@ async function readBoundedBody(response: Response, maxBytes: number): Promise<Bu
 	}
 }
 
-/** One read-only Azure DevOps Services REST request. Throws only when `signal` cancels it. */
+/** The `message` of an Azure DevOps error response, bounded; undefined when it has none. */
+async function errorMessage(response: Response): Promise<string | undefined> {
+	if (!/^application\/json\b/i.test(response.headers.get("content-type") ?? "")) return undefined;
+	const body = await readBoundedBody(response, ERROR_RESPONSE_MAX_BYTES).catch(() => undefined);
+	if (!body) return undefined;
+	try {
+		const value = JSON.parse(body.toString("utf8")) as unknown;
+		const message = isRecord(value) && typeof value.message === "string" ? value.message : undefined;
+		const text = message?.replace(/[\u0000-\u001f\u007f]+/gu, " ").trim();
+		return text ? text.slice(0, ERROR_MESSAGE_MAX_CHARS) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Whether the organization refuses the token as a credential, rather than one request the token may not make: the
+ * organization's connection data, which any token it accepts can read, is refused to it too.
+ */
+async function organizationRefusesToken(
+	organization: string,
+	authorization: string,
+	timeoutMs: number,
+	signal: AbortSignal | undefined,
+): Promise<boolean> {
+	const timeout = AbortSignal.timeout(timeoutMs);
+	try {
+		const response = await fetch(
+			new URL(`https://${AZURE_DEVOPS_HOST}/${encodeURIComponent(organization)}/_apis/connectionData`),
+			{
+				headers: { Accept: "application/json", Authorization: authorization, "X-TFS-FedAuthRedirect": "Suppress" },
+				redirect: "error",
+				signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+			},
+		);
+		await response.body?.cancel().catch(() => {});
+		return response.status === 401 || response.status === 203;
+	} catch {
+		if (signal?.aborted) throw new Error(AZURE_DEVOPS_REQUEST_CANCELLED);
+		// Without an answer the token is kept: at worst the organization refuses it again.
+		return false;
+	}
+}
+
+/** One Azure DevOps Services REST request. Throws only when `signal` cancels it. */
 export async function requestAzureDevOps(request: AzureDevOpsRequest): Promise<AzureDevOpsResponse> {
 	const { signal } = request;
 	if (signal?.aborted) throw new Error(AZURE_DEVOPS_REQUEST_CANCELLED);
 	const url = new URL(`https://${AZURE_DEVOPS_HOST}/${encodeURIComponent(request.organization)}${request.path}`);
 	for (const [key, value] of Object.entries(request.query ?? {})) url.searchParams.set(key, value);
 	url.searchParams.set("api-version", request.apiVersion ?? DEFAULT_API_VERSION);
-	const credentials = await abortable(authorization(), signal);
-	if (!credentials) return { ok: false, failure: "no-credentials" };
-	const timeout = AbortSignal.timeout(request.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-	try {
-		const response = await fetch(url, {
+	const first = await abortable(credentials(request.organization), signal);
+	if (!first) {
+		// A personal access token the organization refused, with no Azure CLI account to use instead, is denied access.
+		const token = personalAccessToken();
+		return {
+			ok: false,
+			failure:
+				token !== undefined && token === refusedPersonalAccessTokens.get(request.organization.toLowerCase())
+					? "access-denied"
+					: "no-credentials",
+		};
+	}
+	const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+	const send = (authorization: string, deadline: AbortSignal): Promise<Response> =>
+		fetch(url, {
+			...(request.body === undefined ? {} : { method: "POST", body: JSON.stringify(request.body) }),
 			headers: {
 				Accept: "application/json",
-				Authorization: credentials,
+				Authorization: authorization,
+				...(request.body === undefined ? {} : { "Content-Type": "application/json" }),
 				// Answer 401 instead of redirecting to an interactive sign-in page.
 				"X-TFS-FedAuthRedirect": "Suppress",
 			},
 			redirect: "error",
-			signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+			signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
 		});
+	// Each send has its own deadline, so getting the Azure CLI account's token does not use up the retry's.
+	let timeout = AbortSignal.timeout(timeoutMs);
+	try {
+		let response = await send(first.authorization, timeout);
+		if (first.personalAccessToken !== undefined && statusFailure(response) === "access-denied") {
+			// The request was refused before it took effect, so the Azure CLI account sends it again. A 403 refuses
+			// this request only. A 401 or the sign-in page can also refuse a token that only may not make this
+			// request, so the token is set aside for the organization only when the organization refuses it outright.
+			await response.body?.cancel().catch(() => {});
+			if (
+				response.status !== 403 &&
+				(await organizationRefusesToken(request.organization, first.authorization, timeoutMs, signal))
+			) {
+				refusedPersonalAccessTokens.set(request.organization.toLowerCase(), first.personalAccessToken);
+			}
+			const fallback = await abortable(azureCliAuthorization(), signal);
+			if (fallback !== undefined) {
+				timeout = AbortSignal.timeout(timeoutMs);
+				response = await send(fallback, timeout);
+			}
+		}
 		const failure = statusFailure(response);
 		if (failure) {
+			const message =
+				failure === "http-error" && response.status >= 400 && response.status < 500
+					? await errorMessage(response)
+					: undefined;
 			await response.body?.cancel().catch(() => {});
-			return { ok: false, failure };
+			return { ok: false, failure, ...(message === undefined ? {} : { message }) };
 		}
 		const body = await readBoundedBody(response, request.maxBytes ?? DEFAULT_RESPONSE_MAX_BYTES);
 		if (!body) return { ok: false, failure: "output-limit" };

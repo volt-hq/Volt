@@ -545,7 +545,7 @@ export const reviewRecordFindingOutcomeIntent = defineIntent({
 export const reviewPublishIntent = defineIntent({
 	name: "review_publish",
 	label: "Publish PR review",
-	description: "Atomically publish a complete, non-stale pull request review.",
+	description: "Publish a complete, non-stale pull request review.",
 	category: "review",
 	scope: "conversation",
 	fence: "branch",
