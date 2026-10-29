@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { execFileSync } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runGitHubCli } from "../../../src/core/code-host/github-cli.ts";
-import { discoverPullRequestWithGitHubCli } from "../../../src/core/code-host/github-cli-discovery.ts";
+import { codeHostPullRequestDiscoveryProvider } from "../../../src/core/code-host/registry.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 vi.mock("../../../src/core/code-host/github-cli.ts", () => ({ runGitHubCli: vi.fn() }));
@@ -34,7 +34,12 @@ function pullRequest(overrides: Record<string, unknown> = {}): Record<string, un
 }
 
 function discover(signal?: AbortSignal) {
-	return discoverPullRequestWithGitHubCli({ cwd: harness.tempDir, branch: LOCAL_BRANCH, headOid, signal });
+	return codeHostPullRequestDiscoveryProvider.discoverPullRequest({
+		cwd: harness.tempDir,
+		branch: LOCAL_BRANCH,
+		headOid,
+		signal,
+	});
 }
 
 beforeEach(async () => {
@@ -82,7 +87,7 @@ afterEach(async () => {
 describe("#406 Work tracked head identity", () => {
 	it("uses the renamed tracking branch for a fork PR targeting upstream", async () => {
 		const request = { cwd: harness.tempDir, branch: LOCAL_BRANCH, headOid };
-		expect(await discoverPullRequestWithGitHubCli(request)).toMatchObject({
+		expect(await codeHostPullRequestDiscoveryProvider.discoverPullRequest(request)).toMatchObject({
 			state: "resolved",
 			pullRequest: {
 				number: 42,
@@ -199,7 +204,13 @@ describe("#406 Work tracked head identity", () => {
 
 	it("rejects a pattern matching multiple local refs rather than selecting a different branch", async () => {
 		git("branch", "review/other");
-		expect(await discoverPullRequestWithGitHubCli({ cwd: harness.tempDir, branch: "review/*", headOid })).toEqual({
+		expect(
+			await codeHostPullRequestDiscoveryProvider.discoverPullRequest({
+				cwd: harness.tempDir,
+				branch: "review/*",
+				headOid,
+			}),
+		).toEqual({
 			state: "unavailable",
 			reason: "invalid_response",
 		});
