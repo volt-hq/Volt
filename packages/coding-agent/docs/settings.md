@@ -397,7 +397,7 @@ Settings the background daemon reads; see [Background daemon](daemon.md). The da
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `remote.allowTools` | string[] | - | Additional tool ceiling for conversations a paired phone opens, intersected with the phone's persisted grant and any workspace ceiling; `[]` denies all tools. A conversation a terminal opened uses that terminal's full tool set, also for phone prompts. |
-| `remote.pullRequestDiscovery` | boolean | `true` | Let the daemon use local Git metadata and the authenticated GitHub CLI to discover exact repository + branch + head-OID pull-request associations for trusted sessions. Linked open or draft PRs keep their status refreshed in the background with batched GitHub CLI queries. Set `false` to disable provider calls, including background PR status refresh; existing private Work state remains local. |
+| `remote.pullRequestDiscovery` | boolean | `true` | Let the daemon use local Git metadata and the code host (the authenticated GitHub CLI, or the Azure DevOps REST API with the credentials [PR review](usage.md#code-review) uses) to discover exact repository + branch + head-OID pull-request associations for trusted sessions. Linked open or draft PRs keep their status refreshed in the background. Set `false` to disable provider calls, including background PR status refresh; existing private Work state remains local. |
 
 How long a conversation no client is attached to stays open once it is idle (30 minutes by default) is a setting of the daemon itself, not of `settings.json`; see [Background daemon](daemon.md#retention-and-background).
 

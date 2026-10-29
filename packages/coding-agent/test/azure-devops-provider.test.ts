@@ -10,6 +10,8 @@ import { requestAzureDevOps } from "../src/core/code-host/azure-devops-rest.ts";
 import { canonicalizeGitHubRemoteUrl } from "../src/core/code-host/github-cli-discovery.ts";
 import { findCodeHostIdentity, parseCodeHostPullRequestUrl } from "../src/core/code-host/identity.ts";
 import {
+	codeHostPullRequestDiscoveryProvider,
+	listCodeHostPullRequestStatusProviders,
 	type ReviewCodeHostPublishRequest,
 	type ReviewPullRequestIdentity,
 	resolveCodeHostProvider,
@@ -877,5 +879,160 @@ process.stdout.write(JSON.stringify({ accessToken: "cli-token", expires_on: Math
 			error: expect.stringContaining("No Azure DevOps credentials are available on the host"),
 		});
 		expect(requests).toHaveLength(0);
+	});
+
+	describe("change association", () => {
+		const discover = () =>
+			codeHostPullRequestDiscoveryProvider.discoverPullRequest({
+				cwd: fixture.repository,
+				branch: "topic",
+				headOid: fixture.headOid,
+			});
+		const listed = (pullRequestId: number, status: string, overrides: Record<string, unknown> = {}) => ({
+			pullRequestId,
+			status,
+			title: `Pull request ${pullRequestId}`,
+			sourceRefName: "refs/heads/topic",
+			lastMergeSourceCommit: { commitId: fixture.headOid },
+			repository: repositoryJson,
+			...overrides,
+		});
+
+		it("links the session's branch to its pull request at the exact head commit", async () => {
+			const state: FakeAzureDevOps = {
+				pullRequest: pullRequestJson(fixture),
+				pullRequests: [
+					listed(3, "completed"),
+					listed(5, "active", { title: "Change value" }),
+					listed(7, "active", { forkSource: { repository: { id: "fork" } } }),
+				],
+			};
+			const requests = installFakeAzureDevOps(state);
+
+			expect(await discover()).toEqual({
+				state: "resolved",
+				pullRequest: {
+					providerId: "azure-devops",
+					repository: expect.objectContaining({ canonicalId: CANONICAL_ID }),
+					headRepository: expect.objectContaining({ canonicalId: CANONICAL_ID }),
+					number: 5,
+					title: "Change value",
+					status: "open",
+					headBranch: "topic",
+					matchedHeadOid: fixture.headOid,
+				},
+			});
+			expect(requests).toHaveLength(1);
+			expect(requests[0]?.url.searchParams.get("searchCriteria.sourceRefName")).toBe("refs/heads/topic");
+			expect(requests[0]?.url.searchParams.get("searchCriteria.status")).toBe("all");
+
+			state.pullRequests = [listed(3, "completed"), listed(5, "active", { isDraft: true })];
+			expect(await discover()).toMatchObject({ state: "resolved", pullRequest: { number: 5, status: "draft" } });
+
+			state.pullRequests = [listed(5, "active"), listed(6, "active")];
+			expect(await discover()).toEqual({ state: "ambiguous" });
+
+			state.pullRequests = [listed(3, "completed"), listed(4, "abandoned", { lastMergeSourceCommit: null })];
+			expect(await discover()).toMatchObject({ state: "resolved", pullRequest: { number: 3, status: "merged" } });
+
+			// A pull request from the branch at another commit is not this session's change.
+			state.pullRequests = [listed(5, "active", { lastMergeSourceCommit: { commitId: fixture.baseOid } })];
+			expect(await discover()).toEqual({ state: "none" });
+
+			state.pullRequests = [listed(5, "draft")];
+			expect(await discover()).toEqual({ state: "unavailable", reason: "invalid_response" });
+			state.pullRequests = [listed(5, "active", { repository: { ...repositoryJson, name: "Other" } })];
+			expect(await discover()).toEqual({ state: "unavailable", reason: "invalid_response" });
+			state.pullRequests = Array.from({ length: 100 }, (_, index) => listed(index + 1, "abandoned"));
+			expect(await discover()).toEqual({ state: "unavailable", reason: "output_limited" });
+		});
+
+		it("reports why Azure DevOps could not be read, without its message or credentials", async () => {
+			const state: FakeAzureDevOps = {
+				pullRequest: pullRequestJson(fixture),
+				refused: { authorization: `Basic ${Buffer.from(":test-pat").toString("base64")}`, status: 429 },
+			};
+			installFakeAzureDevOps(state);
+			expect(await discover()).toEqual({ state: "unavailable", reason: "rate_limited" });
+
+			state.refused = { ...state.refused!, status: 500 };
+			expect(await discover()).toEqual({ state: "unavailable", reason: "provider_error" });
+
+			// The account Azure DevOps does not accept, whether its token is cached or read again.
+			delete process.env.VOLT_ADO_PAT;
+			delete process.env.AZURE_DEVOPS_EXT_PAT;
+			const bin = installAzureCli(
+				fixture.root,
+				`process.stdout.write(JSON.stringify({ accessToken: "cli-token", expires_on: Math.floor(Date.now() / 1000) + 3600 }));\n`,
+			);
+			process.env.PATH = `${bin}${delimiter}${saved.get("PATH") ?? ""}`;
+			state.refused = { authorization: "Bearer cli-token", status: 401 };
+			const denied = await discover();
+			expect(denied).toEqual({ state: "unavailable", reason: "not_authenticated" });
+			expect(JSON.stringify(denied)).not.toMatch(/cli-token|test-pat|TF400813/);
+		});
+
+		it("refreshes linked pull request statuses a few at a time, in request order", async () => {
+			const replies: Record<number, { status: number; body: unknown }> = {
+				1: { status: 200, body: listed(1, "active") },
+				2: { status: 200, body: listed(2, "active", { isDraft: true }) },
+				3: { status: 200, body: listed(3, "completed", { title: "t".repeat(600) }) },
+				4: { status: 200, body: listed(4, "abandoned") },
+				5: { status: 404, body: { message: "TF401180: The requested pull request was not found." } },
+				6: { status: 200, body: listed(6, "notSet") },
+				7: { status: 200, body: listed(8, "active") },
+			};
+			let inFlight = 0;
+			let maxInFlight = 0;
+			const requested: string[] = [];
+			vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+				const url = new URL(input instanceof Request ? input.url : String(input));
+				requested.push(decodeURIComponent(url.pathname));
+				inFlight++;
+				maxInFlight = Math.max(maxInFlight, inFlight);
+				await new Promise((resolve) => setTimeout(resolve, 20));
+				inFlight--;
+				const reply = replies[Number(url.pathname.split("/").at(-1))]!;
+				return new Response(JSON.stringify(reply.body), {
+					status: reply.status,
+					headers: { "content-type": "application/json; charset=utf-8" },
+				});
+			});
+			const provider = listCodeHostPullRequestStatusProviders().find((candidate) => candidate.id === "azure-devops");
+			const path = "fabrikam/fabrikam fiber/fiber";
+
+			const outcomes = await provider?.refreshPullRequestStatuses({
+				cwd: fixture.root,
+				host: "dev.azure.com",
+				pullRequests: [
+					...[1, 2, 3, 4, 5, 6, 7].map((number) => ({ path, number })),
+					{ path: "fabrikam/fiber", number: 1 },
+					{ path, number: 0 },
+				],
+			});
+			expect(outcomes).toEqual([
+				{ state: "resolved", status: "open", title: "Pull request 1" },
+				{ state: "resolved", status: "draft", title: "Pull request 2" },
+				{ state: "resolved", status: "merged", title: "t".repeat(512) },
+				{ state: "resolved", status: "closed", title: "Pull request 4" },
+				{ state: "unavailable", reason: "provider_error" },
+				{ state: "unavailable", reason: "invalid_response" },
+				{ state: "unavailable", reason: "invalid_response" },
+				{ state: "unavailable", reason: "invalid_response" },
+				{ state: "unavailable", reason: "invalid_response" },
+			]);
+			expect(requested).toHaveLength(7);
+			expect(requested[0]).toBe("/fabrikam/fabrikam fiber/_apis/git/repositories/fiber/pullrequests/1");
+			expect(maxInFlight).toBe(4);
+
+			await expect(
+				provider?.refreshPullRequestStatuses({
+					cwd: fixture.root,
+					host: "github.com",
+					pullRequests: [{ path, number: 1 }],
+				}),
+			).resolves.toEqual([{ state: "unavailable", reason: "invalid_response" }]);
+			expect(requested).toHaveLength(7);
+		});
 	});
 });

@@ -3,6 +3,10 @@ import {
 	captureAzureDevOpsPullRequestIdentity,
 	readAzureDevOpsPullRequestHead,
 } from "./azure-devops-context.ts";
+import {
+	listAzureDevOpsPullRequestsForHeadBranch,
+	refreshAzureDevOpsPullRequestStatuses,
+} from "./azure-devops-discovery.ts";
 import { azureDevOpsCodeHostIdentity } from "./azure-devops-identity.ts";
 import { publishAzureDevOpsReview } from "./azure-devops-publish.ts";
 import {
@@ -69,4 +73,6 @@ export const azureDevOpsCodeHostProvider: CodeHostProvider = {
 	async publishPullRequestReview(request) {
 		return publishAzureDevOpsReview(pullRequestLocator(request.pullRequest, request), request);
 	},
+	listPullRequestsForHeadBranch: listAzureDevOpsPullRequestsForHeadBranch,
+	refreshPullRequestStatuses: refreshAzureDevOpsPullRequestStatuses,
 };
