@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall, type JsonValue, type Usage } from "@hansjm10/volt-ai";
+import { calculateCost, fauxAssistantMessage, fauxToolCall, type JsonValue, type Usage } from "@hansjm10/volt-ai";
 import { QUERY_SCHEMAS, type ReviewUsageAccounting, type UiNode, type WorkProgress } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -238,6 +238,24 @@ describe("#409 initial review accounting", () => {
 		expect(final.attempts[1]).toMatchObject({ attempt: 2, requestedTier: "priority", effectiveTier: "default" });
 		expect(final.summary.estimatedCost?.total).toBeCloseTo(0.3);
 		expect(parseReviewUsage(JSON.parse(JSON.stringify(final)))).toEqual(final);
+	});
+
+	it("records the estimate of a provider cost that carries a price version", async () => {
+		const h = await harness();
+		const counts = { input: 1000, output: 500, cacheRead: 200, cacheWrite: 100 };
+		const cost = calculateCost({ cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 } }, counts);
+		expect(cost.priceVersion).toEqual(expect.any(String));
+		const collector = new ReviewUsageCollector();
+		const request = await collector.start(identity, h.getModel());
+		await request.observe({ availability: "complete", ...counts, totalTokens: 1800, cost }, 1, true, true);
+		const final = await collector.finish();
+		expect(final.summary).toMatchObject({
+			status: "complete",
+			partialRequests: 0,
+			estimatedCost: { total: cost.total },
+		});
+		expect(parseReviewUsage(final)).toEqual(final);
+		expect(formatReviewUsage(final, false)).toContain(`Model-priced estimate: $${cost.total.toFixed(6)} USD.`);
 	});
 
 	it("distinguishes zero, unavailable, partial, malformed and interrupted accounting", async () => {
