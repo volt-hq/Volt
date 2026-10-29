@@ -6,6 +6,7 @@ import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { azureDevOpsCodeHostProvider } from "../src/core/code-host/azure-devops-provider.ts";
 import * as azureRemote from "../src/core/code-host/azure-devops-remote.ts";
+import { requestAzureDevOps } from "../src/core/code-host/azure-devops-rest.ts";
 import { canonicalizeGitHubRemoteUrl } from "../src/core/code-host/github-cli-discovery.ts";
 import { findCodeHostIdentity, parseCodeHostPullRequestUrl } from "../src/core/code-host/identity.ts";
 import {
@@ -97,8 +98,11 @@ interface FakeAzureDevOps {
 	changes?: unknown[];
 	/** Responses that replace creating a thread, by the 1-based number of the thread POST. */
 	postFailures?: Record<number, { status: number; body?: unknown }>;
-	/** An `Authorization` header every request carrying it is refused for, with the status refusing it. */
-	refused?: { authorization: string; status: number };
+	/**
+	 * An `Authorization` header refused with `status`, by every organization or by `organization` only. With
+	 * `connectionData`, the organization still serves its connection data to it, as to a token that only lacks a scope.
+	 */
+	refused?: { authorization: string; status: number; organization?: string; connectionData?: boolean };
 }
 
 interface RecordedRequest {
@@ -118,6 +122,8 @@ function installFakeAzureDevOps(state: FakeAzureDevOps): RecordedRequest[] {
 		const headers = new Headers(init?.headers);
 		const method = init?.method ?? "GET";
 		const body = typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : undefined;
+		// Like `fetch`, a request whose signal already aborted is not sent.
+		if (init?.signal?.aborted) throw init.signal.reason;
 		requests.push({
 			url,
 			method,
@@ -125,9 +131,16 @@ function installFakeAzureDevOps(state: FakeAzureDevOps): RecordedRequest[] {
 			contentType: headers.get("content-type"),
 			...(body === undefined ? {} : { body }),
 		});
-		if (state.refused && headers.get("authorization") === state.refused.authorization) {
+		const path = decodeURIComponent(url.pathname).toLowerCase();
+		const refused = state.refused;
+		if (
+			refused &&
+			headers.get("authorization") === refused.authorization &&
+			(refused.organization === undefined || path.startsWith(`/${refused.organization}/`)) &&
+			!(refused.connectionData && path.endsWith("/_apis/connectiondata"))
+		) {
 			return new Response(JSON.stringify({ message: "TF400813: The user is not authorized." }), {
-				status: state.refused.status,
+				status: refused.status,
 				headers: { "content-type": "application/json; charset=utf-8" },
 			});
 		}
@@ -136,7 +149,6 @@ function installFakeAzureDevOps(state: FakeAzureDevOps): RecordedRequest[] {
 				status,
 				headers: { "content-type": "application/json; charset=utf-8; api-version=7.1" },
 			});
-		const path = decodeURIComponent(url.pathname).toLowerCase();
 		const byName = "/fabrikam/fabrikam fiber/_apis/git/repositories/fiber/pullrequests";
 		const byId = `/fabrikam/${PROJECT_ID}/_apis/git/repositories/${REPOSITORY_ID}/pullrequests/5`;
 		if (path === byName) return json({ value: state.pullRequests ?? [] });
@@ -176,6 +188,7 @@ function installFakeAzureDevOps(state: FakeAzureDevOps): RecordedRequest[] {
 				nextTop: more ? top : 0,
 			});
 		}
+		if (/^\/[^/]+\/_apis\/connectiondata$/.test(path)) return json({ authenticatedUser: { id: "user" } });
 		if (path === `${byId}/statuses`) return json({ value: state.statuses ?? [] });
 		if (path === `${byId}/threads`) return json({ value: state.threads ?? [] });
 		if (path === `${byId}/workitems`) return json({ value: state.workItemReferences ?? [] });
@@ -586,6 +599,17 @@ describe("Azure DevOps code-host provider", () => {
 		});
 		expect(posts()).toHaveLength(2);
 
+		// Retargeted before the retry, the rest cannot be placed, so publishing this review again is not suggested.
+		const iterations = state.iterations ?? [];
+		state.iterations = iterations.filter((iteration) => (iteration as { id: number }).id !== 2);
+		await expect(publish()).rejects.toThrow(
+			new Error(
+				"Could not find the reviewed pull request iteration. The pull request's target changed after the review, so the reviewed diff is not one of its iterations. Run a new review. 1 of 3 comment threads of this review are on the pull request.",
+			),
+		);
+		state.iterations = iterations;
+		expect(posts()).toHaveLength(2);
+
 		requests.length = 0;
 		const result = { reviewId: 4, url: `${PULL_REQUEST_URL}?discussionId=4` };
 		await expect(publish()).resolves.toEqual(result);
@@ -705,10 +729,13 @@ describe("Azure DevOps code-host provider", () => {
 		delete process.env.VOLT_ADO_PAT;
 		process.env.AZURE_DEVOPS_EXT_PAT = "expired-pat";
 
-		// A token Azure DevOps does not accept is sent once; the Azure CLI account sends every request from then on.
+		// A token the organization refuses, its connection data included, is not sent to it again; the Azure CLI
+		// account sends every request from then on.
 		await expect(capture()).resolves.toMatchObject({ ok: true, pullRequest: { number: 5 } });
 		await expect(capture()).resolves.toMatchObject({ ok: true, pullRequest: { number: 5 } });
-		expect(requests.filter((request) => request.authorization === basic("expired-pat"))).toHaveLength(1);
+		const expired = requests.filter((request) => request.authorization === basic("expired-pat"));
+		expect(expired).toHaveLength(2);
+		expect(expired[1]?.url.pathname).toBe("/fabrikam/_apis/connectionData");
 		expect(requests.filter((request) => request.authorization === "Bearer cli-token").length).toBeGreaterThan(2);
 
 		// A token that only may not do a request is tried again on the next one.
@@ -720,6 +747,19 @@ describe("Azure DevOps code-host provider", () => {
 		expect(limited.length).toBeGreaterThan(1);
 		expect(requests).toHaveLength(limited.length * 2);
 
+		// A 401 to a token the organization still accepts refuses that request only, as for one lacking a scope.
+		requests.length = 0;
+		process.env.AZURE_DEVOPS_EXT_PAT = "scoped-pat";
+		state.refused = { authorization: basic("scoped-pat"), status: 401, connectionData: true };
+		await expect(capture()).resolves.toMatchObject({ ok: true, pullRequest: { number: 5 } });
+		const scoped = requests.filter(
+			(request) =>
+				request.authorization === basic("scoped-pat") && request.url.pathname !== "/fabrikam/_apis/connectionData",
+		);
+		expect(scoped.length).toBeGreaterThan(1);
+		// Each request: the token, its check against the organization, and the Azure CLI account.
+		expect(requests).toHaveLength(scoped.length * 3);
+
 		// Without an Azure CLI account, a refused token is denied access rather than missing, then and later.
 		installAzureCli(fixture.root, "process.exit(1);\n");
 		process.env.AZURE_DEVOPS_EXT_PAT = "revoked-pat";
@@ -730,7 +770,70 @@ describe("Azure DevOps code-host provider", () => {
 				error: expect.stringContaining("Azure DevOps denied access."),
 			});
 		}
-		expect(requests.filter((request) => request.authorization === basic("revoked-pat"))).toHaveLength(1);
+		const revoked = requests.filter((request) => request.authorization === basic("revoked-pat"));
+		expect(revoked).toHaveLength(2);
+		expect(revoked[1]?.url.pathname).toBe("/fabrikam/_apis/connectionData");
+	});
+
+	it("sets a refused personal access token aside only for the organization refusing it", async () => {
+		const basic = (token: string) => `Basic ${Buffer.from(`:${token}`).toString("base64")}`;
+		const requests = installFakeAzureDevOps({
+			pullRequest: pullRequestJson(fixture),
+			refused: { authorization: basic("fabrikam-pat"), status: 401, organization: "contoso" },
+		});
+		const bin = installAzureCli(
+			fixture.root,
+			`process.stdout.write(JSON.stringify({ accessToken: "cli-token", expires_on: Math.floor(Date.now() / 1000) + 60 }));\n`,
+		);
+		process.env.PATH = `${bin}${delimiter}${saved.get("PATH") ?? ""}`;
+		process.env.VOLT_ADO_PAT = "fabrikam-pat";
+
+		await requestAzureDevOps({ organization: "Contoso", path: "/_apis/projects" });
+		await expect(
+			azureDevOpsCodeHostProvider.capturePullRequestIdentity({
+				cwd: fixture.repository,
+				number: "5",
+				maxPullRequestNumber: MAX_PULL_REQUEST_NUMBER,
+			}),
+		).resolves.toMatchObject({ ok: true, pullRequest: { number: 5 } });
+		await requestAzureDevOps({ organization: "contoso", path: "/_apis/projects" });
+
+		const sentTo = (organization: string) =>
+			requests
+				.filter((request) => request.url.pathname.toLowerCase().startsWith(`/${organization}/`))
+				.map((request) => [request.url.pathname, request.authorization]);
+		expect(sentTo("contoso")).toEqual([
+			["/Contoso/_apis/projects", basic("fabrikam-pat")],
+			["/Contoso/_apis/connectionData", basic("fabrikam-pat")],
+			["/Contoso/_apis/projects", "Bearer cli-token"],
+			["/contoso/_apis/projects", "Bearer cli-token"],
+		]);
+		const fabrikam = sentTo("fabrikam");
+		expect(fabrikam.length).toBeGreaterThan(0);
+		for (const [, authorization] of fabrikam) expect(authorization).toBe(basic("fabrikam-pat"));
+	});
+
+	it("gives a request the Azure CLI account sends again a deadline of its own", async () => {
+		const basic = (token: string) => `Basic ${Buffer.from(`:${token}`).toString("base64")}`;
+		installFakeAzureDevOps({
+			pullRequest: pullRequestJson(fixture),
+			refused: { authorization: basic("slow-expired-pat"), status: 401 },
+		});
+		// `az` takes longer than the request's whole deadline to print its token.
+		const bin = installAzureCli(
+			fixture.root,
+			`setTimeout(() => process.stdout.write(JSON.stringify({ accessToken: "cli-token", expires_on: Math.floor(Date.now() / 1000) + 60 })), 600);\n`,
+		);
+		process.env.PATH = `${bin}${delimiter}${saved.get("PATH") ?? ""}`;
+		process.env.VOLT_ADO_PAT = "slow-expired-pat";
+
+		await expect(
+			requestAzureDevOps({
+				organization: "fabrikam",
+				path: "/Fabrikam%20Fiber/_apis/git/repositories/Fiber/pullrequests/5",
+				timeoutMs: 300,
+			}),
+		).resolves.toMatchObject({ ok: true, value: { pullRequestId: 5 } });
 	});
 
 	it("falls back to the Azure CLI account's token when no personal access token is set", async () => {
@@ -765,5 +868,14 @@ process.stdout.write(JSON.stringify({ accessToken: "cli-token", expires_on: Math
 		);
 		expect(requests.length).toBeGreaterThan(0);
 		for (const request of requests) expect(request.authorization).toBe("Bearer cli-token");
+
+		// A personal access token no header can carry is reported missing rather than replaced by the account.
+		requests.length = 0;
+		process.env.VOLT_ADO_PAT = "not a token";
+		await expect(capture()).resolves.toMatchObject({
+			ok: false,
+			error: expect.stringContaining("No Azure DevOps credentials are available on the host"),
+		});
+		expect(requests).toHaveLength(0);
 	});
 });

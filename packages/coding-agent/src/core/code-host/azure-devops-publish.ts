@@ -36,6 +36,12 @@ interface ReviewPart {
 	comment?: ReviewCodeHostInlineComment;
 }
 
+/** Why the review's findings could not be placed; `final` when publishing the review again fails the same way. */
+interface PlacementFailure {
+	reason: string;
+	kind?: "final";
+}
+
 type Failed = Extract<AzureDevOpsResponse, { ok: false }>;
 
 function failureReason(response: Failed): string {
@@ -96,20 +102,20 @@ async function readReviewedIteration(
 	path: string,
 	headRefOid: string,
 	mergeBaseCommit: string,
-): Promise<number | string> {
+): Promise<number | PlacementFailure> {
 	const response = await requestAzureDevOps({
 		organization: locator.repository.organization,
 		path: `${path}/iterations`,
 	});
-	if (!response.ok) return failureReason(response);
+	if (!response.ok) return { reason: failureReason(response) };
 	const iterations = isRecord(response.value) ? response.value.value : undefined;
-	if (!Array.isArray(iterations)) return azureDevOpsFailureMessage("invalid-response");
+	if (!Array.isArray(iterations)) return { reason: azureDevOpsFailureMessage("invalid-response") };
 	let reviewed: number | undefined;
 	let reviewedHead = false;
 	for (const iteration of iterations) {
-		if (!isRecord(iteration)) return azureDevOpsFailureMessage("invalid-response");
+		if (!isRecord(iteration)) return { reason: azureDevOpsFailureMessage("invalid-response") };
 		const id = positiveInteger(iteration.id);
-		if (id === undefined) return azureDevOpsFailureMessage("invalid-response");
+		if (id === undefined) return { reason: azureDevOpsFailureMessage("invalid-response") };
 		if (commitId(iteration.sourceRefCommit) !== headRefOid) continue;
 		reviewedHead = true;
 		if (commitId(iteration.commonRefCommit) === mergeBaseCommit && (reviewed === undefined || id > reviewed)) {
@@ -117,9 +123,12 @@ async function readReviewedIteration(
 		}
 	}
 	if (reviewed !== undefined) return reviewed;
-	return reviewedHead
-		? "The pull request's target changed after the review, so the reviewed diff is not one of its iterations. Run a new review."
-		: "None of the pull request's iterations has the reviewed commit as its source. Run a new review.";
+	return {
+		reason: reviewedHead
+			? "The pull request's target changed after the review, so the reviewed diff is not one of its iterations. Run a new review."
+			: "None of the pull request's iterations has the reviewed commit as its source. Run a new review.",
+		kind: "final",
+	};
 }
 
 /**
@@ -131,20 +140,22 @@ async function readChangeTrackingIds(
 	path: string,
 	iteration: number,
 	paths: ReadonlySet<string>,
-): Promise<Map<string, number> | string> {
+): Promise<Map<string, number> | PlacementFailure> {
 	const ids = new Map<string, number>();
 	let skip = 0;
 	while (ids.size < paths.size) {
-		if (skip >= CHANGE_LIMIT) return `The pull request changes more than ${CHANGE_LIMIT} files.`;
+		if (skip >= CHANGE_LIMIT) {
+			return { reason: `The pull request changes more than ${CHANGE_LIMIT} files.`, kind: "final" };
+		}
 		const response = await requestAzureDevOps({
 			organization: locator.repository.organization,
 			path: `${path}/iterations/${iteration}/changes`,
 			query: { $top: String(CHANGE_PAGE_SIZE), $skip: String(skip), $compareTo: "0" },
 		});
-		if (!response.ok) return failureReason(response);
+		if (!response.ok) return { reason: failureReason(response) };
 		const page = response.value;
 		const entries = isRecord(page) ? page.changeEntries : undefined;
-		if (!isRecord(page) || !Array.isArray(entries)) return azureDevOpsFailureMessage("invalid-response");
+		if (!isRecord(page) || !Array.isArray(entries)) return { reason: azureDevOpsFailureMessage("invalid-response") };
 		for (const entry of entries) {
 			const item = isRecord(entry) ? entry.item : undefined;
 			const filePath = isRecord(item) && typeof item.path === "string" ? item.path.replace(/^\/+/, "") : undefined;
@@ -210,16 +221,17 @@ export async function publishAzureDevOpsReview(
 	if (typeof posted === "string") {
 		throw new Error(`Could not read the pull request's comment threads, so none were posted. ${posted}`);
 	}
-	/** `uncertain`: the last thread may have been posted although Azure DevOps did not confirm it. */
-	const fail = (reason: string, uncertain = false): Error => {
+	/**
+	 * `uncertain`: the last thread may have been posted although Azure DevOps did not confirm it. `final`: publishing
+	 * the review again fails the same way, so it is not suggested.
+	 */
+	const fail = (reason: string, kind?: "uncertain" | "final"): Error => {
 		const done = parts.filter((part) => posted.has(part.key)).length;
 		const retry = "Publish the review again to post the rest; threads already posted are not posted again.";
-		if (uncertain) return new Error(`${reason} The review may be partly on the pull request. ${retry}`);
-		return new Error(
-			done === 0
-				? `${reason} Nothing was published.`
-				: `${reason} ${done} of ${parts.length} comment threads of this review are on the pull request. ${retry}`,
-		);
+		if (kind === "uncertain") return new Error(`${reason} The review may be partly on the pull request. ${retry}`);
+		if (done === 0) return new Error(`${reason} Nothing was published.`);
+		const partly = `${done} of ${parts.length} comment threads of this review are on the pull request.`;
+		return new Error(kind === "final" ? `${reason} ${partly}` : `${reason} ${partly} ${retry}`);
 	};
 	const pending = parts.filter((part) => !posted.has(part.key));
 	const inline = pending.flatMap((part) => (part.comment ? [part.comment] : []));
@@ -228,6 +240,7 @@ export async function publishAzureDevOpsReview(
 		if (request.mergeBaseCommit === undefined) {
 			throw fail(
 				"The review did not record the merge base it compared against, so its findings cannot be placed. Run a new review.",
+				"final",
 			);
 		}
 		const iteration = await readReviewedIteration(
@@ -236,13 +249,18 @@ export async function publishAzureDevOpsReview(
 			request.pullRequest.headRefOid,
 			request.mergeBaseCommit,
 		);
-		if (typeof iteration === "string") throw fail(`Could not find the reviewed pull request iteration. ${iteration}`);
+		if (typeof iteration !== "number") {
+			throw fail(`Could not find the reviewed pull request iteration. ${iteration.reason}`, iteration.kind);
+		}
 		const ids = await readChangeTrackingIds(locator, path, iteration, new Set(inline.map((comment) => comment.path)));
-		if (typeof ids === "string") throw fail(`Could not read the pull request iteration's changes. ${ids}`);
+		if (!(ids instanceof Map)) {
+			throw fail(`Could not read the pull request iteration's changes. ${ids.reason}`, ids.kind);
+		}
 		const missing = inline.find((comment) => !ids.has(comment.path));
 		if (missing) {
 			throw fail(
 				`Azure DevOps does not list ${JSON.stringify(missing.path)} among the reviewed iteration's changes, so its finding cannot be placed on its lines.`,
+				"final",
 			);
 		}
 		position = { iteration, changeTrackingIds: ids };
@@ -261,14 +279,14 @@ export async function publishAzureDevOpsReview(
 			);
 			throw fail(
 				`${uncertain ? "Could not confirm a comment thread was posted." : "Azure DevOps did not post a comment thread of the review."} ${failureReason(response)}`,
-				uncertain,
+				uncertain ? "uncertain" : undefined,
 			);
 		}
 		const id = isRecord(response.value) ? positiveInteger(response.value.id) : undefined;
 		if (id === undefined) {
 			throw fail(
 				`Could not confirm a comment thread was posted. ${azureDevOpsFailureMessage("invalid-response")}`,
-				true,
+				"uncertain",
 			);
 		}
 		posted.set(part.key, id);
