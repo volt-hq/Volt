@@ -190,8 +190,16 @@ export class ReviewUsageCollector {
 					};
 					if (Check(ReviewUsageTokensSchema, observedTokens) && validNumbers(observedTokens))
 						entry.tokens = observedTokens;
-					if (entry.tokens && Check(ReviewUsageCostSchema, usage.cost) && validNumbers(usage.cost))
-						entry.estimatedCost = { ...usage.cost };
+					// Only the priced components the schema keeps; `priceVersion` is not accounting data.
+					const observedCost: Record<keyof NonNullable<Attempt["estimatedCost"]>, number | undefined> = {
+						input: usage.cost?.input,
+						output: usage.cost?.output,
+						cacheRead: usage.cost?.cacheRead,
+						cacheWrite: usage.cost?.cacheWrite,
+						total: usage.cost?.total,
+					};
+					if (entry.tokens && Check(ReviewUsageCostSchema, observedCost) && validNumbers(observedCost))
+						entry.estimatedCost = observedCost;
 					if (Check(ReviewServiceTierSchema, usage.serviceTier?.requested))
 						entry.requestedTier = usage.serviceTier.requested;
 					if (Check(ReviewServiceTierSchema, usage.serviceTier?.effective))
