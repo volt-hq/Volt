@@ -723,6 +723,7 @@ describe("#409 initial review accounting", () => {
 			displayName: "Mock",
 			canonicalizeRemoteUrl: vi.fn(() => null),
 			parsePullRequestUrl: vi.fn(() => undefined),
+			pullRequestUrl: vi.fn(() => undefined),
 			isCanonicalPullRequestCheckout: vi.fn(() => false),
 			probeCurrentPullRequest: vi.fn(),
 			resolvePullRequestCheckout: vi.fn(),

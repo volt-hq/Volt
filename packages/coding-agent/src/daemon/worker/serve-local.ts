@@ -13,6 +13,7 @@
  */
 
 import type { Duplex } from "node:stream";
+import type { CodeHostLinkedPullRequest } from "../../core/code-host/types.ts";
 import { ClientScope } from "../../core/host/client-scope.ts";
 import type { ConversationHost } from "../../core/host/conversation-host.ts";
 import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
@@ -45,6 +46,8 @@ export interface ServeLocalRelayOptions {
 	/** The worker's own admission of the TUI's intents. */
 	readonly admit?: ServeConnectionOptions["admit"];
 	readonly reviewDiscussions?: ReviewDiscussionService;
+	/** The pull request the daemon linked a conversation to, by its id, while it is on that change's branch. */
+	readonly changePullRequest?: (sessionId: string) => Promise<CodeHostLinkedPullRequest | undefined>;
 	/** The connection serving the TUI, once it exists: the worker ends it on shutdown. */
 	readonly onConnection?: (connection: ProtocolConnection) => void;
 }
@@ -77,6 +80,16 @@ async function applySessionOptions(conversation: HostedConversation, options: Wo
 	}
 }
 
+/** The served conversation's linked pull request, as an intent service, when the worker can ask the daemon. */
+export function linkedPullRequestService(
+	served: HostedConversation | undefined,
+	changePullRequest: ServeLocalRelayOptions["changePullRequest"],
+): { changePullRequest?: () => Promise<CodeHostLinkedPullRequest | undefined> } {
+	return served === undefined || changePullRequest === undefined
+		? {}
+		: { changePullRequest: () => changePullRequest(served.id) };
+}
+
 /**
  * Serve a relayed TUI from `conversation` on the local profile until its
  * stream ends. A preamble for another session is refused.
@@ -101,11 +114,12 @@ export async function serveLocalRelay(options: ServeLocalRelayOptions): Promise<
 			clientKey: preamble.clientKey,
 			// The TUI's prompts reach extensions as interactive input.
 			inputSource: "interactive",
-			services: () => ({
+			services: (served) => ({
 				// The TUI's abort is the user's interrupt key: it stops the run without delivering its queued input.
 				abortRun: (session) => session.abort("keyboard_interrupt"),
 				...(preamble.modelScopePatterns === undefined ? {} : { modelScopePatterns: preamble.modelScopePatterns }),
 				...(options.reviewDiscussions === undefined ? {} : { reviewDiscussions: options.reviewDiscussions }),
+				...linkedPullRequestService(served, options.changePullRequest),
 			}),
 			beforeServing: async (served) => {
 				if (!applied && preamble.apply !== undefined && served === conversation) {

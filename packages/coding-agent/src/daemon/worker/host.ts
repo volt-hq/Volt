@@ -624,6 +624,7 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 					},
 					admit: (intent) => admitRemoteIntent(intent, { shuttingDown: stopping !== undefined, subagent: false }),
 					reviewDiscussions: hosted.reviewDiscussions(conversation),
+					changePullRequest: (sessionId) => client.changePullRequest(sessionId),
 					onConnection,
 				});
 				return;
@@ -657,6 +658,7 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 					}),
 				authority: () => losses.get(relayId),
 				reviewDiscussions: hosted.reviewDiscussions(conversation),
+				changePullRequest: (sessionId) => client.changePullRequest(sessionId),
 				onConnection,
 			});
 		})().finally(() => losses.delete(relayId));

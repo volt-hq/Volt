@@ -34,6 +34,7 @@ import {
 } from "../handshake-responses.ts";
 import { adaptRelaySocketToIrohStream } from "../relay-stream.ts";
 import { getWorktreesRootSpellings } from "../worktree-manager.ts";
+import { linkedPullRequestService, type ServeLocalRelayOptions } from "./serve-local.ts";
 
 /** Rehydrate the daemon-authorized relay snapshot without recomputing its workspace scope. */
 export function createRelayAuthorization(
@@ -120,6 +121,7 @@ export interface ServePhoneRelayOptions {
 	/** The relay's authority as the daemon last pushed it, checked before every frame. */
 	readonly authority?: () => AuthorityLoss | undefined;
 	readonly reviewDiscussions?: ReviewDiscussionService;
+	readonly changePullRequest?: ServeLocalRelayOptions["changePullRequest"];
 	/** The connection serving the phone, once it exists: the host ends it on shutdown or authority loss. */
 	readonly onConnection?: (connection: ProtocolConnection) => void;
 }
@@ -185,7 +187,7 @@ export async function servePhoneRelay(options: ServePhoneRelayOptions): Promise<
 			redaction: getRelaySanitizerOptions(authorizationSubset, options.agentDir),
 			redirect: options.redirect ?? {},
 			// The host's services are the daemon's, reached through `relay`.
-			services: () => ({
+			services: (served) => ({
 				workspace: {
 					name: authorization.workspace.name,
 					...(ownsSession === undefined
@@ -193,6 +195,7 @@ export async function servePhoneRelay(options: ServePhoneRelayOptions): Promise<
 						: { ownsSession: (sessionId: string) => ownsSession.call(daemon, sessionId) }),
 				},
 				...(options.reviewDiscussions === undefined ? {} : { reviewDiscussions: options.reviewDiscussions }),
+				...linkedPullRequestService(served, options.changePullRequest),
 			}),
 			relay: async (frame) => {
 				const outcome = await daemon.forward(frame);

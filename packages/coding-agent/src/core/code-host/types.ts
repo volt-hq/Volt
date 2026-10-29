@@ -152,6 +152,18 @@ export interface CodeHostPullRequestSummary {
 	url: string;
 }
 
+/** The pull request daemon change association linked a conversation to, while the conversation is on its branch. */
+export interface CodeHostLinkedPullRequest {
+	/** Registered code-host provider id. */
+	provider: string;
+	/** The base repository's host and provider-defined path, as in `CanonicalCodeHostRepository`. */
+	repository: { host: string; path: string };
+	number: number;
+	title: string;
+	/** The local branch the conversation was observed on. */
+	branch: string;
+}
+
 /** Host-only normalized repository identity. Never project canonicalId to clients. */
 export interface CanonicalCodeHostRepository {
 	providerId: string;
@@ -342,6 +354,11 @@ export interface CodeHostIdentity {
 	readonly avatarHosts?: readonly string[];
 	/** The pull request a web URL of this provider names, with the URL normalized; undefined for any other URL. */
 	parsePullRequestUrl(url: string): { url: string; number: number } | undefined;
+	/**
+	 * The normalized web URL of pull request `number` in a repository this provider canonicalized (its host and
+	 * path), as `parsePullRequestUrl` returns it; undefined when the repository is not one of this provider's.
+	 */
+	pullRequestUrl(repository: { host: string; path: string }, number: number): string | undefined;
 	/** Host-only consistency check for a persisted checkout identity this provider produced. */
 	isCanonicalPullRequestCheckout(
 		pullRequest: ResolvedPullRequestCheckout["pullRequest"],

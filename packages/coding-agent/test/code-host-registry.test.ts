@@ -115,6 +115,8 @@ function createProvider(fixture: Fixture) {
 		displayName: "Test Host",
 		canonicalizeRemoteUrl: (url) => (url === fixture.remoteUrl ? REPOSITORY : null),
 		parsePullRequestUrl: (url) => (url === PULL_REQUEST_URL ? { url, number: 5 } : undefined),
+		pullRequestUrl: (repository, number) =>
+			repository.path === REPOSITORY.path && number === 5 ? PULL_REQUEST_URL : undefined,
 		isCanonicalPullRequestCheckout: (checkout, repositoryId) =>
 			checkout.url === PULL_REQUEST_URL && repositoryId === REPOSITORY.canonicalId,
 		probeCurrentPullRequest: async () => ({ number: 5, title: pullRequest.title, url: PULL_REQUEST_URL }),
