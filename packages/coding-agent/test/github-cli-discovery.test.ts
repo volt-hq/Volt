@@ -3,10 +3,8 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runGitHubCli } from "../src/core/code-host/github-cli.ts";
-import {
-	canonicalizeGitHubRemoteUrl,
-	discoverPullRequestWithGitHubCli,
-} from "../src/core/code-host/github-cli-discovery.ts";
+import { canonicalizeGitHubRemoteUrl } from "../src/core/code-host/github-cli-discovery.ts";
+import { codeHostPullRequestDiscoveryProvider } from "../src/core/code-host/registry.ts";
 
 const OID = "0123456789abcdef0123456789abcdef01234567";
 const OTHER_OID = "abcdef0123456789abcdef0123456789abcdef01";
@@ -177,7 +175,7 @@ describe("exact GitHub pull request discovery", () => {
 			],
 		});
 
-		const outcome = await discoverPullRequestWithGitHubCli({
+		const outcome = await codeHostPullRequestDiscoveryProvider.discoverPullRequest({
 			cwd: tempDirectory("discovery-cwd"),
 			branch: "feature/work",
 			headOid: OID,
@@ -199,7 +197,11 @@ describe("exact GitHub pull request discovery", () => {
 			"volt-hq/volt": [pullRequest(4, { isDraft: true })],
 		});
 		expect(
-			await discoverPullRequestWithGitHubCli({ cwd: tempDirectory("active"), branch: "feature/work", headOid: OID }),
+			await codeHostPullRequestDiscoveryProvider.discoverPullRequest({
+				cwd: tempDirectory("active"),
+				branch: "feature/work",
+				headOid: OID,
+			}),
 		).toMatchObject({ state: "resolved", pullRequest: { number: 4, status: "draft" } });
 
 		setResponses({
@@ -207,7 +209,7 @@ describe("exact GitHub pull request discovery", () => {
 			"volt-hq/volt": [pullRequest(6)],
 		});
 		expect(
-			await discoverPullRequestWithGitHubCli({
+			await codeHostPullRequestDiscoveryProvider.discoverPullRequest({
 				cwd: tempDirectory("ambiguous"),
 				branch: "feature/work",
 				headOid: OID,
@@ -218,7 +220,7 @@ describe("exact GitHub pull request discovery", () => {
 	it("resolves one historical PR, reports multiple historical PRs as ambiguous, and preserves none", async () => {
 		setResponses({ "volt-hq/volt": [pullRequest(20, { state: "CLOSED" })] });
 		expect(
-			await discoverPullRequestWithGitHubCli({
+			await codeHostPullRequestDiscoveryProvider.discoverPullRequest({
 				cwd: tempDirectory("historical"),
 				branch: "feature/work",
 				headOid: OID,
@@ -230,7 +232,7 @@ describe("exact GitHub pull request discovery", () => {
 			"volt-hq/volt": [pullRequest(22, { state: "CLOSED" })],
 		});
 		expect(
-			await discoverPullRequestWithGitHubCli({
+			await codeHostPullRequestDiscoveryProvider.discoverPullRequest({
 				cwd: tempDirectory("historical-many"),
 				branch: "feature/work",
 				headOid: OID,
@@ -239,7 +241,11 @@ describe("exact GitHub pull request discovery", () => {
 
 		setResponses({});
 		expect(
-			await discoverPullRequestWithGitHubCli({ cwd: tempDirectory("none"), branch: "feature/work", headOid: OID }),
+			await codeHostPullRequestDiscoveryProvider.discoverPullRequest({
+				cwd: tempDirectory("none"),
+				branch: "feature/work",
+				headOid: OID,
+			}),
 		).toEqual({ state: "none" });
 	});
 
@@ -253,7 +259,7 @@ describe("exact GitHub pull request discovery", () => {
 			"volt-hq/volt": { error },
 		});
 		expect(
-			await discoverPullRequestWithGitHubCli({
+			await codeHostPullRequestDiscoveryProvider.discoverPullRequest({
 				cwd: tempDirectory("provider-error"),
 				branch: "feature/work",
 				headOid: OID,
@@ -264,7 +270,7 @@ describe("exact GitHub pull request discovery", () => {
 	it("rejects malformed and oversized provider output", async () => {
 		process.env.VOLT_TEST_GH_MODE = "malformed";
 		expect(
-			await discoverPullRequestWithGitHubCli({
+			await codeHostPullRequestDiscoveryProvider.discoverPullRequest({
 				cwd: tempDirectory("malformed"),
 				branch: "feature/work",
 				headOid: OID,
@@ -273,7 +279,7 @@ describe("exact GitHub pull request discovery", () => {
 
 		process.env.VOLT_TEST_GH_MODE = "oversized";
 		expect(
-			await discoverPullRequestWithGitHubCli({
+			await codeHostPullRequestDiscoveryProvider.discoverPullRequest({
 				cwd: tempDirectory("oversized"),
 				branch: "feature/work",
 				headOid: OID,
@@ -293,7 +299,7 @@ describe("exact GitHub pull request discovery", () => {
 		setResponses({});
 
 		expect(
-			await discoverPullRequestWithGitHubCli({
+			await codeHostPullRequestDiscoveryProvider.discoverPullRequest({
 				cwd: tempDirectory("environment"),
 				branch: "feature/work",
 				headOid: OID,

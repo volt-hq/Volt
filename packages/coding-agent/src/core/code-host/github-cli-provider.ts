@@ -6,7 +6,7 @@ import {
 } from "./github-cli-context.ts";
 import {
 	canonicalizeGitHubRemoteUrl,
-	discoverPullRequestWithGitHubCli,
+	listPullRequestsForHeadBranchWithGitHubCli,
 	refreshPullRequestStatusesWithGitHubCli,
 } from "./github-cli-discovery.ts";
 import { resolveCurrentReviewPullRequest } from "./github-cli-review-target.ts";
@@ -126,6 +126,6 @@ export const githubCliCodeHostProvider: CodeHostProvider = {
 	capturePullRequestIdentity: capturePullRequestIdentityWithGitHubCli,
 	verifyPullRequestHead,
 	publishPullRequestReview,
-	discoverPullRequest: discoverPullRequestWithGitHubCli,
+	listPullRequestsForHeadBranch: listPullRequestsForHeadBranchWithGitHubCli,
 	refreshPullRequestStatuses: refreshPullRequestStatusesWithGitHubCli,
 };

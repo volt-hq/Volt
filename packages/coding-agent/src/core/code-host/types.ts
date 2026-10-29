@@ -234,6 +234,33 @@ export interface CodeHostPullRequestDiscoveryProvider {
 	discoverPullRequest(request: CodeHostPullRequestDiscoveryRequest): Promise<CodeHostPullRequestDiscoveryOutcome>;
 }
 
+/** A pull request into a base repository from a head branch of the requested name, as its provider lists it. */
+export interface CodeHostHeadPullRequest {
+	number: number;
+	/** Unbounded; discovery bounds it. */
+	title: string;
+	status: CodeHostPullRequestStatus;
+	/** The repository the head branch is in: the base repository, or a fork of it. */
+	headRepository: CanonicalCodeHostRepository;
+	headBranch: string;
+	/** The head commit the provider reports, in any case. */
+	headOid: string;
+}
+
+export interface CodeHostHeadPullRequestListRequest {
+	/** The local checkout the head branch was observed in, for a provider CLI. */
+	cwd: string;
+	/** The base repository whose pull requests are listed; this provider canonicalized it. */
+	repository: CanonicalCodeHostRepository;
+	/** The head branch name in the head repository. */
+	branch: string;
+	signal?: AbortSignal;
+}
+
+export type CodeHostHeadPullRequestListResult =
+	| { ok: true; pullRequests: CodeHostHeadPullRequest[] }
+	| { ok: false; reason: CodeHostPullRequestDiscoveryUnavailableReason };
+
 /** One already-associated pull request, identified by its base repository and number. */
 export interface CodeHostPullRequestStatusTarget {
 	/** The base repository's provider-defined path, as in `CanonicalCodeHostRepository.path`. */
@@ -342,8 +369,13 @@ export interface CodeHostProvider extends CodeHostIdentity {
 		options?: CodeHostCommandOptions,
 	): Promise<void>;
 	publishPullRequestReview(request: ReviewCodeHostPublishRequest): Promise<ReviewCodeHostPublishResult>;
-	/** Daemon change association; report unsupported_repository when no remote belongs to this provider. */
-	discoverPullRequest?(request: CodeHostPullRequestDiscoveryRequest): Promise<CodeHostPullRequestDiscoveryOutcome>;
+	/**
+	 * Daemon change association: every pull request in the base repository, open or not, whose head branch has the
+	 * requested name. Shared discovery selects the head repository and matches the head commit.
+	 */
+	listPullRequestsForHeadBranch?(
+		request: CodeHostHeadPullRequestListRequest,
+	): Promise<CodeHostHeadPullRequestListResult>;
 	/** Daemon change status refresh for pull requests this provider associated. */
 	refreshPullRequestStatuses?(request: CodeHostPullRequestStatusRequest): Promise<CodeHostPullRequestStatusOutcome[]>;
 }
