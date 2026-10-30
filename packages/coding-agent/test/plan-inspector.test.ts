@@ -147,6 +147,14 @@ describe("PlanInspectorComponent", () => {
 		expect(ready).toContain("Hidden completed child");
 		expect(ready).toContain("Hidden partial pending child");
 		expect(ready).toContain("Visible active child");
+
+		// A working draft is reviewed as it evolves, so it shows its whole hierarchy too.
+		state.plan!.phase = "draft";
+		inspector.setPlanning(state);
+		const draft = text(inspector);
+		expect(draft).toContain("Hidden completed child");
+		expect(draft).toContain("Hidden partial pending child");
+		expect(draft).toContain("Plan mode · 3 outcomes · 5 tasks · revision 4");
 	});
 
 	it("marks a ready plan as waiting for a decision", () => {

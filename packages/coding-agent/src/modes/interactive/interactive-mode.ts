@@ -816,7 +816,7 @@ export class InteractiveMode {
 		this.editor = this.defaultEditor;
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor as Component);
-		this.planStatus = new PlanStatusComponent(this.planning());
+		this.planStatus = new PlanStatusComponent(this.planning(), { getTerminalRows: () => this.ui.terminal.rows });
 		this.planStatusContainer.addChild(this.planStatus);
 		this.planInspector = new PlanInspectorComponent({
 			planning: this.planning(),

@@ -125,14 +125,38 @@ describe("Plan TUI components", () => {
 		}
 	});
 
-	it("summarizes a working draft without exposing authored content", () => {
+	it("lists a working draft's outcomes as many as the terminal's height allows", () => {
 		initTheme("dark");
-		const draft = { ...readyPlan(), phase: "draft" as const };
-		const rendered = plain(new PlanStatusComponent({ mode: "plan", plan: draft }).render(120).lines);
-		expect(rendered).toContain("PLAN DRAFT");
-		expect(rendered).toContain("12 proposed steps");
-		expect(rendered).toContain("Working draft · revision 4 · /plan-details to inspect");
-		expect(rendered).not.toContain("Plan step");
+		setKeybindings(new KeybindingsManager({ "app.plan.togglePane": "alt+x" }));
+		try {
+			const draft = { ...readyPlan(), phase: "draft" as const };
+			let rows = 40;
+			const status = new PlanStatusComponent({ mode: "plan", plan: draft }, { getTerminalRows: () => rows });
+			for (const width of [60, 120]) {
+				const rendered = status.render(width).lines;
+				const text = plain(rendered);
+				expect(text).toMatch(/PLAN DRAFT · Native Plan Mode +12 proposed steps\n/);
+				expect(text).toContain("1. Plan step 1");
+				expect(text).toContain("5. Plan step 5");
+				expect(text).not.toContain("Plan step 6");
+				expect(text).toMatch(/… 7 more · revision 4 · (alt|option)\+x details$/);
+				for (const line of rendered) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+			}
+
+			// A short terminal lists fewer; a draft that fits lists them all.
+			rows = 24;
+			expect(status.render(120).lines).toHaveLength(5);
+			const small = new PlanStatusComponent(
+				{ mode: "plan", plan: { ...readyPlan(2), phase: "draft" } },
+				{ getTerminalRows: () => 24 },
+			);
+			const text = plain(small.render(120).lines);
+			expect(text).toContain("2. Plan step 2");
+			expect(text).not.toContain("more");
+			expect(text).toMatch(/ {3}revision 4 · (alt|option)\+x details$/);
+		} finally {
+			setKeybindings(new KeybindingsManager());
+		}
 	});
 
 	it("counts grouped draft outcomes and executable tasks", () => {
@@ -151,7 +175,12 @@ describe("Plan TUI components", () => {
 		];
 		const rendered = plain(new PlanStatusComponent({ mode: "plan", plan: draft }).render(120).lines);
 		expect(rendered).toContain("1 outcome · 2 tasks");
-		expect(rendered).not.toContain("Implement hierarchy");
+		// An outcome keeps its task count beside its text, even where the text gives way.
+		expect(rendered).toContain("1. Implement hierarchy · 2 tasks");
+		draft.steps[0]!.text = "Implement a hierarchy whose outcome text is far too long to fit beside its task count";
+		expect(plain(new PlanStatusComponent({ mode: "plan", plan: draft }).render(48).lines)).toMatch(
+			/1\. Implement a hierarchy.*… · 2 tasks\n/,
+		);
 	});
 
 	it("renders grouped draft outcomes and substeps in plan details", () => {

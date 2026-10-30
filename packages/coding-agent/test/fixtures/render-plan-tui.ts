@@ -165,7 +165,7 @@ inspector = new PlanInspectorComponent({
 	onToggleFocus: toggleFocus,
 	requestRender: () => tui.requestRender(),
 });
-const status = new PlanStatusComponent(planning);
+const status = new PlanStatusComponent(planning, { getTerminalRows: () => tui.terminal.rows });
 const tool = new ToolCallRow("update_plan", tui);
 const result: ToolPresentResult = {
 	content: [{ type: "text", text: JSON.stringify({ mode: planning.mode, planId: plan.id, steps: plan.steps }) }],

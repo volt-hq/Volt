@@ -32,14 +32,18 @@ export interface ResponsivePlanDimensions {
 	planColumns: number;
 }
 
-/** Resolve the exact responsive contract for review/execution, or keep drafts compact. */
+/**
+ * Resolve the exact responsive contract for a plan in any phase, so a working
+ * draft shows beside the conversation as it evolves; research before the
+ * first draft keeps the conversation full width.
+ */
 export function getResponsivePlanDimensions(
 	terminalColumns: number,
 	terminalRows: number,
 	planning: PlanningState,
 ): ResponsivePlanDimensions | undefined {
 	if (terminalColumns < PLAN_SPLIT_MIN_COLUMNS || terminalRows < PLAN_SPLIT_MIN_ROWS) return undefined;
-	if (!planning.plan || planning.plan.phase === "draft") return undefined;
+	if (!planning.plan) return undefined;
 
 	const planColumns = Math.min(
 		PLAN_PANE_MAX_COLUMNS,

@@ -264,9 +264,11 @@ export class PlanInspectorComponent implements Component, Focusable {
 		if (!plan) return truncateToWidth(theme.fg("dim", ` ${mode}${position}`), width, "");
 		const progress = getPlanProgress(plan);
 		const size =
-			plan.phase === "draft" || plan.phase === "ready"
-				? planSizeText(plan)
-				: `${progress.completed}/${progress.total} complete · ${progress.percent}%`;
+			plan.phase === "draft"
+				? `${planSizeText(plan)} · revision ${plan.revision}`
+				: plan.phase === "ready"
+					? planSizeText(plan)
+					: `${progress.completed}/${progress.total} complete · ${progress.percent}%`;
 		return truncateToWidth(theme.fg("dim", ` ${mode} · ${size}${position}`), width, "");
 	}
 
@@ -325,7 +327,10 @@ export class PlanInspectorComponent implements Component, Focusable {
 					width,
 				);
 			}
-			const showSubsteps = step.substeps !== undefined && (plan.phase === "ready" || currentGroup?.id === step.id);
+			// A draft or ready plan shows its whole hierarchy for review; execution opens only the current group.
+			const showSubsteps =
+				step.substeps !== undefined &&
+				(plan.phase === "draft" || plan.phase === "ready" || currentGroup?.id === step.id);
 			if (!showSubsteps) continue;
 			for (const [substepIndex, substep] of step.substeps!.entries()) {
 				const substepMarker = theme.fg(stepColor(substep.status), stepMarker(substep.status));

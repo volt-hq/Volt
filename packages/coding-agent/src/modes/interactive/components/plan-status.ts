@@ -13,7 +13,7 @@ import {
 import type { PlanningState, PlanPhase, PlanState } from "../../../core/planning.ts";
 import { theme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { primaryKeyText, rawKeyHint } from "./keybinding-hints.ts";
+import { keyText, primaryKeyText, rawKeyHint } from "./keybinding-hints.ts";
 import {
 	appendWrappedPlanLine,
 	fitPlanSides,
@@ -26,17 +26,25 @@ import {
 	usesAsciiPlanMarkers,
 } from "./plan-content.ts";
 
+/** The most outcomes a working draft lists in the status strip, for a terminal of `rows`. */
+function draftOutcomeRows(rows: number): number {
+	return Math.max(2, Math.min(5, Math.floor(rows / 8)));
+}
+
 /**
- * Bounded one/two-line branch-local plan summary kept directly above the
- * editor. Plan mode itself shows in the composer's border and label, so the
- * strip appears once there is a plan. A ready plan's strip names it; the
- * composer's label says how to decide on it.
+ * Bounded branch-local plan summary kept directly above the editor where the
+ * plan pane does not fit. Plan mode itself shows in the composer's border and
+ * label, so the strip appears once there is a plan. A working draft lists its
+ * outcomes as they evolve, as many as the terminal's height allows; a ready
+ * plan's strip names it, and the composer's label says how to decide on it.
  */
 export class PlanStatusComponent implements Component {
 	private planning: PlanningState;
+	private readonly getTerminalRows: () => number;
 
-	constructor(planning: PlanningState) {
+	constructor(planning: PlanningState, options: { getTerminalRows?: () => number } = {}) {
 		this.planning = planning;
+		this.getTerminalRows = options.getTerminalRows ?? (() => Number.POSITIVE_INFINITY);
 	}
 
 	setPlanning(planning: PlanningState): void {
@@ -55,25 +63,18 @@ export class PlanStatusComponent implements Component {
 		const mark = usesAsciiPlanMarkers() ? "PLAN" : "◆ PLAN";
 		const { completed, total, percent } = getPlanProgress(plan);
 		const ready = plan.phase === "ready";
+		const draft = plan.phase === "draft";
 		const label = theme.bold(theme.fg(planMarkColor(plan.phase), `${mark} ${planPhaseLabel(plan)}`));
-		const left = ready && plan.title ? `${label}${theme.fg("muted", " · ")}${theme.fg("text", plan.title)}` : label;
-		const right = theme.fg(
-			"dim",
-			plan.phase === "draft" || ready ? planSizeText(plan) : `${completed}/${total} · ${percent}%`,
-		);
+		const left =
+			(ready || draft) && plan.title ? `${label}${theme.fg("muted", " · ")}${theme.fg("text", plan.title)}` : label;
+		const right = theme.fg("dim", draft || ready ? planSizeText(plan) : `${completed}/${total} · ${percent}%`);
 		const lines = [fitPlanSides(left, right, width, "…")];
+		if (draft) return createRenderFrame([...lines, ...this.renderDraftOutcomes(plan, width)]);
 		// The composer's label carries a ready plan's next-step keys at every width.
 		if (ready || width < 100) return createRenderFrame(lines);
 
 		const step = getCurrentPlanStep(plan);
-		if (plan.phase === "draft") {
-			lines.push(
-				truncateToWidth(
-					theme.fg("muted", ` Working draft · revision ${plan.revision} · /plan-details to inspect`),
-					width,
-				),
-			);
-		} else if (plan.phase === "handed_off" && plan.execution) {
+		if (plan.phase === "handed_off" && plan.execution) {
 			lines.push(
 				truncateToWidth(
 					theme.fg("muted", ` Execution session: ${plan.execution.targetSessionId} · /plan-close to close`),
@@ -86,6 +87,32 @@ export class PlanStatusComponent implements Component {
 			lines.push(truncateToWidth(theme.fg("muted", ` Current · ${step}`), width));
 		}
 		return createRenderFrame(lines);
+	}
+
+	/**
+	 * A working draft's outcomes, one line each, then a line with how many more
+	 * there are, its revision, and how to open it whole.
+	 */
+	private renderDraftOutcomes(plan: PlanState, width: number): string[] {
+		const shown = plan.steps.slice(0, draftOutcomeRows(this.getTerminalRows()));
+		const lines = shown.map((step, index) => {
+			const tasks = step.substeps
+				? theme.fg("dim", ` · ${step.substeps.length} ${step.substeps.length === 1 ? "task" : "tasks"}`)
+				: "";
+			const number = theme.fg("dim", `   ${index + 1}. `);
+			// The text gives way so its task count stays beside it.
+			const room = Math.max(1, width - visibleWidth(number) - visibleWidth(tasks));
+			const text = truncateToWidth(theme.fg("muted", step.text.replace(/\s+/g, " ")), room, "…");
+			return truncateToWidth(`${number}${text}${tasks}`, width, "");
+		});
+		const more = plan.steps.length - shown.length;
+		const details = keyText("app.plan.togglePane");
+		const footer = [
+			...(more > 0 ? [`… ${more} more`] : []),
+			`revision ${plan.revision}`,
+			details ? `${details} details` : "/plan-details to inspect",
+		].join(" · ");
+		return [...lines, truncateToWidth(theme.fg("dim", `   ${footer}`), width)];
 	}
 }
 

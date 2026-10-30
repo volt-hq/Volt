@@ -205,12 +205,15 @@ describe("responsive plan dimensions", () => {
 		});
 	});
 
-	it("keeps research and working drafts compact until the plan is reviewable", () => {
+	it("splits for a plan in any phase, a working draft included, but not for research before it", () => {
 		expect(getResponsivePlanDimensions(160, 30, { mode: "build", plan: null })).toBeUndefined();
 		expect(getResponsivePlanDimensions(160, 30, { mode: "plan", plan: null })).toBeUndefined();
-		expect(getResponsivePlanDimensions(160, 30, { mode: "plan", plan: plan("draft") })).toBeUndefined();
-		expect(getResponsivePlanDimensions(160, 30, { mode: "plan", plan: plan("ready") })).toBeDefined();
-		expect(getResponsivePlanDimensions(160, 30, { mode: "build", plan: plan("active") })).toBeDefined();
+		for (const phase of ["draft", "ready"] as const) {
+			expect(getResponsivePlanDimensions(160, 30, { mode: "plan", plan: plan(phase) })).toBeDefined();
+		}
+		for (const phase of ["active", "completed", "handed_off"] as const) {
+			expect(getResponsivePlanDimensions(160, 30, { mode: "build", plan: plan(phase) })).toBeDefined();
+		}
 	});
 });
 
@@ -228,13 +231,23 @@ describe("ResponsivePlanLayoutComponent", () => {
 		}
 	});
 
-	it("keeps a working draft in compact flow even when the terminal can split", () => {
+	it("shows a working draft in the plan pane once the terminal can split", () => {
 		const compactOnly = new LinesComponent(["COMPACT_WORKING_DRAFT"]);
 		const planning: PlanningState = { mode: "plan", plan: plan("draft") };
 		const { layout } = createLayout({ columns: 160, rows: 30, planning, compact: [compactOnly] });
 		const rendered = layout.render(160).lines.map(stripAnsi).join("\n");
-		expect(rendered).toContain("COMPACT_WORKING_DRAFT");
-		expect(rendered).not.toContain("Responsive Plan");
+		expect(rendered).not.toContain("COMPACT_WORKING_DRAFT");
+		expect(rendered).toContain("PLAN · DRAFT");
+		expect(rendered).toContain("Responsive Plan");
+		expect(rendered).toContain("revision 2");
+
+		const research = createLayout({
+			columns: 160,
+			rows: 30,
+			planning: { mode: "plan", plan: null },
+			compact: [compactOnly],
+		});
+		expect(research.layout.render(160).lines.map(stripAnsi).join("\n")).toContain("COMPACT_WORKING_DRAFT");
 	});
 
 	it("pins controls and inspector while retaining older conversation rows in scrollback", () => {
@@ -877,14 +890,15 @@ describe("ResponsivePlanLayoutComponent", () => {
 	});
 
 	it("requests scrollback preservation for state-only layout transitions", () => {
-		const compactPlanning: PlanningState = { mode: "plan", plan: plan("draft") };
+		// Research gives way to the first draft's pane, which leaves when the plan does.
+		const compactPlanning: PlanningState = { mode: "plan", plan: null };
 		const { layout, inspector, splitChanges, preserveScrollbackChanges } = createLayout({
 			columns: 160,
 			rows: 24,
 			planning: compactPlanning,
 		});
 		layout.render(160).lines;
-		const splitPlanning: PlanningState = { mode: "plan", plan: plan("ready") };
+		const splitPlanning: PlanningState = { mode: "plan", plan: plan("draft") };
 		layout.setPlanning(splitPlanning);
 		inspector.setPlanning(splitPlanning);
 		layout.render(160).lines;
