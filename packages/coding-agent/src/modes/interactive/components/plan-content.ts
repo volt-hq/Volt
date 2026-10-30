@@ -1,6 +1,12 @@
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@hansjm10/volt-tui";
-import { getPlanLeafSteps, type PlanState, type PlanStep, type PlanStepStatus } from "../../../core/planning.ts";
-import type { Theme } from "../../../core/theme/runtime.ts";
+import {
+	getPlanLeafSteps,
+	type PlanPhase,
+	type PlanState,
+	type PlanStep,
+	type PlanStepStatus,
+} from "../../../core/planning.ts";
+import type { Theme, ThemeColor } from "../../../core/theme/runtime.ts";
 
 export interface PlanProgress {
 	completed: number;
@@ -32,6 +38,30 @@ export function planPhaseLabel(plan: PlanState): string {
 		default:
 			return "DRAFT";
 	}
+}
+
+/** The color of a plan's `PLAN` mark: a ready plan waits on the user, every other phase is the plan's own. */
+export function planMarkColor(phase: PlanPhase | undefined): ThemeColor {
+	return phase === "ready" ? "warning" : "planMode";
+}
+
+/** A plan's size before execution: its outcomes and tasks when outcomes have substeps, else its steps. */
+export function planSizeText(plan: PlanState): string {
+	const { total } = getPlanProgress(plan);
+	const outcomes = plan.steps.length;
+	return plan.steps.some((step) => step.substeps !== undefined)
+		? `${outcomes} ${outcomes === 1 ? "outcome" : "outcomes"} · ${total} ${total === 1 ? "task" : "tasks"}`
+		: `${total} proposed ${total === 1 ? "step" : "steps"}`;
+}
+
+/** `left` truncated with `ellipsis` so `right` stays flush with the right edge of `width`. */
+export function fitPlanSides(left: string, right: string, width: number, ellipsis = ""): string {
+	if (width <= 0) return "";
+	const rightWidth = visibleWidth(right);
+	if (rightWidth >= width) return truncateToWidth(right, width, "");
+	const fittedLeft = truncateToWidth(left, Math.max(0, width - rightWidth - 1), ellipsis);
+	const gap = " ".repeat(Math.max(1, width - visibleWidth(fittedLeft) - rightWidth));
+	return truncateToWidth(`${fittedLeft}${gap}${right}`, width, "");
 }
 
 export function getPlanProgress(plan: PlanState): PlanProgress {

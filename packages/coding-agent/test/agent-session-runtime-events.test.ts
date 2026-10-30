@@ -530,6 +530,8 @@ describe("conversation host client session lifecycle events", () => {
 		expect(executionEntries).toHaveLength(1);
 		expect(executionEntries[0]).toMatchObject({
 			content: expect.stringContaining(`Revision: ${started.planning.plan!.revision}`),
+			// Clients present the plan the details carry instead of the model's text.
+			details: { mode: "build", plan: { id: ready.id, revision: started.planning.plan!.revision, phase: "active" } },
 		});
 		expect(executionEntries[0]).toMatchObject({
 			content: expect.stringContaining(`(id: ${started.planning.plan!.steps[0]!.id})`),
@@ -708,6 +710,10 @@ describe("conversation host client session lifecycle events", () => {
 		expect(childExecutionEntries).toHaveLength(1);
 		expect(childExecutionEntries[0]).toMatchObject({
 			content: expect.stringContaining(`Revision: ${started.planning.plan!.revision}`),
+			details: {
+				mode: "build",
+				plan: { revision: started.planning.plan!.revision, execution: { strategy: "new_session" } },
+			},
 		});
 		expect(childExecutionEntries[0]).toMatchObject({
 			content: expect.stringContaining(`(id: ${started.planning.plan!.steps[0]!.id})`),

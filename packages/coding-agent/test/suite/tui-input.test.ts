@@ -335,7 +335,7 @@ describe("the TUI's input as intents", () => {
 
 		tui.terminal.sendInput(SHIFT_TAB);
 		await vi.waitFor(() => expect(tui.store.state.planning?.mode).toBe("plan"));
-		await waitForScreen(tui, "Plan mode: agent tools are read-only");
+		await waitForScreen(tui, "Plan mode · agent tools are read-only");
 		tui.terminal.sendInput(SHIFT_TAB);
 		await vi.waitFor(() => expect(session.agentMode).toBe("build"));
 

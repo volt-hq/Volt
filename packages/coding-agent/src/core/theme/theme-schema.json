@@ -85,7 +85,8 @@
 				"thinkingMedium",
 				"thinkingHigh",
 				"thinkingXhigh",
-				"bashMode"
+				"bashMode",
+				"planMode"
 			],
 			"properties": {
 				"accent": {
@@ -303,6 +304,10 @@
 				"bashMode": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Editor border color in bash mode"
+				},
+				"planMode": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Plan mode: editor border, transcript mode divider, and plan status marks"
 				}
 			},
 			"additionalProperties": false

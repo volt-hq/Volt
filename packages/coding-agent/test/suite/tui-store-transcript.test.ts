@@ -245,6 +245,64 @@ describe("the TUI's transcript from its store", () => {
 		});
 	});
 
+	it("marks each switch between Build and Plan mode once, from the log at startup and live", async () => {
+		const { tui, session } = await start({
+			before: async (session) => {
+				await session.setAgentMode("plan");
+				// Revising the plan changes the planning state, not the mode.
+				const draft = await session.updatePlan({ title: "Mode marks", steps: [{ text: "First step" }] });
+				await session.updatePlan({
+					planId: draft.id,
+					expectedRevision: draft.revision,
+					title: "Mode marks",
+					steps: [{ id: draft.steps[0]!.id, text: "First step" }, { text: "Second step" }],
+				});
+				await session.setAgentMode("build");
+			},
+		});
+		const plan = "Plan mode · agent tools are read-only";
+		const shown = await waitForScreen(tui, plan, "Build mode");
+		expect(occurrences(shown, plan)).toBe(1);
+		expect(occurrences(shown, "Build mode")).toBe(1);
+		expect(shown.indexOf(plan)).toBeLessThan(shown.indexOf("Build mode"));
+
+		await session.setAgentMode("plan");
+		await vi.waitFor(async () => expect(occurrences(await screen(tui), plan)).toBe(2));
+		expect(occurrences(await screen(tui), "Build mode")).toBe(1);
+	});
+
+	it("presents an executed plan as the approved plan, not the model's instructions and ids", async () => {
+		const { harness, tui, session } = await start({
+			before: async (session) => {
+				await session.setAgentMode("plan");
+				const draft = await session.updatePlan({ title: "Ship the card", steps: [{ text: "Render the card" }] });
+				await session.submitPlan({
+					planId: draft.id,
+					expectedRevision: draft.revision,
+					title: "Ship the card",
+					summary: "Present it.",
+				});
+			},
+		});
+		harness.faux.setResponses([fauxAssistantMessage("Executed.")]);
+		const plan = session.planningState.plan!;
+		await tui.store.client.intent("plan_execute", {
+			planId: plan.id,
+			expectedRevision: plan.revision,
+			strategy: "retain_context",
+		});
+
+		const shown = await waitForScreen(
+			tui,
+			"execute plan · Ship the card",
+			"APPROVED · executing · 1 step",
+			"Executed.",
+		);
+		expect(shown.indexOf("Build mode")).toBeLessThan(shown.indexOf("execute plan · Ship the card"));
+		for (const internal of ["TRUSTED HOST", "(id:", plan.id, "volt-plan-execution"])
+			expect(shown).not.toContain(internal);
+	});
+
 	it("keeps each row and redraws it once the thinking blocks are hidden", async () => {
 		const { tui, access, session } = await start();
 		await session.sessionWriter.appendMessage({ role: "user", content: "think", timestamp: Date.now() });

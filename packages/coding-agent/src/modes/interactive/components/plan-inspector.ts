@@ -12,15 +12,31 @@ import {
 } from "@hansjm10/volt-tui";
 import type { PlanningState, PlanStepStatus } from "../../../core/planning.ts";
 import { theme } from "../../../core/theme/runtime.ts";
-import { keyHint, keyText, rawKeyHint } from "./keybinding-hints.ts";
+import { keyText } from "./keybinding-hints.ts";
 import {
 	appendWrappedPlanLine,
+	fitPlanSides,
 	getPlanProgress,
 	getPlanStepProgress,
+	planMarkColor,
 	planPhaseLabel,
+	planSizeText,
 	usesAsciiPlanMarkers,
 } from "./plan-content.ts";
-import { getPlanActions, isComposerInput, type PlanDetailsAction } from "./plan-status.ts";
+import {
+	getPlanActions,
+	isComposerInput,
+	type PlanDetailsAction,
+	renderPlanActionRows,
+	renderPlanChooserHint,
+} from "./plan-status.ts";
+
+/** The footer of the inspector: its action rows, then its hint row. */
+interface InspectorFooter {
+	readonly lines: string[];
+	/** The index in `lines` of the row holding the selected action, when there are actions. */
+	readonly selectedRow: number | undefined;
+}
 
 function stepMarker(status: PlanStepStatus): string {
 	if (usesAsciiPlanMarkers()) {
@@ -31,15 +47,6 @@ function stepMarker(status: PlanStepStatus): string {
 
 function stepColor(status: PlanStepStatus): "success" | "accent" | "dim" {
 	return status === "completed" ? "success" : status === "in_progress" ? "accent" : "dim";
-}
-
-function fitSides(left: string, right: string, width: number): string {
-	if (width <= 0) return "";
-	const rightWidth = visibleWidth(right);
-	if (rightWidth >= width) return truncateToWidth(right, width, "");
-	const fittedLeft = truncateToWidth(left, Math.max(0, width - rightWidth - 1), "");
-	const gap = " ".repeat(Math.max(1, width - visibleWidth(fittedLeft) - rightWidth));
-	return truncateToWidth(`${fittedLeft}${gap}${right}`, width, "");
 }
 
 class PlanInspectorSection implements Component {
@@ -102,7 +109,7 @@ export class PlanInspectorComponent implements Component, Focusable {
 			{ component: new PlanInspectorSection((width) => this.renderFullscreenHeader(width)), shrink: 1, minSize: 0 },
 			{ component: this.bodyScroll, basis: 0, grow: 1, shrink: 1, minSize: 0 },
 			{
-				component: new PlanInspectorSection((width) => this.renderFooter(width)),
+				component: new PlanInspectorSection((width) => this.renderFooter(width).lines),
 				shrink: 1,
 				minSize: 0,
 			},
@@ -163,16 +170,16 @@ export class PlanInspectorComponent implements Component, Focusable {
 		const body = this.renderBody(width);
 		const footer = this.renderFooter(width);
 		const headerRows = Math.min(2, this.regularViewportRows);
-		const footerRows = Math.min(footer.length, Math.max(0, this.regularViewportRows - headerRows - 1));
+		const footerRows = Math.min(footer.lines.length, Math.max(0, this.regularViewportRows - headerRows - 1));
 		const pageSize = Math.max(1, this.regularViewportRows - headerRows - footerRows);
 		this.regularPageSize = pageSize;
 		this.bodyScroll.updateLayout(body.length, pageSize, this.requestRender);
 		const end = Math.min(body.length, this.bodyScroll.scrollTop + pageSize);
 		const header = this.renderHeader(width, body.length, end).slice(0, headerRows);
 		const page = body.slice(this.bodyScroll.scrollTop, end);
-		const visibleFooter = this.selectVisibleFooter(footer, footerRows);
-		this.selectedActionVisible =
-			getPlanActions(this.planning.plan?.phase).length > 0 && visibleFooter.includes(footer[this.actionIndex] ?? "");
+		const shownRows = this.selectVisibleFooterRows(footer, footerRows);
+		const visibleFooter = shownRows.map((row) => footer.lines[row] ?? "");
+		this.selectedActionVisible = footer.selectedRow !== undefined && shownRows.includes(footer.selectedRow);
 		const padding = Array.from(
 			{ length: Math.max(0, this.regularViewportRows - header.length - page.length - visibleFooter.length) },
 			() => "",
@@ -244,13 +251,7 @@ export class PlanInspectorComponent implements Component, Focusable {
 			? theme.bold(theme.fg("accent", "FOCUSED"))
 			: theme.fg("dim", `${keyText("app.plan.togglePane")} ${ready ? "choose" : "focus"}`);
 		return [
-			fitSides(
-				theme.bold(
-					theme.fg(ready ? "warning" : "accent", `${marker} · ${phase}${ready ? " · APPROVAL NEEDED" : ""}`),
-				),
-				focus,
-				width,
-			),
+			fitPlanSides(theme.bold(theme.fg(planMarkColor(plan?.phase), `${marker} · ${phase}`)), focus, width),
 			this.renderMetadata(width, bodyRows, end),
 		];
 	}
@@ -262,14 +263,11 @@ export class PlanInspectorComponent implements Component, Focusable {
 		const position = bodyRows > pageSize ? ` · rows ${this.bodyScroll.scrollTop + 1}–${end}/${bodyRows}` : "";
 		if (!plan) return truncateToWidth(theme.fg("dim", ` ${mode}${position}`), width, "");
 		const progress = getPlanProgress(plan);
-		return truncateToWidth(
-			theme.fg(
-				"dim",
-				` ${mode} · ${progress.completed}/${progress.total} complete · ${progress.percent}%${position}`,
-			),
-			width,
-			"",
-		);
+		const size =
+			plan.phase === "draft" || plan.phase === "ready"
+				? planSizeText(plan)
+				: `${progress.completed}/${progress.total} complete · ${progress.percent}%`;
+		return truncateToWidth(theme.fg("dim", ` ${mode} · ${size}${position}`), width, "");
 	}
 
 	private renderBody(width: number): string[] {
@@ -348,48 +346,30 @@ export class PlanInspectorComponent implements Component, Focusable {
 		return lines;
 	}
 
-	private selectVisibleFooter(footer: readonly string[], rows: number): string[] {
+	/**
+	 * The footer rows that fit `rows`, in order. When not all fit, the row
+	 * holding the selected action comes first, then the hint, then the other
+	 * action rows: Enter confirms only an action that shows.
+	 */
+	private selectVisibleFooterRows(footer: InspectorFooter, rows: number): number[] {
 		if (rows <= 0) return [];
-		const actionCount = getPlanActions(this.planning.plan?.phase).length;
-		if (actionCount === 0 || rows >= footer.length) return footer.slice(-rows);
-
-		const selectedAction = footer[this.actionIndex];
-		const actionHint = footer[actionCount];
-		const scrollHint = footer.at(-1);
-		if (!selectedAction || !actionHint || !scrollHint) return footer.slice(-rows);
-		if (rows === 1) return [selectedAction];
-		if (rows === 2) return [selectedAction, actionHint];
-		if (rows === 3) return [selectedAction, actionHint, scrollHint];
-		return [...footer.slice(0, actionCount), actionHint].slice(0, rows);
+		const all = footer.lines.map((_, index) => index);
+		if (rows >= all.length) return all;
+		if (footer.selectedRow === undefined) return all.slice(-rows);
+		const hintRow = all.length - 1;
+		const priority = [
+			footer.selectedRow,
+			hintRow,
+			...all.filter((row) => row !== footer.selectedRow && row !== hintRow),
+		];
+		return priority.slice(0, rows).sort((left, right) => left - right);
 	}
 
-	private renderFooter(width: number): string[] {
-		const lines: string[] = [];
+	private renderFooter(width: number): InspectorFooter {
 		const actions = getPlanActions(this.planning.plan?.phase);
-		if (actions.length > 0) {
-			for (const [index, item] of actions.entries()) {
-				const label = index === this.actionIndex ? `> ${item.label}` : `  ${item.label}`;
-				lines.push(
-					truncateToWidth(
-						index === this.actionIndex ? theme.bold(theme.fg("accent", label)) : theme.fg("muted", label),
-						width,
-						"",
-					),
-				);
-			}
-			const actionHint =
-				actions.length > 1
-					? `${rawKeyHint("←/→", "choose")}  ${keyHint("tui.select.confirm", "confirm")}`
-					: keyHint("tui.select.confirm", actions[0]!.label.toLowerCase());
-			lines.push(truncateToWidth(` ${actionHint}`, width, ""));
-		}
-		lines.push(
-			truncateToWidth(
-				` ${rawKeyHint(`${keyText("tui.select.up")}/${keyText("tui.select.down")}`, "scroll")}  ${rawKeyHint(`${keyText("tui.editor.pageUp")}/${keyText("tui.editor.pageDown")}`, "page")}`,
-				width,
-				"",
-			),
-		);
-		return lines;
+		const hint = renderPlanChooserHint(actions, width, { back: false });
+		if (actions.length === 0) return { lines: [hint], selectedRow: undefined };
+		const buttons = renderPlanActionRows(actions, Math.min(this.actionIndex, actions.length - 1), width);
+		return { lines: [...buttons.rows, hint], selectedRow: buttons.selectedRow };
 	}
 }

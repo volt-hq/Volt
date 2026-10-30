@@ -252,6 +252,7 @@ import {
 	keyDisplayText,
 	keyHint,
 	keyText,
+	PLAN_MODE_EDITOR_LABEL,
 	rawKeyHint,
 } from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
@@ -809,7 +810,7 @@ export class InteractiveMode {
 		this.defaultEditor = new CustomEditor(this.ui, getEditorTheme(), this.keybindings, {
 			paddingX: editorPaddingX,
 			autocompleteMaxVisible,
-			topBorderLabel: this.planning().mode === "plan" ? "PLAN · AGENT READ-ONLY" : "ASK VOLT · BUILD",
+			topBorderLabel: this.planning().mode === "plan" ? PLAN_MODE_EDITOR_LABEL : "ASK VOLT · BUILD",
 			placeholder: "Type a request or / for commands",
 		});
 		this.editor = this.defaultEditor;
@@ -3531,9 +3532,10 @@ export class InteractiveMode {
 				const mode = text === "/plan" ? "plan" : "build";
 				try {
 					await this.clientConnected.promise;
-					// The plan UI follows the mode as the client fold applies it.
+					const unchanged = this.planning().mode === mode;
+					// The plan UI follows the mode as the client fold applies it; the transcript marks the switch.
 					await this.store.client.intent("set_agent_mode", { mode });
-					this.showStatus(mode === "plan" ? "Plan mode: agent tools are read-only" : "Build mode");
+					if (unchanged) this.showStatus(mode === "plan" ? "Already in Plan mode" : "Already in Build mode");
 				} catch (error: unknown) {
 					this.showError(error instanceof Error ? error.message : String(error));
 				}
@@ -4453,17 +4455,23 @@ export class InteractiveMode {
 		}
 	}
 
+	/** The composer's border and label: its mode (shell, Plan, Build), thinking level, and a ready plan's cue. */
 	private updateEditorBorderColor(streaming = this.runActive()): void {
+		const planning = this.planning();
 		this.editor.borderColor = this.isBashMode
 			? theme.getBashModeBorderColor()
-			: theme.getThinkingBorderColor(this.store.state.thinkingLevel || "off");
+			: planning.mode === "plan"
+				? theme.getPlanModeBorderColor()
+				: theme.getThinkingBorderColor(this.store.state.thinkingLevel || "off");
+		const focused = this.ui.getFocusedComponent();
 		this.editor.setTopBorderLabel?.(
 			editorTopBorderLabelForState({
 				bashMode: this.isBashMode,
 				streaming,
 				hasText: this.editor.getText().length > 0,
-				agentMode: this.planning().mode,
-				planReady: this.planning().plan?.phase === "ready",
+				agentMode: planning.mode,
+				planReady: planning.plan?.phase === "ready",
+				planChooserFocused: focused !== null && (focused === this.planInspector || focused === this.planDetails),
 			}),
 		);
 		this.ui.requestRender();
@@ -4476,8 +4484,8 @@ export class InteractiveMode {
 
 	private async toggleAgentMode(): Promise<void> {
 		await this.clientConnected.promise;
-		const mode = await this.input.toggleAgentMode();
-		this.showStatus(mode === "plan" ? "Plan mode: agent tools are read-only" : "Build mode");
+		// The transcript marks the switch once the client fold applies it.
+		await this.input.toggleAgentMode();
 	}
 
 	private handlePlanningStateChanged(planning: PlanningState): void {
@@ -4562,6 +4570,8 @@ export class InteractiveMode {
 			requestRender: () => this.ui.requestRender(),
 		});
 		this.planDetailsContainer.addChild(this.planDetails);
+		// Plan Details shows everything the status strip does.
+		this.planStatusContainer.clear();
 		this.fullscreenFlexibleSlot.clear();
 		this.fullscreenFlexibleSlot.addChild(this.planDetails.getFullscreenLayout(), {
 			grow: 1,
@@ -4573,13 +4583,15 @@ export class InteractiveMode {
 		if (!this.ui.retargetFocus(this.getConversationFocusTarget(), this.planDetails)) {
 			this.ui.setFocus(this.planDetails);
 		}
-		this.ui.requestRender();
+		this.updateEditorBorderColor();
 	}
 
 	private closePlanDetails(options: { focusConversation?: boolean } = {}): void {
 		const closingDetails = this.planDetails;
 		this.planDetailsContainer.clear();
 		this.planDetails = undefined;
+		this.planStatusContainer.clear();
+		this.planStatusContainer.addChild(this.planStatus);
 		this.fullscreenFlexibleSlot.clear();
 		this.fullscreenFlexibleSlot.addChild(this.fullscreenTranscript, { grow: 1, shrink: 1, minSize: 0 });
 		if (options.focusConversation !== false && this.activeView === this.conversationView) {
@@ -4589,7 +4601,7 @@ export class InteractiveMode {
 				this.fullscreenTranscript.setPrimary(true);
 				this.ui.setFocus(this.getConversationFocusTarget());
 			}
-			this.ui.requestRender();
+			this.updateEditorBorderColor();
 		}
 	}
 
@@ -4631,7 +4643,7 @@ export class InteractiveMode {
 			this.planInspector.setSelected(true);
 			if (!retargeted) this.ui.setFocus(this.planInspector);
 		}
-		this.ui.requestRender();
+		this.updateEditorBorderColor();
 		return true;
 	}
 
@@ -4646,7 +4658,7 @@ export class InteractiveMode {
 		this.planInspector.setSelected(false);
 		this.fullscreenTranscript.setPrimary(true);
 		this.planPaneReturnFocus = undefined;
-		this.ui.requestRender();
+		this.updateEditorBorderColor();
 		return true;
 	}
 

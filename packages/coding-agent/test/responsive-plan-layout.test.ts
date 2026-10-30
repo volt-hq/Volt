@@ -729,7 +729,7 @@ describe("ResponsivePlanLayoutComponent", () => {
 				actions,
 			});
 			const output = layout.render(129).lines.map(stripAnsi).join("\n");
-			expect(output).toContain("> Execute Plan");
+			expect(output).toContain("[ Execute Plan ]");
 			expect(output).toContain("CONTROL_3");
 			inspector.handleInput("\r");
 			expect(actions).toEqual(["retain_context"]);

@@ -9,6 +9,9 @@
  * plan's numbered checklist; a progress update's checklist opens only the
  * outcomes it touched. The checklist is bounded, so a large plan still
  * presents within the remote bound; the plan inspector shows it whole.
+ *
+ * The host's plan execution message (`volt-plan-execution`) presents the same
+ * way: the approved plan it starts, not the model's instructions and ids.
  */
 
 import { Buffer } from "node:buffer";
@@ -23,7 +26,7 @@ import {
 	type PlanStepStatus,
 	parsePlanningState,
 } from "../planning.ts";
-import { resultText, type ToolPresenter, type ToolPresentInput } from "../ui/presentation.ts";
+import { type MessagePresenter, resultText, type ToolPresenter, type ToolPresentInput } from "../ui/presentation.ts";
 import { type Args, isFailed, isRecord, oneLine, type StyledSpans, stringArg, textNode } from "./present-utils.ts";
 
 export type PlanningToolName = "update_plan" | "submit_plan" | "update_plan_progress" | "request_replan";
@@ -540,6 +543,42 @@ function presentDone(name: PlanningToolName, args: Args, plan: PlanState): DoneP
 			return presentReplan(args, plan);
 	}
 }
+
+/**
+ * The host's plan execution message: the approved plan it starts executing,
+ * as its details hold it. Collapsed, the approval and the plan's size;
+ * expanded, the plan's text and checklist. Its text is the model's
+ * instructions and checkpoint, so a message without a plan in its details
+ * shows only that text's first line.
+ */
+export const presentPlanExecution: MessagePresenter = (message) => {
+	const plan = planningOf(message.details)?.plan;
+	const title: StyledSpans = [{ text: "execute plan", bold: true }];
+	if (!plan) {
+		const text =
+			typeof message.content === "string"
+				? message.content
+				: message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
+		return {
+			title,
+			body: [textNode("text", oneLine(text.split("\n", 1)[0] ?? "") || "Executing the approved plan")],
+		};
+	}
+	if (plan.title) title.push({ text: ` · ${oneLine(plan.title)}`, token: "muted" });
+	const status = textNode("status", [
+		{ text: "APPROVED", bold: true, token: "success" },
+		{
+			text: ` · ${plan.execution?.strategy === "new_session" ? "executing in a new session" : "executing"} · ${planSize(plan)}`,
+			token: "muted",
+		},
+	]);
+	const head = [status, ...planTextNode(plan)];
+	return {
+		title,
+		summary: [status],
+		body: [...head, ...checklistNodes(plan, CHECKLIST_MAX_BYTES - bytesOf(head))],
+	};
+};
 
 /** The presenter of planning tool `name`. */
 export function presentPlanning(name: PlanningToolName): ToolPresenter {

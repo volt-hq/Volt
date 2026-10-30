@@ -91,9 +91,11 @@ afterEach(() => {
 });
 
 describe("Plan TUI components", () => {
-	it("hides an empty Build status and bounds the strip at narrow widths", () => {
+	it("shows the strip only once there is a plan and bounds it at narrow widths", () => {
 		initTheme("dark");
 		expect(new PlanStatusComponent({ mode: "build", plan: null }).render(80).lines).toEqual([]);
+		// The composer's border and label carry Plan mode before a plan exists.
+		expect(new PlanStatusComponent({ mode: "plan", plan: null }).render(80).lines).toEqual([]);
 
 		const active = { ...readyPlan(), phase: "active" as const };
 		const rendered = new PlanStatusComponent({ mode: "build", plan: active }).render(80).lines;
@@ -102,19 +104,22 @@ describe("Plan TUI components", () => {
 		expect(plain(rendered)).toContain("4/12 · 33%");
 	});
 
-	it("keeps a ready plan's approval cue and next-step keys at every width", () => {
+	it("names a ready plan and its size on one row at every width, leaving its keys to the composer", () => {
 		initTheme("dark");
 		setKeybindings(new KeybindingsManager({ "app.plan.togglePane": "alt+x" }));
 		try {
 			const status = new PlanStatusComponent({ mode: "plan", plan: readyPlan() });
 			for (const width of [60, 80, 120]) {
 				const rendered = status.render(width).lines;
-				expect(rendered).toHaveLength(2);
+				expect(rendered).toHaveLength(1);
 				const text = plain(rendered);
-				expect(text).toContain("PLAN READY · APPROVAL NEEDED");
-				expect(text).toMatch(/(alt|option)\+x choose next step {2}enter send feedback/);
-				for (const line of rendered) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+				expect(text).toMatch(/PLAN READY · Native Plan Mode +12 proposed steps$/);
+				expect(text).not.toContain("choose next step");
+				expect(visibleWidth(rendered[0]!)).toBeLessThanOrEqual(width);
 			}
+			// A long title gives way to the size.
+			const long = plain(new PlanStatusComponent({ mode: "plan", plan: longPlan() }).render(60).lines);
+			expect(long).toMatch(/^(◆ )?PLAN READY · A deliberately.*… +3 proposed steps$/);
 		} finally {
 			setKeybindings(new KeybindingsManager());
 		}
@@ -213,15 +218,16 @@ describe("Plan TUI components", () => {
 			},
 		});
 		const before = plain(details.render(80).lines);
-		expect(before).toContain("rows 1–8/");
+		expect(before).toContain("rows 1–10/");
 		expect(before).toContain("first checklist item");
 
 		details.handleInput("\u001b[6~");
 		const after = plain(details.render(80).lines);
 		expect(renders).toBe(1);
-		expect(after).toContain("rows 9–16/");
+		expect(after).toContain("rows 11–20/");
 		expect(after).not.toContain("A summary that occupies");
-		expect(after).toContain("Plan step 6");
+		expect(after).toContain("Plan step 8");
+		expect(after).not.toContain("Plan step 7");
 	});
 
 	it("settles fullscreen plan metadata before display, resize, and body scrolling", async () => {
@@ -240,21 +246,21 @@ describe("Plan TUI components", () => {
 				await terminal.waitForRender();
 				const before = plain(terminal.getViewport());
 				expect(before).toContain("Native Plan Mode");
-				expect(before).toContain("rows 1–7/42");
+				expect(before).toContain("rows 1–9/42");
 				expect(before).toContain("Execute Plan");
 				expect(before).toContain("Plan step 1");
 
 				terminal.resize(80, 20);
 				await terminal.waitForRender();
 				const resized = plain(terminal.getViewport());
-				expect(resized).toContain("rows 1–11/42");
+				expect(resized).toContain("rows 1–13/42");
 				expect(resized).toContain("Native Plan Mode");
 				expect(resized).toContain("Execute Plan");
 
 				terminal.sendInput("\u001b[6~");
 				await terminal.waitForRender();
 				const after = plain(terminal.getViewport());
-				expect(after).toContain("rows 8–18/42");
+				expect(after).toContain("rows 10–22/42");
 				expect(after).toContain("Native Plan Mode");
 				expect(after).toContain("Execute Plan");
 				expect(after).not.toMatch(/Plan step 1\s*$/m);
@@ -264,13 +270,42 @@ describe("Plan TUI components", () => {
 		}
 	});
 
-	it("heads ready actions with the pending decision", () => {
+	it("names the phase above the plan and offers its actions as one row of buttons at every width", () => {
 		initTheme("dark");
 		for (const width of [80, 120]) {
-			const footer = plain(createDetails(readyPlan(), 36).render(width).lines);
-			expect(footer).toMatch(/Plan ready — choose the next step\n.*Execute Plan/);
+			const rendered = plain(createDetails(readyPlan(), 36).render(width).lines);
+			expect(rendered).toContain("READY · 12 proposed steps");
+			expect(rendered).toMatch(/\[ Execute Plan \] +Execute Plan & Clear Context +Change Plan/);
+			expect(rendered).toMatch(
+				/←\/→ choose {2}enter confirm {2}up\/down scroll {2}pageUp\/pageDown page {2}escape back/,
+			);
 		}
-		expect(plain(createDetails(finishedPlan("completed"), 36).render(120).lines)).not.toContain("Plan ready");
+		// Too narrow for one row, the buttons wrap; moving the selection does not reflow them.
+		const narrow = createDetails(readyPlan(), 36);
+		const before = plain(narrow.render(40).lines);
+		expect(before).toMatch(/\[ Execute Plan \]\n +Execute Plan & Clear Context *\n +Change Plan/);
+		narrow.handleInput("\u001b[C");
+		const after = plain(narrow.render(40).lines);
+		expect(after).toMatch(/Execute Plan *\n \[ Execute Plan & Clear Context \]\n +Change Plan/);
+		expect(after.split("\n")).toHaveLength(before.split("\n").length);
+
+		const completed = plain(createDetails(finishedPlan("completed"), 36).render(120).lines);
+		expect(completed).toContain("COMPLETE · 12/12 complete");
+		expect(completed).not.toContain("READY");
+	});
+
+	it("scrolls a ready plan with the vertical keys while the horizontal keys choose its action", () => {
+		initTheme("dark");
+		const actions: PlanDetailsAction[] = [];
+		const details = createDetails(readyPlan(40), 24, (action) => actions.push(action));
+		expect(plain(details.render(80).lines)).toContain("rows 1–");
+		details.handleInput("\u001b[B");
+		details.handleInput("\u001b[B");
+		expect(plain(details.render(80).lines)).toContain("rows 3–");
+		details.handleInput("\u001b[A");
+		expect(plain(details.render(80).lines)).toContain("rows 2–");
+		details.handleInput("\r");
+		expect(actions).toEqual(["retain_context"]);
 	});
 
 	it("hands typed and pasted text to the composer instead of confirming a ready action", () => {
@@ -334,7 +369,7 @@ describe("Plan TUI components", () => {
 			expect(rendered).not.toContain("Execute Plan");
 		}
 		for (const width of [100, 120]) {
-			expect(plain(details.render(width).lines)).toMatch(/escape\/ctrl\+c back$/m);
+			expect(plain(details.render(width).lines)).toMatch(/^ enter close plan {2}up\/down scroll .*escape back$/m);
 		}
 
 		expect(plain(details.render(80).lines)).toContain("rows 1–");
