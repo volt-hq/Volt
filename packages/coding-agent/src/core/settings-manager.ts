@@ -206,6 +206,11 @@ export interface ExtensionEntrySettings {
 	enabled?: boolean;
 	/** Setting values by name, checked against the extension's manifest when read. */
 	settings?: Record<string, string | boolean | number | null>;
+	/**
+	 * The extension's commands, by registered name, that paired remote devices may invoke though the extension did not
+	 * mark them `remoteSafe`. Global settings only: a project's value is ignored.
+	 */
+	remoteSafeCommands?: string[];
 }
 
 export interface RemoteSettings {
@@ -245,6 +250,10 @@ function deepMergeRecord(base: Record<string, unknown>, overrides: Record<string
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively. */
 function deepMergeSettings(base: Settings, overrides: Settings): Settings {
 	return deepMergeRecord(base as Record<string, unknown>, overrides as Record<string, unknown>) as Settings;
+}
+
+function isRemoteSafeCommandList(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every((name) => typeof name === "string");
 }
 
 function normalizeProfileName(profile: string | undefined): string | undefined {
@@ -695,7 +704,7 @@ export class SettingsManager {
 			["global", globalLoad],
 			["project", projectLoad],
 		] as const) {
-			for (const error of SettingsManager.shapeErrors(load.settings)) initialErrors.push({ scope, error });
+			for (const error of SettingsManager.shapeErrors(load.settings, scope)) initialErrors.push({ scope, error });
 		}
 
 		return new SettingsManager(
@@ -747,24 +756,41 @@ export class SettingsManager {
 	}
 
 	/** Why parts of loaded settings are ignored, in the settings themselves and in each of their profiles. */
-	private static shapeErrors(settings: Settings): Error[] {
-		const errors = SettingsManager.shapeErrorsAt(settings, "");
+	private static shapeErrors(settings: Settings, scope: SettingsScope): Error[] {
+		const errors = SettingsManager.shapeErrorsAt(settings, "", scope);
 		if (isSettingsRecord(settings.profiles)) {
 			for (const [name, profile] of Object.entries(settings.profiles)) {
-				if (isSettingsRecord(profile)) errors.push(...SettingsManager.shapeErrorsAt(profile, `profiles.${name}.`));
+				if (isSettingsRecord(profile))
+					errors.push(...SettingsManager.shapeErrorsAt(profile, `profiles.${name}.`, scope));
 			}
 		}
 		return errors;
 	}
 
 	/** Shape errors of one settings object or profile; `path` prefixes the setting names in messages. */
-	private static shapeErrorsAt(settings: Pick<Settings, "extensions" | "promptCache">, path: string): Error[] {
+	private static shapeErrorsAt(
+		settings: Pick<Settings, "extensions" | "promptCache">,
+		path: string,
+		scope: SettingsScope,
+	): Error[] {
 		const errors: Error[] = [];
 		// `extensions` holds a list of paths, which `extensionPaths` now holds.
 		if (Array.isArray(settings.extensions)) {
 			errors.push(
 				new Error(`"${path}extensions" holds a list of paths and is ignored; rename it to "${path}extensionPaths"`),
 			);
+		} else if (isSettingsRecord(settings.extensions)) {
+			for (const [id, entry] of Object.entries(settings.extensions)) {
+				const commands: unknown = isSettingsRecord(entry) ? entry.remoteSafeCommands : undefined;
+				// A profile clears an inherited value with `null`.
+				if (commands === undefined || commands === null) continue;
+				const setting = `"${path}extensions.${id}.remoteSafeCommands"`;
+				if (scope === "project") {
+					errors.push(new Error(`${setting} is ignored in project settings; set it in the global settings`));
+				} else if (!isRemoteSafeCommandList(commands)) {
+					errors.push(new Error(`${setting} must be a list of command names; it is ignored`));
+				}
+			}
 		}
 		const retention: unknown = settings.promptCache?.retention;
 		if (retention !== undefined && retention !== "short" && retention !== "long") {
@@ -894,7 +920,8 @@ export class SettingsManager {
 		if (projectLoad.error) {
 			this.recordError("project", projectLoad.error);
 		}
-		for (const error of SettingsManager.shapeErrors(projectLoad.settings)) this.recordError("project", error);
+		for (const error of SettingsManager.shapeErrors(projectLoad.settings, "project"))
+			this.recordError("project", error);
 		this.mergeEffectiveSettings();
 	}
 
@@ -931,7 +958,7 @@ export class SettingsManager {
 			["global", this.globalSettings],
 			["project", this.projectSettings],
 		] as const) {
-			for (const error of SettingsManager.shapeErrors(settings)) this.recordError(scope, error);
+			for (const error of SettingsManager.shapeErrors(settings, scope)) this.recordError(scope, error);
 		}
 
 		this.mergeEffectiveSettings();
@@ -1763,6 +1790,47 @@ export class SettingsManager {
 		};
 		if (scope === "project") this.updateProjectSettings("extensions", update, id);
 		else this.updateGlobalSettings("extensions", update, id);
+	}
+
+	/**
+	 * The commands of the extension `id`, by registered name, that the user lets paired remote devices invoke though the
+	 * extension did not mark them `remoteSafe`. Only the global settings (with the active profile's) grant this: a
+	 * project's settings cannot widen what a remote device may run. An invalid list grants nothing.
+	 */
+	getExtensionRemoteSafeCommands(id: string): string[] {
+		const extensions = this.globalEffectiveSettings.extensions;
+		if (!isSettingsRecord(extensions) || !Object.hasOwn(extensions, id)) return [];
+		const entry: unknown = extensions[id];
+		const commands: unknown = isSettingsRecord(entry) ? entry.remoteSafeCommands : undefined;
+		return isRemoteSafeCommandList(commands) ? [...commands] : [];
+	}
+
+	/**
+	 * Replace the commands of the extension `id` that paired remote devices may invoke though it did not mark them
+	 * `remoteSafe`, in the global settings (the active profile's, when one is). Its other settings are kept. Not
+	 * written while the global settings file failed to load.
+	 */
+	setExtensionRemoteSafeCommands(id: string, commands: readonly string[]): void {
+		if (this.globalSettingsLoadError) {
+			throw new Error("Host global settings could not be loaded; repair them and reload");
+		}
+		const update = (settings: Settings): void => {
+			if (Array.isArray(settings.extensions)) {
+				throw new Error('"extensions" holds a list of paths; rename it to "extensionPaths"');
+			}
+			const extensions: Record<string, ExtensionEntrySettings> = {};
+			for (const [key, entry] of Object.entries(isSettingsRecord(settings.extensions) ? settings.extensions : {})) {
+				defineOwnEnumerableProperty(extensions, key, entry);
+			}
+			const current = Object.hasOwn(extensions, id) ? extensions[id] : undefined;
+			const entry: ExtensionEntrySettings = isSettingsRecord(current) ? { ...current } : {};
+			// A profile overlays the base settings, and a list replaces the base list: an empty one there allows none.
+			if (commands.length > 0 || this.activeProfile) entry.remoteSafeCommands = [...new Set(commands)];
+			else delete entry.remoteSafeCommands;
+			defineOwnEnumerableProperty(extensions, id, Object.keys(entry).length > 0 ? entry : undefined);
+			settings.extensions = extensions;
+		};
+		this.updateGlobalSettings("extensions", update, id);
 	}
 
 	/** Changes whenever any extension's stored settings (or `enabled`) change in effect. */

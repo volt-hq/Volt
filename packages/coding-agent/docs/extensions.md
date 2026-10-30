@@ -1823,6 +1823,8 @@ volt.registerCommand("status", {
 
 `remoteSafe: true` lets paired remote clients invoke the command's intent and send its slash text; it is a security classification, not a sandbox. The handler still runs on the host with the extension's full process permissions. Do not mark commands remote-safe if remote-controlled arguments can read secrets, mutate host configuration, execute arbitrary commands, or trigger UI flows that the remote client cannot safely answer. The default is `false`/omitted.
 
+The user can also make a command remote-safe that its extension did not mark, in `/extensions` ("Remote commands") or the global settings' `extensions.<id>.remoteSafeCommands` (see [settings.md](settings.md#extensions)). Its handler still sees `ctx.invokedBy` as `"remote"` for a paired device; a command that must never run remotely refuses it there.
+
 If multiple extensions register the same command name, volt keeps them all: the first in load order is `/review`, and each later one is `/<id>:review` under its extension's manifest id.
 
 ```typescript
@@ -1858,7 +1860,7 @@ The intent is a presentation layer over the command handler:
 - The command still runs in the host and may finish without starting an agent turn.
 - `ctx.ui` dialogs reach clients as host requests on the protocol's live lane (see [Clients](#clients)).
 - Descriptors expose only bounded labels and source scope/origin metadata. They do not expose extension source paths or raw `sourceInfo`.
-- Paired remote clients see only commands registered with `remoteSafe: true`.
+- Paired remote clients see only commands registered with `remoteSafe: true` or listed in the user's `extensions.<id>.remoteSafeCommands`.
 - Project-local extension commands appear only after the same project-trust/resource-loading path that exposes them locally.
 
 For an operation with typed input that UI actions, forms, and shortcuts invoke, register an intent with [`volt.registerIntent()`](#voltregisterintentname-options).
@@ -2766,7 +2768,7 @@ How each client renders the data:
 
 - **TUI**: terminal components in the active theme's colors, in both screen modes. Status items show in the footer; panels above or below the editor, and `sidebar` panels in fullscreen mode's sidebar (above the editor in regular mode); dialogs and forms in place of the editor; tool calls as cards and custom messages under their label. A panel shows at most 12 rows, its title included, and a terminal node in a panel its newest 12 lines. The TUI is a protocol client of its host on the local profile: it renders the presentations the host's presenters returned, as RPC clients receive them.
 - **RPC, JSON, and SDK clients** receive the data as live-lane items and in projected entries ([rpc.md](rpc.md#extension-ui)); [rpc-extension-ui.ts](../examples/rpc-extension-ui.ts) renders it as plain lines.
-- **Paired phones** render the same `UiNode` data. On the remote profile a presentation holds at most 16 KB, without image data, host paths are redacted from every frame, and a live work value holds at most 8 KB (its detail goes first). A phone invokes an extension's command, intent, or completion provider only when the extension opted it in (`remoteSafe: true` or `remote: true`) and the device's grant allows it.
+- **Paired phones** render the same `UiNode` data. On the remote profile a presentation holds at most 16 KB, without image data, host paths are redacted from every frame, and a live work value holds at most 8 KB (its detail goes first). A phone invokes an extension's command, intent, or completion provider only when the extension opted it in (`remoteSafe: true` or `remote: true`), or the user's global settings list the command in `extensions.<id>.remoteSafeCommands`, and the device's grant allows it.
 - **HTML export** (`/export`) renders presentations as HTML.
 
 ### Styled Text

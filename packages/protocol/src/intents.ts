@@ -29,6 +29,7 @@ import { LogEntryIdSchema, LogSessionIdSchema } from "./entries.ts";
 import {
 	EXTENSION_SETTING_NAME_PATTERN,
 	EXTENSION_SETTINGS_MAX_SERIALIZED_BYTES,
+	ExtensionCommandNameSchema,
 	ExtensionIdSchema,
 	ExtensionSettingsScopeSchema,
 	ExtensionSettingsValuesSchema,
@@ -691,6 +692,16 @@ export const INTENT_SCHEMAS = {
 	set_extension_settings: {
 		input: Type.Object(
 			{ id: ExtensionIdSchema, scope: ExtensionSettingsScopeSchema, values: ExtensionSettingsValuesSchema },
+			closed,
+		),
+	},
+	/**
+	 * Replace which of an extension's commands paired remote devices may invoke though it does not mark them
+	 * remote-safe, in the user's global settings; local clients only.
+	 */
+	set_extension_remote_commands: {
+		input: Type.Object(
+			{ id: ExtensionIdSchema, commands: Type.Array(ExtensionCommandNameSchema, { maxItems: 200 }) },
 			closed,
 		),
 	},

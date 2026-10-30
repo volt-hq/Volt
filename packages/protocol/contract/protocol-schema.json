@@ -241,6 +241,7 @@
 				"review_reset_discussion",
 				"set_extension_enabled",
 				"set_extension_settings",
+				"set_extension_remote_commands",
 				"set_default_model",
 				"set_default_thinking_level",
 				"set_steering_mode",
@@ -4873,6 +4874,19 @@
 			"properties": {},
 			"additionalProperties": false
 		},
+		"ExtensionCommandName": {
+			"type": "string",
+			"pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+			"x-volt-expected": "be a command name: a letter or digit, then at most 63 letters, digits, `_`, and `-`"
+		},
+		"ExtensionCommandRemoteAccess": {
+			"type": "string",
+			"enum": [
+				"extension",
+				"user",
+				"local"
+			]
+		},
 		"ExtensionDescription": {
 			"type": "string",
 			"maxLength": 240,
@@ -4962,6 +4976,26 @@
 			},
 			"maxItems": 5,
 			"uniqueItems": true
+		},
+		"ExtensionRemoteCommand": {
+			"type": "object",
+			"required": [
+				"name",
+				"access"
+			],
+			"properties": {
+				"name": {
+					"$ref": "#/$defs/ExtensionCommandName"
+				},
+				"description": {
+					"type": "string",
+					"maxLength": 240
+				},
+				"access": {
+					"$ref": "#/$defs/ExtensionCommandRemoteAccess"
+				}
+			},
+			"additionalProperties": false
 		},
 		"ExtensionResource": {
 			"type": "object",
@@ -5667,6 +5701,9 @@
 				},
 				{
 					"$ref": "#/$defs/Frame.intent.set_extension_settings"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.set_extension_remote_commands"
 				},
 				{
 					"$ref": "#/$defs/Frame.intent.set_default_model"
@@ -7470,6 +7507,35 @@
 			},
 			"additionalProperties": false
 		},
+		"Frame.intent.set_extension_remote_commands": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "set_extension_remote_commands"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.set_extension_remote_commands"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Frame.intent.set_extension_settings": {
 			"type": "object",
 			"required": [
@@ -8091,6 +8157,9 @@
 					"$ref": "#/$defs/Frame.query.extension_settings"
 				},
 				{
+					"$ref": "#/$defs/Frame.query.extension_remote_commands"
+				},
+				{
 					"$ref": "#/$defs/Frame.query.host_status"
 				},
 				{
@@ -8396,6 +8465,37 @@
 				},
 				"params": {
 					"$ref": "#/$defs/QueryParams.extension_inventory"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.extension_remote_commands": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query",
+				"params"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "extension_remote_commands"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.extension_remote_commands"
 				}
 			},
 			"additionalProperties": false
@@ -11676,6 +11776,26 @@
 				},
 				"scope": {
 					"$ref": "#/$defs/ExtensionSettingsScope"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.set_extension_remote_commands": {
+			"type": "object",
+			"required": [
+				"id",
+				"commands"
+			],
+			"properties": {
+				"id": {
+					"$ref": "#/$defs/ExtensionId"
+				},
+				"commands": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ExtensionCommandName"
+					},
+					"maxItems": 200
 				}
 			},
 			"additionalProperties": false
@@ -16963,6 +17083,7 @@
 				"subscription_usage",
 				"extensions",
 				"extension_settings",
+				"extension_remote_commands",
 				"host_status",
 				"web_search_status",
 				"subagent_definitions",
@@ -17055,6 +17176,18 @@
 			"properties": {
 				"worktreeId": {
 					"$ref": "#/$defs/RemoteHandshake.WorktreeId"
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.extension_remote_commands": {
+			"type": "object",
+			"required": [
+				"id"
+			],
+			"properties": {
+				"id": {
+					"$ref": "#/$defs/ExtensionId"
 				}
 			},
 			"additionalProperties": false
@@ -17615,6 +17748,21 @@
 						"$ref": "#/$defs/RpcReviewEngine"
 					},
 					"maxItems": 128
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryResult.extension_remote_commands": {
+			"type": "object",
+			"required": [
+				"commands"
+			],
+			"properties": {
+				"commands": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ExtensionRemoteCommand"
+					}
 				}
 			},
 			"additionalProperties": false
