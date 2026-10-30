@@ -127,8 +127,8 @@ describe("withFileMutationQueue", () => {
 			await releaseFirst.promise;
 		});
 		await firstStarted.promise;
-		const disjoint = withFileMutationQueues(["/tmp/queue-e", "/tmp/queue-f"], async () => "done");
-		expect(await resolvesWithin(disjoint, 50)).toBe(true);
+		// `first` holds its keys until released, so a disjoint set that waited for it would never settle.
+		await expect(withFileMutationQueues(["/tmp/queue-e", "/tmp/queue-f"], async () => "done")).resolves.toBe("done");
 		releaseFirst.resolve();
 		await first;
 	});
@@ -207,8 +207,8 @@ describe("withFileMutationQueue", () => {
 		});
 		await firstStarted.promise;
 
-		const sibling = withFileMutationQueue(secondSibling, async () => "done");
-		expect(await resolvesWithin(sibling, 50)).toBe(true);
+		// `first` holds its keys until released, so a sibling that waited for it would never settle.
+		await expect(withFileMutationQueue(secondSibling, async () => "done")).resolves.toBe("done");
 		releaseFirst.resolve();
 		await first;
 	});
