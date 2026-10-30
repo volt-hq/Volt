@@ -24,7 +24,11 @@ import {
 	switchSessionIntent,
 	withdrawQueuedIntent,
 } from "./conversation.ts";
-import { setExtensionEnabledIntent, setExtensionSettingsIntent } from "./extensions.ts";
+import {
+	setExtensionEnabledIntent,
+	setExtensionRemoteCommandsIntent,
+	setExtensionSettingsIntent,
+} from "./extensions.ts";
 import {
 	createWorktreeIntent,
 	mcpAuthCancelIntent,
@@ -134,6 +138,7 @@ export function createBuiltinIntents() {
 		review_reset_discussion: reviewResetDiscussionIntent,
 		set_extension_enabled: setExtensionEnabledIntent,
 		set_extension_settings: setExtensionSettingsIntent,
+		set_extension_remote_commands: setExtensionRemoteCommandsIntent,
 		set_default_model: setDefaultModelIntent,
 		set_default_thinking_level: setDefaultThinkingLevelIntent,
 		set_steering_mode: setSteeringModeIntent,

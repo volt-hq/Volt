@@ -4,12 +4,15 @@
  * (`extensions.<id>.remoteSafeCommands`): the device sees each listed command
  * as an intent and invokes it by intent or slash text, where the handler sees
  * `ctx.invokedBy` as `"remote"`. Commands the settings do not list stay local.
+ * Only a local client reads and changes the list (`extension_remote_commands`,
+ * `set_extension_remote_commands`); a paired device can do neither.
  */
 
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type HostFrame, type IntentDescriptor, REMOTE_CAPABILITIES, type RemoteGrant } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createLoopbackClient } from "../../src/client/protocol-client.ts";
 import type { CommandInvoker } from "../../src/core/extensions/index.ts";
 import { serveIrohRemoteConnection } from "../../src/core/remote/iroh/connection.ts";
 import type { Settings } from "../../src/core/settings-manager.ts";
@@ -38,9 +41,10 @@ describe("extensions.<id>.remoteSafeCommands", () => {
 			extensionMode: "rpc",
 			globalSettings,
 			extension: (volt) => {
-				for (const command of ["allowed", "local"]) {
+				for (const command of ["allowed", "local", "declared"]) {
 					volt.registerCommand(command, {
 						description: `The ${command} command`,
+						...(command === "declared" ? { remoteSafe: true } : {}),
 						handler: async (args, ctx) => {
 							seen.push({ command, args, invokedBy: ctx.invokedBy });
 						},
@@ -118,5 +122,49 @@ describe("extensions.<id>.remoteSafeCommands", () => {
 			from,
 		});
 		expect((await remoteIntents(phone, conversation.id)).get(ALLOWED)).toMatchObject({ remote: "safe" });
+	});
+
+	it("lets a local client read and replace the list, which the device then follows", async () => {
+		const { harness, conversation, phone } = await setup(allowing(["local"]));
+		const local = await createLoopbackClient(harness.host, conversation, { anchor: false });
+		cleanups.push(() => local.stop());
+
+		const listed = await local.query("extension_remote_commands", { id: "test-extension" });
+		expect(listed.commands).toEqual([
+			{ name: "allowed", description: "The allowed command", access: "local" },
+			{ name: "local", description: "The local command", access: "user" },
+			{ name: "declared", description: "The declared command", access: "extension" },
+		]);
+
+		const from = phone.frames.length;
+		await local.intent("set_extension_remote_commands", { id: "test-extension", commands: ["allowed"] });
+		expect(JSON.parse(readFileSync(join(harness.tempDir, "settings.json"), "utf-8")).extensions).toEqual(
+			allowing(["allowed"]).extensions,
+		);
+		await phone.waitFor((frame): frame is HostFrame => frame.type === "changed" && frame.catalog === "intents", {
+			from,
+		});
+		const intents = await remoteIntents(phone, conversation.id);
+		expect(intents.has(ALLOWED)).toBe(true);
+		expect(intents.has(LOCAL)).toBe(false);
+
+		await local.intent("set_extension_remote_commands", { id: "test-extension", commands: [] });
+		expect(JSON.parse(readFileSync(join(harness.tempDir, "settings.json"), "utf-8")).extensions).toEqual({});
+		await expect(
+			local.intent("set_extension_remote_commands", { id: "missing", commands: ["allowed"] }),
+		).rejects.toThrow(/No extension "missing"/);
+	});
+
+	it("neither shows nor changes the list for a paired device", async () => {
+		const { harness, conversation, phone } = await setup({});
+
+		await expect(
+			phone.query("extension_remote_commands", { id: "test-extension" }, conversation.id),
+		).resolves.toMatchObject({ type: "query_error", reason: { code: "not_allowed" } });
+		await expect(
+			phone.intent("set_extension_remote_commands", { id: "test-extension", commands: ["allowed", "local"] }),
+		).resolves.toMatchObject({ type: "rejected", reason: { code: "not_allowed" } });
+		expect(conversation.session.settingsManager.getExtensionRemoteSafeCommands("test-extension")).toEqual([]);
+		expect(JSON.parse(readFileSync(join(harness.tempDir, "settings.json"), "utf-8")).extensions).toBeUndefined();
 	});
 });

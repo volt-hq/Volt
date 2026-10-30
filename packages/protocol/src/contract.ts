@@ -100,6 +100,8 @@ import {
 } from "./entries.ts";
 import {
 	EXTENSION_LIMITS,
+	ExtensionCommandNameSchema,
+	ExtensionCommandRemoteAccessSchema,
 	ExtensionDescriptionSchema,
 	ExtensionDisplayNameSchema,
 	ExtensionEntrySchema,
@@ -107,6 +109,7 @@ import {
 	ExtensionManifestSchema,
 	ExtensionPermissionSchema,
 	ExtensionPermissionsSchema,
+	ExtensionRemoteCommandSchema,
 	ExtensionSettingSchema,
 	ExtensionSettingsSchema,
 	ExtensionSettingsScopeSchema,
@@ -633,6 +636,9 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	ExtensionSourceScope: ExtensionSourceScopeSchema,
 	ExtensionSummary: ExtensionSummarySchema,
 	ExtensionSettingsView: ExtensionSettingsViewSchema,
+	ExtensionCommandName: ExtensionCommandNameSchema,
+	ExtensionCommandRemoteAccess: ExtensionCommandRemoteAccessSchema,
+	ExtensionRemoteCommand: ExtensionRemoteCommandSchema,
 	ToolPresentation: ToolPresentationSchema,
 	ToolPresentationPatch: ToolPresentationPatchSchema,
 	MessagePresentation: MessagePresentationSchema,

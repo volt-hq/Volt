@@ -12,7 +12,12 @@ import { type Static, type TObject, type TSchema, Type } from "typebox";
 import { RpcAgentOptionsSchema } from "./agent-options.ts";
 import { LogEntryIdSchema, LogEntryOrdinalSchema, LogSessionIdSchema } from "./entries.ts";
 import { RpcExtensionInventoryParamsSchema, RpcExtensionInventorySchema } from "./extension-inventory.ts";
-import { ExtensionIdSchema, ExtensionSettingsViewSchema, ExtensionSummarySchema } from "./extensions.ts";
+import {
+	ExtensionIdSchema,
+	ExtensionRemoteCommandSchema,
+	ExtensionSettingsViewSchema,
+	ExtensionSummarySchema,
+} from "./extensions.ts";
 import { stringEnum } from "./helpers.ts";
 import {
 	AuthProviderSchema,
@@ -302,6 +307,11 @@ export const QUERY_SCHEMAS = {
 	},
 	/** One extension's settings form and stored values; refetched on `changed{settings}`. */
 	extension_settings: { params: Type.Object({ id: ExtensionIdSchema }, closed), result: ExtensionSettingsViewSchema },
+	/** The commands a running extension registers, and who lets paired remote devices invoke each; local clients only. */
+	extension_remote_commands: {
+		params: Type.Object({ id: ExtensionIdSchema }, closed),
+		result: Type.Object({ commands: Type.Array(ExtensionRemoteCommandSchema) }, closed),
+	},
 	/** The host's keep-awake state and, when the host shares it, its theme colors; refetched on `changed{host}`. */
 	host_status: {
 		params: EmptyInputSchema,

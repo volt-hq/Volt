@@ -1823,7 +1823,7 @@ volt.registerCommand("status", {
 
 `remoteSafe: true` lets paired remote clients invoke the command's intent and send its slash text; it is a security classification, not a sandbox. The handler still runs on the host with the extension's full process permissions. Do not mark commands remote-safe if remote-controlled arguments can read secrets, mutate host configuration, execute arbitrary commands, or trigger UI flows that the remote client cannot safely answer. The default is `false`/omitted.
 
-The user can also make a command remote-safe that its extension did not mark, by listing it in the global settings' `extensions.<id>.remoteSafeCommands` (see [settings.md](settings.md#extensions)). Its handler still sees `ctx.invokedBy` as `"remote"` for a paired device; a command that must never run remotely refuses it there.
+The user can also make a command remote-safe that its extension did not mark, in `/extensions` ("Remote commands") or the global settings' `extensions.<id>.remoteSafeCommands` (see [settings.md](settings.md#extensions)). Its handler still sees `ctx.invokedBy` as `"remote"` for a paired device; a command that must never run remotely refuses it there.
 
 If multiple extensions register the same command name, volt keeps them all: the first in load order is `/review`, and each later one is `/<id>:review` under its extension's manifest id.
 

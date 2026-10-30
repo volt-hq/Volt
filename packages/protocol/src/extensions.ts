@@ -261,3 +261,33 @@ export const ExtensionSettingsViewSchema = Type.Object(
 	closed,
 );
 export type ExtensionSettingsView = Static<typeof ExtensionSettingsViewSchema>;
+
+// ============================================================================
+// Remote command access
+// ============================================================================
+
+/** A command an extension registers, by name: the slash-command token without `/`. */
+export const ExtensionCommandNameSchema = Type.String({
+	pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+	"x-volt-expected": "be a command name: a letter or digit, then at most 63 letters, digits, `_`, and `-`",
+});
+
+/**
+ * Who lets paired remote devices invoke an extension command: the extension,
+ * which marks it remote-safe; the user, whose global settings list it
+ * (`extensions.<id>.remoteSafeCommands`); or no one, so it stays local.
+ */
+export const ExtensionCommandRemoteAccessSchema = stringEnum(["extension", "user", "local"]);
+export type ExtensionCommandRemoteAccess = Static<typeof ExtensionCommandRemoteAccessSchema>;
+
+/** One command of an extension, as the `extension_remote_commands` query lists it. */
+export const ExtensionRemoteCommandSchema = Type.Object(
+	{
+		name: ExtensionCommandNameSchema,
+		/** Bounded, with path-like text redacted. */
+		description: Type.Optional(Type.String({ maxLength: EXTENSION_DESCRIPTION_MAX_CHARS })),
+		access: ExtensionCommandRemoteAccessSchema,
+	},
+	closed,
+);
+export type ExtensionRemoteCommand = Static<typeof ExtensionRemoteCommandSchema>;

@@ -27,7 +27,12 @@ import { runReviewDiscussion } from "../intents/review.ts";
 import { intentStateOf } from "../intents/state.ts";
 import { type IntentContext, missingCapability } from "../intents/types.ts";
 import { conversationInfoQuery, resourcesQuery, toolsQuery } from "./conversation.ts";
-import { editorCompletionsQuery, extensionSettingsQuery, extensionsQuery } from "./extensions.ts";
+import {
+	editorCompletionsQuery,
+	extensionRemoteCommandsQuery,
+	extensionSettingsQuery,
+	extensionsQuery,
+} from "./extensions.ts";
 import { contentQuery, historyQuery } from "./log.ts";
 import { defineQuery, type QueryDefinition, QueryRejectedError } from "./types.ts";
 
@@ -656,6 +661,7 @@ export const BUILTIN_QUERIES = {
 	subscription_usage: subscriptionUsageQuery,
 	extensions: extensionsQuery,
 	extension_settings: extensionSettingsQuery,
+	extension_remote_commands: extensionRemoteCommandsQuery,
 	host_status: hostStatusQuery,
 	web_search_status: webSearchStatusQuery,
 	subagent_definitions: subagentDefinitionsQuery,

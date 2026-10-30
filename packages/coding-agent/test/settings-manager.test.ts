@@ -1183,6 +1183,52 @@ describe("SettingsManager", () => {
 			]);
 		});
 
+		it("replaces the global list, keeping the entry's other keys, and removes an empty one", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(
+				settingsPath,
+				JSON.stringify({ extensions: { goal: { enabled: true, remoteSafeCommands: ["goal"] }, other: {} } }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.setExtensionRemoteSafeCommands("goal", ["goal-pause", "goal-status", "goal-pause"]);
+			await manager.flush();
+			expect(JSON.parse(readFileSync(settingsPath, "utf-8")).extensions).toEqual({
+				goal: { enabled: true, remoteSafeCommands: ["goal-pause", "goal-status"] },
+				other: {},
+			});
+			expect(manager.getExtensionRemoteSafeCommands("goal")).toEqual(["goal-pause", "goal-status"]);
+
+			manager.setExtensionRemoteSafeCommands("goal", []);
+			await manager.flush();
+			expect(JSON.parse(readFileSync(settingsPath, "utf-8")).extensions).toEqual({
+				goal: { enabled: true },
+				other: {},
+			});
+			expect(manager.getExtensionRemoteSafeCommands("goal")).toEqual([]);
+		});
+
+		it("writes the active profile's list, where an empty one overrides the base list", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(
+				settingsPath,
+				JSON.stringify({
+					extensions: { goal: { remoteSafeCommands: ["goal-pause"] } },
+					defaultProfile: "desk",
+					profiles: { desk: {} },
+				}),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.setExtensionRemoteSafeCommands("goal", []);
+			await manager.flush();
+
+			const saved = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(saved.extensions).toEqual({ goal: { remoteSafeCommands: ["goal-pause"] } });
+			expect(saved.profiles.desk).toEqual({ extensions: { goal: { remoteSafeCommands: [] } } });
+			expect(manager.getExtensionRemoteSafeCommands("goal")).toEqual([]);
+		});
+
 		it("is kept when the extension's settings or enablement are written", async () => {
 			const settingsPath = join(agentDir, "settings.json");
 			writeFileSync(settingsPath, JSON.stringify({ extensions: { goal: { remoteSafeCommands: ["goal-pause"] } } }));

@@ -14,6 +14,11 @@
  * an update carries them. Settings name an id, not the code it runs, so each
  * conversation runs an extension enabled at runtime only once its own
  * declaration is acknowledged (core/extensions/registry.ts).
+ *
+ * `set_extension_remote_commands` stores which of an extension's commands
+ * paired remote devices may invoke though it does not mark them remote-safe.
+ * Only the user's global settings grant this, and only a local client may
+ * change it: a paired device cannot widen what it may run.
  */
 
 import { ExtensionPermissionStore, permissionRequestLines, permissionSubject } from "../../extensions/permissions.ts";
@@ -120,6 +125,32 @@ export const setExtensionEnabledIntent = defineIntent({
 		await registry.reconcile();
 		// Enabling a failed extension tries it again.
 		if (input.enabled) await registry.retry(input.id);
+	},
+});
+
+export const setExtensionRemoteCommandsIntent = defineIntent({
+	name: "set_extension_remote_commands",
+	label: "Remote extension commands",
+	description: "Choose which of an extension's commands paired devices may run",
+	category: "extension",
+	scope: "conversation",
+	fence: "none",
+	remote: "unsafe",
+	requires: hostManage,
+	whileBusy: "run",
+	presentation: { kind: "hidden" },
+	async run(ctx, input) {
+		const { session } = targetOf(ctx);
+		if (!session.extensionRegistry.get(input.id)) {
+			throw new IntentRejectedError("invalid_input", `No extension "${input.id}" in this conversation`);
+		}
+		ctx.assertCurrent?.();
+		try {
+			session.settingsManager.setExtensionRemoteSafeCommands(input.id, input.commands);
+			await session.settingsManager.flush();
+		} catch (error) {
+			throw new IntentRejectedError("failed", error instanceof Error ? error.message : String(error));
+		}
 	},
 });
 

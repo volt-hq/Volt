@@ -1805,6 +1805,34 @@ export class SettingsManager {
 		return isRemoteSafeCommandList(commands) ? [...commands] : [];
 	}
 
+	/**
+	 * Replace the commands of the extension `id` that paired remote devices may invoke though it did not mark them
+	 * `remoteSafe`, in the global settings (the active profile's, when one is). Its other settings are kept. Not
+	 * written while the global settings file failed to load.
+	 */
+	setExtensionRemoteSafeCommands(id: string, commands: readonly string[]): void {
+		if (this.globalSettingsLoadError) {
+			throw new Error("Host global settings could not be loaded; repair them and reload");
+		}
+		const update = (settings: Settings): void => {
+			if (Array.isArray(settings.extensions)) {
+				throw new Error('"extensions" holds a list of paths; rename it to "extensionPaths"');
+			}
+			const extensions: Record<string, ExtensionEntrySettings> = {};
+			for (const [key, entry] of Object.entries(isSettingsRecord(settings.extensions) ? settings.extensions : {})) {
+				defineOwnEnumerableProperty(extensions, key, entry);
+			}
+			const current = Object.hasOwn(extensions, id) ? extensions[id] : undefined;
+			const entry: ExtensionEntrySettings = isSettingsRecord(current) ? { ...current } : {};
+			// A profile overlays the base settings, and a list replaces the base list: an empty one there allows none.
+			if (commands.length > 0 || this.activeProfile) entry.remoteSafeCommands = [...new Set(commands)];
+			else delete entry.remoteSafeCommands;
+			defineOwnEnumerableProperty(extensions, id, Object.keys(entry).length > 0 ? entry : undefined);
+			settings.extensions = extensions;
+		};
+		this.updateGlobalSettings("extensions", update, id);
+	}
+
 	/** Changes whenever any extension's stored settings (or `enabled`) change in effect. */
 	getExtensionSettingsRevision(): number {
 		return this.extensionSettingsRevision;
