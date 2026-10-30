@@ -471,6 +471,19 @@ describe.runIf(nativeIrohAvailable)("phones in conversation workers", () => {
 				type: "ok",
 			},
 		);
+		// It reads the linked pull request only of a conversation it hosts; a control client reads none.
+		expect(await client.request({ type: "worker_change_pull_request", sessionId: ref.sessionId })).toMatchObject({
+			type: "error",
+			code: "not_hosted",
+		});
+		expect(await client.request({ type: "worker_change_pull_request", sessionId: otherRef.sessionId })).toEqual({
+			type: "worker_change_pull_request_result",
+			id: expect.any(String),
+		});
+		expect(await tui.request({ type: "worker_change_pull_request", sessionId: otherRef.sessionId })).toMatchObject({
+			type: "error",
+			code: "forbidden",
+		});
 		// It restores and pins only a managed checkout of a session it hosts, and releases only its own pins.
 		expect(
 			await client.request({ type: "worker_worktree_restore", path: harness.workspacePath, sessionRef: ref }),

@@ -2009,6 +2009,9 @@
 					"$ref": "#/$defs/Control.Request.worker_authority"
 				},
 				{
+					"$ref": "#/$defs/Control.Request.worker_change_pull_request"
+				},
+				{
 					"$ref": "#/$defs/Control.Request.worker_stop_result"
 				},
 				{
@@ -2548,6 +2551,29 @@
 				},
 				"relayId": {
 					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_change_pull_request": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"sessionId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_change_pull_request"
+				},
+				"id": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
 				}
 			},
 			"additionalProperties": false
@@ -3377,6 +3403,9 @@
 					"$ref": "#/$defs/Control.Response.worker_authority_result"
 				},
 				{
+					"$ref": "#/$defs/Control.Response.worker_change_pull_request_result"
+				},
+				{
 					"$ref": "#/$defs/Control.Response.worker_exit_result"
 				},
 				{
@@ -3698,6 +3727,76 @@
 				},
 				"authority": {
 					"$ref": "#/$defs/Control.WorkerRelayAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.worker_change_pull_request_result": {
+			"type": "object",
+			"required": [
+				"type",
+				"id"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_change_pull_request_result"
+				},
+				"id": {
+					"type": "string"
+				},
+				"pullRequest": {
+					"type": "object",
+					"required": [
+						"provider",
+						"repository",
+						"number",
+						"title",
+						"branch"
+					],
+					"properties": {
+						"provider": {
+							"type": "string",
+							"maxLength": 64,
+							"pattern": "^[^\\u0000\\r\\n]{1,64}$"
+						},
+						"repository": {
+							"type": "object",
+							"required": [
+								"host",
+								"path"
+							],
+							"properties": {
+								"host": {
+									"type": "string",
+									"maxLength": 253,
+									"pattern": "^[^\\u0000\\r\\n]{1,253}$"
+								},
+								"path": {
+									"type": "string",
+									"maxLength": 256,
+									"pattern": "^[^\\u0000\\r\\n]{1,256}$"
+								}
+							},
+							"additionalProperties": false
+						},
+						"number": {
+							"type": "integer",
+							"minimum": 1,
+							"maximum": 9007199254740991
+						},
+						"title": {
+							"type": "string",
+							"maxLength": 512,
+							"pattern": "^[\\s\\S]{0,512}$"
+						},
+						"branch": {
+							"type": "string",
+							"maxLength": 1024,
+							"pattern": "^[^\\u0000\\r\\n]{1,1024}$"
+						}
+					},
+					"additionalProperties": false
 				}
 			},
 			"additionalProperties": false

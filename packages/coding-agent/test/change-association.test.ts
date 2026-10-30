@@ -677,6 +677,41 @@ describe("ChangeStore", () => {
 });
 
 describe("ChangeAssociationService", () => {
+	it("answers a session's linked pull request only while it is on that change's branch", async () => {
+		const store = new ChangeStore({ path: statePath("changes-linked-pull-request") });
+		await store.load();
+		const provider = new FakeDiscoveryProvider();
+		const service = new ChangeAssociationService({ store, discoveryProvider: provider });
+
+		await service.observe(observation({ branch: "feature/unlinked" }));
+		expect(service.getChangeContext("volt", 1, "session-a")).toMatchObject({ resolutionState: "none" });
+		expect(service.getLinkedPullRequest("volt", 1, "session-a")).toBeUndefined();
+
+		provider.outcome = resolved(42);
+		await service.observe(observation({ sessionId: "session-b" }));
+		expect(service.getLinkedPullRequest("volt", 1, "session-b")).toEqual({
+			pullRequest: {
+				provider: "github",
+				repository: PR_REPOSITORY,
+				number: 42,
+				title: "PR 42",
+				status: "open",
+				matchedHeadOid: OID_A,
+			},
+			branch: "feature/work",
+		});
+		expect(service.getLinkedPullRequest("volt", 2, "session-b")).toBeUndefined();
+
+		// The link stays with the session, but the session is no longer on its branch.
+		await service.observe(observation({ sessionId: "session-b", branch: "main", headOid: OID_B }));
+		expect(service.getChangeContext("volt", 1, "session-b")).toMatchObject({ pullRequest: { number: 42 } });
+		expect(service.getLinkedPullRequest("volt", 1, "session-b")).toBeUndefined();
+
+		await service.observe(observation({ sessionId: "session-b", headOid: OID_B }));
+		expect(service.getLinkedPullRequest("volt", 1, "session-b")).toMatchObject({ pullRequest: { number: 42 } });
+		await service.close();
+	});
+
 	it("shares slash-delimited feature branches ending in a default base branch name", async () => {
 		const store = new ChangeStore({ path: statePath("changes-prefixed-feature") });
 		await store.load();

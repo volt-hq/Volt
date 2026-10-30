@@ -10,6 +10,8 @@ import type { IntentOption } from "@hansjm10/volt-protocol";
 import { parseCodeHostPullRequestUrl } from "../../code-host/identity.ts";
 import { openReviewFindings } from "../../host/review-handoff.ts";
 import {
+	type CurrentBranchPullRequest,
+	linkedCurrentBranchPullRequest,
 	listBaseBranches,
 	listRecentCommits,
 	MUTABLE_WORKSPACE_REVIEW_TOOLS,
@@ -258,28 +260,58 @@ async function completeBaseBranches(ctx: IntentContext, prefix: string): Promise
 }
 
 /**
- * Reads of the workspace's Git history and code host, by cwd, in flight or
- * fresh for `ttlMs`: completing as a user types reads each once.
+ * Reads by key, in flight or fresh for `ttlMs`: completing as a user types
+ * reads each once.
  */
-function readsPerCwd<T>(ttlMs: number, read: (cwd: string) => Promise<T>): (cwd: string) => Promise<T> {
+function cachedReads<T>(ttlMs: number): (key: string, read: () => Promise<T>) => Promise<T> {
 	const reads = new Map<string, { readonly at: number; readonly value: Promise<T> }>();
-	return (cwd) => {
+	return (key, read) => {
 		const now = Date.now();
-		for (const [key, cached] of reads) {
-			if (now - cached.at >= ttlMs) reads.delete(key);
+		for (const [cachedKey, cached] of reads) {
+			if (now - cached.at >= ttlMs) reads.delete(cachedKey);
 		}
-		const cached = reads.get(cwd);
+		const cached = reads.get(key);
 		if (cached) return cached.value;
-		const value = read(cwd);
-		reads.set(cwd, { at: now, value });
+		const value = read();
+		reads.set(key, { at: now, value });
 		return value;
 	};
+}
+
+/** Reads of the workspace's Git history and code host, by cwd. */
+function readsPerCwd<T>(ttlMs: number, read: (cwd: string) => Promise<T>): (cwd: string) => Promise<T> {
+	const reads = cachedReads<T>(ttlMs);
+	return (cwd) => reads(cwd, () => read(cwd));
 }
 
 const recentCommits = readsPerCwd(5_000, (cwd) => listRecentCommits(cwd).catch(() => ({ error: "git log failed" })));
 
 /** The current branch's pull request, probed through the code host at most every 30 seconds. */
 const currentPullRequest = readsPerCwd(30_000, (cwd) => probeCurrentBranchPullRequest(cwd).catch(() => undefined));
+
+/** The pull request the host's change association linked a conversation to, read at most every 5 seconds. */
+const linkedPullRequests = cachedReads<CurrentBranchPullRequest | undefined>(5_000);
+
+/**
+ * The current branch's pull request: the one the host's change association
+ * linked the conversation to, when the host has it and it still applies,
+ * else probed through the code host.
+ */
+async function currentBranchPullRequest(ctx: IntentContext): Promise<CurrentBranchPullRequest | undefined> {
+	const { session, conversation } = targetOf(ctx);
+	const cwd = session.sessionManager.getCwd();
+	const changePullRequest = ctx.services.changePullRequest;
+	const linked =
+		changePullRequest &&
+		(await linkedPullRequests(conversation.id, () =>
+			changePullRequest()
+				.then((pullRequest) =>
+					linkedCurrentBranchPullRequest(cwd, session.gitContextProvider.getSnapshot(), pullRequest),
+				)
+				.catch(() => undefined),
+		));
+	return linked ?? currentPullRequest(cwd);
+}
 
 /**
  * Whether completing may read the workspace's Git history or code host for
@@ -320,7 +352,7 @@ async function completeCommits(ctx: IntentContext, prefix: string): Promise<Inte
 /** The current branch's pull request (the TUI picker's first choice), when its number starts with `prefix`. */
 async function completePullRequests(ctx: IntentContext, prefix: string): Promise<IntentOption[]> {
 	if (!readsWorkspace(ctx)) return [];
-	const pullRequest = await currentPullRequest(targetOf(ctx).session.sessionManager.getCwd());
+	const pullRequest = await currentBranchPullRequest(ctx);
 	if (!pullRequest) return [];
 	const value = String(pullRequest.number);
 	if (!value.startsWith(prefix.trim())) return [];
@@ -334,7 +366,7 @@ async function completePullRequests(ctx: IntentContext, prefix: string): Promise
  */
 async function completePullRequestUrls(ctx: IntentContext, prefix: string): Promise<IntentOption[]> {
 	if (ctx.profile.name !== "local") return [];
-	const pullRequest = await currentPullRequest(targetOf(ctx).session.sessionManager.getCwd());
+	const pullRequest = await currentBranchPullRequest(ctx);
 	if (!pullRequest?.url.startsWith(prefix.trim())) return [];
 	const label = boundedDisplayString(`#${pullRequest.number} — ${pullRequest.title}`, MAX_INTENT_LABEL_LENGTH);
 	return [{ value: pullRequest.url, ...(label === undefined ? {} : { label }), description: "Current branch" }];

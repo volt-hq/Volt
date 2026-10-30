@@ -70,5 +70,12 @@ export const githubCodeHostIdentity: CodeHostIdentity = {
 		const locator = parseGitHubPullRequestUrl(url);
 		return locator && { url: locator.url, number: locator.number };
 	},
+	pullRequestUrl(repository, number) {
+		if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository.path) || !/^[A-Za-z0-9.:-]+$/.test(repository.host)) {
+			return undefined;
+		}
+		const locator = parseGitHubPullRequestUrl(`https://${repository.host}/${repository.path}/pull/${number}`);
+		return locator?.number === number ? locator.url : undefined;
+	},
 	isCanonicalPullRequestCheckout,
 };

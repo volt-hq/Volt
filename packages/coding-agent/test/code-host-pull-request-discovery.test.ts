@@ -38,6 +38,7 @@ function provider(id: string, host: string, list?: ListHook): CodeHostProvider {
 		id,
 		displayName: id,
 		parsePullRequestUrl: () => undefined,
+		pullRequestUrl: () => undefined,
 		isCanonicalPullRequestCheckout: () => false,
 		canonicalizeRemoteUrl: (url) => {
 			const prefix = `https://${host}/r/`;

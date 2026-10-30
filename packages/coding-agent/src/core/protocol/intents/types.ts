@@ -37,6 +37,7 @@ import type {
 } from "@hansjm10/volt-protocol";
 import type { Static } from "typebox";
 import type { AgentSession } from "../../agent-session.ts";
+import type { CodeHostLinkedPullRequest } from "../../code-host/types.ts";
 import type { InputSource } from "../../extensions/types.ts";
 import type { ConversationHost } from "../../host/conversation-host.ts";
 import type { HostedConversation } from "../../host/hosted-conversation.ts";
@@ -180,6 +181,11 @@ export interface IntentServices {
 	readonly runReview?: (target: ReviewTarget, options: IntentReviewOptions) => Promise<ReviewWorkflowResult>;
 	/** Reviews run detached from the conversation, so its busy states do not gate them. */
 	readonly detachedReviews?: boolean;
+	/**
+	 * The pull request the host's change association linked the conversation to, while the conversation is on its
+	 * branch: the daemon's answer, without a code-host call. None when there is none or it cannot say.
+	 */
+	readonly changePullRequest?: () => Promise<CodeHostLinkedPullRequest | undefined>;
 	readonly reviewDiscussions?: ReviewDiscussionService;
 	readonly subagents?: IntentSubagentServices;
 	readonly subscriptionUsage?: SubscriptionUsageService;

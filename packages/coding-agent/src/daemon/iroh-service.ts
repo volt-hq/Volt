@@ -4666,6 +4666,7 @@ class IrohDaemonService {
 			case "worker_last_session":
 			case "worker_session_owned":
 			case "worker_authority":
+			case "worker_change_pull_request":
 			case "worker_worktree_restore":
 			case "worker_worktree_release":
 			case "worker_worktree_create":
@@ -5057,6 +5058,7 @@ class IrohDaemonService {
 					| "worker_last_session"
 					| "worker_session_owned"
 					| "worker_authority"
+					| "worker_change_pull_request"
 					| "worker_worktree_restore"
 					| "worker_worktree_release"
 					| "worker_worktree_create"
@@ -5160,6 +5162,37 @@ class IrohDaemonService {
 					.inheritSession(key.workspaceName, key.workspaceGeneration, request.from, request.to)
 					.catch(() => {});
 				connection.send({ type: "ok", id: request.id });
+				return;
+			}
+			case "worker_change_pull_request": {
+				const workerId = this.workers.workerOf(connection.connectionId);
+				const key = workerId === undefined ? undefined : this.workers.keyOf(workerId);
+				if (workerId === undefined || key === undefined || !this.workers.workerHosts(workerId, request.sessionId)) {
+					return refuse("not_hosted", "the worker does not host that conversation");
+				}
+				const linked = this.services.changes.getLinkedPullRequest(
+					key.workspaceName,
+					key.workspaceGeneration,
+					request.sessionId,
+				);
+				connection.send({
+					type: "worker_change_pull_request_result",
+					id: request.id,
+					...(linked === undefined
+						? {}
+						: {
+								pullRequest: {
+									provider: linked.pullRequest.provider,
+									repository: {
+										host: linked.pullRequest.repository.host,
+										path: linked.pullRequest.repository.path,
+									},
+									number: linked.pullRequest.number,
+									title: linked.pullRequest.title,
+									branch: linked.branch,
+								},
+							}),
+				});
 				return;
 			}
 			case "worker_worktree_restore": {

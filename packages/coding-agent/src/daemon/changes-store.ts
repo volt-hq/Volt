@@ -1013,6 +1013,34 @@ export class ChangeStore {
 		return { ...base, resolutionState: change.resolutionState as "none" | "ambiguous" | "unavailable" };
 	}
 
+	/**
+	 * The pull request a session's change is linked to, with the change's branch, while the session observes that
+	 * change's own repository and branch: a session that left the branch keeps its link, but is not on it.
+	 */
+	getLinkedPullRequest(
+		workspaceName: string,
+		workspaceGeneration: number,
+		sessionId: string,
+	): { pullRequest: ChangePullRequestRecord; branch: string } | undefined {
+		const binding = this.state.bindings.find(
+			(candidate) =>
+				candidate.workspaceName === workspaceName &&
+				candidate.workspaceGeneration === workspaceGeneration &&
+				candidate.sessionId === sessionId,
+		);
+		const change = binding && this.state.changes.find((candidate) => candidate.id === binding.changeId);
+		if (
+			!binding ||
+			!change?.pullRequest ||
+			change.resolutionState !== "resolved" ||
+			binding.observedRepositoryId !== change.repositoryId ||
+			binding.observedBranch !== change.branch
+		) {
+			return undefined;
+		}
+		return { pullRequest: cloneRecord(change.pullRequest), branch: change.branch };
+	}
+
 	async flush(): Promise<void> {
 		await this.mutationQueue;
 	}

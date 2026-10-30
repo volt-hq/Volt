@@ -337,6 +337,15 @@ export class ChangeAssociationService {
 		return this.store.getChangeContext(workspaceName, workspaceGeneration, sessionId, this.now());
 	}
 
+	/** The session's linked pull request while the session is on its change's branch; see `ChangeStore`. */
+	getLinkedPullRequest(
+		workspaceName: string,
+		workspaceGeneration: number,
+		sessionId: string,
+	): ReturnType<ChangeStore["getLinkedPullRequest"]> {
+		return this.store.getLinkedPullRequest(workspaceName, workspaceGeneration, sessionId);
+	}
+
 	async close(): Promise<void> {
 		if (this.closed) return;
 		this.closed = true;

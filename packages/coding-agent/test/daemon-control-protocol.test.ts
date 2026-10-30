@@ -216,6 +216,7 @@ const REQUESTS: ByType<ControlRequest> = {
 	worker_last_session: { type: "worker_last_session", id: "38", relayId: "rl-1", sessionId: "s-2" },
 	worker_session_owned: { type: "worker_session_owned", id: "45", relayId: "rl-1", sessionId: "s-2" },
 	worker_authority: { type: "worker_authority", id: "39", relayId: "rl-1" },
+	worker_change_pull_request: { type: "worker_change_pull_request", id: "40", sessionId: "s-1" },
 };
 
 const REVIEW_NOTIFICATION = {
@@ -361,6 +362,11 @@ const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, u
 	worker_last_session: [{ sessionId: undefined }],
 	worker_session_owned: [{ sessionId: undefined }, { relayId: undefined }],
 	worker_authority: [{ relayId: undefined }],
+	worker_change_pull_request: [
+		{ sessionId: undefined },
+		{ sessionId: "" },
+		{ sessionId: "s-1", workspaceName: "volt" },
+	],
 };
 
 const STATUS_RESULT: Extract<ControlResponse, { type: "status_result" }> = {
@@ -478,6 +484,17 @@ const RESPONSES: ByType<ControlResponse> = {
 		frame: { type: "accepted", intentId: "i-2", ordinals: [], result: { registered: true } },
 	},
 	worker_authority_result: { type: "worker_authority_result", id: "18", authority: "current" },
+	worker_change_pull_request_result: {
+		type: "worker_change_pull_request_result",
+		id: "22",
+		pullRequest: {
+			provider: "azure-devops",
+			repository: { host: "dev.azure.com", path: "fabrikam/fabrikam fiber/fiber" },
+			number: 5,
+			title: "Change value",
+			branch: "topic",
+		},
+	},
 	worker_exit_result: { type: "worker_exit_result", id: "20", descendantsEnded: true },
 	worker_worktree_pinned: { type: "worker_worktree_pinned", id: "19", pinId: "pin-1" },
 };
@@ -529,6 +546,19 @@ const INVALID_RESPONSES: { [K in ControlResponse["type"]]?: Array<Record<string,
 	relay_push_delivery_result: [{ status: "maybe" }],
 	worker_host_response: [{ response: { value: "x", extra: true } }],
 	worker_authority_result: [{ authority: "lost" }],
+	worker_change_pull_request_result: [
+		{ pullRequest: { provider: "github" } },
+		{ pullRequest: { ...RESPONSES.worker_change_pull_request_result.pullRequest, number: 0 } },
+		{ pullRequest: { ...RESPONSES.worker_change_pull_request_result.pullRequest, title: "x".repeat(513) } },
+		{ pullRequest: { ...RESPONSES.worker_change_pull_request_result.pullRequest, branch: "a\nb" } },
+		{
+			pullRequest: {
+				...RESPONSES.worker_change_pull_request_result.pullRequest,
+				repository: { host: "dev.azure.com", path: "fiber", canonicalId: "azure-devops:dev.azure.com/fiber" },
+			},
+		},
+		{ pullRequest: { ...RESPONSES.worker_change_pull_request_result.pullRequest, headOid: HEAD_OID } },
+	],
 	worker_exit_result: [{ descendantsEnded: "yes" }, { descendantsEnded: undefined }],
 	worker_worktree_pinned: [{ pinId: undefined }],
 };
@@ -704,6 +734,9 @@ describe("daemon control contract", () => {
 		expect(isRequestAllowedFor("worker", "worker_host_request")).toBe(true);
 		expect(isRequestAllowedFor("tui", "worker_host_request")).toBe(false);
 		expect(isRequestAllowedFor("cli", "worker_host_request")).toBe(false);
+		expect(isRequestAllowedFor("worker", "worker_change_pull_request")).toBe(true);
+		expect(isRequestAllowedFor("tui", "worker_change_pull_request")).toBe(false);
+		expect(isRequestAllowedFor("cli", "worker_change_pull_request")).toBe(false);
 	});
 
 	it("admits the default, preset, and explicit pairing access selections", () => {
