@@ -24,6 +24,7 @@ function inlineComment(finding: ReviewFinding, run: ReviewRunRecord): ReviewCode
 	if (location.side === "head" && !file.headOid) return undefined;
 	if (location.side === "base" && !file.baseOid) return undefined;
 	return {
+		findingId: finding.id,
 		path: location.path,
 		startLine: location.startLine,
 		endLine: location.endLine,
@@ -97,7 +98,11 @@ export async function publishReviewRun(
 	].join("\n");
 	const published = await codeHostProvider.publishPullRequestReview({
 		cwd,
+		runId: run.runId,
 		pullRequest,
+		...(run.target.identity.mergeBaseCommit === undefined
+			? {}
+			: { mergeBaseCommit: run.target.identity.mergeBaseCommit }),
 		body,
 		comments,
 		...command,

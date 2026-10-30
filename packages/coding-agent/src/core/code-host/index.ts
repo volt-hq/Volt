@@ -1,7 +1,6 @@
 export {
 	canonicalizeGitHubRemoteUrl,
-	discoverPullRequestWithGitHubCli,
-	githubCliPullRequestDiscoveryProvider,
+	listPullRequestsForHeadBranchWithGitHubCli,
 } from "./github-cli-discovery.ts";
 export { githubCliCodeHostProvider } from "./github-cli-provider.ts";
 export {
@@ -17,6 +16,9 @@ export {
 export type {
 	CanonicalCodeHostRepository,
 	CodeHostCommandOptions,
+	CodeHostHeadPullRequest,
+	CodeHostHeadPullRequestListRequest,
+	CodeHostHeadPullRequestListResult,
 	CodeHostProvider,
 	CodeHostPullRequestAssociation,
 	CodeHostPullRequestDiscoveryOutcome,

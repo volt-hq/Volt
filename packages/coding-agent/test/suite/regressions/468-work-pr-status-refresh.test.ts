@@ -16,8 +16,7 @@ const MAIN_OID = "abcdef0123456789abcdef0123456789abcdef01";
 const REPOSITORY = {
 	providerId: "github",
 	host: "github.com",
-	owner: "volt-hq",
-	name: "volt-app",
+	path: "volt-hq/volt-app",
 	canonicalId: "github:github.com/volt-hq/volt-app",
 };
 
@@ -131,7 +130,7 @@ describe("#468 Work PR status refresh", () => {
 		});
 		expect(status.requests.at(-1)).toMatchObject({
 			host: "github.com",
-			pullRequests: [{ owner: "volt-hq", name: "volt-app", number: 340 }],
+			pullRequests: [{ path: "volt-hq/volt-app", number: 340 }],
 		});
 		await service.close();
 	});

@@ -1,14 +1,9 @@
-import { Buffer } from "node:buffer";
-import type { ChildProcess } from "node:child_process";
-import { spawnProcess } from "../../utils/child-process.ts";
-import { terminateProcessTree } from "../../utils/shell.ts";
 import { runGitHubCli } from "./github-cli.ts";
 import type {
 	CanonicalCodeHostRepository,
-	CodeHostPullRequestAssociation,
-	CodeHostPullRequestDiscoveryOutcome,
-	CodeHostPullRequestDiscoveryProvider,
-	CodeHostPullRequestDiscoveryRequest,
+	CodeHostHeadPullRequest,
+	CodeHostHeadPullRequestListRequest,
+	CodeHostHeadPullRequestListResult,
 	CodeHostPullRequestDiscoveryUnavailableReason,
 	CodeHostPullRequestStatus,
 	CodeHostPullRequestStatusOutcome,
@@ -17,119 +12,12 @@ import type {
 	CodeHostPullRequestStatusTarget,
 } from "./types.ts";
 
-const MAX_REMOTES = 16;
-const MAX_REPOSITORIES = 8;
-const MAX_GIT_OUTPUT_BYTES = 64 * 1024;
 const MAX_GH_OUTPUT_BYTES = 256 * 1024;
-const MAX_BRANCH_CHARS = 1024;
 const MAX_TITLE_CHARS = 512;
-const GIT_TIMEOUT_MS = 2500;
 const GH_TIMEOUT_MS = 15_000;
-const OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-const REMOTE_NAME_PATTERN = /^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 const STATUS_CHUNK_SIZE = 50;
 const MAX_GRAPHQL_INT = 2_147_483_647;
 const STATUS_IDENTITY_FORBIDDEN_PATTERN = /[\0-\x20\x7f/]/;
-
-interface GitCommandResult {
-	readonly ok: boolean;
-	readonly stdout: string;
-	readonly failure: "exit" | "spawn" | "timeout" | "output" | "cancelled" | null;
-}
-
-interface RemoteRepository {
-	readonly remote: string;
-	readonly repository: CanonicalCodeHostRepository;
-}
-
-function createGitEnvironment(): NodeJS.ProcessEnv {
-	const environment = { ...process.env };
-	for (const key of [
-		"GIT_DIR",
-		"GIT_WORK_TREE",
-		"GIT_COMMON_DIR",
-		"GIT_INDEX_FILE",
-		"GIT_OBJECT_DIRECTORY",
-		"GIT_ALTERNATE_OBJECT_DIRECTORIES",
-		"GIT_CEILING_DIRECTORIES",
-		"GIT_CONFIG",
-		"GIT_CONFIG_GLOBAL",
-		"GIT_CONFIG_SYSTEM",
-		"GIT_CONFIG_COUNT",
-	]) {
-		delete environment[key];
-	}
-	for (const key of Object.keys(environment)) {
-		if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(key)) delete environment[key];
-	}
-	environment.GIT_TERMINAL_PROMPT = "0";
-	environment.GIT_OPTIONAL_LOCKS = "0";
-	environment.GIT_PAGER = "cat";
-	environment.LC_ALL = "C";
-	return environment;
-}
-
-function runGit(args: readonly string[], cwd: string, signal?: AbortSignal): Promise<GitCommandResult> {
-	return new Promise((resolve) => {
-		if (signal?.aborted) {
-			resolve({ ok: false, stdout: "", failure: "cancelled" });
-			return;
-		}
-		const child: ChildProcess = spawnProcess("git", [...args], {
-			cwd,
-			env: createGitEnvironment(),
-			stdio: ["ignore", "pipe", "ignore"],
-		});
-		const chunks: Buffer[] = [];
-		let byteCount = 0;
-		let failure: GitCommandResult["failure"] = null;
-		let settled = false;
-		const terminate = (): void => {
-			if (child.pid) void terminateProcessTree(child.pid);
-			else child.kill();
-		};
-		const timeout = setTimeout(() => {
-			if (failure === null) failure = "timeout";
-			terminate();
-		}, GIT_TIMEOUT_MS);
-		timeout.unref?.();
-		const onAbort = (): void => {
-			if (failure === null) failure = "cancelled";
-			terminate();
-		};
-		const finish = (result: GitCommandResult): void => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timeout);
-			signal?.removeEventListener("abort", onAbort);
-			resolve(result);
-		};
-		child.stdout?.on("data", (chunk: Buffer) => {
-			if (failure !== null) return;
-			byteCount += chunk.length;
-			if (byteCount > MAX_GIT_OUTPUT_BYTES) {
-				failure = "output";
-				terminate();
-				return;
-			}
-			chunks.push(chunk);
-		});
-		child.once("error", () => {
-			failure = "spawn";
-			finish({ ok: false, stdout: "", failure });
-		});
-		child.once("close", (code) => {
-			const finalFailure = failure ?? (code === 0 ? null : "exit");
-			finish({
-				ok: finalFailure === null,
-				stdout: finalFailure === null ? Buffer.concat(chunks, byteCount).toString("utf8") : "",
-				failure: finalFailure,
-			});
-		});
-		signal?.addEventListener("abort", onAbort, { once: true });
-		if (signal?.aborted) onAbort();
-	});
-}
 
 function normalizedRepository(host: string, owner: string, name: string): CanonicalCodeHostRepository | null {
 	const normalizedHost = host.trim().toLowerCase();
@@ -151,12 +39,12 @@ function normalizedRepository(host: string, owner: string, name: string): Canoni
 	) {
 		return null;
 	}
+	const path = `${normalizedOwner}/${normalizedName}`;
 	return Object.freeze({
 		providerId: "github",
 		host: normalizedHost,
-		owner: normalizedOwner,
-		name: normalizedName,
-		canonicalId: `github:${normalizedHost}/${normalizedOwner}/${normalizedName}`,
+		path,
+		canonicalId: `github:${normalizedHost}/${path}`,
 	});
 }
 
@@ -182,133 +70,7 @@ export function canonicalizeGitHubRemoteUrl(value: string): CanonicalCodeHostRep
 }
 
 function repositorySlug(repository: CanonicalCodeHostRepository): string {
-	const path = `${repository.owner}/${repository.name}`;
-	return repository.host === "github.com" ? path : `${repository.host}/${path}`;
-}
-
-async function discoverRemoteRepositories(
-	request: CodeHostPullRequestDiscoveryRequest,
-): Promise<RemoteRepository[] | CodeHostPullRequestDiscoveryOutcome> {
-	const remotesResult = await runGit(["remote"], request.cwd, request.signal);
-	if (!remotesResult.ok) {
-		return {
-			state: "unavailable",
-			reason: remotesResult.failure === "cancelled" ? "cancelled" : "provider_error",
-		};
-	}
-	const remoteNames = remotesResult.stdout
-		.split(/\r?\n/)
-		.map((name) => name.trim())
-		.filter((name) => REMOTE_NAME_PATTERN.test(name))
-		.slice(0, MAX_REMOTES);
-	const repositories: RemoteRepository[] = [];
-	for (const remote of remoteNames) {
-		const urls = await runGit(["remote", "get-url", "--all", remote], request.cwd, request.signal);
-		if (!urls.ok) {
-			if (urls.failure === "cancelled") return { state: "unavailable", reason: "cancelled" };
-			continue;
-		}
-		for (const line of urls.stdout.split(/\r?\n/)) {
-			const repository = canonicalizeGitHubRemoteUrl(line);
-			if (repository) repositories.push({ remote, repository });
-		}
-	}
-	return repositories;
-}
-
-function remoteForTrackingRef(ref: string, remotes: readonly RemoteRepository[], branch: string): string | null {
-	const expectedSuffix = `/${branch}`;
-	if (!ref.endsWith(expectedSuffix)) return null;
-	const remote = remotes
-		.map((candidate) => candidate.remote)
-		.sort((left, right) => right.length - left.length)
-		.find((candidate) => ref === `${candidate}/${branch}`);
-	return remote ?? null;
-}
-
-async function selectHeadTarget(
-	request: CodeHostPullRequestDiscoveryRequest,
-	remotes: readonly RemoteRepository[],
-): Promise<{ repository: CanonicalCodeHostRepository; branch: string } | CodeHostPullRequestDiscoveryOutcome> {
-	const candidates = new Map<string, CanonicalCodeHostRepository>();
-	const addRemote = (remote: string | null): void => {
-		if (!remote) return;
-		for (const candidate of remotes) {
-			if (candidate.remote === remote) candidates.set(candidate.repository.canonicalId, candidate.repository);
-		}
-	};
-
-	const localRef = `refs/heads/${request.branch}`;
-	const upstream = await runGit(
-		["for-each-ref", "--format=%(refname)%00%(upstream:remotename)%00%(upstream:remoteref)", localRef],
-		request.cwd,
-		request.signal,
-	);
-	if (!upstream.ok) {
-		return { state: "unavailable", reason: upstream.failure === "cancelled" ? "cancelled" : "provider_error" };
-	}
-	if (upstream.stdout.trim()) {
-		const [observedRef, remote, remoteRef, extra] = upstream.stdout.trim().split("\0");
-		if (observedRef !== localRef || remote === undefined || remoteRef === undefined || extra !== undefined) {
-			return { state: "unavailable", reason: "invalid_response" };
-		}
-		if (remote && remote !== ".") {
-			const branch = remoteRef.startsWith("refs/heads/") ? remoteRef.slice("refs/heads/".length) : "";
-			if (
-				!REMOTE_NAME_PATTERN.test(remote) ||
-				!branch ||
-				branch.length > MAX_BRANCH_CHARS ||
-				/[\0\r\n]/.test(branch)
-			) {
-				return { state: "unavailable", reason: "invalid_response" };
-			}
-			// Revalidate every URL of the selected remote: discovery omits unsupported URLs.
-			// A mixed supported/credential-bearing remote must not become a partial match.
-			const urls = await runGit(["remote", "get-url", "--all", remote], request.cwd, request.signal);
-			if (!urls.ok) {
-				return { state: "unavailable", reason: urls.failure === "cancelled" ? "cancelled" : "provider_error" };
-			}
-			for (const url of urls.stdout.trim().split(/\r?\n/)) {
-				const repository = canonicalizeGitHubRemoteUrl(url);
-				if (!repository) return { state: "unavailable", reason: "unsupported_repository" };
-				candidates.set(repository.canonicalId, repository);
-			}
-			if (candidates.size !== 1) return { state: "unavailable", reason: "repository_ambiguous" };
-			const repository = candidates.values().next().value!;
-			if (
-				!remotes.some(
-					(candidate) =>
-						candidate.remote === remote && candidate.repository.canonicalId === repository.canonicalId,
-				)
-			) {
-				return { state: "unavailable", reason: "repository_ambiguous" };
-			}
-			return { repository, branch };
-		}
-		if (!remote && remoteRef) return { state: "unavailable", reason: "invalid_response" };
-	}
-
-	if (candidates.size === 0) {
-		const refs = await runGit(
-			["for-each-ref", "--format=%(refname)%00%(objectname)", "refs/remotes"],
-			request.cwd,
-			request.signal,
-		);
-		if (refs.failure === "cancelled") return { state: "unavailable", reason: "cancelled" };
-		if (!refs.ok && refs.failure !== "exit") return { state: "unavailable", reason: "provider_error" };
-		for (const line of refs.stdout.split(/\r?\n/)) {
-			const [ref, oid] = line.split("\0");
-			if (!ref || oid?.toLowerCase() !== request.headOid) continue;
-			const shortRef = ref.startsWith("refs/remotes/") ? ref.slice("refs/remotes/".length) : "";
-			addRemote(remoteForTrackingRef(shortRef, remotes, request.branch));
-		}
-	}
-
-	if (candidates.size === 0) {
-		for (const candidate of remotes) candidates.set(candidate.repository.canonicalId, candidate.repository);
-	}
-	if (candidates.size !== 1) return { state: "unavailable", reason: "repository_ambiguous" };
-	return { repository: candidates.values().next().value!, branch: request.branch };
+	return repository.host === "github.com" ? repository.path : `${repository.host}/${repository.path}`;
 }
 
 function unavailableReason(
@@ -328,10 +90,7 @@ function unavailableReason(
 function parsePullRequests(
 	text: string,
 	baseRepository: CanonicalCodeHostRepository,
-	headRepository: CanonicalCodeHostRepository,
-	branch: string,
-	headOid: string,
-): CodeHostPullRequestAssociation[] | null {
+): CodeHostHeadPullRequest[] | null {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(text);
@@ -339,7 +98,7 @@ function parsePullRequests(
 		return null;
 	}
 	if (!Array.isArray(parsed) || parsed.length > 100) return null;
-	const matches: CodeHostPullRequestAssociation[] = [];
+	const pullRequests: CodeHostHeadPullRequest[] = [];
 	for (const item of parsed) {
 		if (typeof item !== "object" || item === null || Array.isArray(item)) return null;
 		const value = item as Record<string, unknown>;
@@ -360,7 +119,7 @@ function parsePullRequests(
 					? `${headOwnerObject.login}/${headRepositoryObject.name}`
 					: null;
 		const headParts = nameWithOwner?.split("/") ?? [];
-		const canonicalHead =
+		const headRepository =
 			headParts.length === 2 && headParts[0] && headParts[1]
 				? normalizedRepository(baseRepository.host, headParts[0], headParts[1])
 				: null;
@@ -373,16 +132,9 @@ function parsePullRequests(
 			typeof value.isDraft !== "boolean" ||
 			typeof value.headRefName !== "string" ||
 			typeof value.headRefOid !== "string" ||
-			!canonicalHead
+			!headRepository
 		) {
 			return null;
-		}
-		if (
-			canonicalHead.canonicalId !== headRepository.canonicalId ||
-			value.headRefName !== branch ||
-			value.headRefOid.toLowerCase() !== headOid
-		) {
-			continue;
 		}
 		const state = value.state.toUpperCase();
 		const status =
@@ -396,110 +148,58 @@ function parsePullRequests(
 						? "closed"
 						: null;
 		if (!status) return null;
-		matches.push({
-			providerId: "github",
-			repository: baseRepository,
-			headRepository,
+		pullRequests.push({
 			number: value.number,
-			title: value.title.slice(0, MAX_TITLE_CHARS),
+			title: value.title,
 			status,
-			headBranch: branch,
-			matchedHeadOid: headOid,
+			headRepository,
+			headBranch: value.headRefName,
+			headOid: value.headRefOid,
 		});
 	}
-	return matches;
+	return pullRequests;
 }
 
-export async function discoverPullRequestWithGitHubCli(
-	request: CodeHostPullRequestDiscoveryRequest,
-): Promise<CodeHostPullRequestDiscoveryOutcome> {
-	const branch = request.branch.trim();
-	const headOid = request.headOid.toLowerCase();
-	if (!branch || branch.length > MAX_BRANCH_CHARS || /[\0\r\n]/.test(branch) || !OID_PATTERN.test(headOid)) {
-		return { state: "unavailable", reason: "invalid_response" };
+/** Every pull request into `repository` from a head branch named `branch`, in any state, by `gh pr list`. */
+export async function listPullRequestsForHeadBranchWithGitHubCli(
+	request: CodeHostHeadPullRequestListRequest,
+): Promise<CodeHostHeadPullRequestListResult> {
+	const result = await runGitHubCli(
+		[
+			"pr",
+			"list",
+			"--repo",
+			repositorySlug(request.repository),
+			"--state",
+			"all",
+			"--head",
+			request.branch,
+			"--limit",
+			"100",
+			"--json",
+			"number,title,state,isDraft,headRefName,headRefOid,headRepository,headRepositoryOwner",
+		],
+		{
+			cwd: request.cwd,
+			...(request.signal === undefined ? {} : { signal: request.signal }),
+			stdoutMaxBytes: MAX_GH_OUTPUT_BYTES,
+			stderrMaxBytes: 32 * 1024,
+			timeoutMs: GH_TIMEOUT_MS,
+			cancellationMessage: "GitHub pull request discovery was cancelled.",
+		},
+	);
+	if (!result.ok) {
+		return { ok: false, reason: unavailableReason(result.stderr, result.outputLimited, result.timedOut) };
 	}
-	if (request.signal?.aborted) return { state: "unavailable", reason: "cancelled" };
-
-	const discovered = await discoverRemoteRepositories({ ...request, branch, headOid });
-	if (!Array.isArray(discovered)) return discovered;
-	if (discovered.length === 0) return { state: "unavailable", reason: "unsupported_repository" };
-	const headTarget = await selectHeadTarget({ ...request, branch, headOid }, discovered);
-	if ("state" in headTarget) return headTarget;
-
-	const repositories = new Map<string, CanonicalCodeHostRepository>();
-	for (const candidate of discovered) repositories.set(candidate.repository.canonicalId, candidate.repository);
-	if (repositories.size > MAX_REPOSITORIES) return { state: "unavailable", reason: "repository_ambiguous" };
-
-	const matches = new Map<string, CodeHostPullRequestAssociation>();
-	try {
-		for (const repository of repositories.values()) {
-			const result = await runGitHubCli(
-				[
-					"pr",
-					"list",
-					"--repo",
-					repositorySlug(repository),
-					"--state",
-					"all",
-					"--head",
-					headTarget.branch,
-					"--limit",
-					"100",
-					"--json",
-					"number,title,state,isDraft,headRefName,headRefOid,headRepository,headRepositoryOwner",
-				],
-				{
-					cwd: request.cwd,
-					...(request.signal === undefined ? {} : { signal: request.signal }),
-					stdoutMaxBytes: MAX_GH_OUTPUT_BYTES,
-					stderrMaxBytes: 32 * 1024,
-					timeoutMs: GH_TIMEOUT_MS,
-					cancellationMessage: "GitHub pull request discovery was cancelled.",
-				},
-			);
-			if (!result.ok) {
-				return {
-					state: "unavailable",
-					reason: unavailableReason(result.stderr, result.outputLimited, result.timedOut),
-				};
-			}
-			const repositoryMatches = parsePullRequests(
-				result.stdout.toString("utf8"),
-				repository,
-				headTarget.repository,
-				headTarget.branch,
-				headOid,
-			);
-			if (!repositoryMatches) return { state: "unavailable", reason: "invalid_response" };
-			for (const match of repositoryMatches) {
-				matches.set(`${match.repository.canonicalId}#${match.number}`, match);
-			}
-		}
-	} catch {
-		return {
-			state: "unavailable",
-			reason: request.signal?.aborted ? "cancelled" : "provider_error",
-		};
-	}
-
-	const candidates = [...matches.values()];
-	const active = candidates.filter((candidate) => candidate.status === "open" || candidate.status === "draft");
-	if (active.length === 1) return { state: "resolved", pullRequest: active[0]! };
-	if (active.length > 1) return { state: "ambiguous" };
-	const historical = candidates.filter((candidate) => candidate.status === "merged" || candidate.status === "closed");
-	if (historical.length === 1) return { state: "resolved", pullRequest: historical[0]! };
-	if (historical.length > 1) return { state: "ambiguous" };
-	return { state: "none" };
+	const pullRequests = parsePullRequests(result.stdout.toString("utf8"), request.repository);
+	return pullRequests ? { ok: true, pullRequests } : { ok: false, reason: "invalid_response" };
 }
-
-export const githubCliPullRequestDiscoveryProvider: CodeHostPullRequestDiscoveryProvider = {
-	id: "github",
-	discoverPullRequest: discoverPullRequestWithGitHubCli,
-};
 
 interface StatusChunkEntry {
 	readonly index: number;
-	readonly target: CodeHostPullRequestStatusTarget;
+	readonly owner: string;
+	readonly name: string;
+	readonly number: number;
 }
 
 interface StatusQuery {
@@ -522,24 +222,30 @@ function isStatusIdentityPart(value: unknown, maximum: number): value is string 
 	);
 }
 
-function isValidStatusTarget(target: CodeHostPullRequestStatusTarget): boolean {
-	return (
-		isStatusIdentityPart(target.owner, 100) &&
-		isStatusIdentityPart(target.name, 100) &&
-		Number.isSafeInteger(target.number) &&
-		target.number >= 1 &&
-		target.number <= MAX_GRAPHQL_INT
-	);
+/** A target whose path is a GitHub `owner/name` and whose number fits a GraphQL Int; null otherwise. */
+function statusChunkEntry(target: CodeHostPullRequestStatusTarget, index: number): StatusChunkEntry | null {
+	const [owner, name, ...rest] = target.path.split("/");
+	if (
+		rest.length > 0 ||
+		!isStatusIdentityPart(owner, 100) ||
+		!isStatusIdentityPart(name, 100) ||
+		!Number.isSafeInteger(target.number) ||
+		target.number < 1 ||
+		target.number > MAX_GRAPHQL_INT
+	) {
+		return null;
+	}
+	return { index, owner, name, number: target.number };
 }
 
 /** Build one aliased query; every owner, name, and number travels as a GraphQL variable. */
 function buildStatusQuery(chunk: readonly StatusChunkEntry[]): StatusQuery {
 	const groups = new Map<string, { index: number; owner: string; name: string; members: number[] }>();
 	chunk.forEach((entry, position) => {
-		const key = `${entry.target.owner}\0${entry.target.name}`;
+		const key = `${entry.owner}\0${entry.name}`;
 		let group = groups.get(key);
 		if (!group) {
-			group = { index: groups.size, owner: entry.target.owner, name: entry.target.name, members: [] };
+			group = { index: groups.size, owner: entry.owner, name: entry.name, members: [] };
 			groups.set(key, group);
 		}
 		group.members.push(position);
@@ -556,7 +262,7 @@ function buildStatusQuery(chunk: readonly StatusChunkEntry[]): StatusQuery {
 		const fields = group.members.map((position, memberIndex) => {
 			const variable = `p${group.index}_${memberIndex}`;
 			const pullRequestAlias = `${repositoryAlias}p${memberIndex}`;
-			variables[variable] = chunk[position]!.target.number;
+			variables[variable] = chunk[position]!.number;
 			declarations.push(`$${variable}:Int!`);
 			aliases[position] = { repository: repositoryAlias, pullRequest: pullRequestAlias };
 			return `${pullRequestAlias}: pullRequest(number:$${variable}){ state isDraft title }`;
@@ -667,7 +373,8 @@ export async function refreshPullRequestStatusesWithGitHubCli(
 	if (!isStatusIdentityPart(request.host, 253) || request.host.startsWith("-")) return outcomes;
 	const valid: StatusChunkEntry[] = [];
 	request.pullRequests.forEach((target, index) => {
-		if (isValidStatusTarget(target)) valid.push({ index, target });
+		const entry = statusChunkEntry(target, index);
+		if (entry) valid.push(entry);
 	});
 	for (let offset = 0; offset < valid.length; offset += STATUS_CHUNK_SIZE) {
 		const chunk = valid.slice(offset, offset + STATUS_CHUNK_SIZE);

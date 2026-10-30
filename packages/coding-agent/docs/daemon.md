@@ -659,10 +659,13 @@ conversation's association when it is a stored session the workspace owns (see
 workspace or its worktrees is. Phone input and
 `sessions` queries cannot choose an association or start provider discovery.
 
-For trusted workspaces, the daemon uses configured Git remotes plus the local
-authenticated `gh` CLI to match the exact head repository, branch, and object
-ID. Provider failure remains distinct from “no pull request,” ambiguous matches
-are not guessed, and configured/default base branches such as `main` are not
+For trusted workspaces, the daemon uses configured Git remotes plus the code
+host to match the exact head repository, branch, and object ID: the local
+authenticated `gh` CLI for GitHub, and the Azure DevOps REST API for Azure
+DevOps, with the credentials [PR review](usage.md#code-review) uses. Azure
+DevOps pull requests from forks are not matched. Provider failure remains
+distinct from “no pull request,” ambiguous matches are not guessed, and
+configured/default base branches such as `main` are not
 grouped across sessions. A positive PR match is sticky: later checkouts,
 refresh failures, branch reuse, or a newer PR do not silently move the session
 to another change. Set `remote.pullRequestDiscovery: false` to disable provider
@@ -670,19 +673,20 @@ calls.
 
 Once a PR is linked, the daemon keeps its status current in the background,
 whether or not the session is still on the PR branch or open in a worker,
-and across daemon restarts. It refreshes every linked open or draft PR with one
-batched `gh api graphql` query per GitHub host: about every minute while any
-client stream is open or was open in the last few minutes, and about every 15
-minutes otherwise. It also refreshes right away on daemon start, when a session
+and across daemon restarts. It refreshes every linked open or draft PR, with one
+batched `gh api graphql` query per GitHub host and one read per Azure DevOps
+pull request: about every minute while any client stream is open or was open
+in the last few minutes, and about every 15 minutes otherwise. It also refreshes right away on daemon start, when a session
 leaves a PR branch, and when a session's conversation closes. A PR stops being
 refreshed once it is merged or closed. A closed PR that is later reopened is
 picked up again only when a session returns to its branch. Reads never wait on
-GitHub; they return the stored status.
+the code host; they return the stored status.
 
 Associations are stored separately in private `changes.json`. The file uses
 opaque local IDs and a salted hash of the common Git directory, and stores each
-linked PR's repository host, owner, and name so its status can be refreshed
-after the branch is gone. Checkout paths, repository identities, credentials,
+linked PR's repository host and path (`owner/name` on GitHub,
+`organization/project/repository` on Azure DevOps) so its status can
+be refreshed after the branch is gone. Checkout paths, repository identities, credentials,
 raw provider output, and provider diagnostics are not projected to phones. A
 `sessions` entry's `changeContext` contains only the opaque change ID,
 repository display name, effective branch, resolution state, and bounded PR

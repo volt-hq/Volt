@@ -1,9 +1,8 @@
-import { getPriceVersion } from "../models.ts";
+import { calculateCost } from "../models.ts";
 import type { Api, InferenceSpeed, Model, Usage } from "../types.ts";
 
 const OPENAI_BASE_URL = "https://api.openai.com/v1";
 const OPENAI_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
-const TOKENS_PER_MILLION = 1_000_000;
 
 interface PriorityTokenRates {
 	input: number;
@@ -91,19 +90,5 @@ export function getOpenAIPriorityCost(
 	model: Pick<Model<"openai-responses">, "api" | "provider" | "baseUrl" | "id">,
 ): Usage["cost"] | undefined {
 	const rates = isDirectOpenAIFastModel(model) ? OPENAI_PRIORITY_RATES[model.id] : undefined;
-	if (!rates) {
-		return undefined;
-	}
-	const input = (usage.input * rates.input) / TOKENS_PER_MILLION;
-	const output = (usage.output * rates.output) / TOKENS_PER_MILLION;
-	const cacheRead = (usage.cacheRead * rates.cacheRead) / TOKENS_PER_MILLION;
-	const cacheWrite = (usage.cacheWrite * rates.cacheWrite) / TOKENS_PER_MILLION;
-	return {
-		input,
-		output,
-		cacheRead,
-		cacheWrite,
-		total: input + output + cacheRead + cacheWrite,
-		priceVersion: getPriceVersion(rates),
-	};
+	return rates ? calculateCost({ cost: rates }, usage) : undefined;
 }

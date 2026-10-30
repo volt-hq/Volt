@@ -156,8 +156,8 @@ export interface CodeHostPullRequestSummary {
 export interface CanonicalCodeHostRepository {
 	providerId: string;
 	host: string;
-	owner: string;
-	name: string;
+	/** Provider-defined `/`-separated repository path under `host`, normalized for comparison (GitHub: `owner/name`). */
+	path: string;
 	canonicalId: string;
 }
 
@@ -234,10 +234,37 @@ export interface CodeHostPullRequestDiscoveryProvider {
 	discoverPullRequest(request: CodeHostPullRequestDiscoveryRequest): Promise<CodeHostPullRequestDiscoveryOutcome>;
 }
 
+/** A pull request into a base repository from a head branch of the requested name, as its provider lists it. */
+export interface CodeHostHeadPullRequest {
+	number: number;
+	/** Unbounded; discovery bounds it. */
+	title: string;
+	status: CodeHostPullRequestStatus;
+	/** The repository the head branch is in: the base repository, or a fork of it. */
+	headRepository: CanonicalCodeHostRepository;
+	headBranch: string;
+	/** The head commit the provider reports, in any case. */
+	headOid: string;
+}
+
+export interface CodeHostHeadPullRequestListRequest {
+	/** The local checkout the head branch was observed in, for a provider CLI. */
+	cwd: string;
+	/** The base repository whose pull requests are listed; this provider canonicalized it. */
+	repository: CanonicalCodeHostRepository;
+	/** The head branch name in the head repository. */
+	branch: string;
+	signal?: AbortSignal;
+}
+
+export type CodeHostHeadPullRequestListResult =
+	| { ok: true; pullRequests: CodeHostHeadPullRequest[] }
+	| { ok: false; reason: CodeHostPullRequestDiscoveryUnavailableReason };
+
 /** One already-associated pull request, identified by its base repository and number. */
 export interface CodeHostPullRequestStatusTarget {
-	owner: string;
-	name: string;
+	/** The base repository's provider-defined path, as in `CanonicalCodeHostRepository.path`. */
+	path: string;
 	number: number;
 }
 
@@ -276,6 +303,8 @@ export interface PullRequestFetchPlan {
 }
 
 export interface ReviewCodeHostInlineComment {
+	/** The finding the comment posts, unique within its review. */
+	findingId: string;
 	path: string;
 	side: "base" | "head";
 	startLine: number;
@@ -291,7 +320,11 @@ export interface CodeHostCommandOptions {
 
 export interface ReviewCodeHostPublishRequest extends CodeHostCommandOptions {
 	cwd: string;
+	/** The published review run: a provider that posts a review in parts recognizes the parts it already posted by it. */
+	runId: string;
 	pullRequest: ReviewPullRequestIdentity;
+	/** The commit the review read the base side of the diff from: the merge base of the pull request's base and head. */
+	mergeBaseCommit?: string;
 	body: string;
 	comments: ReviewCodeHostInlineComment[];
 }
@@ -307,6 +340,8 @@ export interface CodeHostIdentity {
 	readonly displayName: string;
 	/** Hosts trusted to serve pull request author avatars in addition to the pull request host. */
 	readonly avatarHosts?: readonly string[];
+	/** The pull request a web URL of this provider names, with the URL normalized; undefined for any other URL. */
+	parsePullRequestUrl(url: string): { url: string; number: number } | undefined;
 	/** Host-only consistency check for a persisted checkout identity this provider produced. */
 	isCanonicalPullRequestCheckout(
 		pullRequest: ResolvedPullRequestCheckout["pullRequest"],
@@ -334,8 +369,13 @@ export interface CodeHostProvider extends CodeHostIdentity {
 		options?: CodeHostCommandOptions,
 	): Promise<void>;
 	publishPullRequestReview(request: ReviewCodeHostPublishRequest): Promise<ReviewCodeHostPublishResult>;
-	/** Daemon change association; report unsupported_repository when no remote belongs to this provider. */
-	discoverPullRequest?(request: CodeHostPullRequestDiscoveryRequest): Promise<CodeHostPullRequestDiscoveryOutcome>;
+	/**
+	 * Daemon change association: every pull request in the base repository, open or not, whose head branch has the
+	 * requested name. Shared discovery selects the head repository and matches the head commit.
+	 */
+	listPullRequestsForHeadBranch?(
+		request: CodeHostHeadPullRequestListRequest,
+	): Promise<CodeHostHeadPullRequestListResult>;
 	/** Daemon change status refresh for pull requests this provider associated. */
 	refreshPullRequestStatuses?(request: CodeHostPullRequestStatusRequest): Promise<CodeHostPullRequestStatusOutcome[]>;
 }

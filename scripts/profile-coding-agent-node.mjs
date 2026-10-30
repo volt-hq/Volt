@@ -42,7 +42,9 @@ Options:
 
 Notes:
   - By default the benchmark uses your normal configured agent dir, so global models/auth/settings work.
-  - TUI mode measures startup until the interactive UI reaches first usable state.
+  - TUI mode inherits the terminal and measures launch to interactive readiness, including module loading but excluding teardown.
+  - Printed phase timings start inside main() and exclude module loading; startup_time_ms includes it.
+  - Isolated TUI runs stop their daemon before deleting temporary state; normal runs leave your daemon running.
   - RPC mode measures startup until the host answers a protocol subscription with its snapshot, then closes stdin to exit cleanly.
   - CPU profiles are kept in the selected profile directory for later analysis.
 `);
@@ -268,7 +270,7 @@ function toMetricName(label) {
 async function waitForExit(child, errorPrefix) {
 	return await new Promise((resolve, reject) => {
 		child.once("error", reject);
-		child.once("exit", (code, signal) => {
+		child.once("close", (code, signal) => {
 			if (signal) {
 				reject(new Error(`${errorPrefix} exited from signal ${signal}`));
 				return;
@@ -368,6 +370,7 @@ function createBenchmarkEnv(options, isolatedAgentDir) {
 	}
 	if (options.mode === "tui") {
 		env[startupBenchmarkEnvName] = "1";
+		env.VOLT_TIMING = "1";
 	}
 	if (options.offline) {
 		env.VOLT_OFFLINE = "1";
@@ -376,7 +379,10 @@ function createBenchmarkEnv(options, isolatedAgentDir) {
 	return env;
 }
 
-async function runTuiBenchmarkRun({ runtime, runIndex, measuredIndex, options, profileDir }) {
+export async function runTuiBenchmarkRun(
+	{ runtime, runIndex, measuredIndex, options, profileDir },
+	{ spawnProcess = spawn, now = () => performance.now() } = {},
+) {
 	const runNumber = runIndex + 1;
 	const suffix = String(runNumber).padStart(3, "0");
 	const profileName = `${options.label}-${suffix}.cpuprofile`;
@@ -387,26 +393,34 @@ async function runTuiBenchmarkRun({ runtime, runIndex, measuredIndex, options, p
 	}
 
 	const command = getRuntimeCommand(runtime, "tui", profileDir, profileName, options.cpuProfile);
-	const child = spawn(command.executable, command.args, {
-		cwd: packageDir,
-		env: createBenchmarkEnv(options, isolatedAgentDir),
-		stdio: ["inherit", "ignore", "pipe"],
-		shell: process.platform === "win32" && runtime === "bun",
-	});
-
-	let stderr = "";
-	child.stderr.setEncoding("utf8");
-	child.stderr.on("data", (chunk) => {
-		stderr += chunk;
-	});
-
-	const startedAt = performance.now();
-	const exitCode = await waitForExit(child, `Benchmark ${measuredIndex === undefined ? `warmup ${runNumber}` : `run ${measuredIndex}`}`);
-	const elapsedMs = performance.now() - startedAt;
-
+	const env = createBenchmarkEnv({ ...options, mode: "tui" }, isolatedAgentDir);
+	let benchmarkError;
 	try {
+		// The parent already requires a real terminal. Piping/ignoring stdout selects print mode.
+		const startedAt = now();
+		const child = spawnProcess(command.executable, command.args, {
+			cwd: packageDir,
+			env,
+			stdio: ["inherit", "inherit", "pipe"],
+			shell: process.platform === "win32" && runtime === "bun",
+		});
+
+		let stderr = "";
+		let readyElapsedMs;
+		child.stderr.setEncoding("utf8");
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk;
+			if (readyElapsedMs === undefined && parseStartupTimings(stderr).has("interactiveMode.init")) {
+				readyElapsedMs = now() - startedAt;
+			}
+		});
+
+		const exitCode = await waitForExit(child, `Benchmark ${measuredIndex === undefined ? `warmup ${runNumber}` : `run ${measuredIndex}`}`);
 		if (exitCode !== 0) {
 			throw new Error(stderr.trim() || `Benchmark child exited with code ${exitCode}`);
+		}
+		if (readyElapsedMs === undefined) {
+			throw new Error("TUI benchmark exited without interactive startup readiness.");
 		}
 
 		const profilePath = options.cpuProfile ? join(profileDir, profileName) : undefined;
@@ -414,10 +428,35 @@ async function runTuiBenchmarkRun({ runtime, runIndex, measuredIndex, options, p
 			throw new Error(`CPU profile was not written: ${profilePath}`);
 		}
 
-		return { elapsedMs, profilePath, timings: parseStartupTimings(stderr) };
+		return { elapsedMs: readyElapsedMs, profilePath, timings: parseStartupTimings(stderr) };
+	} catch (error) {
+		benchmarkError = error;
+		throw error;
 	} finally {
 		if (tempRoot) {
-			rmSync(tempRoot, { recursive: true, force: true });
+			try {
+				if (existsSync(join(isolatedAgentDir, "daemon", "voltd.pid"))) {
+					// Do not profile cleanup or overwrite the measured process's CPU profile.
+					const stop = spawnProcess(command.executable, [runtime === "bun" ? srcCliPath : npmCliPath, "daemon", "stop"], {
+						cwd: packageDir,
+						env,
+						stdio: ["ignore", "ignore", "pipe"],
+						shell: process.platform === "win32" && runtime === "bun",
+					});
+					let stopStderr = "";
+					stop.stderr.setEncoding("utf8");
+					stop.stderr.on("data", (chunk) => { stopStderr += chunk; });
+					const stopCode = await waitForExit(stop, "Benchmark daemon cleanup");
+					if (stopCode !== 0) {
+						throw new Error(stopStderr.trim() || `Daemon stop exited with code ${stopCode}`);
+					}
+				}
+				rmSync(tempRoot, { recursive: true, force: true });
+			} catch (error) {
+				const message = `Isolated benchmark cleanup failed; state preserved at ${tempRoot}`;
+				if (benchmarkError) throw new AggregateError([benchmarkError, error], message);
+				throw new Error(message, { cause: error });
+			}
 		}
 	}
 }
@@ -644,8 +683,11 @@ async function main() {
 	}
 }
 
-main().catch((error) => {
-	const message = error instanceof Error ? error.message : String(error);
-	console.error(message);
-	process.exit(1);
-});
+const invokedPath = process.argv[1] ? resolve(process.argv[1]) : undefined;
+if (invokedPath === fileURLToPath(import.meta.url)) {
+	main().catch((error) => {
+		const message = error instanceof Error ? error.message : String(error);
+		console.error(message);
+		process.exit(1);
+	});
+}

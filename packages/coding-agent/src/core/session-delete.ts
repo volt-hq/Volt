@@ -19,7 +19,7 @@ function moveToTrash(path: string): Promise<boolean> {
 	return new Promise((resolve) => {
 		let child: ReturnType<typeof spawn>;
 		try {
-			child = spawn("trash", path.startsWith("-") ? ["--", path] : [path], { stdio: "ignore" });
+			child = spawn("trash", path.startsWith("-") ? ["--", path] : [path], { stdio: "ignore", windowsHide: true });
 		} catch {
 			resolve(false);
 			return;

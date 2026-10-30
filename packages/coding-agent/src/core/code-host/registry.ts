@@ -1,5 +1,7 @@
+import { azureDevOpsCodeHostProvider } from "./azure-devops-provider.ts";
 import { githubCliCodeHostProvider } from "./github-cli-provider.ts";
 import { registerCodeHostIdentity } from "./identity.ts";
+import { discoverPullRequest } from "./pull-request-discovery.ts";
 import {
 	REVIEW_TARGET_CANCELLED,
 	type ReviewTargetFailure,
@@ -10,7 +12,6 @@ import {
 } from "./review-remote.ts";
 import type {
 	CodeHostProvider,
-	CodeHostPullRequestDiscoveryOutcome,
 	CodeHostPullRequestDiscoveryProvider,
 	CodeHostPullRequestStatusProvider,
 	ReviewCodeHostContextCaptureOptions,
@@ -20,7 +21,7 @@ import type {
  * Resolution order: the first provider that accepts every URL of the selected remote serves the review.
  * Built-in identity rules are listed separately in identity.ts; keep both lists in step.
  */
-const providers: CodeHostProvider[] = [githubCliCodeHostProvider];
+const providers: CodeHostProvider[] = [githubCliCodeHostProvider, azureDevOpsCodeHostProvider];
 
 /** Add a code-host provider and its identity rules after the built-ins. Returns a function that removes both. */
 export function registerCodeHostProvider(provider: CodeHostProvider): () => void {
@@ -87,17 +88,10 @@ export async function resolveCodeHostProvider(
 	}
 }
 
-/** Change discovery across providers; a provider that does not recognize the repository defers. */
+/** Change discovery across the registered providers: the one that recognizes the head repository lists its PRs. */
 export const codeHostPullRequestDiscoveryProvider: CodeHostPullRequestDiscoveryProvider = {
 	id: "code-host",
-	async discoverPullRequest(request): Promise<CodeHostPullRequestDiscoveryOutcome> {
-		for (const provider of providers) {
-			if (!provider.discoverPullRequest) continue;
-			const outcome = await provider.discoverPullRequest(request);
-			if (outcome.state !== "unavailable" || outcome.reason !== "unsupported_repository") return outcome;
-		}
-		return { state: "unavailable", reason: "unsupported_repository" };
-	},
+	discoverPullRequest: (request) => discoverPullRequest(request, providers),
 };
 
 /** Status refresh for every registered provider that supports change association. */

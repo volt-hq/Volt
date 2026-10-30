@@ -22,8 +22,11 @@ const MAX_BRANCH_CHARS = 1024;
 const MAX_PROVIDER_CHARS = 64;
 const MAX_PR_TITLE_CHARS = 512;
 const MAX_PR_REPOSITORY_HOST_CHARS = 253;
+const MAX_PR_REPOSITORY_PATH_CHARS = 256;
 const MAX_PR_REPOSITORY_SEGMENT_CHARS = 100;
 const PR_REPOSITORY_FORBIDDEN_PATTERN = /[\0-\x20\x7f/]/;
+/** Path segments may contain spaces, as Azure DevOps project names do. */
+const PR_REPOSITORY_SEGMENT_FORBIDDEN_PATTERN = /[\0-\x1f\x7f]/;
 const OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 
@@ -32,8 +35,8 @@ export type ChangeResolutionState = "resolved" | "none" | "ambiguous" | "unavail
 /** Host-private base repository of a linked pull request. Never projected to clients. */
 export interface ChangePullRequestRepositoryRecord {
 	host: string;
-	owner: string;
-	name: string;
+	/** Provider-defined `/`-separated repository path, as in `CanonicalCodeHostRepository.path`. */
+	path: string;
 }
 
 export interface ChangePullRequestRecord {
@@ -232,24 +235,38 @@ function pullRequestRepositoryPart(value: unknown, maximum: number): value is st
 	);
 }
 
+function pullRequestRepositoryPath(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		value.length <= MAX_PR_REPOSITORY_PATH_CHARS &&
+		value
+			.split("/")
+			.every(
+				(segment) =>
+					segment.length > 0 &&
+					segment.length <= MAX_PR_REPOSITORY_SEGMENT_CHARS &&
+					!PR_REPOSITORY_SEGMENT_FORBIDDEN_PATTERN.test(segment),
+			)
+	);
+}
+
 function parsePullRequestRepository(value: unknown): ChangePullRequestRepositoryRecord {
 	if (
 		!isRecord(value) ||
-		!hasExactKeys(value, ["host", "owner", "name"]) ||
+		!hasExactKeys(value, ["host", "path"]) ||
 		!pullRequestRepositoryPart(value.host, MAX_PR_REPOSITORY_HOST_CHARS) ||
-		!pullRequestRepositoryPart(value.owner, MAX_PR_REPOSITORY_SEGMENT_CHARS) ||
-		!pullRequestRepositoryPart(value.name, MAX_PR_REPOSITORY_SEGMENT_CHARS)
+		!pullRequestRepositoryPath(value.path)
 	) {
 		throw new Error("invalid change pull request repository");
 	}
-	return { host: value.host, owner: value.owner, name: value.name };
+	return { host: value.host, path: value.path };
 }
 
 export function isSameChangePullRequestRepository(
 	left: ChangePullRequestRepositoryRecord,
 	right: ChangePullRequestRepositoryRecord,
 ): boolean {
-	return left.host === right.host && left.owner === right.owner && left.name === right.name;
+	return left.host === right.host && left.path === right.path;
 }
 
 function parsePullRequest(value: unknown): ChangePullRequestRecord {

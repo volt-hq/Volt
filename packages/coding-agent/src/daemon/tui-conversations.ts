@@ -532,8 +532,8 @@ export class TuiConversations {
 		const defaultDirectory = this.options.sessions.sessionDir;
 		if (target.kind === "session") {
 			const directory = target.sessionDir ?? defaultDirectory;
-			const ref = await findStored(directory, target.sessionId);
-			if (ref !== undefined) return this.resolveStored(ref, target.cwdOverride, request);
+			const stored = await findStoredSessionLocation(directory, target.sessionId);
+			if (stored !== undefined) return this.resolveStored(stored.ref, stored.cwd, target.cwdOverride, request);
 			// Not stored there: a conversation a worker hosts (a `--no-session` one, or one a move led to).
 			const hostingWorkspace = this.options.workers.workspaceHosting(target.sessionId);
 			const workspace = this.options.workspaces().find((candidate) => candidate.name === hostingWorkspace);
@@ -572,7 +572,7 @@ export class TuiConversations {
 				if (existing.cwdKey !== cwd) {
 					throw new TuiOpenError("session_exists", "A conversation with that id is stored for another directory");
 				}
-				return this.resolveStored(existing.ref, undefined, request);
+				return this.resolveStored(existing.ref, existing.cwd, undefined, request);
 			}
 			if (target.sessionId !== undefined && this.options.workers.workspaceHosting(target.sessionId) !== undefined) {
 				return this.resolve({ ...request, target: { kind: "session", sessionId: target.sessionId, sessionDir } });
@@ -610,16 +610,11 @@ export class TuiConversations {
 	/** A stored conversation, run in (the real path of) its own working directory or `cwdOverride`. */
 	private async resolveStored(
 		ref: SessionReference,
+		storedCwd: string,
 		cwdOverride: string | undefined,
 		request: ConversationOpenRequest,
 	): Promise<ResolvedOpen> {
-		let storedCwd: string;
-		const reader = await SessionManager.openReadOnly(ref);
-		try {
-			storedCwd = reader.getCwd();
-		} finally {
-			await reader.closePersistence();
-		}
+		// Placement needs only the indexed cwd; the owning worker validates and loads the transcript.
 		// The conversation runs in the real directory its root was resolved from, not through a link re-pointed later.
 		const cwd = await realDirectory(cwdOverride ?? storedCwd);
 		const placement = await this.placement(cwd, request);

@@ -3,7 +3,9 @@
  * summary, carried by review workflow results.
  */
 
+import type { Usage } from "@hansjm10/volt-ai";
 import { type Static, Type } from "typebox";
+import type { Assert, MutualExtends } from "./helpers.ts";
 
 const count = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
 const availability = Type.Union([Type.Literal("complete"), Type.Literal("partial"), Type.Literal("unavailable")]);
@@ -15,7 +17,10 @@ export const ReviewUsageTokensSchema = Type.Object(
 	{ input: count, output: count, cacheRead: count, cacheWrite: count },
 	{ additionalProperties: false },
 );
-/** Estimated cost in USD from the model price table. */
+/**
+ * Estimated cost in USD from the model price table: the priced components of volt-ai's `Usage["cost"]`.
+ * Pinned below, so a component added to that cost fails typecheck until it is added here or excluded.
+ */
 export const ReviewUsageCostSchema = Type.Object(
 	{
 		input: Type.Number({ minimum: 0 }),
@@ -26,6 +31,10 @@ export const ReviewUsageCostSchema = Type.Object(
 	},
 	{ additionalProperties: false },
 );
+/** `priceVersion` identifies the rates a cost was priced with; review totals sum across rates, so it is not kept. */
+type ReviewPricedCost = Omit<Usage["cost"], "priceVersion">;
+type _reviewUsageCostKeys = Assert<MutualExtends<keyof Static<typeof ReviewUsageCostSchema>, keyof ReviewPricedCost>>;
+type _reviewUsageCost = Assert<MutualExtends<Static<typeof ReviewUsageCostSchema>, ReviewPricedCost>>;
 const totals = {
 	requests: count,
 	turns: count,

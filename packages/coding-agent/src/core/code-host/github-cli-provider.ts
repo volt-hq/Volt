@@ -6,11 +6,11 @@ import {
 } from "./github-cli-context.ts";
 import {
 	canonicalizeGitHubRemoteUrl,
-	discoverPullRequestWithGitHubCli,
+	listPullRequestsForHeadBranchWithGitHubCli,
 	refreshPullRequestStatusesWithGitHubCli,
 } from "./github-cli-discovery.ts";
-import { parseGitHubPullRequestUrl, resolveCurrentReviewPullRequest } from "./github-cli-review-target.ts";
-import { githubCodeHostIdentity } from "./github-identity.ts";
+import { resolveCurrentReviewPullRequest } from "./github-cli-review-target.ts";
+import { githubCodeHostIdentity, parseGitHubPullRequestUrl } from "./github-identity.ts";
 import type {
 	CodeHostCommandOptions,
 	CodeHostProvider,
@@ -126,6 +126,6 @@ export const githubCliCodeHostProvider: CodeHostProvider = {
 	capturePullRequestIdentity: capturePullRequestIdentityWithGitHubCli,
 	verifyPullRequestHead,
 	publishPullRequestReview,
-	discoverPullRequest: discoverPullRequestWithGitHubCli,
+	listPullRequestsForHeadBranch: listPullRequestsForHeadBranchWithGitHubCli,
 	refreshPullRequestStatuses: refreshPullRequestStatusesWithGitHubCli,
 };

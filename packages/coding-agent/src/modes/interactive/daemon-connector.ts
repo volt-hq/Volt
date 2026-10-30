@@ -200,7 +200,7 @@ export class DaemonConnector implements ConversationConnector {
 			for (;;) {
 				const control = await this.connect(options);
 				if (target.kind === "session" && target.resume === true) await this.assertWorkspaceKept(control);
-				await this.restoreCheckout(control, openTarget);
+				await this.restoreCheckout(control, located);
 				options.onStatus?.("Opening the conversation");
 				try {
 					const { opened, transport } = await openDaemonConversation(control, {
@@ -385,9 +385,12 @@ export class DaemonConnector implements ConversationConnector {
 	 * runs nowhere else: the daemon restores it and pins it for as long as the
 	 * control connection lasts.
 	 */
-	private async restoreCheckout(control: DaemonClient, target: ConversationOpenTarget): Promise<void> {
+	private async restoreCheckout(control: DaemonClient, located: Located): Promise<void> {
+		const { target, cwd } = located;
 		if (target.kind !== "session" || target.sessionDir === undefined || target.cwdOverride !== undefined) return;
 		if (this.restored.has(target.sessionId)) return;
+		// Resolution already found the cwd: only a missing managed checkout needs another store lookup.
+		if (!isPathUnderWorktreesRoot(this.agentDir, cwd) || existsSync(cwd)) return;
 		const info = await findSessionInfoById(target.sessionDir, target.sessionId).catch(() => undefined);
 		if (info === undefined || !info.cwd || existsSync(info.cwd)) return;
 		if (!isPathUnderWorktreesRoot(this.agentDir, info.cwd)) return;
