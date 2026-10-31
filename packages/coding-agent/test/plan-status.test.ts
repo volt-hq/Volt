@@ -99,9 +99,11 @@ describe("Plan TUI components", () => {
 
 		const active = { ...readyPlan(), phase: "active" as const };
 		const rendered = new PlanStatusComponent({ mode: "build", plan: active }).render(80).lines;
-		expect(rendered).toHaveLength(1);
-		expect(plain(rendered)).toContain("PLAN EXECUTING");
-		expect(plain(rendered)).toContain("4/12 · 33%");
+		expect(rendered).toHaveLength(2);
+		expect(plain(rendered)).toMatch(/PLAN · EXECUTING {2}Native Plan Mode +\S+ 4\/12\n/);
+		// The item execution is on, numbered as the cards number it.
+		expect(plain(rendered)).toMatch(/^ {2}(\[>\]|●) 5 Plan step 5$/m);
+		for (const line of rendered) expect(visibleWidth(line)).toBeLessThanOrEqual(80);
 	});
 
 	it("names a ready plan and its size on one row at every width, leaving its keys to the composer", () => {
@@ -113,13 +115,13 @@ describe("Plan TUI components", () => {
 				const rendered = status.render(width).lines;
 				expect(rendered).toHaveLength(1);
 				const text = plain(rendered);
-				expect(text).toMatch(/PLAN READY · Native Plan Mode +12 proposed steps$/);
+				expect(text).toMatch(/PLAN · READY {2}Native Plan Mode +12 steps$/);
 				expect(text).not.toContain("choose next step");
 				expect(visibleWidth(rendered[0]!)).toBeLessThanOrEqual(width);
 			}
 			// A long title gives way to the size.
 			const long = plain(new PlanStatusComponent({ mode: "plan", plan: longPlan() }).render(60).lines);
-			expect(long).toMatch(/^(◆ )?PLAN READY · A deliberately.*… +3 proposed steps$/);
+			expect(long).toMatch(/^(◆ )?PLAN · READY {2}A deliberately.*… +3 steps$/);
 		} finally {
 			setKeybindings(new KeybindingsManager());
 		}
@@ -135,11 +137,11 @@ describe("Plan TUI components", () => {
 			for (const width of [60, 120]) {
 				const rendered = status.render(width).lines;
 				const text = plain(rendered);
-				expect(text).toMatch(/PLAN DRAFT · Native Plan Mode +12 proposed steps\n/);
-				expect(text).toContain("1. Plan step 1");
-				expect(text).toContain("5. Plan step 5");
+				expect(text).toMatch(/PLAN · DRAFT {2}Native Plan Mode +12 steps\n/);
+				expect(text).toMatch(/^ {2}(\[x\]|✓) 1 Plan step 1$/m);
+				expect(text).toMatch(/^ {2}(\[>\]|●) 5 Plan step 5$/m);
 				expect(text).not.toContain("Plan step 6");
-				expect(text).toMatch(/… 7 more · revision 4 · (alt|option)\+x details$/);
+				expect(text).toMatch(/^ {2}… 7 more · revision 4 · (alt|option)\+x details$/m);
 				for (const line of rendered) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 			}
 
@@ -151,9 +153,9 @@ describe("Plan TUI components", () => {
 				{ getTerminalRows: () => 24 },
 			);
 			const text = plain(small.render(120).lines);
-			expect(text).toContain("2. Plan step 2");
+			expect(text).toContain("2 Plan step 2");
 			expect(text).not.toContain("more");
-			expect(text).toMatch(/ {3}revision 4 · (alt|option)\+x details$/);
+			expect(text).toMatch(/^ {2}revision 4 · (alt|option)\+x details$/m);
 		} finally {
 			setKeybindings(new KeybindingsManager());
 		}
@@ -175,11 +177,11 @@ describe("Plan TUI components", () => {
 		];
 		const rendered = plain(new PlanStatusComponent({ mode: "plan", plan: draft }).render(120).lines);
 		expect(rendered).toContain("1 outcome · 2 tasks");
-		// An outcome keeps its task count beside its text, even where the text gives way.
-		expect(rendered).toContain("1. Implement hierarchy · 2 tasks");
+		// An outcome keeps its task count beside its text, as the cards give it, even where the text gives way.
+		expect(rendered).toContain("1 Implement hierarchy  0/2 tasks");
 		draft.steps[0]!.text = "Implement a hierarchy whose outcome text is far too long to fit beside its task count";
 		expect(plain(new PlanStatusComponent({ mode: "plan", plan: draft }).render(48).lines)).toMatch(
-			/1\. Implement a hierarchy.*… · 2 tasks\n/,
+			/1 Implement a hierarchy.*… {2}0\/2 tasks\n/,
 		);
 	});
 
@@ -199,10 +201,10 @@ describe("Plan TUI components", () => {
 			},
 		];
 		const rendered = normalized(createDetails(grouped, 30).render(80).lines);
-		expect(rendered).toContain("Implement hierarchy · 1/2 tasks");
-		expect(rendered).toContain("Persist hierarchy");
-		expect(rendered).toContain("Note: Stored");
-		expect(rendered).toContain("Render hierarchy");
+		expect(rendered).toContain("1 Implement hierarchy 1/2 tasks");
+		expect(rendered).toContain("1.1 Persist hierarchy");
+		expect(rendered).toMatch(/(↳|->) Stored/);
+		expect(rendered).toContain("1.2 Render hierarchy");
 	});
 
 	it("wraps all authored plan content at compact and wide widths", () => {
@@ -225,9 +227,9 @@ describe("Plan TUI components", () => {
 		initTheme("light");
 		const details = createDetails(readyPlan(40), 36);
 		const rendered = plain(details.render(120).lines);
-		expect(rendered).toContain("rows 1–22/42");
-		expect(rendered).toContain("Plan step 20");
-		expect(rendered).not.toContain("Plan step 21");
+		expect(rendered).toContain("rows 1–23/46");
+		expect(rendered).toContain("Plan step 17");
+		expect(rendered).not.toContain("Plan step 18");
 	});
 
 	it("scrolls by rendered visual rows rather than logical checklist items", () => {
@@ -247,16 +249,17 @@ describe("Plan TUI components", () => {
 			},
 		});
 		const before = plain(details.render(80).lines);
-		expect(before).toContain("rows 1–10/");
+		expect(before).toContain("rows 1–11/");
 		expect(before).toContain("first checklist item");
 
 		details.handleInput("\u001b[6~");
 		const after = plain(details.render(80).lines);
 		expect(renders).toBe(1);
-		expect(after).toContain("rows 11–20/");
+		expect(after).toContain("rows 12–22/");
 		expect(after).not.toContain("A summary that occupies");
-		expect(after).toContain("Plan step 8");
-		expect(after).not.toContain("Plan step 7");
+		// The wrapped first item spends two rows, so the page opens at the fifth.
+		expect(after).toMatch(/ 5 {2}Plan step 5$/m);
+		expect(after).not.toMatch(/ 4 {2}Plan step 4$/m);
 	});
 
 	it("settles fullscreen plan metadata before display, resize, and body scrolling", async () => {
@@ -275,22 +278,24 @@ describe("Plan TUI components", () => {
 				await terminal.waitForRender();
 				const before = plain(terminal.getViewport());
 				expect(before).toContain("Native Plan Mode");
-				expect(before).toContain("rows 1–9/42");
+				expect(before).toContain("rows 1–10/46");
 				expect(before).toContain("Execute Plan");
 				expect(before).toContain("Plan step 1");
 
 				terminal.resize(80, 20);
 				await terminal.waitForRender();
 				const resized = plain(terminal.getViewport());
-				expect(resized).toContain("rows 1–13/42");
+				expect(resized).toContain("rows 1–14/46");
 				expect(resized).toContain("Native Plan Mode");
 				expect(resized).toContain("Execute Plan");
 
 				terminal.sendInput("\u001b[6~");
 				await terminal.waitForRender();
 				const after = plain(terminal.getViewport());
-				expect(after).toContain("rows 10–22/42");
-				expect(after).toContain("Native Plan Mode");
+				expect(after).toContain("rows 11–24/46");
+				// The badge and meta stay fixed while the body, title included, scrolls.
+				expect(after).toContain("PLAN · READY");
+				expect(after).not.toContain("Native Plan Mode");
 				expect(after).toContain("Execute Plan");
 				expect(after).not.toMatch(/Plan step 1\s*$/m);
 			} finally {
@@ -303,7 +308,9 @@ describe("Plan TUI components", () => {
 		initTheme("dark");
 		for (const width of [80, 120]) {
 			const rendered = plain(createDetails(readyPlan(), 36).render(width).lines);
-			expect(rendered).toContain("READY · 12 proposed steps");
+			// The badge rides the top rule, as the composer's label rides its border.
+			expect(rendered).toMatch(/^(--|──) (◆ )?PLAN · READY (-|─)+$/m);
+			expect(rendered).toMatch(/^ 12 steps *$/m);
 			expect(rendered).toMatch(/\[ Execute Plan \] +Execute Plan & Clear Context +Change Plan/);
 			expect(rendered).toMatch(
 				/←\/→ choose {2}enter confirm {2}up\/down scroll {2}pageUp\/pageDown page {2}escape back/,
@@ -319,7 +326,8 @@ describe("Plan TUI components", () => {
 		expect(after.split("\n")).toHaveLength(before.split("\n").length);
 
 		const completed = plain(createDetails(finishedPlan("completed"), 36).render(120).lines);
-		expect(completed).toContain("COMPLETE · 12/12 complete");
+		expect(completed).toContain("PLAN · COMPLETE");
+		expect(completed).toMatch(/^ (#|█)+ 12\/12/m);
 		expect(completed).not.toContain("READY");
 	});
 
@@ -423,19 +431,18 @@ describe("Plan TUI components", () => {
 		expect(actions).toEqual(["close"]);
 	});
 
-	it("hints /plan-close for finished plans only in the wide status strip", () => {
+	it("says how to close a finished plan at every width", () => {
 		initTheme("dark");
 		const completed = new PlanStatusComponent({ mode: "build", plan: finishedPlan("completed") });
-		const wide = completed.render(120).lines;
-		expect(wide).toHaveLength(2);
-		expect(plain(wide)).toContain("All steps complete · /plan-close to close");
-		const compact = completed.render(80).lines;
-		expect(compact).toHaveLength(1);
-		expect(plain(compact)).not.toContain("/plan-close");
+		for (const width of [80, 120]) {
+			const lines = completed.render(width).lines;
+			expect(lines).toHaveLength(2);
+			expect(plain(lines)).toMatch(/PLAN · COMPLETE {2}Native Plan Mode +\S+ 12\/12\n/);
+			expect(plain(lines)).toMatch(/^ {2}All steps complete · \/plan-close to close$/m);
+		}
 
 		const handedOff = new PlanStatusComponent({ mode: "build", plan: finishedPlan("handed_off") });
-		expect(plain(handedOff.render(120).lines)).toContain("Execution session: target-session · /plan-close to close");
-		expect(plain(handedOff.render(80).lines)).not.toContain("/plan-close");
+		expect(plain(handedOff.render(80).lines)).toContain("Executing in session target-session · /plan-close to close");
 	});
 
 	it("renders Unicode markers normally and ASCII markers when requested", () => {

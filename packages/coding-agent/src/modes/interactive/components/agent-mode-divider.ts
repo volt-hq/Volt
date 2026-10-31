@@ -21,16 +21,17 @@ export class AgentModeDividerComponent implements Component {
 
 	render(width: number): RenderFrame {
 		if (width <= 0) return createRenderFrame([]);
-		const rule = usesAsciiPlanMarkers() ? "-" : "─";
+		const ascii = usesAsciiPlanMarkers();
+		const rule = ascii ? "-" : "─";
 		const plan = this.mode === "plan";
 		const ruleColor = plan ? "planMode" : "borderMuted";
-		const label = plan ? "Plan mode · agent tools are read-only" : "Build mode";
+		// Plan mode carries the plan's mark, as its badge does.
+		const label = plan
+			? `${theme.bold(theme.fg("planMode", `${ascii ? "" : "◆ "}Plan mode`))}${theme.fg("muted", " · agent tools are read-only")}`
+			: theme.fg("muted", "Build mode");
 		const head = ` ${rule.repeat(2)} `;
 		const tail = rule.repeat(Math.max(0, width - 1 - visibleWidth(head) - visibleWidth(label) - 1));
-		const line =
-			theme.fg(ruleColor, head) +
-			(plan ? theme.bold(theme.fg("planMode", label)) : theme.fg("muted", label)) +
-			theme.fg(ruleColor, ` ${tail}`);
+		const line = theme.fg(ruleColor, head) + label + theme.fg(ruleColor, ` ${tail}`);
 		return createRenderFrame([truncateToWidth(line, width, "")]);
 	}
 }

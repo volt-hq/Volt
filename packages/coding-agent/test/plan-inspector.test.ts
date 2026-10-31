@@ -69,10 +69,11 @@ afterEach(() => {
 });
 
 describe("PlanInspectorComponent", () => {
-	it("renders empty Plan-mode draft state from PlanningState", () => {
+	it("renders Plan mode before its first draft from PlanningState", () => {
 		const output = text(createInspector({ mode: "plan", plan: null }));
-		expect(output).toContain("PLAN · DRAFT");
-		expect(output).toContain("No structured plan yet");
+		expect(output.split("\n")[0]).toMatch(/^ (◆ )?PLAN +/);
+		expect(output).not.toContain("DRAFT");
+		expect(output).toContain("No plan yet");
 		expect(output.replace(/\s+/g, " ")).toContain("initial research orientation");
 	});
 
@@ -81,24 +82,29 @@ describe("PlanInspectorComponent", () => {
 			const output = text(createInspector(planning(phase)));
 			expect(output).toContain(`${phase} lifecycle title`);
 			expect(output).toContain(`Canonical ${phase} lifecycle summary`);
-			expect(output).toContain("1. ");
-			expect(output).toContain("Observed verification note");
+			// Items read as the cards draw them: glyph, checklist number, text; notes below.
+			expect(output).toMatch(/^ (\[x\]|✓) 1 Lifecycle step 1$/m);
+			expect(output).toMatch(/^ {5,}(->|↳) Observed verification note$/m);
 			expect(output).not.toContain("Elapsed");
 			expect(output).not.toContain("Pause");
 			expect(output).not.toContain("Maximize");
-			if (phase === "active") expect(output).toContain("EXECUTING");
-			if (phase === "completed") expect(output).toContain("COMPLETE");
-			if (phase === "handed_off") expect(output).toContain("Execution session: target-session");
+			if (phase === "active") expect(output).toContain("PLAN · EXECUTING");
+			if (phase === "completed") expect(output).toContain("PLAN · COMPLETE");
+			if (phase === "handed_off") expect(output).toContain("Executing in session target-session");
 		}
 	});
 
 	it("shows progress and focused state while bounding every line", () => {
 		const inspector = createInspector(planning("active"));
+		const unfocused = inspector.render(48).lines.map(stripAnsi);
+		expect(unfocused[0]).toMatch(/(alt|option)\+p focus$/);
 		inspector.focused = true;
 		const lines = inspector.render(48).lines;
 		const output = lines.map(stripAnsi).join("\n");
-		expect(output).toContain("FOCUSED");
-		expect(output).toContain("1/3 complete · 33%");
+		// Focused, the header says how to leave; the progress bar and the cards' heading carry progress.
+		expect(output.split("\n")[0]).toMatch(/escape back$/);
+		expect(output.split("\n")[1]).toMatch(/^ (#|█)+(-|░)+ 1\/3/);
+		expect(output).toContain("Checklist · 1/3 complete");
 		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(48);
 	});
 
@@ -154,7 +160,7 @@ describe("PlanInspectorComponent", () => {
 		const draft = text(inspector);
 		expect(draft).toContain("Hidden completed child");
 		expect(draft).toContain("Hidden partial pending child");
-		expect(draft).toContain("Plan mode · 3 outcomes · 5 tasks · revision 4");
+		expect(draft).toContain("3 outcomes · 5 tasks · revision 4");
 	});
 
 	it("marks a ready plan as waiting for a decision", () => {
@@ -166,11 +172,11 @@ describe("PlanInspectorComponent", () => {
 			expect(header).toContain("PLAN · READY");
 			expect(header).toMatch(/(alt|option)\+x choose$/);
 			// Before approval the plan has a size, not progress.
-			expect(stripAnsi(lines[1] ?? "")).toContain("Plan mode · 3 proposed steps");
+			expect(stripAnsi(lines[1] ?? "")).toMatch(/^ 3 steps *$/);
 			for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(48);
 
 			inspector.focused = true;
-			expect(stripAnsi(inspector.render(60).lines[0] ?? "")).toMatch(/PLAN · READY.*FOCUSED$/);
+			expect(stripAnsi(inspector.render(60).lines[0] ?? "")).toMatch(/PLAN · READY.*escape back$/);
 
 			const active = stripAnsi(createInspector(planning("active")).render(60).lines[0] ?? "");
 			expect(active).toContain("PLAN · EXECUTING");
@@ -264,6 +270,26 @@ describe("PlanInspectorComponent", () => {
 		expect(output).toContain("choose");
 		narrow.handleInput("\r");
 		expect(actions).toEqual(["change"]);
+	});
+
+	it("keeps an item's detail whole: beside its text where it fits, else below it", () => {
+		const state = planning("ready", 1);
+		state.plan!.steps = [
+			{
+				id: "group",
+				text: "Integrate the hierarchical plan presentation",
+				status: "pending",
+				substeps: [
+					{ id: "a", text: "First task", status: "pending" },
+					{ id: "b", text: "Second task", status: "pending" },
+				],
+			},
+		];
+		const wide = text(createInspector(state), 72);
+		expect(wide).toMatch(/1 Integrate the hierarchical plan presentation {2}0\/2 tasks$/m);
+		// Too narrow for both, the count moves to a line of its own under the text, never split.
+		const narrow = text(createInspector(state), 52);
+		expect(narrow).toMatch(/1 Integrate the hierarchical plan presentation\n {5,}0\/2 tasks$/m);
 	});
 
 	it("offers Close Plan only for finished plans and confirms it with Enter", () => {

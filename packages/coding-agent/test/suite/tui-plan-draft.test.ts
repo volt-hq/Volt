@@ -90,7 +90,7 @@ describe("the TUI shows a working draft as it evolves", () => {
 			});
 			expect(shown).toContain("PLAN · DRAFT");
 			expect(shown).toContain("Live draft");
-			expect(shown).toMatch(/1\. (\[ \]|○) First outcome/);
+			expect(shown).toMatch(/(\[ \]|○) 1 First outcome/);
 			expect(shown).toContain(`revision ${session.planningState.plan!.revision}`);
 		});
 
@@ -104,9 +104,9 @@ describe("the TUI shows a working draft as it evolves", () => {
 		await draftDuringRun(harness, session, () => draftTwoOutcomes(session));
 
 		const shown = await screen(control, terminal);
-		expect(shown).toMatch(/PLAN DRAFT · Live draft +2 proposed steps/);
-		expect(shown).toContain("1. First outcome");
-		expect(shown).toContain("2. Second outcome");
+		expect(shown).toMatch(/PLAN · DRAFT {2}Live draft +2 steps/);
+		expect(shown).toMatch(/(\[ \]|○) 1 First outcome/);
+		expect(shown).toMatch(/(\[ \]|○) 2 Second outcome/);
 		expect(shown).toMatch(/revision \d+ · (alt|option)\+p details/);
 		expect(control.renderer.getFocusedComponent()).toBe(control.defaultEditor);
 	});

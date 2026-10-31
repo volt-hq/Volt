@@ -16,7 +16,7 @@ import { resetCapabilitiesCache, setCapabilities, setCellDimensions } from "../.
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { PlanningState, PlanState } from "../src/core/planning.ts";
-import { initTheme } from "../src/core/theme/runtime.ts";
+import { initTheme, theme } from "../src/core/theme/runtime.ts";
 import { usesAsciiPlanMarkers } from "../src/modes/interactive/components/plan-content.ts";
 import { PlanInspectorComponent } from "../src/modes/interactive/components/plan-inspector.ts";
 import type { PlanDetailsAction } from "../src/modes/interactive/components/plan-status.ts";
@@ -399,6 +399,27 @@ describe("ResponsivePlanLayoutComponent", () => {
 		} finally {
 			tui.stop({ preserveScreen: true });
 		}
+	});
+
+	it("keeps the divider quiet and lights it in the plan's color while the pane holds attention", () => {
+		const glyph = usesAsciiPlanMarkers() ? "|" : "│";
+		const quiet = theme.fg("borderMuted", glyph);
+		const lit = theme.fg("planMode", glyph);
+		const { layout, inspector } = createLayout({ columns: 160, rows: 24 });
+		const output = () => layout.render(160).lines.join("\n");
+		expect(output()).toContain(quiet);
+		expect(output()).not.toContain(lit);
+
+		inspector.focused = true;
+		expect(output()).toContain(lit);
+		expect(output()).not.toContain(quiet);
+
+		// A search overlay may hold focus while the pane stays selected.
+		inspector.focused = false;
+		inspector.setSelected(true);
+		expect(output()).toContain(lit);
+		inspector.setSelected(false);
+		expect(output()).toContain(quiet);
 	});
 
 	it("leaves rows scrolled out of the viewport undecorated so scrollback stays readable", () => {

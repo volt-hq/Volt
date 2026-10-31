@@ -89,11 +89,18 @@ function fitLine(line: string, width: number): string {
 	return `${fitted}${" ".repeat(Math.max(0, width - visibleWidth(fitted)))}`;
 }
 
+/** The divider glyph between the panes: the plan's chrome color while the pane holds attention, else quiet. */
+function paneDivider(highlighted: boolean): string {
+	return theme.fg(highlighted ? "planMode" : "borderMuted", usesAsciiPlanMarkers() ? "|" : "│");
+}
+
 class PlanPaneDivider implements Component {
 	private readonly getTerminalRows: () => number;
+	private readonly isHighlighted: () => boolean;
 
-	constructor(getTerminalRows: () => number) {
+	constructor(getTerminalRows: () => number, isHighlighted: () => boolean) {
 		this.getTerminalRows = getTerminalRows;
+		this.isHighlighted = isHighlighted;
 	}
 
 	invalidate(): void {
@@ -102,7 +109,7 @@ class PlanPaneDivider implements Component {
 
 	render(width: number): RenderFrame {
 		if (width <= 0) return createRenderFrame([]);
-		const divider = theme.fg("border", usesAsciiPlanMarkers() ? "|" : "│");
+		const divider = paneDivider(this.isHighlighted());
 		return createRenderFrame(Array.from({ length: Math.max(1, this.getTerminalRows()) }, () => divider));
 	}
 }
@@ -164,7 +171,7 @@ export class ResponsivePlanLayoutComponent extends Container {
 				minSize: CONVERSATION_PANE_MIN_COLUMNS,
 			},
 			{
-				component: new PlanPaneDivider(options.getTerminalRows),
+				component: new PlanPaneDivider(options.getTerminalRows, () => options.inspector.highlighted),
 				basis: PLAN_PANE_DIVIDER_COLUMNS,
 				grow: 0,
 				shrink: 0,
@@ -277,7 +284,7 @@ export class ResponsivePlanLayoutComponent extends Container {
 		const availableInspectorRows = Math.max(0, mainRows - protectedVisibleRows.size);
 		this.inspector.setViewportRows(availableInspectorRows);
 		const inspectorFrame = this.inspector.render(dimensions.planColumns);
-		const divider = theme.fg("border", usesAsciiPlanMarkers() ? "|" : "│");
+		const divider = paneDivider(this.inspector.highlighted);
 		let inspectorIndex = 0;
 		const visibleFrame = mapRenderFrameLines(visibleConversation, (line, row) => {
 			if (protectedVisibleRows.has(row)) return line;

@@ -12,18 +12,19 @@ import {
 } from "@hansjm10/volt-tui";
 import type { PlanningState, PlanPhase, PlanState } from "../../../core/planning.ts";
 import { theme } from "../../../core/theme/runtime.ts";
-import { DynamicBorder } from "./dynamic-border.ts";
 import { keyText, primaryKeyText, rawKeyHint } from "./keybinding-hints.ts";
 import {
-	appendWrappedPlanLine,
+	appendPlanItemLines,
+	appendPlanOutcomeLines,
 	fitPlanSides,
-	getCurrentPlanStep,
-	getPlanProgress,
-	planMarkColor,
-	planPhaseLabel,
+	getCurrentPlanItem,
+	insetPlanLines,
 	planSizeText,
-	renderPlanContentLines,
-	usesAsciiPlanMarkers,
+	renderPlanBadge,
+	renderPlanBody,
+	renderPlanMeta,
+	renderPlanProgressBar,
+	renderPlanRule,
 } from "./plan-content.ts";
 
 /** The most outcomes a working draft lists in the status strip, for a terminal of `rows`. */
@@ -31,12 +32,17 @@ function draftOutcomeRows(rows: number): number {
 	return Math.max(2, Math.min(5, Math.floor(rows / 8)));
 }
 
+/** Columns the status strip indents its rows under its badge. */
+const STRIP_INDENT = 2;
+
 /**
  * Bounded branch-local plan summary kept directly above the editor where the
- * plan pane does not fit. Plan mode itself shows in the composer's border and
- * label, so the strip appears once there is a plan. A working draft lists its
- * outcomes as they evolve, as many as the terminal's height allows; a ready
- * plan's strip names it, and the composer's label says how to decide on it.
+ * plan pane does not fit: the plan's badge, title, and size or progress, then
+ * one row of what matters in its phase. A working draft lists its outcomes as
+ * they evolve, as many as the terminal's height allows; execution shows the
+ * item it is on. Plan mode itself shows in the composer's border and label,
+ * so the strip appears once there is a plan, and a ready plan leaves its
+ * next-step keys to the composer's label.
  */
 export class PlanStatusComponent implements Component {
 	private planning: PlanningState;
@@ -60,59 +66,50 @@ export class PlanStatusComponent implements Component {
 		const plan = this.planning.plan;
 		if (!plan) return createRenderFrame([]);
 
-		const mark = usesAsciiPlanMarkers() ? "PLAN" : "◆ PLAN";
-		const { completed, total, percent } = getPlanProgress(plan);
-		const ready = plan.phase === "ready";
-		const draft = plan.phase === "draft";
-		const label = theme.bold(theme.fg(planMarkColor(plan.phase), `${mark} ${planPhaseLabel(plan)}`));
-		const left =
-			(ready || draft) && plan.title ? `${label}${theme.fg("muted", " · ")}${theme.fg("text", plan.title)}` : label;
-		const right = theme.fg("dim", draft || ready ? planSizeText(plan) : `${completed}/${total} · ${percent}%`);
+		const badge = renderPlanBadge(plan);
+		const left = plan.title ? `${badge}  ${theme.fg("text", plan.title)}` : badge;
+		const right =
+			plan.phase === "draft" || plan.phase === "ready"
+				? theme.fg("dim", planSizeText(plan))
+				: renderPlanProgressBar(plan, width, 10);
 		const lines = [fitPlanSides(left, right, width, "…")];
-		if (draft) return createRenderFrame([...lines, ...this.renderDraftOutcomes(plan, width)]);
-		// The composer's label carries a ready plan's next-step keys at every width.
-		if (ready || width < 100) return createRenderFrame(lines);
-
-		const step = getCurrentPlanStep(plan);
-		if (plan.phase === "handed_off" && plan.execution) {
-			lines.push(
-				truncateToWidth(
-					theme.fg("muted", ` Execution session: ${plan.execution.targetSessionId} · /plan-close to close`),
-					width,
-				),
-			);
-		} else if (plan.phase === "completed") {
-			lines.push(truncateToWidth(theme.fg("muted", " All steps complete · /plan-close to close"), width));
-		} else if (step) {
-			lines.push(truncateToWidth(theme.fg("muted", ` Current · ${step}`), width));
+		const footer = (parts: readonly string[]): string =>
+			truncateToWidth(theme.fg("dim", `${" ".repeat(STRIP_INDENT)}${parts.join(" · ")}`), width, "");
+		switch (plan.phase) {
+			case "draft": {
+				const shown = plan.steps.slice(0, draftOutcomeRows(this.getTerminalRows()));
+				appendPlanOutcomeLines(lines, shown, width, {
+					indent: STRIP_INDENT,
+					numberWidth: `${shown.length}`.length,
+				});
+				const more = plan.steps.length - shown.length;
+				const details = keyText("app.plan.togglePane");
+				lines.push(
+					footer([
+						...(more > 0 ? [`… ${more} more`] : []),
+						`revision ${plan.revision}`,
+						details ? `${details} details` : "/plan-details to inspect",
+					]),
+				);
+				break;
+			}
+			case "active": {
+				const current = getCurrentPlanItem(plan);
+				if (current) appendPlanItemLines(lines, current, width, { indent: STRIP_INDENT, singleLine: true });
+				break;
+			}
+			case "completed":
+				lines.push(footer(["All steps complete", "/plan-close to close"]));
+				break;
+			case "handed_off":
+				if (plan.execution) {
+					lines.push(footer([`Executing in session ${plan.execution.targetSessionId}`, "/plan-close to close"]));
+				}
+				break;
+			default:
+				break;
 		}
 		return createRenderFrame(lines);
-	}
-
-	/**
-	 * A working draft's outcomes, one line each, then a line with how many more
-	 * there are, its revision, and how to open it whole.
-	 */
-	private renderDraftOutcomes(plan: PlanState, width: number): string[] {
-		const shown = plan.steps.slice(0, draftOutcomeRows(this.getTerminalRows()));
-		const lines = shown.map((step, index) => {
-			const tasks = step.substeps
-				? theme.fg("dim", ` · ${step.substeps.length} ${step.substeps.length === 1 ? "task" : "tasks"}`)
-				: "";
-			const number = theme.fg("dim", `   ${index + 1}. `);
-			// The text gives way so its task count stays beside it.
-			const room = Math.max(1, width - visibleWidth(number) - visibleWidth(tasks));
-			const text = truncateToWidth(theme.fg("muted", step.text.replace(/\s+/g, " ")), room, "…");
-			return truncateToWidth(`${number}${text}${tasks}`, width, "");
-		});
-		const more = plan.steps.length - shown.length;
-		const details = keyText("app.plan.togglePane");
-		const footer = [
-			...(more > 0 ? [`… ${more} more`] : []),
-			`revision ${plan.revision}`,
-			details ? `${details} details` : "/plan-details to inspect",
-		].join(" · ");
-		return [...lines, truncateToWidth(theme.fg("dim", `   ${footer}`), width)];
 	}
 }
 
@@ -155,8 +152,8 @@ export function renderPlanActionRows(
 	width: number,
 ): PlanActionRows {
 	const rows: string[] = [];
-	let row = " ";
-	let rowWidth = 1;
+	let row = "";
+	let rowWidth = 0;
 	let selectedRow = 0;
 	for (const [index, item] of actions.entries()) {
 		const isSelected = index === selected;
@@ -164,12 +161,12 @@ export function renderPlanActionRows(
 			? theme.bold(theme.fg("accent", `[ ${item.label} ]`))
 			: theme.fg("muted", `  ${item.label}  `);
 		const cellWidth = visibleWidth(cell);
-		if (rowWidth > 1 && rowWidth + 1 + cellWidth > width) {
+		if (rowWidth > 0 && rowWidth + 1 + cellWidth > width) {
 			rows.push(truncateToWidth(row, width, ""));
-			row = " ";
-			rowWidth = 1;
+			row = "";
+			rowWidth = 0;
 		}
-		if (rowWidth > 1) {
+		if (rowWidth > 0) {
 			row += " ";
 			rowWidth += 1;
 		}
@@ -177,7 +174,7 @@ export function renderPlanActionRows(
 		rowWidth += cellWidth;
 		if (isSelected) selectedRow = rows.length;
 	}
-	if (rowWidth > 1) rows.push(truncateToWidth(row, width, ""));
+	if (rowWidth > 0) rows.push(truncateToWidth(row, width, ""));
 	return { rows, selectedRow };
 }
 
@@ -198,7 +195,7 @@ export function renderPlanChooserHint(
 		rawKeyHint(`${primaryKeyText("tui.editor.pageUp")}/${primaryKeyText("tui.editor.pageDown")}`, "page"),
 	);
 	if (options.back) hints.push(rawKeyHint(primaryKeyText("tui.select.cancel"), "back"));
-	return truncateToWidth(` ${hints.join("  ")}`, width, "");
+	return truncateToWidth(hints.join("  "), width, "");
 }
 
 /** Printable keystrokes and pastes that belong in the composer rather than the ready-plan chooser. */
@@ -223,14 +220,18 @@ class PlanDetailsSection implements Component {
 }
 
 /**
- * Scrollable plan viewer. Regular mode keeps its bounded native-scrollback
- * rendering; fullscreen mode uses a fixed header/actions layout around one
- * body ScrollView while sharing the same plan, action, and scroll state.
- * Its actions are one row of buttons at every width, chosen with the
- * horizontal keys; the vertical keys always scroll.
+ * Scrollable plan viewer where the plan pane does not fit, laid out as the
+ * pane is: a rule carrying the plan's badge, the plan's size or progress,
+ * the shared plan body, then its actions and one hint row above a closing
+ * rule. Regular mode keeps its bounded native-scrollback rendering;
+ * fullscreen mode uses a fixed header/actions layout around one body
+ * ScrollView while sharing the same plan, action, and scroll state. Its
+ * actions are one row of buttons at every width, chosen with the horizontal
+ * keys; the vertical keys always scroll.
  */
 export class PlanDetailsComponent implements Component {
 	private static readonly RESERVED_OUTSIDE_ROWS = 7;
+	private static readonly HEADER_ROWS = 2;
 	private plan: PlanState;
 	private readonly getTerminalRows: () => number;
 	private readonly onAction: (action: PlanDetailsAction) => void;
@@ -260,14 +261,14 @@ export class PlanDetailsComponent implements Component {
 		this.onTextInput = options.onTextInput;
 		this.requestRender = options.requestRender;
 
-		const body = new PlanDetailsSection((width) => renderPlanContentLines(this.plan, width, theme));
+		const body = new PlanDetailsSection((width) => this.renderBody(width));
 		this.bodyScroll = new ScrollView(body, {
 			overscroll: "contain",
 			scrollbar: options.fullscreenScrollbar ?? "auto",
 			scrollbarStyle: (text) => theme.bg("scrollbarThumb", text),
 		});
 		const header = new PlanDetailsSection((width) => this.renderFullscreenHeader(width));
-		const actions = new PlanDetailsSection((width) => this.renderFooter(width, this.renderBorder(width)));
+		const actions = new PlanDetailsSection((width) => this.renderFooter(width));
 		this.fullscreenLayout = new VStack([
 			{ component: header, shrink: 1, minSize: 0 },
 			{ component: this.bodyScroll, basis: 0, grow: 1, shrink: 1, minSize: 0 },
@@ -299,11 +300,9 @@ export class PlanDetailsComponent implements Component {
 
 	render(width: number): RenderFrame {
 		if (width <= 0) return createRenderFrame([]);
-		const border = this.renderBorder(width);
-		const titleLines = this.renderTitle(width);
-		const bodyContent = renderPlanContentLines(this.plan, width, theme);
-		const footer = this.renderFooter(width, border);
-		const headerRows = 2 + titleLines.length;
+		const bodyContent = this.renderBody(width);
+		const footer = this.renderFooter(width);
+		const headerRows = PlanDetailsComponent.HEADER_ROWS;
 		const targetRows = Math.max(
 			headerRows + footer.length + 2,
 			this.getTerminalRows() - PlanDetailsComponent.RESERVED_OUTSIDE_ROWS,
@@ -314,9 +313,7 @@ export class PlanDetailsComponent implements Component {
 		const end = Math.min(bodyContent.length, this.bodyScroll.scrollTop + pageSize);
 
 		return createRenderFrame([
-			border,
-			...titleLines,
-			this.renderMetadata(width, bodyContent.length, end),
+			...this.renderHeader(width, bodyContent.length, end),
 			...bodyContent.slice(this.bodyScroll.scrollTop, end),
 			...footer,
 		]);
@@ -361,41 +358,44 @@ export class PlanDetailsComponent implements Component {
 		}
 	}
 
-	private renderBorder(width: number): string {
-		return new DynamicBorder().render(width).lines[0] ?? "";
-	}
-
-	private renderTitle(width: number): string[] {
-		const lines: string[] = [];
-		appendWrappedPlanLine(lines, " ", theme.bold(theme.fg("accent", this.plan.title ?? "Plan Details")), width);
-		return lines;
+	/** The shared plan body, inset, after a blank row below the header. */
+	private renderBody(width: number): string[] {
+		return insetPlanLines(width, (inner) => ["", ...renderPlanBody(this.plan, inner)]);
 	}
 
 	private renderFullscreenHeader(width: number): string[] {
-		const bodyLength = renderPlanContentLines(this.plan, width, theme).length;
+		const bodyLength = this.renderBody(this.bodyScroll.getContentWidth(width)).length;
 		const end = Math.min(bodyLength, this.bodyScroll.scrollTop + this.bodyScroll.viewportHeight);
-		return [this.renderBorder(width), ...this.renderTitle(width), this.renderMetadata(width, bodyLength, end)];
+		return this.renderHeader(width, bodyLength, end);
 	}
 
-	private renderMetadata(width: number, bodyLength: number, end: number): string {
-		const progress = getPlanProgress(this.plan);
-		const maxScroll = Math.max(0, bodyLength - Math.max(1, this.bodyScroll.viewportHeight));
-		const position = maxScroll > 0 ? ` · rows ${this.bodyScroll.scrollTop + 1}–${end}/${bodyLength}` : "";
-		const size =
-			this.plan.phase === "draft" || this.plan.phase === "ready"
-				? planSizeText(this.plan)
-				: `${progress.completed}/${progress.total} complete`;
-		const phase = theme.bold(theme.fg(planMarkColor(this.plan.phase), planPhaseLabel(this.plan)));
-		return truncateToWidth(` ${phase}${theme.fg("dim", ` · ${size}${position}`)}`, width, "");
+	/** The rule carrying the plan's badge, then its size or progress with the scroll position at its right. */
+	private renderHeader(width: number, bodyLength: number, end: number): string[] {
+		const pageRows = this.fullscreenActive ? this.bodyScroll.viewportHeight : this.regularPageSize;
+		const position =
+			bodyLength > Math.max(1, pageRows)
+				? theme.fg("dim", `rows ${this.bodyScroll.scrollTop + 1}–${end}/${bodyLength}`)
+				: "";
+		return [
+			renderPlanRule(width, renderPlanBadge(this.plan)),
+			...insetPlanLines(width, (inner) => {
+				const metaWidth = Math.max(1, inner - visibleWidth(position) - (position ? 1 : 0));
+				return [fitPlanSides(renderPlanMeta(this.plan, metaWidth), position, inner)];
+			}),
+		];
 	}
 
-	private renderFooter(width: number, border: string): string[] {
+	private renderFooter(width: number): string[] {
 		const actions = getPlanActions(this.plan.phase);
-		const lines: string[] = [];
-		if (actions.length > 0) {
-			lines.push("", ...renderPlanActionRows(actions, Math.min(this.actionIndex, actions.length - 1), width).rows);
-		}
-		lines.push(renderPlanChooserHint(actions, width, { back: true }), border);
-		return lines;
+		return [
+			...insetPlanLines(width, (inner) => [
+				"",
+				...(actions.length > 0
+					? renderPlanActionRows(actions, Math.min(this.actionIndex, actions.length - 1), inner).rows
+					: []),
+				renderPlanChooserHint(actions, inner, { back: true }),
+			]),
+			renderPlanRule(width),
+		];
 	}
 }
