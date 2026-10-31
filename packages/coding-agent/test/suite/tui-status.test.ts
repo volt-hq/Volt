@@ -234,7 +234,7 @@ describe("the TUI's status from its store", () => {
 		});
 
 		await session.sessionWriter.appendPlanningState(plan("active"));
-		await waitForScreen(tui, "PLAN EXECUTING", "Read the plan");
+		await waitForScreen(tui, "PLAN · EXECUTING", "Read the plan");
 		await session.sessionWriter.appendPlanningState(plan("completed"));
 		await waitForScreen(tui, "Plan complete · /plan-close");
 
