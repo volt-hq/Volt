@@ -4,6 +4,7 @@ import { readFile, rm } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { Api, DeepReadonly, Model } from "@hansjm10/volt-ai";
+import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
 import { minimatch } from "minimatch";
 import { spawnProcess } from "../utils/child-process.ts";
 import type { AgentSession, AgentSessionEvent } from "./agent-session.ts";
@@ -11,6 +12,7 @@ import type { AgentSessionServices } from "./agent-session-services.ts";
 import type { AuthStorage } from "./auth-storage.ts";
 import { executeBashWithOperations } from "./bash-executor.ts";
 import {
+	type CodeHostLinkedPullRequest,
 	type CodeHostProvider,
 	type CodeHostPullRequestSummary,
 	getCodeHostProvider,
@@ -258,6 +260,46 @@ export async function probeCurrentBranchPullRequest(
 	} finally {
 		clearTimeout(timer);
 	}
+}
+
+/**
+ * The current branch's pull request as the host's change association linked it, without asking the code host:
+ * only while the conversation is on the linked change's branch, and only when a numbered review of it would resolve
+ * the same provider and repository, so a review the picker starts with its URL resolves the same pull request.
+ */
+export async function linkedCurrentBranchPullRequest(
+	cwd: string,
+	gitContext: RpcGitContext | null,
+	linked: CodeHostLinkedPullRequest | undefined,
+): Promise<CurrentBranchPullRequest | undefined> {
+	if (
+		!linked ||
+		!gitContext ||
+		gitContext.stale ||
+		gitContext.head.kind !== "branch" ||
+		gitContext.head.name !== linked.branch ||
+		!Number.isSafeInteger(linked.number) ||
+		linked.number < 1 ||
+		linked.number > MAX_PULL_REQUEST_NUMBER
+	) {
+		return undefined;
+	}
+	const signal = AbortSignal.timeout(CURRENT_PR_PROBE_TIMEOUT_MS);
+	const resolved = await resolveCodeHostProvider({ cwd, number: String(linked.number), signal }).catch(
+		() => undefined,
+	);
+	if (
+		!resolved?.ok ||
+		resolved.provider.id !== linked.provider ||
+		resolved.repository === undefined ||
+		resolved.repository.host !== linked.repository.host ||
+		resolved.repository.path !== linked.repository.path
+	) {
+		return undefined;
+	}
+	const url = resolved.provider.pullRequestUrl(linked.repository, linked.number);
+	const title = truncateProbeTitle(linked.title);
+	return url && title ? { number: linked.number, title, url } : undefined;
 }
 
 interface LocalBaseBranch {

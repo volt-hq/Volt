@@ -1106,6 +1106,147 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("extensions.<id>.remoteSafeCommands", () => {
+		it("reads the global list, with the active profile's", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					extensions: { goal: { remoteSafeCommands: ["goal-pause"] }, other: { enabled: false } },
+					defaultProfile: "phone",
+					profiles: { phone: { extensions: { goal: { remoteSafeCommands: ["goal-pause", "goal-resume"] } } } },
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getExtensionRemoteSafeCommands("goal")).toEqual(["goal-pause", "goal-resume"]);
+			expect(manager.getExtensionRemoteSafeCommands("other")).toEqual([]);
+			expect(manager.getExtensionRemoteSafeCommands("missing")).toEqual([]);
+			expect(manager.drainErrors()).toEqual([]);
+		});
+
+		it("lets a profile clear the global list", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					extensions: { goal: { remoteSafeCommands: ["goal-pause"] } },
+					defaultProfile: "desk",
+					profiles: { desk: { extensions: { goal: { remoteSafeCommands: null } } } },
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getExtensionRemoteSafeCommands("goal")).toEqual([]);
+			expect(manager.drainErrors()).toEqual([]);
+		});
+
+		it("ignores a trusted project's list, with a warning", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ extensions: { goal: { remoteSafeCommands: ["goal-pause"] } } }),
+			);
+			writeFileSync(
+				join(projectDir, ".volt", "settings.json"),
+				JSON.stringify({
+					extensions: { goal: { remoteSafeCommands: ["goal", "goal-resume"] } },
+					profiles: { ci: { extensions: { goal: { remoteSafeCommands: ["goal"] } } } },
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getExtensionRemoteSafeCommands("goal")).toEqual(["goal-pause"]);
+			expect(manager.drainErrors().map(({ scope, error }) => [scope, error.message])).toEqual([
+				[
+					"project",
+					'"extensions.goal.remoteSafeCommands" is ignored in project settings; set it in the global settings',
+				],
+				[
+					"project",
+					'"profiles.ci.extensions.goal.remoteSafeCommands" is ignored in project settings; set it in the global settings',
+				],
+			]);
+		});
+
+		it.each(["goal-pause", ["goal-pause", 1], { "goal-pause": true }])("reports %j and grants nothing", (value) => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ extensions: { goal: { remoteSafeCommands: value } } }),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getExtensionRemoteSafeCommands("goal")).toEqual([]);
+			expect(manager.drainErrors().map(({ scope, error }) => [scope, error.message])).toEqual([
+				["global", '"extensions.goal.remoteSafeCommands" must be a list of command names; it is ignored'],
+			]);
+		});
+
+		it("replaces the global list, keeping the entry's other keys, and removes an empty one", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(
+				settingsPath,
+				JSON.stringify({ extensions: { goal: { enabled: true, remoteSafeCommands: ["goal"] }, other: {} } }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.setExtensionRemoteSafeCommands("goal", ["goal-pause", "goal-status", "goal-pause"]);
+			await manager.flush();
+			expect(JSON.parse(readFileSync(settingsPath, "utf-8")).extensions).toEqual({
+				goal: { enabled: true, remoteSafeCommands: ["goal-pause", "goal-status"] },
+				other: {},
+			});
+			expect(manager.getExtensionRemoteSafeCommands("goal")).toEqual(["goal-pause", "goal-status"]);
+
+			manager.setExtensionRemoteSafeCommands("goal", []);
+			await manager.flush();
+			expect(JSON.parse(readFileSync(settingsPath, "utf-8")).extensions).toEqual({
+				goal: { enabled: true },
+				other: {},
+			});
+			expect(manager.getExtensionRemoteSafeCommands("goal")).toEqual([]);
+		});
+
+		it("writes the active profile's list, where an empty one overrides the base list", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(
+				settingsPath,
+				JSON.stringify({
+					extensions: { goal: { remoteSafeCommands: ["goal-pause"] } },
+					defaultProfile: "desk",
+					profiles: { desk: {} },
+				}),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.setExtensionRemoteSafeCommands("goal", []);
+			await manager.flush();
+
+			const saved = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(saved.extensions).toEqual({ goal: { remoteSafeCommands: ["goal-pause"] } });
+			expect(saved.profiles.desk).toEqual({ extensions: { goal: { remoteSafeCommands: [] } } });
+			expect(manager.getExtensionRemoteSafeCommands("goal")).toEqual([]);
+		});
+
+		it("is kept when the extension's settings or enablement are written", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(settingsPath, JSON.stringify({ extensions: { goal: { remoteSafeCommands: ["goal-pause"] } } }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.setExtensionSettings("goal", "global", { mode: "fast" });
+			manager.setExtensionEnabled("goal", "global", false);
+			await manager.flush();
+
+			expect(JSON.parse(readFileSync(settingsPath, "utf-8")).extensions.goal).toEqual({
+				remoteSafeCommands: ["goal-pause"],
+				settings: { mode: "fast" },
+				enabled: false,
+			});
+			expect(manager.getExtensionRemoteSafeCommands("goal")).toEqual(["goal-pause"]);
+		});
+	});
+
 	describe("contextWarningTokens", () => {
 		it("should default to 350k tokens", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);

@@ -8,6 +8,7 @@
 import type { Duplex } from "node:stream";
 import type { ControlRelayFrame, ControlRelayOutcome, HostPromptRequest, HostResponse } from "@hansjm10/volt-protocol";
 import { VERSION } from "../../config.ts";
+import type { CodeHostLinkedPullRequest } from "../../core/code-host/types.ts";
 import type { IrohRemoteHostHandshakeFailureOutcome } from "../../core/remote/iroh/protocol.ts";
 import type {
 	IrohRemotePushNotificationDeliveryStatus,
@@ -300,6 +301,16 @@ export class WorkerDaemonClient {
 			return response.type === "worker_authority_result" ? response.authority : "revoked";
 		} catch {
 			return "revoked";
+		}
+	}
+
+	/** The pull request the daemon linked `sessionId` to while it is on that change's branch; none when it cannot say. */
+	async changePullRequest(sessionId: string): Promise<CodeHostLinkedPullRequest | undefined> {
+		try {
+			const response = await this.request({ type: "worker_change_pull_request", sessionId });
+			return response.type === "worker_change_pull_request_result" ? response.pullRequest : undefined;
+		} catch {
+			return undefined;
 		}
 	}
 

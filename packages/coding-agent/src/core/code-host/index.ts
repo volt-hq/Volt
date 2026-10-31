@@ -19,6 +19,7 @@ export type {
 	CodeHostHeadPullRequest,
 	CodeHostHeadPullRequestListRequest,
 	CodeHostHeadPullRequestListResult,
+	CodeHostLinkedPullRequest,
 	CodeHostProvider,
 	CodeHostPullRequestAssociation,
 	CodeHostPullRequestDiscoveryOutcome,

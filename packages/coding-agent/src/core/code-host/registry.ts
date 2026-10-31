@@ -11,6 +11,7 @@ import {
 	selectNumberedReviewRemote,
 } from "./review-remote.ts";
 import type {
+	CanonicalCodeHostRepository,
 	CodeHostProvider,
 	CodeHostPullRequestDiscoveryProvider,
 	CodeHostPullRequestStatusProvider,
@@ -49,7 +50,14 @@ export function getCodeHostProvider(providerId: string): CodeHostProvider {
 
 export type ResolveCodeHostProviderOptions = Pick<ReviewCodeHostContextCaptureOptions, "cwd" | "number" | "signal">;
 
-export type ResolveCodeHostProviderResult = { ok: true; provider: CodeHostProvider } | ReviewTargetFailure;
+export type ResolveCodeHostProviderResult =
+	| {
+			ok: true;
+			provider: CodeHostProvider;
+			/** The repository the remote names, when its every URL names the same one. */
+			repository?: CanonicalCodeHostRepository;
+	  }
+	| ReviewTargetFailure;
 
 /**
  * Select the provider for a PR review from the same remote the provider will resolve:
@@ -70,10 +78,14 @@ export async function resolveCodeHostProvider(
 				"The review remote does not identify one repository. Configure one unambiguous repository on the host.",
 			);
 		}
-		const provider = providers.find((candidate) =>
-			urls.every((url) => candidate.canonicalizeRemoteUrl(url) !== null),
-		);
-		if (provider) return { ok: true, provider };
+		for (const provider of providers) {
+			const repositories = urls.map((url) => provider.canonicalizeRemoteUrl(url));
+			if (repositories.some((repository) => repository === null)) continue;
+			const [repository] = repositories;
+			return repository && repositories.every((candidate) => candidate?.canonicalId === repository.canonicalId)
+				? { ok: true, provider, repository }
+				: { ok: true, provider };
+		}
 		const supported = providers.map((candidate) => candidate.displayName).join(" or ");
 		return reviewTargetFailure(
 			`The review remote is not a supported credential-free ${supported} URL. Check its configuration on the host.`,

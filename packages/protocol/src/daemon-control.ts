@@ -985,6 +985,11 @@ export const CONTROL_REQUEST_SCHEMAS = {
 	worker_session_owned: withId("worker_session_owned", { relayId: Type.String(), sessionId: LogSessionIdSchema }),
 	/** Worker: whether a relay's client still holds the authority it was relayed with (before each frame acts). */
 	worker_authority: withId("worker_authority", { relayId: Type.String() }),
+	/**
+	 * Worker: the pull request the daemon linked a conversation it hosts to, while the conversation is on that
+	 * change's own repository and branch. Answered by `worker_change_pull_request_result`.
+	 */
+	worker_change_pull_request: withId("worker_change_pull_request", { sessionId: LogSessionIdSchema }),
 	/** Worker: its answer to `worker_stop`, from its own idle check when the stop arrived. */
 	worker_stop_result: withId("worker_stop_result", {
 		stopId: Type.String(),
@@ -1062,6 +1067,7 @@ export const WORKER_REQUEST_TYPES = [
 	"worker_last_session",
 	"worker_session_owned",
 	"worker_authority",
+	"worker_change_pull_request",
 	"worker_stop_result",
 	"worker_close_result",
 	"worker_exit",
@@ -1111,6 +1117,7 @@ export const ControlRequestSchema = Type.Union([
 	CONTROL_REQUEST_SCHEMAS.worker_last_session,
 	CONTROL_REQUEST_SCHEMAS.worker_session_owned,
 	CONTROL_REQUEST_SCHEMAS.worker_authority,
+	CONTROL_REQUEST_SCHEMAS.worker_change_pull_request,
 	CONTROL_REQUEST_SCHEMAS.worker_stop_result,
 	CONTROL_REQUEST_SCHEMAS.worker_close_result,
 	CONTROL_REQUEST_SCHEMAS.worker_exit,
@@ -1213,6 +1220,27 @@ export const CONTROL_RESPONSE_SCHEMAS = {
 	worker_host_response: withId("worker_host_response", { response: Type.Optional(HostResponseSchema) }),
 	worker_forward_result: withId("worker_forward_result", { frame: ControlRelayOutcomeSchema }),
 	worker_authority_result: withId("worker_authority_result", { authority: WorkerRelayAuthoritySchema }),
+	/** The conversation's linked pull request; none when it has none, or is not on that change's branch. */
+	worker_change_pull_request_result: withId("worker_change_pull_request_result", {
+		pullRequest: Type.Optional(
+			Type.Object(
+				{
+					/** Registered code-host provider id. */
+					provider: codePoints(1, 64, SINGLE_LINE),
+					/** The base repository, as the provider canonicalized it. */
+					repository: Type.Object(
+						{ host: codePoints(1, 253, SINGLE_LINE), path: codePoints(1, 256, SINGLE_LINE) },
+						closed,
+					),
+					number: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+					title: codePoints(0, 512),
+					/** The change's branch: the local branch the conversation was observed on. */
+					branch: codePoints(1, 1024, SINGLE_LINE),
+				},
+				closed,
+			),
+		),
+	}),
 	/**
 	 * The daemon's answer to `worker_exit`: whether it ended the worker's descendants, having read its process
 	 * list and found the worker running throughout. When it did not, the worker ends them as it can itself.
@@ -1243,6 +1271,7 @@ export const ControlResponseSchema = Type.Union([
 	CONTROL_RESPONSE_SCHEMAS.worker_host_response,
 	CONTROL_RESPONSE_SCHEMAS.worker_forward_result,
 	CONTROL_RESPONSE_SCHEMAS.worker_authority_result,
+	CONTROL_RESPONSE_SCHEMAS.worker_change_pull_request_result,
 	CONTROL_RESPONSE_SCHEMAS.worker_exit_result,
 	CONTROL_RESPONSE_SCHEMAS.worker_worktree_pinned,
 	CONTROL_RESPONSE_SCHEMAS.relay_push_delivery_result,

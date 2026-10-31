@@ -1193,6 +1193,8 @@ export class SessionExtensionBinding {
 
 	private bindExtensionCore(runner: ExtensionRunner): void {
 		const session = this.host.session;
+		const settings = this.host.settingsManager;
+		runner.bindRemoteSafeCommands((id, name) => settings.getExtensionRemoteSafeCommands(id).includes(name));
 		runner.bindServices(this.host.extensionServices().servicesManager);
 		const kinds = this.host.extensionKinds();
 		runner.bindWork(kinds.start, () => this.refuseDeclarations(runner));

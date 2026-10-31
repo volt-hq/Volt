@@ -200,6 +200,7 @@ import { DaxnutsComponent } from "./components/daxnuts.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
 import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
+import { ExtensionRemoteCommandsComponent } from "./components/extension-remote-commands.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { ExtensionSettingsComponent } from "./components/extension-settings.ts";
 import { FooterComponent, type FooterViewModel } from "./components/footer.ts";
@@ -5863,7 +5864,7 @@ export class InteractiveMode {
 
 	/**
 	 * `/extensions`: the conversation's extensions with their state, each
-	 * opening its actions (enable or disable, detail and settings);
+	 * opening its actions (enable or disable, detail and settings, remote commands);
 	 * `/extensions <id>` opens one's detail; `/extensions enable|disable <id>`
 	 * toggles one.
 	 */
@@ -5909,17 +5910,43 @@ export class InteractiveMode {
 		if (selected !== undefined) await this.showExtensionActions(selected);
 	}
 
-	/** What to do with one extension: enable or disable it, or open its detail and settings. */
+	/**
+	 * What to do with one extension: enable or disable it, open its detail and
+	 * settings, or, while it runs, choose which of its commands paired devices may run.
+	 */
 	private async showExtensionActions(summary: ExtensionSummary): Promise<void> {
 		const toggle = summary.enabled ? "Disable" : "Enable";
 		const detailLabel = summary.hasSettings ? "Details and settings" : "Details";
+		const remoteLabel = "Remote commands";
 		const selection = await this.showExtensionSelector(`${summary.displayName} (${summary.id})`, [
 			toggle,
 			detailLabel,
+			...(summary.state === "active" ? [remoteLabel] : []),
 			"Cancel",
 		]);
 		if (selection === toggle) await this.setExtensionEnabled(summary.id, !summary.enabled);
 		else if (selection === detailLabel) await this.showExtensionDetail(summary.id);
+		else if (selection === remoteLabel) this.showExtensionRemoteCommands(summary);
+	}
+
+	/** Which of a running extension's commands paired devices may run, read and saved through the host. */
+	private showExtensionRemoteCommands(summary: ExtensionSummary): void {
+		const client = this.store.client;
+		const id = summary.id;
+		this.showSelector((done) => {
+			const component = new ExtensionRemoteCommandsComponent(
+				summary,
+				{
+					load: async () => (await client.query("extension_remote_commands", { id })).commands,
+					save: async (commands) => {
+						await client.intent("set_extension_remote_commands", { id, commands: [...commands] });
+					},
+				},
+				{ onClose: done, requestRender: () => this.ui.requestRender() },
+			);
+			void component.start();
+			return { component, focus: component };
+		});
 	}
 
 	/**

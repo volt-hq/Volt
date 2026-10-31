@@ -584,6 +584,8 @@ export class ExtensionRunner {
 	private shutdownHandler: ShutdownHandler = () => {};
 	/** Who the command now being invoked runs for. */
 	private invokerFn: () => CommandInvoker = () => "local";
+	/** Whether the user lets paired remote devices invoke a command its extension did not mark remote-safe. */
+	private remoteSafeCommandFn: (extensionId: string, name: string) => boolean = () => false;
 	private commandDiagnostics: ResourceDiagnostic[] = [];
 	private staleMessage: string | undefined;
 	private servicesManager: ExtensionServicesManager | undefined;
@@ -640,6 +642,14 @@ export class ExtensionRunner {
 			this.assertActive();
 			refresh();
 		};
+	}
+
+	/**
+	 * Resolve the commands `allowed` names (by manifest id and registered name) as remote-safe, though their extensions
+	 * did not mark them: the user's choice, read each time the commands resolve.
+	 */
+	bindRemoteSafeCommands(allowed: (extensionId: string, name: string) => boolean): void {
+		this.remoteSafeCommandFn = allowed;
 	}
 
 	/** Run the extensions' subagents (`ctx.subagents`) through `handler`. */
@@ -1117,7 +1127,8 @@ export class ExtensionRunner {
 					});
 				}
 				owners.set(invocationName, ext.id);
-				commands.push({ ...command, invocationName, extensionId: ext.id });
+				const remoteSafe = command.remoteSafe === true || this.remoteSafeCommandFn(ext.id, command.name);
+				commands.push({ ...command, invocationName, extensionId: ext.id, ...(remoteSafe ? { remoteSafe } : {}) });
 			}
 		}
 		return { commands, diagnostics };

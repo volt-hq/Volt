@@ -680,7 +680,9 @@ in the last few minutes, and about every 15 minutes otherwise. It also refreshes
 leaves a PR branch, and when a session's conversation closes. A PR stops being
 refreshed once it is merged or closed. A closed PR that is later reopened is
 picked up again only when a session returns to its branch. Reads never wait on
-the code host; they return the stored status.
+the code host; they return the stored status. The `/review` target selector of a
+conversation still on its linked PR's branch offers that PR from this stored
+association, without a code-host lookup.
 
 Associations are stored separately in private `changes.json`. The file uses
 opaque local IDs and a salted hash of the common Git directory, and stores each

@@ -713,9 +713,11 @@ export function serveConnection(
 						}
 					})
 				: () => {};
-		// Extension settings saved by any client, an extension, or another conversation.
+		// Extension settings saved by any client, an extension, or another conversation. They also say which extension
+		// commands a remote client may invoke.
 		const unsubscribeExtensionSettings = session.settingsManager.subscribeExtensionSettings(() => {
 			write({ type: "changed", catalog: "settings" });
+			write({ type: "changed", catalog: "intents" });
 		});
 		unsubscribeHome = () => {
 			unsubscribeEvents();
