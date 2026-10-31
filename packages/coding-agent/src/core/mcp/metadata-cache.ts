@@ -316,6 +316,7 @@ export class McpMetadataCache {
 	}
 
 	private serialize(): string {
-		return `${JSON.stringify({ version: 2, servers: Object.fromEntries(this.servers.entries()) }, null, 2)}\n`;
+		// Deep tool schemas can spend most of the byte budget on indentation alone.
+		return `${JSON.stringify({ version: 2, servers: Object.fromEntries(this.servers.entries()) })}\n`;
 	}
 }
