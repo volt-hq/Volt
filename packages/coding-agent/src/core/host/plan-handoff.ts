@@ -11,12 +11,12 @@
  */
 
 import { randomUUID } from "node:crypto";
+import type { JsonValue } from "@hansjm10/volt-ai";
 import type { AgentSession } from "../agent-session.ts";
 import type { ReplacedSessionContext } from "../extensions/index.ts";
 import {
 	clonePlanState,
-	createPlanExecutionPrompt,
-	PLAN_EXECUTION_CUSTOM_TYPE,
+	createPlanExecutionMessage,
 	type PlanExecution,
 	type PlanExecutionStrategy,
 	type PlanningState,
@@ -69,15 +69,10 @@ export function createPlanHandoff(source: AgentSession, plan: PlanState, expecte
 		async queueStart(writer) {
 			if (!activePlan) throw new Error("Plan execution session was not initialized");
 			// The same message `start` sends: the turn it triggers is the execution.
-			await writer.queueHostMessages("steer", [
-				{
-					role: "custom",
-					customType: PLAN_EXECUTION_CUSTOM_TYPE,
-					content: createPlanExecutionPrompt(activePlan),
-					display: true,
-					timestamp: Date.now(),
-				},
-			]);
+			const message = createPlanExecutionMessage(activePlan);
+			// A planning state is plain JSON data: its parser admits nothing else.
+			const details = message.details as unknown as JsonValue;
+			await writer.queueHostMessages("steer", [{ role: "custom", ...message, details, timestamp: Date.now() }]);
 		},
 		async beforeMove(from) {
 			if (!execution) throw new Error("Plan execution session was not initialized");
@@ -89,16 +84,7 @@ export function createPlanHandoff(source: AgentSession, plan: PlanState, expecte
 			if (!activePlan || activePlan.phase !== "active") {
 				throw new Error("Plan execution session did not restore its active plan");
 			}
-			void context
-				.sendMessage(
-					{
-						customType: PLAN_EXECUTION_CUSTOM_TYPE,
-						content: createPlanExecutionPrompt(activePlan),
-						display: true,
-					},
-					{ triggerTurn: true },
-				)
-				.catch(() => undefined);
+			void context.sendMessage(createPlanExecutionMessage(activePlan), { triggerTurn: true }).catch(() => undefined);
 		},
 	};
 }
@@ -156,14 +142,7 @@ export async function executePlan(
 		const result = await sourceSession.activatePlan(planId, expectedRevision, execution);
 		if (result.activated) {
 			void sourceSession
-				.sendCustomMessage(
-					{
-						customType: PLAN_EXECUTION_CUSTOM_TYPE,
-						content: createPlanExecutionPrompt(result.planning.plan!),
-						display: true,
-					},
-					{ triggerTurn: true },
-				)
+				.sendCustomMessage(createPlanExecutionMessage(result.planning.plan!), { triggerTurn: true })
 				.catch(() => undefined);
 		}
 		return {

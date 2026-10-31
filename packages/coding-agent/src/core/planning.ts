@@ -319,6 +319,25 @@ export function formatPlanCheckpoint(state: PlanningState): string {
 		.join("\n\n");
 }
 
+/**
+ * The host message that starts executing `plan`: the model's instructions and
+ * checkpoint as its text, and the active planning state as its details, which
+ * clients present instead of that text.
+ */
+export function createPlanExecutionMessage(plan: PlanState): {
+	customType: typeof PLAN_EXECUTION_CUSTOM_TYPE;
+	content: string;
+	display: true;
+	details: PlanningState;
+} {
+	return {
+		customType: PLAN_EXECUTION_CUSTOM_TYPE,
+		content: createPlanExecutionPrompt(plan),
+		display: true,
+		details: { mode: "build", plan: clonePlanState(plan) },
+	};
+}
+
 export function createPlanExecutionPrompt(plan: PlanState): string {
 	return [
 		`Execute the approved plan${plan.title ? `: ${plan.title}` : "."}`,

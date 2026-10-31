@@ -57,7 +57,7 @@ describe("editorTopBorderLabel", () => {
 				agentMode: "plan",
 				planReady: false,
 			}),
-		).toBe("PLAN · AGENT READ-ONLY");
+		).toBe("PLAN · READ-ONLY");
 	});
 
 	it("asks for a ready-plan decision with configured keys once the run settles", () => {
@@ -75,6 +75,17 @@ describe("editorTopBorderLabel", () => {
 					`PLAN READY · ${keyDisplayText("app.plan.togglePane")} choose next step · ${keyDisplayText("tui.input.submit")} send feedback`,
 				);
 				expect(label).toMatch(/(Alt|Option)\+X choose next step/);
+				// With the chooser focused, its own keys pick the step; typing still reaches the composer.
+				expect(
+					editorTopBorderLabelForState({
+						bashMode: false,
+						streaming: false,
+						hasText: false,
+						agentMode,
+						planReady: true,
+						planChooserFocused: true,
+					}),
+				).toBe("PLAN READY · Type to send feedback");
 			}
 		} finally {
 			setKeybindings(new KeybindingsManager(KEYBINDINGS));
@@ -88,7 +99,7 @@ describe("editorTopBorderLabel", () => {
 				agentMode: "plan",
 				planReady: true,
 			}),
-		).toBe("PLAN · AGENT READ-ONLY");
+		).toBe("PLAN · READ-ONLY");
 		expect(
 			editorTopBorderLabelForState({
 				bashMode: true,

@@ -44,7 +44,8 @@ export type ThemeColor =
 	| "thinkingMedium"
 	| "thinkingHigh"
 	| "thinkingXhigh"
-	| "bashMode";
+	| "bashMode"
+	| "planMode";
 
 export type ThemeBg =
 	| "selectedBg"

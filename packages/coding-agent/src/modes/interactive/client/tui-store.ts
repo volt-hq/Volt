@@ -56,12 +56,13 @@ export type TuiStoreChange =
 	/** The subscription ended for good: the conversation lost its log, closed, or the host shut down. */
 	| { readonly type: "ended"; readonly reason: "closed" | "lost" | "shutdown" };
 
-/** The entry types a transcript shows. */
+/** The entry types a transcript shows; a planning change shows only where it switches the agent mode. */
 const TRANSCRIPT_ENTRY_TYPES: ReadonlySet<ProjectedEntry["type"]> = new Set([
 	"message",
 	"custom_message",
 	"compaction",
 	"branch_summary",
+	"planning_state_change",
 ]);
 
 function isTranscriptEntry(entry: ProjectedEntry): boolean {

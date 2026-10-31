@@ -10,36 +10,30 @@ import {
 	VStack,
 	visibleWidth,
 } from "@hansjm10/volt-tui";
-import type { PlanningState, PlanStepStatus } from "../../../core/planning.ts";
+import type { PlanningState } from "../../../core/planning.ts";
 import { theme } from "../../../core/theme/runtime.ts";
-import { keyHint, keyText, rawKeyHint } from "./keybinding-hints.ts";
+import { keyText, primaryKeyText } from "./keybinding-hints.ts";
 import {
 	appendWrappedPlanLine,
-	getPlanProgress,
-	getPlanStepProgress,
-	planPhaseLabel,
-	usesAsciiPlanMarkers,
+	fitPlanSides,
+	insetPlanLines,
+	renderPlanBadge,
+	renderPlanBody,
+	renderPlanMeta,
 } from "./plan-content.ts";
-import { getPlanActions, isComposerInput, type PlanDetailsAction } from "./plan-status.ts";
+import {
+	getPlanActions,
+	isComposerInput,
+	type PlanDetailsAction,
+	renderPlanActionRows,
+	renderPlanChooserHint,
+} from "./plan-status.ts";
 
-function stepMarker(status: PlanStepStatus): string {
-	if (usesAsciiPlanMarkers()) {
-		return status === "completed" ? "[x]" : status === "in_progress" ? "[>]" : "[ ]";
-	}
-	return status === "completed" ? "✓" : status === "in_progress" ? "→" : "○";
-}
-
-function stepColor(status: PlanStepStatus): "success" | "accent" | "dim" {
-	return status === "completed" ? "success" : status === "in_progress" ? "accent" : "dim";
-}
-
-function fitSides(left: string, right: string, width: number): string {
-	if (width <= 0) return "";
-	const rightWidth = visibleWidth(right);
-	if (rightWidth >= width) return truncateToWidth(right, width, "");
-	const fittedLeft = truncateToWidth(left, Math.max(0, width - rightWidth - 1), "");
-	const gap = " ".repeat(Math.max(1, width - visibleWidth(fittedLeft) - rightWidth));
-	return truncateToWidth(`${fittedLeft}${gap}${right}`, width, "");
+/** The footer of the inspector: its action rows, then its hint row. */
+interface InspectorFooter {
+	readonly lines: string[];
+	/** The index in `lines` of the row holding the selected action, when there are actions. */
+	readonly selectedRow: number | undefined;
 }
 
 class PlanInspectorSection implements Component {
@@ -58,7 +52,12 @@ class PlanInspectorSection implements Component {
 	}
 }
 
-/** Persistent, focusable rendering of canonical branch-local planning state. */
+/**
+ * Persistent, focusable rendering of canonical branch-local planning state in
+ * the plan pane: the plan's badge with its focus key, its size or progress,
+ * the shared plan body, then its actions and one hint row, every row inset
+ * one column from the divider and the terminal's edge.
+ */
 export class PlanInspectorComponent implements Component, Focusable {
 	private planning: PlanningState;
 	private readonly onAction: (action: PlanDetailsAction) => void;
@@ -102,7 +101,7 @@ export class PlanInspectorComponent implements Component, Focusable {
 			{ component: new PlanInspectorSection((width) => this.renderFullscreenHeader(width)), shrink: 1, minSize: 0 },
 			{ component: this.bodyScroll, basis: 0, grow: 1, shrink: 1, minSize: 0 },
 			{
-				component: new PlanInspectorSection((width) => this.renderFooter(width)),
+				component: new PlanInspectorSection((width) => this.renderFooter(width).lines),
 				shrink: 1,
 				minSize: 0,
 			},
@@ -115,6 +114,11 @@ export class PlanInspectorComponent implements Component, Focusable {
 
 	set focused(focused: boolean) {
 		this._focused = focused;
+	}
+
+	/** Whether the pane holds the user's attention: focused, or selected while a search overlay has focus. */
+	get highlighted(): boolean {
+		return this._focused || this.selected;
 	}
 
 	setSelected(selected: boolean): void {
@@ -163,16 +167,16 @@ export class PlanInspectorComponent implements Component, Focusable {
 		const body = this.renderBody(width);
 		const footer = this.renderFooter(width);
 		const headerRows = Math.min(2, this.regularViewportRows);
-		const footerRows = Math.min(footer.length, Math.max(0, this.regularViewportRows - headerRows - 1));
+		const footerRows = Math.min(footer.lines.length, Math.max(0, this.regularViewportRows - headerRows - 1));
 		const pageSize = Math.max(1, this.regularViewportRows - headerRows - footerRows);
 		this.regularPageSize = pageSize;
 		this.bodyScroll.updateLayout(body.length, pageSize, this.requestRender);
 		const end = Math.min(body.length, this.bodyScroll.scrollTop + pageSize);
 		const header = this.renderHeader(width, body.length, end).slice(0, headerRows);
 		const page = body.slice(this.bodyScroll.scrollTop, end);
-		const visibleFooter = this.selectVisibleFooter(footer, footerRows);
-		this.selectedActionVisible =
-			getPlanActions(this.planning.plan?.phase).length > 0 && visibleFooter.includes(footer[this.actionIndex] ?? "");
+		const shownRows = this.selectVisibleFooterRows(footer, footerRows);
+		const visibleFooter = shownRows.map((row) => footer.lines[row] ?? "");
+		this.selectedActionVisible = footer.selectedRow !== undefined && shownRows.includes(footer.selectedRow);
 		const padding = Array.from(
 			{ length: Math.max(0, this.regularViewportRows - header.length - page.length - visibleFooter.length) },
 			() => "",
@@ -237,159 +241,68 @@ export class PlanInspectorComponent implements Component, Focusable {
 
 	private renderHeader(width: number, bodyRows: number, end: number): string[] {
 		const plan = this.planning.plan;
-		const phase = plan ? planPhaseLabel(plan) : "DRAFT";
-		const marker = usesAsciiPlanMarkers() ? "PLAN" : "◆ PLAN";
-		const ready = plan?.phase === "ready";
-		const focus = this.focused
-			? theme.bold(theme.fg("accent", "FOCUSED"))
-			: theme.fg("dim", `${keyText("app.plan.togglePane")} ${ready ? "choose" : "focus"}`);
-		return [
-			fitSides(
-				theme.bold(
-					theme.fg(ready ? "warning" : "accent", `${marker} · ${phase}${ready ? " · APPROVAL NEEDED" : ""}`),
-				),
-				focus,
-				width,
-			),
-			this.renderMetadata(width, bodyRows, end),
-		];
+		const hint = this.highlighted
+			? `${primaryKeyText("tui.select.cancel")} back`
+			: `${keyText("app.plan.togglePane")} ${plan?.phase === "ready" ? "choose" : "focus"}`;
+		const position =
+			bodyRows > this.getPageSize()
+				? theme.fg("dim", `rows ${this.bodyScroll.scrollTop + 1}–${end}/${bodyRows}`)
+				: "";
+		return insetPlanLines(width, (inner) => {
+			const metaWidth = Math.max(1, inner - visibleWidth(position) - (position ? 1 : 0));
+			return [
+				fitPlanSides(renderPlanBadge(plan), theme.fg("dim", hint), inner),
+				fitPlanSides(plan ? renderPlanMeta(plan, metaWidth) : "", position, inner),
+			];
+		});
 	}
 
-	private renderMetadata(width: number, bodyRows: number, end: number): string {
-		const plan = this.planning.plan;
-		const mode = this.planning.mode === "plan" ? "Plan mode" : "Build mode";
-		const pageSize = this.getPageSize();
-		const position = bodyRows > pageSize ? ` · rows ${this.bodyScroll.scrollTop + 1}–${end}/${bodyRows}` : "";
-		if (!plan) return truncateToWidth(theme.fg("dim", ` ${mode}${position}`), width, "");
-		const progress = getPlanProgress(plan);
-		return truncateToWidth(
-			theme.fg(
-				"dim",
-				` ${mode} · ${progress.completed}/${progress.total} complete · ${progress.percent}%${position}`,
-			),
-			width,
-			"",
-		);
-	}
-
+	/** The shared plan body, inset, after a blank row below the header. */
 	private renderBody(width: number): string[] {
 		const plan = this.planning.plan;
-		const lines: string[] = [];
-		if (!plan) {
-			appendWrappedPlanLine(lines, " ", theme.bold(theme.fg("text", "No structured plan yet")), width);
-			lines.push("");
+		return insetPlanLines(width, (inner) => {
+			if (plan) return ["", ...renderPlanBody(plan, inner)];
+			const lines = [""];
+			appendWrappedPlanLine(lines, "", theme.bold(theme.fg("text", "No plan yet")), inner);
 			appendWrappedPlanLine(
 				lines,
-				" ",
-				theme.fg("muted", "Volt will create a working draft after its initial research orientation."),
-				width,
-			);
-			return lines;
-		}
-
-		appendWrappedPlanLine(lines, " ", theme.bold(theme.fg("text", plan.title ?? "Untitled plan")), width);
-		if (plan.summary) {
-			lines.push("");
-			appendWrappedPlanLine(lines, " ", theme.fg("muted", plan.summary), width);
-		}
-		if (plan.phase === "handed_off" && plan.execution) {
-			lines.push("");
-			appendWrappedPlanLine(
-				lines,
-				" ",
-				theme.fg("accent", `Execution session: ${plan.execution.targetSessionId}`),
-				width,
-			);
-		}
-		lines.push("");
-		appendWrappedPlanLine(lines, " ", theme.bold(theme.fg("text", "Checklist")), width);
-		if (plan.steps.length === 0) {
-			appendWrappedPlanLine(lines, " ", theme.fg("dim", "No checklist steps yet."), width);
-			return lines;
-		}
-		const currentGroup =
-			plan.phase === "active"
-				? (plan.steps.find((step) => (step.substeps ?? [step]).some((item) => item.status === "in_progress")) ??
-					plan.steps.find((step) => (step.substeps ?? [step]).some((item) => item.status === "pending")))
-				: undefined;
-		for (const [index, step] of plan.steps.entries()) {
-			const marker = theme.fg(stepColor(step.status), stepMarker(step.status));
-			const textColor = step.status === "in_progress" ? "accent" : step.status === "completed" ? "muted" : "text";
-			const prefix = ` ${index + 1}. ${marker} `;
-			const progress = step.substeps ? getPlanStepProgress(step) : undefined;
-			const progressText = progress ? theme.fg("dim", ` · ${progress.completed}/${progress.total} tasks`) : "";
-			appendWrappedPlanLine(lines, prefix, `${theme.fg(textColor, step.text)}${progressText}`, width);
-			if (step.note) {
-				appendWrappedPlanLine(
-					lines,
-					" ".repeat(visibleWidth(prefix)),
-					theme.fg("muted", `Note: ${step.note}`),
-					width,
-				);
-			}
-			const showSubsteps = step.substeps !== undefined && (plan.phase === "ready" || currentGroup?.id === step.id);
-			if (!showSubsteps) continue;
-			for (const [substepIndex, substep] of step.substeps!.entries()) {
-				const substepMarker = theme.fg(stepColor(substep.status), stepMarker(substep.status));
-				const substepColor =
-					substep.status === "in_progress" ? "accent" : substep.status === "completed" ? "muted" : "text";
-				const substepPrefix = ` ${index + 1}.${substepIndex + 1}. ${substepMarker} `;
-				appendWrappedPlanLine(lines, substepPrefix, theme.fg(substepColor, substep.text), width);
-				if (substep.note) {
-					appendWrappedPlanLine(
-						lines,
-						" ".repeat(visibleWidth(substepPrefix)),
-						theme.fg("muted", `Note: ${substep.note}`),
-						width,
-					);
-				}
-			}
-		}
-		return lines;
-	}
-
-	private selectVisibleFooter(footer: readonly string[], rows: number): string[] {
-		if (rows <= 0) return [];
-		const actionCount = getPlanActions(this.planning.plan?.phase).length;
-		if (actionCount === 0 || rows >= footer.length) return footer.slice(-rows);
-
-		const selectedAction = footer[this.actionIndex];
-		const actionHint = footer[actionCount];
-		const scrollHint = footer.at(-1);
-		if (!selectedAction || !actionHint || !scrollHint) return footer.slice(-rows);
-		if (rows === 1) return [selectedAction];
-		if (rows === 2) return [selectedAction, actionHint];
-		if (rows === 3) return [selectedAction, actionHint, scrollHint];
-		return [...footer.slice(0, actionCount), actionHint].slice(0, rows);
-	}
-
-	private renderFooter(width: number): string[] {
-		const lines: string[] = [];
-		const actions = getPlanActions(this.planning.plan?.phase);
-		if (actions.length > 0) {
-			for (const [index, item] of actions.entries()) {
-				const label = index === this.actionIndex ? `> ${item.label}` : `  ${item.label}`;
-				lines.push(
-					truncateToWidth(
-						index === this.actionIndex ? theme.bold(theme.fg("accent", label)) : theme.fg("muted", label),
-						width,
-						"",
-					),
-				);
-			}
-			const actionHint =
-				actions.length > 1
-					? `${rawKeyHint("←/→", "choose")}  ${keyHint("tui.select.confirm", "confirm")}`
-					: keyHint("tui.select.confirm", actions[0]!.label.toLowerCase());
-			lines.push(truncateToWidth(` ${actionHint}`, width, ""));
-		}
-		lines.push(
-			truncateToWidth(
-				` ${rawKeyHint(`${keyText("tui.select.up")}/${keyText("tui.select.down")}`, "scroll")}  ${rawKeyHint(`${keyText("tui.editor.pageUp")}/${keyText("tui.editor.pageDown")}`, "page")}`,
-				width,
 				"",
-			),
-		);
-		return lines;
+				theme.fg("muted", "Volt drafts the plan here after its initial research orientation."),
+				inner,
+			);
+			return lines;
+		});
+	}
+
+	/**
+	 * The footer rows that fit `rows`, in order. When not all fit, the row
+	 * holding the selected action comes first, then the hint, then the other
+	 * action rows: Enter confirms only an action that shows.
+	 */
+	private selectVisibleFooterRows(footer: InspectorFooter, rows: number): number[] {
+		if (rows <= 0) return [];
+		const all = footer.lines.map((_, index) => index);
+		if (rows >= all.length) return all;
+		if (footer.selectedRow === undefined) return all.slice(-rows);
+		const hintRow = all.length - 1;
+		const priority = [
+			footer.selectedRow,
+			hintRow,
+			...all.filter((row) => row !== footer.selectedRow && row !== hintRow),
+		];
+		return priority.slice(0, rows).sort((left, right) => left - right);
+	}
+
+	private renderFooter(width: number): InspectorFooter {
+		const actions = getPlanActions(this.planning.plan?.phase);
+		let selectedRow: number | undefined;
+		const lines = insetPlanLines(width, (inner) => {
+			const hint = renderPlanChooserHint(actions, inner, { back: false });
+			if (actions.length === 0) return [hint];
+			const buttons = renderPlanActionRows(actions, Math.min(this.actionIndex, actions.length - 1), inner);
+			selectedRow = buttons.selectedRow;
+			return [...buttons.rows, hint];
+		});
+		return { lines, selectedRow };
 	}
 }

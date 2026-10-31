@@ -130,12 +130,16 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 		await run.finish();
 		expect(control.planDetails).toBeDefined();
 		expect(control.renderer.getFocusedComponent()).toBe(control.planDetails);
-		expect(await screen(fixture)).toContain("Plan ready — choose the next step");
+		const chooser = await screen(fixture);
+		expect(chooser).toMatch(/\[ Execute Plan \] +Execute Plan & Clear Context +Change Plan/);
+		// The chooser holds focus, so the composer says only that typing still reaches it.
+		expect(chooser).toContain("PLAN READY · Type to send feedback");
 
 		terminal.sendInput("l");
 		expect(control.planDetails).toBeUndefined();
 		expect(control.renderer.getFocusedComponent()).toBe(control.defaultEditor);
 		expect(control.defaultEditor.getText()).toBe("l");
+		expect(await screen(fixture)).toMatch(/PLAN READY · (Alt|Option)\+P choose next step · Enter send feedback/);
 
 		// Dismissal sticks: an unrelated planning refresh does not reopen the chooser.
 		control.defaultEditor.setText("");
@@ -166,8 +170,10 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 		expect(control.planDetails).toBeUndefined();
 		expect(control.renderer.getFocusedComponent()).toBe(control.defaultEditor);
 		const output = await screen(fixture);
-		expect(output).toContain("PLAN READY · APPROVAL NEEDED");
+		// One row names the plan; the composer's label says how to decide on it.
+		expect(output).toContain(`PLAN · READY  ${PLAN_TITLE}`);
 		expect(output).toMatch(/PLAN READY · (Alt|Option)\+P choose next step · Enter send feedback/);
+		expect(output.match(/choose next step/g)).toHaveLength(1);
 
 		// Enter sends the draft as feedback on the plan: a prompt, never its execution.
 		harness.faux.setResponses([fauxAssistantMessage("Revising the plan")]);
@@ -188,17 +194,19 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 		const { control, terminal } = fixture;
 		const run = await submitDuringRun(fixture);
 		const during = await screen(fixture);
-		expect(during).toContain("APPROVAL NEEDED");
+		expect(during).toContain("PLAN · READY");
 		expect(control.planInspector.focused).toBe(false);
 		expect(control.renderer.getFocusedComponent()).toBe(control.defaultEditor);
 
 		await run.finish();
 		expect(control.planInspector.focused).toBe(true);
+		expect(await screen(fixture)).toContain("PLAN READY · Type to send feedback");
 
 		terminal.sendInput("x");
 		expect(control.planInspector.focused).toBe(false);
 		expect(control.renderer.getFocusedComponent()).toBe(control.defaultEditor);
 		expect(control.defaultEditor.getText()).toBe("x");
+		expect(await screen(fixture)).toMatch(/PLAN READY · (Alt|Option)\+P choose next step/);
 		expect(fixture.executePlan).not.toHaveBeenCalled();
 	});
 });

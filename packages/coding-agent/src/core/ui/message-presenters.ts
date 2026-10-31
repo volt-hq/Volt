@@ -1,7 +1,8 @@
 /**
  * The host's own custom message types and their presenters (RFC §8.3): a
- * finished work item's notice (`work_notice`) and a review's result
- * (`review`) present as `UiNode` data on every client, as an extension's
+ * finished work item's notice (`work_notice`), a review's result (`review`),
+ * and an approved plan's execution (`volt-plan-execution`, presented with the
+ * planning tools' presenters) present as `UiNode` data on every client, as an extension's
  * message presenter would. The host's types are its own: an extension cannot
  * register a presenter for one, so no extension restyles what the host says.
  * Host messages without a presenter here show as their text.
@@ -11,6 +12,7 @@ import type { JsonValue } from "@hansjm10/volt-ai";
 import { type UiNode, WORK_NOTICE_CUSTOM_TYPE, type WorkNoticeDetails } from "@hansjm10/volt-protocol";
 import { PLAN_CHECKPOINT_CUSTOM_TYPE, PLAN_EXECUTION_CUSTOM_TYPE } from "../planning.ts";
 import { formatReviewUsage } from "../review-presentation.ts";
+import { presentPlanExecution } from "../tools/planning-presenters.ts";
 import type { MessagePresenter, MessagePresentInput } from "./presentation.ts";
 
 /** The custom type of the notice offering a conversation's subagent runs suspended since a restart. */
@@ -131,4 +133,5 @@ export const presentReview: MessagePresenter = (message) => {
 export const BUILTIN_MESSAGE_PRESENTERS: ReadonlyMap<string, MessagePresenter> = new Map([
 	[WORK_NOTICE_CUSTOM_TYPE, presentWorkNotice],
 	[REVIEW_CUSTOM_TYPE, presentReview],
+	[PLAN_EXECUTION_CUSTOM_TYPE, presentPlanExecution],
 ]);

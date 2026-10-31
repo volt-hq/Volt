@@ -23,6 +23,7 @@ import {
 import type { IntentDescriptor, QueryResult } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionFactory } from "../../src/core/extensions/index.ts";
+import { theme } from "../../src/core/theme/runtime.ts";
 import type { CustomEditor } from "../../src/modes/interactive/components/custom-editor.ts";
 import { workOutcomeLine } from "../../src/modes/interactive/components/work-notice.ts";
 import { openBrowser } from "../../src/utils/open-browser.ts";
@@ -190,12 +191,23 @@ describe("TUI model, mode, and settings commands", () => {
 
 	it("switches Build and Plan mode through the host, showing a refusal's reason", async () => {
 		const { harness, tui } = await start();
+		const editor = (tui.mode as unknown as { defaultEditor: CustomEditor }).defaultEditor;
+		const planBorder = theme.fg("planMode", "─");
 		await tui.submit("/plan");
-		await waitForScreen(tui, "Plan mode: agent tools are read-only");
+		await waitForScreen(tui, "Plan mode · agent tools are read-only");
 		await vi.waitFor(() => expect(tui.store.state.planning?.mode).toBe("plan"));
+		// The composer's frame says which mode it sends to: its label and its border's color.
+		await waitForScreen(tui, "PLAN · READ-ONLY");
+		expect(editor.borderColor("─")).toBe(planBorder);
 		await tui.submit("/build");
 		await waitForScreen(tui, "Build mode");
 		await vi.waitFor(() => expect(tui.store.state.planning?.mode).toBe("build"));
+		await vi.waitFor(() => expect(editor.borderColor("─")).not.toBe(planBorder));
+		// The transcript keeps a divider at each switch, in order.
+		const screen = tui.screen();
+		expect(screen.indexOf("Plan mode · agent tools are read-only")).toBeLessThan(screen.indexOf("Build mode"));
+		await tui.submit("/build");
+		await waitForScreen(tui, "Already in Build mode");
 
 		vi.spyOn(harness.startup.session, "setAgentMode").mockRejectedValueOnce(
 			new Error("Cannot enter Plan mode while background jobs are active; abort or wait for them to finish"),

@@ -4,6 +4,7 @@ import { type Container, getKeybindings, setKeybindings, visibleWidth } from "@h
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { CustomMessage } from "../src/core/messages.ts";
+import { createPlanExecutionMessage, type PlanState } from "../src/core/planning.ts";
 import { SessionPresenters } from "../src/core/session/presenters.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import { workNoticeOwnText } from "../src/core/ui/message-presenters.ts";
@@ -135,7 +136,7 @@ describe("custom messages in the transcript", () => {
 		expect(presenters.message("review")?.policy).toEqual(HOST_UI_POLICY);
 		expect(presenters.message("work_notice")?.policy).toEqual(HOST_UI_POLICY);
 		expect(presenters.message("subagent_recovery")).toBeUndefined();
-		expect(presenters.message("volt-plan-execution")).toBeUndefined();
+		expect(presenters.message("volt-plan-execution")?.policy).toEqual(HOST_UI_POLICY);
 		expect(presenters.message("deploy-note")?.policy).toMatchObject({ owner: "extension", extensionId: "styler" });
 	});
 
@@ -204,6 +205,78 @@ describe("custom messages in the transcript", () => {
 		expect(rebuilt).toContain("f6 to expand");
 		expect(rebuilt).not.toContain("ctrl+o");
 		expect(rebuilt).not.toContain("ctrl+shift+x");
+	});
+
+	test("presents a plan execution as the approved plan, not the model's instructions and ids", () => {
+		const plan: PlanState = {
+			id: "plan-7f40940c",
+			revision: 3,
+			phase: "active",
+			title: "Append gamma to notes.txt",
+			summary: "Append `gamma` as the last line of notes.txt.",
+			steps: [
+				{
+					id: "outcome-be2a0e3a",
+					text: "notes.txt ends with gamma",
+					status: "pending",
+					substeps: [
+						{ id: "task-4661a044", text: "Append gamma after beta", status: "pending" },
+						{ id: "task-a781bffb", text: "Verify notes.txt", status: "pending" },
+					],
+				},
+			],
+			execution: {
+				id: "execution-1",
+				approvedRevision: 2,
+				strategy: "retain_context",
+				sourceSessionId: "session-1",
+				targetSessionId: "session-1",
+			},
+		};
+		// As the log holds it: JSON data.
+		const logged = (input: ReturnType<typeof createPlanExecutionMessage>) =>
+			JSON.parse(JSON.stringify({ role: "custom", ...input, timestamp: 0 })) as CustomMessage;
+		const message = createPlanExecutionMessage(plan);
+		const component = draw(logged(message));
+		const internals = ["TRUSTED HOST", "(id:", "plan-7f40940c", "task-4661a044", "update_plan_progress"];
+
+		const collapsed = component.render(80).lines.map(stripAnsi).join("\n");
+		expect(collapsed).toContain("execute plan · Append gamma to notes.txt");
+		expect(collapsed).toContain("APPROVED · executing · 1 outcome · 2 tasks");
+		expect(collapsed).toContain("ctrl+o to expand");
+		expect(collapsed).not.toContain("volt-plan-execution");
+		for (const internal of internals) expect(collapsed).not.toContain(internal);
+
+		component.setExpanded(true);
+		const expanded = component.render(80).lines.map(stripAnsi).join("\n");
+		expect(expanded).toContain("Append gamma after beta");
+		expect(expanded).toContain("Verify notes.txt");
+		for (const internal of internals) expect(expanded).not.toContain(internal);
+		// The model still receives the full instructions and checkpoint.
+		expect(message.content).toContain("(id: task-4661a044)");
+
+		// A plan executed in a new session says so.
+		const handedOff = createPlanExecutionMessage({
+			...plan,
+			execution: { ...plan.execution!, strategy: "new_session", targetSessionId: "session-2" },
+		});
+		expect(draw(logged(handedOff)).render(80).lines.map(stripAnsi).join("\n")).toContain(
+			"APPROVED · executing in a new session",
+		);
+
+		// Without the plan in its details, only the text's first line shows.
+		const bare = draw({
+			role: "custom",
+			customType: message.customType,
+			content: message.content,
+			display: true,
+			timestamp: 0,
+		})
+			.render(80)
+			.lines.map(stripAnsi)
+			.join("\n");
+		expect(bare).toContain("Execute the approved plan: Append gamma to notes.txt");
+		for (const internal of internals) expect(bare).not.toContain(internal);
 	});
 
 	test("presents a work notice: the line naming the work literal, the kind's own text as Markdown", () => {

@@ -5,7 +5,7 @@ import {
 	type UiNode,
 } from "@hansjm10/volt-protocol";
 import { type TUI, visibleWidth } from "@hansjm10/volt-tui";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { PlanningState, PlanPhase, PlanState } from "../src/core/planning.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import { createPlanningToolDefinitions, type PlanningToolController } from "../src/core/tools/planning.ts";
@@ -18,6 +18,7 @@ import {
 	type ToolPresenter,
 	type ToolPresentInput,
 } from "../src/core/ui/presentation.ts";
+import { PlanInspectorComponent } from "../src/modes/interactive/components/plan-inspector.ts";
 import { ToolCallRow } from "../src/modes/interactive/components/tool-call-row.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -193,6 +194,44 @@ function rendered(component: ToolCallRow, width = 120): string {
 
 describe("planning tool presenters", () => {
 	beforeAll(() => initTheme("dark"));
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	it("draws a checklist in the plan pane exactly as the plan's card draws it in the transcript", () => {
+		vi.stubEnv("TERM", "xterm-256color");
+		vi.stubEnv("TERM_PROGRAM", "iTerm.app");
+		vi.stubEnv("VOLT_ASCII", "0");
+		const plan = createPlan("active");
+		// A card puts a note beside its item; the pane, below it.
+		delete plan.steps[0]!.note;
+		const planning: PlanningState = { mode: "build", plan };
+		const card = row("update_plan", done(planning, { steps: plan.steps.map(({ id, text }) => ({ id, text })) }));
+		card.setExpanded(true);
+		const cardLines = rendered(card, 160)
+			.split("\n")
+			.map((line) => line.trim());
+
+		const pane = new PlanInspectorComponent({
+			planning,
+			onAction: () => undefined,
+			onReturnFocus: () => undefined,
+			onToggleFocus: () => undefined,
+			requestRender: () => undefined,
+		});
+		pane.setViewportRows(30);
+		const paneLines = pane
+			.render(160)
+			.lines.map((line) => stripAnsi(line).trim())
+			.filter((line) => /^([✓●○] \d|Checklist ·)/.test(line));
+		expect(paneLines).toEqual([
+			"Checklist · 1/3 complete",
+			"✓ 1 Render the first long planning step without losing EXPANDED_STEP_TAIL",
+			"● 2 Render the active planning step",
+			"○ 3 Render the final pending planning step",
+		]);
+		for (const line of paneLines) expect(cardLines).toContain(line);
+	});
 
 	it("keeps a draft update that added nothing to its title and shows the checklist on expansion", () => {
 		const planning: PlanningState = { mode: "plan", plan: createPlan() };
