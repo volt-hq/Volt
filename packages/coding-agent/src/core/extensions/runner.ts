@@ -33,6 +33,8 @@ import {
 import type { ExtensionOperationEvent, ExtensionOperationOrigin, RequestBoundaryEvent } from "./services-types.ts";
 import type {
 	ActivateEvent,
+	AgentSettledEvent,
+	AgentSettledEventResult,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
 	BeforeProviderRequestEvent,
@@ -119,6 +121,7 @@ type RunnerEmitEvent = Exclude<
 	| ContextEvent
 	| BeforeProviderRequestEvent
 	| BeforeAgentStartEvent
+	| AgentSettledEvent
 	| MessageEndEvent
 	| ResourcesDiscoverEvent
 	| InputEvent
@@ -1643,6 +1646,51 @@ export class ExtensionRunner {
 		}
 
 		return result as RunnerEmitResult<TEvent>;
+	}
+
+	/** Observe settlement, retaining the first proposal and its exact instance's lifetime. */
+	async emitAgentSettled(
+		event: AgentSettledEvent,
+		shutdown: AbortSignal,
+	): Promise<{ prompt: string; isCurrent: () => boolean; release: () => void } | undefined> {
+		if (this.isInert) return undefined;
+		let proposal: { prompt: string; isCurrent: () => boolean; release: () => void } | undefined;
+		for (const ext of [...this.extensions]) {
+			if (this.isInert || !this.extensions.includes(ext) || ext.lifetime.stopped) continue;
+			const retired = new AbortController();
+			const release = ext.lifetime.onRetire(() => retired.abort());
+			const stop = AbortSignal.any([shutdown, ext.lifetime.stopSignal, retired.signal]);
+			const signal = AbortSignal.any([event.signal, stop]);
+			const isCurrent = () =>
+				!this.isInert && !signal.aborted && this.extensions.includes(ext) && !ext.lifetime.stopped;
+			for (const handler of ext.handlers.get("agent_settled") ?? []) {
+				if (stop.aborted) break;
+				const abandoned = Promise.withResolvers<undefined>();
+				const cancel = () => abandoned.resolve(undefined);
+				stop.addEventListener("abort", cancel, { once: true });
+				try {
+					const ctx = this.createContext(ext.id);
+					Object.defineProperty(ctx, "signal", { value: signal });
+					const result = (await Promise.race([handler({ ...event, signal }, ctx), abandoned.promise])) as
+						| AgentSettledEventResult
+						| undefined;
+					if (result === undefined || proposal || event.outcome !== "completed" || !isCurrent()) continue;
+					if (typeof result.prompt !== "string" || !result.prompt.trim())
+						throw new Error("A continuation needs a nonempty prompt");
+					proposal = { prompt: result.prompt, isCurrent, release };
+				} catch (error) {
+					this.emitErrorContained({
+						extensionId: ext.id,
+						event: event.type,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				} finally {
+					stop.removeEventListener("abort", cancel);
+				}
+			}
+			if (proposal?.release !== release) release();
+		}
+		return proposal;
 	}
 
 	async emitMessageEnd(event: MessageEndEvent): Promise<AgentMessage | undefined> {

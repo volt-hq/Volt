@@ -1244,15 +1244,27 @@ export class SessionExtensionBinding {
 						});
 					});
 				},
-				sendUserMessage: (content, options) => {
-					session.sendUserMessage(content, options).catch((err) => {
-						runner.emitError({
-							extensionId: "<runtime>",
-							event: "send_user_message",
-							error: err instanceof Error ? err.message : String(err),
-						});
-					});
-				},
+				// Resolves at admission or refusal, never rejects; a failure, a later turn's included, is still reported.
+				sendUserMessage: (content, options) =>
+					new Promise((resolve) => {
+						session
+							.sendUserMessage(content, {
+								deliverAs: options?.deliverAs,
+								preflightResult: (result) => {
+									if (result.success)
+										resolve({ success: true, outcome: result.handled ? "handled" : "admitted" });
+								},
+							})
+							.then(
+								// Settled unreported: an input hook handled it as the session closed.
+								() => resolve({ success: true, outcome: "handled" }),
+								(err: unknown) => {
+									const error = err instanceof Error ? err.message : String(err);
+									runner.emitError({ extensionId: "<runtime>", event: "send_user_message", error });
+									resolve({ success: false, error });
+								},
+							);
+					}),
 				appendEntry: async (customType, data) => {
 					assertExtensionEntryType(customType);
 					await this.host.sessionWriter().appendCustomEntry(customType, data);

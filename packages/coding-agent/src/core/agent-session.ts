@@ -154,7 +154,8 @@ export type AgentSessionEvent =
 			 * Emitted once tracked prompt work fully settles. When an agent run starts,
 			 * this follows its final `agent_end` plus any automatic retries,
 			 * overflow/threshold compaction, and queued-message continuations.
-			 * Equivalent to `waitForIdle()` resolving for that work.
+			 * Extension settlement hooks may propose fresh turns afterwards;
+			 * `waitForIdle()` also joins those proposals and their turns.
 			 */
 			type: "agent_settled";
 	  }
@@ -306,7 +307,14 @@ export interface AgentSessionState {
 /** Options for AgentSession.prompt() */
 export type PromptAdmissionOutcome = "admitted" | "completed";
 
-export type PromptPreflightResult = { success: true; outcome: PromptAdmissionOutcome } | { success: false };
+export type PromptPreflightResult =
+	| {
+			success: true;
+			outcome: PromptAdmissionOutcome;
+			/** An unidentified prompt a command or `input` hook handled: no turn runs for it. */
+			handled?: true;
+	  }
+	| { success: false };
 
 export interface PromptOptions {
 	/** Whether to expand file-based prompt templates (default: true) */
@@ -847,6 +855,19 @@ export class AgentSession {
 				this._captureConversationGenerationAssertion(assertExternalAuthorityCurrent),
 			waitForIdle: () => this._waitForIdle(),
 			activityChanged: () => this._activityChanged(),
+			canContinue: () => this.agentMode === "build" && !this.isReviewDiscussion,
+			promptingCommandRunning: () => this._prompting.extensionCommandRunning,
+			continuePrompt: (text, scope, assertCurrent, admitted) =>
+				this._prompting.promptAdmitted(
+					text,
+					{
+						source: "extension",
+						expandPromptTemplates: false,
+						assertConversationGenerationCurrent: assertCurrent,
+						preflightResult: admitted,
+					},
+					scope,
+				),
 			prompt: (text, options) => this.prompt(text, options),
 			emit: (event) => this._events.emit(event),
 		});
@@ -1140,6 +1161,7 @@ export class AgentSession {
 	 */
 	suspendAdmission(): () => void {
 		this._assertActive();
+		this._prompting.continuations.invalidate("superseded");
 		return this._admissionGate.suspend();
 	}
 
@@ -1311,6 +1333,8 @@ export class AgentSession {
 	}
 
 	private async _drainAdmittedWork(includePromptWork: boolean): Promise<void> {
+		// A continuation delivery runs prompt work; its agent_settled hooks already race the lifetime signal.
+		if (includePromptWork) await this._prompting.continuations.wait();
 		while (this._admittedAncillaryWork.size > 0 || (includePromptWork && this._admittedPromptWork.size > 0)) {
 			await Promise.allSettled([
 				...this._admittedAncillaryWork,
@@ -1828,6 +1852,7 @@ export class AgentSession {
 		for (;;) {
 			if (includeQueueAdmissions) await Promise.allSettled([...this._clientInputs.queueAdmissions]);
 			await this._conversation.waitForIdle();
+			if (includeQueueAdmissions) await this._prompting.continuations.wait();
 			if (
 				this._conversation.operation === undefined &&
 				(!includeQueueAdmissions || this._clientInputs.queueAdmissions.size === 0)
@@ -1898,10 +1923,11 @@ export class AgentSession {
 	 *
 	 * @param content User message content (string or content array)
 	 * @param options.deliverAs Delivery mode when streaming: "steer" or "followUp"
+	 * @param options.preflightResult Hears whether the message was admitted, as for prompt()
 	 */
 	sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
-		options?: { deliverAs?: "steer" | "followUp" },
+		options?: { deliverAs?: "steer" | "followUp"; preflightResult?: PromptOptions["preflightResult"] },
 	): Promise<void> {
 		return this._prompting.sendUserMessage(content, options);
 	}
@@ -1958,6 +1984,7 @@ export class AgentSession {
 	 * joined stop that does not request delivery keeps it retained.
 	 */
 	abort(source?: AgentAbortSource, options?: { deliverQueuedMessages?: boolean }): Promise<void> {
+		this._prompting.continuations.invalidate("aborted");
 		if (this._abortPromise) {
 			if (!options?.deliverQueuedMessages && this._abortQueueDelivery) this._abortQueueDelivery.requested = false;
 			return this._abortPromise;
@@ -2164,6 +2191,7 @@ export class AgentSession {
 	}
 
 	reload(): Promise<void> {
+		this._prompting.continuations.invalidate("superseded");
 		// The reloaded extensions' session_start belongs to no client, whoever asked for the reload.
 		const reloaded = ClientScope.exit(() => this._trackAdmittedAncillaryWork(this._extensions.reload()));
 		void reloaded.then(
@@ -2330,6 +2358,7 @@ export class AgentSession {
 	 * @returns Result with editorText (if user message) and cancelled status
 	 */
 	navigateTree(targetId: string, options: NavigateTreeOptions = {}): Promise<NavigateTreeResult> {
+		this._prompting.continuations.invalidate("superseded");
 		return this._navigation.navigateTree(targetId, options);
 	}
 
