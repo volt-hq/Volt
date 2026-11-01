@@ -8,8 +8,8 @@ import { createHarness, getMessageText, type Harness } from "../harness.ts";
 describe("regression #417: incremental approved plan progress", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		while (harnesses.length > 0) harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		while (harnesses.length > 0) await harnesses.pop()?.cleanupAsync();
 	});
 
 	it.each([false, true])("delivers boundary guidance and intermediate progress (compaction: %s)", async (compact) => {
@@ -41,7 +41,7 @@ describe("regression #417: incremental approved plan progress", () => {
 		await harness.session.setAgentMode("plan");
 		const draft = await harness.session.updatePlan({
 			title: "Verify three outcomes",
-			summary: "Complete the first outcome, then two related outcomes together.",
+			summary: "Complete and verify all three outcomes sequentially.",
 			steps: [
 				{ text: "First outcome" },
 				{ text: "Related outcomes", substeps: [{ text: "Second outcome" }, { text: "Third outcome" }] },
@@ -98,7 +98,6 @@ describe("regression #417: incremental approved plan progress", () => {
 					updates: [
 						{ id: first!.id, status: "completed", note: "Verified first" },
 						{ id: second!.id, status: "in_progress" },
-						{ id: third!.id, status: "in_progress" },
 					],
 				}),
 				{ stopReason: "toolUse" },
@@ -121,15 +120,23 @@ describe("regression #417: incremental approved plan progress", () => {
 				intermediateCheckpoint = formatPlanCheckpoint(harness.session.planningState);
 				return fauxAssistantMessage(fauxToolCall(workTool.name, { outcome: "second" }), { stopReason: "toolUse" });
 			},
-			fauxAssistantMessage(fauxToolCall(workTool.name, { outcome: "third" }), { stopReason: "toolUse" }),
 			fauxAssistantMessage(
 				fauxToolCall("update_plan_progress", {
 					planId: active.id,
 					expectedRevision: active.revision + 2,
 					updates: [
 						{ id: second!.id, status: "completed", note: "Verified second" },
-						{ id: third!.id, status: "completed", note: "Verified third" },
+						{ id: third!.id, status: "in_progress" },
 					],
+				}),
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage(fauxToolCall(workTool.name, { outcome: "third" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(
+				fauxToolCall("update_plan_progress", {
+					planId: active.id,
+					expectedRevision: active.revision + 3,
+					updates: [{ id: third!.id, status: "completed", note: "Verified third" }],
 				}),
 				{ stopReason: "toolUse" },
 			),
@@ -155,8 +162,9 @@ describe("regression #417: incremental approved plan progress", () => {
 		expect(timeline).toEqual([
 			"progress:in_progress,pending,pending",
 			"work:first",
-			"progress:completed,in_progress,in_progress",
+			"progress:completed,in_progress,pending",
 			"work:second",
+			"progress:completed,completed,in_progress",
 			"work:third",
 			"progress:completed,completed,completed",
 			"final_response",

@@ -114,6 +114,85 @@ describe("regression #585: executing a plan in a new session hands it off throug
 		}
 	});
 
+	it.each(["retain_context", "new_session"] as const)(
+		"enforces sequential progress after execution starts (%s)",
+		async (strategy) => {
+			const { source, tui, ready } = await setup();
+			const draft = (await source.session.changePlan(ready.id, ready.revision)).plan!;
+			const revised = await source.session.updatePlan({
+				planId: draft.id,
+				expectedRevision: draft.revision,
+				steps: [...draft.steps.map(({ id, text }) => ({ id, text })), { text: "Verify the change" }],
+			});
+			const approved = await source.session.submitPlan({
+				planId: revised.id,
+				expectedRevision: revised.revision,
+				title: revised.title!,
+				summary: revised.summary!,
+			});
+			await tui.executePlan(approved.id, approved.revision, strategy);
+			const target = tui.session;
+			await target.waitForIdle();
+			let current = target.planningState.plan!;
+			const [first, second] = current.steps;
+			await expect(
+				target.updatePlanProgress({
+					planId: current.id,
+					expectedRevision: current.revision,
+					updates: [{ id: second!.id, status: "in_progress" }],
+				}),
+			).rejects.toThrow(first!.id);
+			current = await target.updatePlanProgress({
+				planId: current.id,
+				expectedRevision: current.revision,
+				updates: [{ id: first!.id, status: "in_progress" }],
+			});
+			current = await target.updatePlanProgress({
+				planId: current.id,
+				expectedRevision: current.revision,
+				updates: [
+					{ id: first!.id, status: "completed" },
+					{ id: second!.id, status: "in_progress" },
+				],
+			});
+			expect(
+				(
+					await target.updatePlanProgress({
+						planId: current.id,
+						expectedRevision: current.revision,
+						updates: [{ id: second!.id, status: "completed" }],
+					})
+				).phase,
+			).toBe("completed");
+		},
+	);
+
+	it.each(["retain_context", "new_session"] as const)(
+		"rejects a nonsequential ready plan before creating a target (%s)",
+		async (strategy) => {
+			const { harness, source, tui, ready, shutdowns } = await setup();
+			const invalid = {
+				...ready,
+				steps: [...ready.steps, { id: "later-active", text: "Later work", status: "in_progress" as const }],
+			};
+			await source.session.sessionWriter.appendPlanningState({ mode: "plan", plan: invalid });
+			const manager = source.session.sessionManager;
+			const before = await SessionManager.list(manager.getCwd(), manager.getSessionDir(), undefined, {
+				includeMessageFreeDurable: true,
+			});
+			await expect(tui.executePlan(ready.id, ready.revision, strategy)).rejects.toThrow(/Change Plan/);
+			expect(
+				await SessionManager.list(manager.getCwd(), manager.getSessionDir(), undefined, {
+					includeMessageFreeDurable: true,
+				}),
+			).toEqual(before);
+			expect(tui.session).toBe(source.session);
+			expect(harness.host.list()).toEqual([source]);
+			expect(shutdowns).toEqual([]);
+			expect(source.session.planningState.plan).toEqual(invalid);
+		},
+	);
+
 	it("keeps the client on the source, with the plan still ready, when the handoff cannot be recorded there", async () => {
 		const { harness, source, tui, ready, shutdowns } = await setup();
 		vi.spyOn(source.session, "markPlanHandedOff").mockRejectedValueOnce(new Error("handoff refused"));

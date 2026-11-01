@@ -611,18 +611,27 @@ describe("planning tool presenters", () => {
 		expect(texts(presentation.body)).toContain("Checklist · 3/6 complete");
 	});
 
-	it("calls a progress update that returns an item to pending a reopening", () => {
+	it("calls a progress update that returns the current item to pending a pause", () => {
 		const plan = createExecutingPlan();
-		const reopened: PlanState = {
+		const paused: PlanState = {
 			...plan,
-			steps: plan.steps.map((step) => (step.id === "a" ? { ...step, status: "pending" as const } : step)),
+			steps: plan.steps.map((step) =>
+				step.substeps
+					? {
+							...step,
+							substeps: step.substeps.map((leaf) =>
+								leaf.id === "b3" ? { ...leaf, status: "pending" as const } : leaf,
+							),
+						}
+					: step,
+			),
 		};
 		const presentation = presented(
 			"update_plan_progress",
-			done({ mode: "build", plan: reopened }, progressArgs([{ id: "a", status: "pending" }])),
+			done({ mode: "build", plan: paused }, progressArgs([{ id: "b3", status: "pending" }])),
 		);
-		expect(presentation.title).toContainEqual({ text: "reopened", token: "warning" });
-		expect(plainTitle(presentation)).toBe("plan progress · reopened 1 Parse config · 2/6");
+		expect(presentation.title).toContainEqual({ text: "paused", token: "warning" });
+		expect(plainTitle(presentation)).toBe("plan progress · paused 2.3 Surface retry count · 3/6");
 	});
 
 	it("lists several progress updates, finished work first, and calls out an outcome they complete", () => {

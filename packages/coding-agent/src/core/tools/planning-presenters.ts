@@ -65,7 +65,7 @@ const LIST_MAX_BYTES = 2 * 1024;
 const STATUS_VERBS: Readonly<Record<PlanStepStatus, string>> = {
 	completed: "done",
 	in_progress: "started",
-	pending: "reopened",
+	pending: "paused",
 };
 const STATUS_TOKENS: Readonly<Record<PlanStepStatus, UiNodeToken>> = {
 	completed: "success",

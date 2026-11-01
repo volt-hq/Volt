@@ -15,6 +15,7 @@ import type { JsonValue } from "@hansjm10/volt-ai";
 import type { AgentSession } from "../agent-session.ts";
 import type { ReplacedSessionContext } from "../extensions/index.ts";
 import {
+	assertSequentialPlanExecution,
 	clonePlanState,
 	createPlanExecutionMessage,
 	type PlanExecution,
@@ -43,6 +44,7 @@ export interface PlanHandoff {
 
 /** Hand `plan`, ready at `expectedRevision` in `source`, to a new conversation. */
 export function createPlanHandoff(source: AgentSession, plan: PlanState, expectedRevision: number): PlanHandoff {
+	assertSequentialPlanExecution(plan);
 	const sourceSessionId = source.sessionId;
 	const model = source.model;
 	const thinkingLevel = source.thinkingLevel;

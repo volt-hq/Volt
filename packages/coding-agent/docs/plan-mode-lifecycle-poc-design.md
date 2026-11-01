@@ -19,7 +19,7 @@ ready -> handed_off (clear-context execution source)
 - `active`, `completed`, and `handed_off` require execution metadata.
 - Entering Plan mode during active execution is treated as an explicit replan transition, not a mode-only mutation.
 - Entering Plan mode after completion or handoff starts a new plan.
-- Every transition is revision-fenced and every committed state passes the same semantic parser used for restored state.
+- Every transition is revision-fenced and every committed state passes the same structural parser used for restored state. Current execution also passes sequential-cursor validation at progress, activation, and handoff boundaries, before a new execution session is created.
 - Asynchronous mode, activation, and handoff requests commit in invocation order. Toggle targets are derived only when their queued transition starts, after earlier transitions have settled.
 
 ## Tool split
@@ -43,6 +43,16 @@ Approved execution exposes:
 Approved title, summary, outcome/substep IDs, text, order, hierarchy, and cardinality are therefore structurally inaccessible to the execution progress tool. Completing every executable leaf moves the plan to `completed` and removes both execution-only plan tools from the active tool set.
 
 Exact no-op draft and progress updates are rejected so repeated calls cannot consume revisions without making progress.
+
+## Sequential approved execution
+
+Executable leaves follow outcome/substep order. Only the earliest unfinished leaf may enter `in_progress`, and only that leaf with a start committed in a previous snapshot may newly complete. A progress call may atomically complete the current leaf and start the next in either argument order. Skipped starts, parallel active leaves, pending-to-completed transitions, bulk completion, and completed-status reversals are rejected before any planning state, revision, entry, or event changes. Ordinary error tool results remain observable.
+
+Same-status notes may be edited or cleared on any leaf, including completed and future work; the updates array is not limited to two items. Returning the current active leaf to `pending` pauses it without advancing. Group statuses remain derived from their substeps, so a partly completed group can be `in_progress` even while no leaf is active. These rules validate reported checklist progress, not general Build-tool scheduling.
+
+Every active/ready-to-draft path—`request_replan`, manual Plan re-entry during execution, Change Plan, and ready-plan feedback—resets active leaves to `pending`, preserves completed leaves and notes, and rederives groups. Revisiting completed work requires an explicitly revised/new leaf and fresh approval. A replan may insert unfinished work before preserved completed work, so completed leaves need not form a prefix; the current item is always the earliest unfinished leaf.
+
+Historical deserialization remains structural rather than applying execution rules to every old snapshot. Nonserial historical entries stay readable, but inconsistent current active plans cannot advance until `request_replan` and reapproval; inconsistent ready plans require Change Plan or feedback, then reapproval. Valid compaction and resume preserve the committed current item without silent status repair, alternate wire formats, or legacy execution exceptions.
 
 ## Exploration and working drafts
 
