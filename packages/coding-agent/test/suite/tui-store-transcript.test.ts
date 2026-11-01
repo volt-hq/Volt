@@ -271,6 +271,55 @@ describe("the TUI's transcript from its store", () => {
 		expect(occurrences(await screen(tui), "Build mode")).toBe(1);
 	});
 
+	it.each([
+		{ tuiMode: "regular", compactedAtStartup: false },
+		{ tuiMode: "regular", compactedAtStartup: true },
+		{ tuiMode: "fullscreen", compactedAtStartup: false },
+		{ tuiMode: "fullscreen", compactedAtStartup: true },
+	] as const)(
+		"marks mode switches after compaction ($tuiMode, compacted at startup: $compactedAtStartup)",
+		async ({ tuiMode, compactedAtStartup }) => {
+			const compactInPlanMode = async (session: AgentSession): Promise<void> => {
+				await session.setAgentMode("plan");
+				await session.sessionWriter.appendMessage({
+					role: "user",
+					content: "Research the implementation",
+					timestamp: Date.now(),
+				});
+				await session.sessionWriter.appendMessage(
+					assistant(session, [{ type: "text", text: "Research complete." }]),
+				);
+				await session.compact();
+				await session.waitForIdle();
+				const branch = session.sessionManager.getBranch();
+				const compaction = branch.findLast((entry) => entry.type === "compaction");
+				expect(branch.findIndex((entry) => entry.id === compaction?.firstKeptEntryId)).toBeGreaterThan(
+					branch.findLastIndex((entry) => entry.type === "planning_state_change"),
+				);
+			};
+			const { tui, session } = await start({
+				tuiMode,
+				globalSettings: { ...SETTINGS, compaction: { enabled: false, keepRecentTokens: 1 } },
+				responses: ["The planning research so far, summarized."],
+				...(compactedAtStartup ? { before: compactInPlanMode } : {}),
+			});
+			if (!compactedAtStartup) await compactInPlanMode(session);
+			await waitForScreen(tui, "[compaction]");
+
+			await session.setAgentMode("build");
+
+			const plan = "Plan mode · agent tools are read-only";
+			const shown = await waitForScreen(tui, "Build mode");
+			expect(occurrences(shown, plan)).toBe(1);
+			expect(occurrences(shown, "Build mode")).toBe(1);
+			expect(shown.indexOf(plan)).toBeLessThan(shown.indexOf("Build mode"));
+
+			await session.setAgentMode("plan");
+			await vi.waitFor(async () => expect(occurrences(await screen(tui), plan)).toBe(2));
+			expect(occurrences(await screen(tui), "Build mode")).toBe(1);
+		},
+	);
+
 	it("presents an executed plan as the approved plan, not the model's instructions and ids", async () => {
 		const { harness, tui, session } = await start({
 			before: async (session) => {
@@ -419,5 +468,42 @@ describe("transcriptOf", () => {
 			entry("e", "c"),
 		];
 		expect(transcriptOf(branch).map((item) => item.id)).toEqual(["c", "c1", "d", "e"]);
+	});
+
+	it.each(["plan", "build"] as const)("retains only the latest %s snapshot before the kept entries", (mode) => {
+		const planning: ProjectedEntry = {
+			...entry("planning", "old-mode"),
+			type: "planning_state_change",
+			payload: { planning: { mode, plan: null } },
+		};
+		const compaction: ProjectedEntry = {
+			...entry("compaction", "kept"),
+			type: "compaction",
+			payload: { summary: "s", firstKeptEntryId: "kept", tokensBefore: 1 },
+		};
+		const branch = [
+			entry("old", null),
+			entry("old-mode", "old", "planning_state_change"),
+			planning,
+			entry("kept", "planning"),
+			compaction,
+			entry("after", "compaction"),
+		];
+		expect(transcriptOf(branch).map((item) => item.id)).toEqual(["compaction", "planning", "kept", "after"]);
+	});
+
+	it("does not duplicate a planning snapshot that is already retained", () => {
+		const planning: ProjectedEntry = {
+			...entry("planning", "old"),
+			type: "planning_state_change",
+			payload: { planning: { mode: "plan", plan: null } },
+		};
+		const compaction: ProjectedEntry = {
+			...entry("compaction", "kept"),
+			type: "compaction",
+			payload: { summary: "s", firstKeptEntryId: "planning", tokensBefore: 1 },
+		};
+		const branch = [entry("old", null), planning, entry("kept", "planning"), compaction];
+		expect(transcriptOf(branch).map((item) => item.id)).toEqual(["compaction", "planning", "kept"]);
 	});
 });
