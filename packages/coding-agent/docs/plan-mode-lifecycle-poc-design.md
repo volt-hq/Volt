@@ -38,13 +38,17 @@ Approved execution exposes:
 
 - normal Build tools
 - `update_plan_progress`, which can change only status and notes for existing executable leaf IDs; group status is derived from its substeps
-- `request_replan`, which pauses execution, removes execution metadata, returns the plan to `draft`, and terminates the current run
+- `request_replan`, which pauses implementation, removes execution metadata, returns the plan to `draft`, and continues the current run with read-only Plan tools
 
 Approved title, summary, outcome/substep IDs, text, order, hierarchy, and cardinality are therefore structurally inaccessible to the execution progress tool. Completing every executable leaf moves the plan to `completed` and removes both execution-only plan tools from the active tool set.
+
+A successful `request_replan` uses ordinary tool continuation, not a new host-scheduled turn. The committed draft immediately refreshes the tools and trusted policy to read-only Plan mode and clears research evidence. The agent gathers fresh research, revises with `update_plan`, explains the reason and proposed changes in the canonical summary, and calls `submit_plan` without waiting for a user continuation message. `submit_plan` still stops the planning run at `ready`, where the existing chooser offers explicit approval actions. Neither the replan nor its submission approves implementation. Cancelling prevents continuation; there is no idle-restart loop. Direct SDK `requestReplan` remains a state transition without launching a run, and manual Change Plan still waits for user feedback.
 
 Exact no-op draft and progress updates are rejected so repeated calls cannot consume revisions without making progress.
 
 ## Sequential approved execution
+
+The trusted active-plan policy and activation message direct the agent to execute all remaining approved items without per-item confirmation. Routine implementation choices and debugging needed by the current unfinished outcome remain within its existing scope; structural changes or revisiting completed work require replanning and reapproval. This guidance does not override user pauses, genuine blockers, unresolved decisions requiring input, or project/host approval gates, and does not force continuation after arbitrary text-only endings.
 
 Executable leaves follow outcome/substep order. Only the earliest unfinished leaf may enter `in_progress`, and only that leaf with a start committed in a previous snapshot may newly complete. A progress call may atomically complete the current leaf and start the next in either argument order. Skipped starts, parallel active leaves, pending-to-completed transitions, bulk completion, and completed-status reversals are rejected before any planning state, revision, entry, or event changes. Ordinary error tool results remain observable.
 

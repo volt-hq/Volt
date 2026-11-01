@@ -241,8 +241,8 @@ export function createPlanningToolDefinitions(
 			name: "request_replan",
 			label: "request replan",
 			description:
-				"Pause approved execution when implementation evidence requires a structural plan change or revisiting completed work. This preserves completed leaves and evidence, resets in_progress leaves to pending, returns the plan to draft, ends the execution run, and requires new user approval.",
-			promptSnippet: "Pause execution and request approval for a revised plan",
+				"Pause implementation when evidence requires a structural plan change or revisiting completed work. This preserves completed leaves and evidence, resets in_progress leaves to pending, clears execution approval, and returns the plan to a read-only draft. After success, continue automatically with fresh read-only research, revise with update_plan, explain the reason and proposed changes in the canonical summary, and call submit_plan without waiting for a user continuation message. Implementation resumes only after explicit approval of the submitted revision.",
+			promptSnippet: "Pause implementation, automatically revise read-only, and submit for reapproval",
 			parameters: requestReplanSchema,
 			present: presentPlanning("request_replan"),
 			async execute(_toolCallId, input) {
@@ -256,7 +256,6 @@ export function createPlanningToolDefinitions(
 					content: [{ type: "text", text: stateResultText(planning) }],
 					details: planning,
 					isError: false,
-					disposition: "stop",
 				};
 			},
 		},
