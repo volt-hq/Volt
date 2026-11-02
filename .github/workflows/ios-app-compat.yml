@@ -8,8 +8,10 @@ on:
     branches: [main]
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
+# A run that records an ios-compat-checked decision is never cancelled, so the
+# decision cannot be lost; other runs for the pull request replace each other.
 concurrency:
-  group: ios-app-compat-${{ github.ref }}
+  group: ios-app-compat-${{ github.ref }}${{ (github.event.action == 'labeled' && github.event.label.name == 'ios-compat-checked') && format('-decision-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 permissions: {}
@@ -35,32 +37,7 @@ jobs:
           node-version: '22.23.1'
           package-manager-cache: false
 
-      - name: Detect app-facing changes
-        id: detect
-        run: node scripts/ios-app-compat.mjs --base HEAD^1
-
-      - name: Require a compatibility decision
+      - name: Require a compatibility decision for app-facing changes
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          ACTION: ${{ github.event.action }}
-          APP_FACING: ${{ steps.detect.outputs.app-facing }}
-          BREAKS: ${{ contains(github.event.pull_request.labels.*.name, 'breaks-ios-app') }}
-          CHECKED: ${{ contains(github.event.pull_request.labels.*.name, 'ios-compat-checked') }}
-        run: |
-          if [ "$BREAKS" = true ]; then
-            echo "::error::Labeled breaks-ios-app. Hold until a Volt iOS build that supports this change is released, then update .github/ios-app-baseline.json and remove the label."
-            exit 1
-          fi
-          if [ "$APP_FACING" != true ] || [ "$CHECKED" = true ]; then
-            exit 0
-          fi
-          # Label only on code changes, so removing the label before adding
-          # ios-compat-checked does not put it back.
-          if [ "$ACTION" != labeled ] && [ "$ACTION" != unlabeled ]; then
-            gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label breaks-ios-app \
-              || echo "::warning::Could not add the breaks-ios-app label."
-          fi
-          echo "::error::This pull request changes what the Volt iOS baseline build depends on (see the step above). If that build keeps working, label it ios-compat-checked; otherwise leave breaks-ios-app until a supporting build is released."
-          exit 1
+        run: node scripts/ios-app-compat.mjs --base HEAD^1 --gate

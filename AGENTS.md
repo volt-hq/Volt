@@ -102,9 +102,10 @@ The Volt iOS app ships through App Review, so an app fix takes weeks to reach us
 
 The app currently rejects unknown fields and variants in host frames (volt-hq/volt-app#506), so additive protocol changes break it too.
 
-The `iOS app compatibility` workflow (`scripts/ios-app-compat.mjs`) labels pull requests that change these surfaces `breaks-ios-app` and fails while that label is present:
+The `iOS app compatibility` workflow (`scripts/ios-app-compat.mjs`) labels pull requests that change these surfaces `breaks-ios-app` and fails until a compatibility decision covers their current app-facing changes:
 
-- If the baseline build keeps working (for example, a server change that still accepts its requests), add `ios-compat-checked`, then remove `breaks-ios-app`. Say in the PR why the build is unaffected.
+- If the baseline build keeps working (for example, a server change that still accepts its requests), remove `breaks-ios-app` and add `ios-compat-checked`, in either order or together. Say in the PR why the build is unaffected.
+- Adding `ios-compat-checked` records the decision in a workflow comment: the exact app-facing changes it covers and the baseline it was checked against. A later commit that changes those surfaces, or a new baseline, clears `ios-compat-checked` and restores `breaks-ios-app`; review the new changes and decide again. A label added before the app-facing change existed covers nothing.
 - Add `breaks-ios-app` by hand to any other change the build cannot handle, such as daemon behavior it depends on.
 - A breaking change waits: land support in `volt-hq/volt-app`, ship that build, update the baseline in the same pull request, remove `breaks-ios-app`, then merge.
 - When a new app build is submitted or released, update `.github/ios-app-baseline.json` from that build's commit; `Packages/VoltClient/Tests/VoltClientTests/Contract/UPSTREAM.md` gives its contract commit and SHA-256.
