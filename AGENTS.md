@@ -96,6 +96,8 @@ The Volt iOS app ships through App Review, so an app fix takes weeks to reach us
 
 - the protocol contract (`packages/protocol/contract/protocol-schema.json`);
 - the pairing ticket, remote features, and push payloads in `packages/coding-agent/src/core/remote/iroh/` (`protocol.ts`, `ticket.ts`, `push.ts`, `completion-notifications.ts`);
+- the remote handshake, authorization outcomes, host metadata, and stream serving in the same directory (`handshake.ts`, `handshake-reader.ts`, `authorization.ts`, `metadata.ts`, `connection.ts`);
+- the managed relay and credential service origins (`packages/coding-agent/src/daemon/relay-deployments.ts`; the app accepts only these pairs, so keep them there) and the endpoint ticket embedded in pairing tickets (`daemon/iroh-endpoint-ticket.ts`);
 - the push relay function (`packages/coding-agent/examples/remote/firebase-push-relay/functions/`);
 - the relay credential broker and relay (`services/relay-credential-broker/`);
 - the `@hansjm10/volt-iroh` binding version.
@@ -106,7 +108,7 @@ The `iOS app compatibility` workflow (`scripts/ios-app-compat.mjs`) labels pull 
 
 - If the baseline build keeps working (for example, a server change that still accepts its requests), remove `breaks-ios-app` and add `ios-compat-checked`, in either order or together. Say in the PR why the build is unaffected.
 - Adding `ios-compat-checked` records the decision in a workflow comment: the exact app-facing changes it covers and the baseline it was checked against. A later commit that changes those surfaces, or a new baseline, clears `ios-compat-checked` and restores `breaks-ios-app`; review the new changes and decide again. A label added before the app-facing change existed covers nothing.
-- Add `breaks-ios-app` by hand to any other change the build cannot handle, such as daemon behavior it depends on.
+- Add `breaks-ios-app` by hand to any other change the build cannot handle, such as phone-visible behavior in `daemon/iroh-service.ts` or `core/remote/iroh/engine.ts` (too broad to watch).
 - A breaking change waits: land support in `volt-hq/volt-app`, ship that build, update the baseline in the same pull request, remove `breaks-ios-app`, then merge.
 - When a new app build is submitted or released, update `.github/ios-app-baseline.json` from that build's commit; `Packages/VoltClient/Tests/VoltClientTests/Contract/UPSTREAM.md` gives its contract commit and SHA-256.
 
