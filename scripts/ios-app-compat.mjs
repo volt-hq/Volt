@@ -37,6 +37,14 @@ export const APP_FACING_PATHS = [
 		surface: "pairing ticket, remote features, or push payloads",
 	},
 	{
+		pattern: /^packages\/coding-agent\/src\/core\/remote\/iroh\/(?:handshake|handshake-reader|authorization|metadata|connection)\.ts$/,
+		surface: "remote handshake, authorization outcomes, host metadata, or stream serving",
+	},
+	{
+		pattern: /^packages\/coding-agent\/src\/daemon\/(?:relay-deployments|iroh-endpoint-ticket)\.ts$/,
+		surface: "managed relay and credential service origins, or the endpoint ticket in pairing tickets",
+	},
+	{
 		pattern: /^packages\/coding-agent\/examples\/remote\/firebase-push-relay\/functions\/(?!.*\.test\.js$)[^/]+\.js$/,
 		surface: "push relay function",
 	},

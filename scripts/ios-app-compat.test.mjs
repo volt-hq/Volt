@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { parse } from "yaml";
 import {
@@ -85,6 +85,13 @@ test("app-facing paths outside the contract are flagged; their tests and docs ar
 		"packages/coding-agent/src/core/remote/iroh/protocol.ts",
 		"packages/coding-agent/src/core/remote/iroh/push.ts",
 		"packages/coding-agent/src/core/remote/iroh/completion-notifications.ts",
+		"packages/coding-agent/src/core/remote/iroh/handshake.ts",
+		"packages/coding-agent/src/core/remote/iroh/handshake-reader.ts",
+		"packages/coding-agent/src/core/remote/iroh/authorization.ts",
+		"packages/coding-agent/src/core/remote/iroh/metadata.ts",
+		"packages/coding-agent/src/core/remote/iroh/connection.ts",
+		"packages/coding-agent/src/daemon/relay-deployments.ts",
+		"packages/coding-agent/src/daemon/iroh-endpoint-ticket.ts",
 		"packages/coding-agent/examples/remote/firebase-push-relay/functions/index.js",
 		brokerPath,
 		"services/relay-credential-broker/internal/database/migrations/0005_replaceable_app_endpoints.sql",
@@ -92,7 +99,11 @@ test("app-facing paths outside the contract are flagged; their tests and docs ar
 	];
 	const ignored = [
 		"packages/coding-agent/src/core/remote/iroh/qr.ts",
+		"packages/coding-agent/src/core/remote/iroh/control.ts",
+		"packages/coding-agent/src/core/remote/iroh/engine.ts",
 		"packages/coding-agent/src/daemon/iroh-service.ts",
+		"packages/coding-agent/src/daemon/relay-credential.ts",
+		"packages/coding-agent/test/daemon-iroh-service.test.ts",
 		"packages/coding-agent/examples/remote/firebase-push-relay/functions/index.test.js",
 		"packages/coding-agent/examples/remote/firebase-push-relay/README.md",
 		"services/relay-credential-broker/internal/broker/reapproval_test.go",
@@ -105,6 +116,26 @@ test("app-facing paths outside the contract are flagged; their tests and docs ar
 	);
 	for (const path of flagged) {
 		assert.ok(APP_FACING_PATHS.some(({ pattern }) => pattern.test(path)), path);
+	}
+});
+
+test("managed relay and credential service hostnames appear only in watched source files", () => {
+	const root = new URL("../", import.meta.url);
+	const hostname = /iroh-relay[a-z-]*\.volt-cli\.dev|credentials(?:-canary)?\.volt-cli\.dev/;
+	const sources = readdirSync(new URL("packages/", root)).flatMap((name) => {
+		const src = new URL(`packages/${name}/src/`, root);
+		if (!existsSync(src)) return [];
+		return readdirSync(src, { recursive: true })
+			.map((path) => `packages/${name}/src/${String(path).split("\\").join("/")}`)
+			.filter((path) => path.endsWith(".ts"));
+	});
+	const defining = sources.filter((path) => hostname.test(readFileSync(new URL(path, root), "utf8")));
+	assert.ok(defining.length > 0, "expected the relay deployments to be defined in product source");
+	for (const path of defining) {
+		assert.ok(
+			APP_FACING_PATHS.some(({ pattern }) => pattern.test(path)),
+			`${path} names a managed relay or credential service but is not an app-facing path; keep these in packages/coding-agent/src/daemon/relay-deployments.ts`,
+		);
 	}
 });
 
