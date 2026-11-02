@@ -26,7 +26,7 @@
 - Never remove or downgrade code to mask type errors from outdated dependencies. If the requested work requires a dependency upgrade, report it and ask before changing dependency metadata unless dependency updates are already in scope.
 - Use only erasable TypeScript syntax (Node strip-only mode) in code checked by the root config (`packages/*/src`, `packages/*/test`, `packages/coding-agent/examples`): no parameter properties, `enum`, `namespace`/`module`, `import =`, `export =`, or other constructs needing JS emit. Use explicit fields with constructor assignments.
 - Always ask before removing functionality or code that appears intentional.
-- Volt has no users yet. Never preserve backward compatibility or add legacy paths (opt-in capability gating for old clients, deprecation shims, fallback wire formats, versioned protocol branches) unless the user explicitly asks. Change protocols, APIs, and storage formats in place. When a dependent repo (e.g. `volt-hq/volt-app`) must adapt, file an issue there instead of keeping a compat path.
+- Volt has no users yet. Never preserve backward compatibility or add legacy paths (opt-in capability gating for old clients, deprecation shims, fallback wire formats, versioned protocol branches) unless the user explicitly asks. Change protocols, APIs, and storage formats in place. When a dependent repo (e.g. `volt-hq/volt-app`) must adapt, file an issue there instead of keeping a compat path. Exception: the surfaces in [iOS app compatibility](#ios-app-compatibility) must keep working with the recorded iOS app build.
 - Never hardcode key checks (e.g. `matchesKey(keyData, "ctrl+x")`). Add a configurable action with its default keys instead. Editor and other reusable TUI component bindings (`tui.*`) go in `TUI_KEYBINDINGS` (`packages/tui/src/keybindings.ts`, declared in the `Keybindings` interface). App-level bindings (`app.*`) go in `KEYBINDINGS` (`packages/coding-agent/src/core/keybindings.ts`, declared in the `AppKeybindings` interface).
 - Never modify `packages/ai/src/models.generated.ts` directly; update `packages/ai/scripts/generate-models.ts` instead, then regenerate. Including the resulting `models.generated.ts` diff is always OK, even if regeneration includes unrelated upstream model metadata changes.
 
@@ -89,6 +89,25 @@ History:
 - `main` starts at a new root commit. History before the architecture rewrite, including Pi's, is at the protected tag `legacy/main`. Never delete or move `legacy/*` or `v*` tags.
 - Before pushing a branch, confirm it descends from the current root: `git merge-base --is-ancestor "$(git rev-list --max-parents=0 origin/main)" HEAD`. A branch from a pre-rewrite clone cannot merge; start from a fresh clone instead.
 - For `git log` or `git blame` across the boundary, use a separate clone: `git fetch origin 'refs/tags/legacy/*:refs/tags/legacy/*'`, then `git replace --graft "$(git rev-list --max-parents=0 origin/main)" legacy/main`, and disable pushing with `git remote set-url --push origin no-push`. Never push `refs/replace/*`.
+
+## iOS app compatibility
+
+The Volt iOS app ships through App Review, so an app fix takes weeks to reach users. `.github/ios-app-baseline.json` records the latest build submitted for review or released: build, version, app commit, the protocol contract it pins, and the Iroh binding version. Volt must keep working with that build until a newer one replaces it. App-facing surfaces:
+
+- the protocol contract (`packages/protocol/contract/protocol-schema.json`);
+- the pairing ticket, remote features, and push payloads in `packages/coding-agent/src/core/remote/iroh/` (`protocol.ts`, `ticket.ts`, `push.ts`, `completion-notifications.ts`);
+- the push relay function (`packages/coding-agent/examples/remote/firebase-push-relay/functions/`);
+- the relay credential broker and relay (`services/relay-credential-broker/`);
+- the `@hansjm10/volt-iroh` binding version.
+
+The app currently rejects unknown fields and variants in host frames (volt-hq/volt-app#506), so additive protocol changes break it too.
+
+The `iOS app compatibility` workflow (`scripts/ios-app-compat.mjs`) labels pull requests that change these surfaces `breaks-ios-app` and fails while that label is present:
+
+- If the baseline build keeps working (for example, a server change that still accepts its requests), add `ios-compat-checked`, then remove `breaks-ios-app`. Say in the PR why the build is unaffected.
+- Add `breaks-ios-app` by hand to any other change the build cannot handle, such as daemon behavior it depends on.
+- A breaking change waits: land support in `volt-hq/volt-app`, ship that build, update the baseline in the same pull request, remove `breaks-ios-app`, then merge.
+- When a new app build is submitted or released, update `.github/ios-app-baseline.json` from that build's commit; `Packages/VoltClient/Tests/VoltClientTests/Contract/UPSTREAM.md` gives its contract commit and SHA-256.
 
 ## Issues and PRs
 
