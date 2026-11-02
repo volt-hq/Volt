@@ -337,7 +337,8 @@ func (s *Server) handleApproveClaim(writer http.ResponseWriter, request *http.Re
 			Request: bound, Challenge: body.Challenge, Assertion: assertion,
 		})
 	if err != nil {
-		s.logger.Warn("pairing attestation rejected", "stage", "approve", "reason", broker.AttestationRejectionReason(err))
+		_, code, _ := brokerErrorResponse(err, "invalid_app_node_id")
+		s.logger.Warn("pairing attestation rejected", "stage", "approve", "reason", broker.AttestationRejectionReason(err), "code", code)
 		s.writeBrokerError(writer, err, "invalid_app_node_id")
 		return
 	}
@@ -556,41 +557,52 @@ func (s *Server) writeClaimCreationError(writer http.ResponseWriter, err error) 
 }
 
 func (s *Server) writeBrokerError(writer http.ResponseWriter, err error, invalidCode string) {
+	status, code, ok := brokerErrorResponse(err, invalidCode)
+	if !ok {
+		s.internalError(writer, "pairing claim operation", err)
+		return
+	}
+	writeError(writer, status, code)
+}
+
+// brokerErrorResponse returns the public status and error code for a
+// broker error, or false when the error is internal.
+func brokerErrorResponse(err error, invalidCode string) (int, string, bool) {
 	switch {
 	case errors.Is(err, broker.ErrAttestationInvalid):
-		writeError(writer, http.StatusUnauthorized, "app_attest_invalid")
+		return http.StatusUnauthorized, "app_attest_invalid", true
 	case errors.Is(err, broker.ErrAttestationCapacity):
-		writeError(writer, http.StatusTooManyRequests, "app_attest_capacity")
+		return http.StatusTooManyRequests, "app_attest_capacity", true
 	case errors.Is(err, broker.ErrAppCheckInvalid), errors.Is(err, broker.ErrAppCheckReplay):
-		writeError(writer, http.StatusUnauthorized, "app_check_invalid")
+		return http.StatusUnauthorized, "app_check_invalid", true
 	case errors.Is(err, broker.ErrClaimNotFound):
-		writeError(writer, http.StatusNotFound, "claim_not_found")
+		return http.StatusNotFound, "claim_not_found", true
 	case errors.Is(err, broker.ErrClaimExpired):
-		writeError(writer, http.StatusGone, "claim_expired")
+		return http.StatusGone, "claim_expired", true
 	case errors.Is(err, broker.ErrClaimUnauthorized):
-		writeError(writer, http.StatusUnauthorized, "claim_secret_invalid")
+		return http.StatusUnauthorized, "claim_secret_invalid", true
 	case errors.Is(err, broker.ErrClaimConflict), errors.Is(err, broker.ErrRefreshHashConflict):
-		writeError(writer, http.StatusConflict, "claim_conflict")
+		return http.StatusConflict, "claim_conflict", true
 	case errors.Is(err, broker.ErrEndpointCapacity):
-		writeError(writer, http.StatusTooManyRequests, "endpoint_capacity_reached")
+		return http.StatusTooManyRequests, "endpoint_capacity_reached", true
 	case errors.Is(err, broker.ErrAppEndpointCapacity):
-		writeError(writer, http.StatusTooManyRequests, "grant_endpoint_capacity_reached")
+		return http.StatusTooManyRequests, "grant_endpoint_capacity_reached", true
 	case errors.Is(err, broker.ErrInvalidAppNodeID):
-		writeError(writer, http.StatusBadRequest, invalidCode)
+		return http.StatusBadRequest, invalidCode, true
 	case errors.Is(err, broker.ErrRefreshExpired):
-		writeError(writer, http.StatusGone, "credential_expired")
+		return http.StatusGone, "credential_expired", true
 	case errors.Is(err, broker.ErrSubscriptionRequired):
-		writeError(writer, http.StatusPaymentRequired, "subscription_inactive")
+		return http.StatusPaymentRequired, "subscription_inactive", true
 	case errors.Is(err, broker.ErrSubscriptionConflict):
-		writeError(writer, http.StatusConflict, "subscription_conflict")
+		return http.StatusConflict, "subscription_conflict", true
 	case errors.Is(err, broker.ErrSubscriptionSuperseded):
-		writeError(writer, http.StatusConflict, "subscription_pairing_superseded")
+		return http.StatusConflict, "subscription_pairing_superseded", true
 	case errors.Is(err, broker.ErrAppStoreProofReplay):
-		writeError(writer, http.StatusConflict, "app_store_proof_replayed")
+		return http.StatusConflict, "app_store_proof_replayed", true
 	case errors.Is(err, broker.ErrGrantRevoked), errors.Is(err, broker.ErrRefreshInvalid):
-		writeError(writer, http.StatusUnauthorized, "credential_invalid")
+		return http.StatusUnauthorized, "credential_invalid", true
 	default:
-		s.internalError(writer, "pairing claim operation", err)
+		return http.StatusInternalServerError, "internal_error", false
 	}
 }
 

@@ -32,7 +32,7 @@ func TestRegression387RegistrationLogsOnlyBoundedReason(t *testing.T) {
 	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
 		t.Fatal(err)
 	}
-	if len(record) != 5 || record["level"] != "WARN" || record["msg"] != "pairing attestation rejected" || record["stage"] != "register" || record["reason"] != "registration_owner" {
+	if len(record) != 6 || record["level"] != "WARN" || record["msg"] != "pairing attestation rejected" || record["stage"] != "register" || record["reason"] != "registration_owner" || record["code"] != "app_attest_invalid" {
 		t.Fatalf("unexpected log fields: %v", record)
 	}
 	for _, secret := range []string{claim.ClaimID, fields["attestation"], fields["signedAppTransaction"], fields["appStoreDeviceVerificationId"], fields["keyId"], headers["X-Firebase-AppCheck"]} {
@@ -63,7 +63,7 @@ func TestApprovalLogsOnlyBoundedReason(t *testing.T) {
 	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
 		t.Fatal(err)
 	}
-	if len(record) != 5 || record["level"] != "WARN" || record["msg"] != "pairing attestation rejected" || record["stage"] != "approve" || record["reason"] != "approval_challenge" {
+	if len(record) != 6 || record["level"] != "WARN" || record["msg"] != "pairing attestation rejected" || record["stage"] != "approve" || record["reason"] != "approval_challenge" || record["code"] != "app_attest_invalid" {
 		t.Fatalf("unexpected log fields: %v", record)
 	}
 	for _, secret := range []string{claim.ClaimID, fields["assertion"], fields["signedAppTransaction"], fields["appStoreDeviceVerificationId"], fields["keyId"], headers["X-Firebase-AppCheck"]} {
