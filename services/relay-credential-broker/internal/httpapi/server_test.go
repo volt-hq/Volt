@@ -354,8 +354,20 @@ func TestExistingGrantAddsAndRevokesOneAppEndpoint(t *testing.T) {
 		"signedAppTransaction":         testSignedAppTransaction(defaultSubscriptionID, duplicateNodeClaim.ClaimID),
 		"appStoreDeviceVerificationId": testDeviceVerificationID,
 	}), map[string]string{"X-Firebase-AppCheck": developmentAppCheckToken})
-	if duplicateNodeApproval.Code != http.StatusConflict {
+	// Regression: #1004. Pairing an enrolled phone again replaces its endpoint.
+	if duplicateNodeApproval.Code != http.StatusOK {
 		t.Fatalf("duplicate grant/node approval status = %d, body = %s", duplicateNodeApproval.Code, duplicateNodeApproval.Body.String())
+	}
+	var replacementApproval broker.Approval
+	decodeResponse(t, duplicateNodeApproval, &replacementApproval)
+	if replacementApproval.GrantID != firstApproval.GrantID || replacementApproval.EndpointID == secondApproval.EndpointID {
+		t.Fatalf("duplicate grant/node approval did not replace the endpoint: %+v", replacementApproval)
+	}
+	replacedAppRefresh := service.request(t, http.MethodPost, "/v1/tokens/refresh", "", map[string]string{
+		"Authorization": "Bearer " + secondAppRefreshToken,
+	})
+	if replacedAppRefresh.Code != http.StatusUnauthorized {
+		t.Fatalf("replaced app refresh status = %d, body = %s", replacedAppRefresh.Code, replacedAppRefresh.Body.String())
 	}
 
 	otherHostNodeID := strings.Repeat("f", 64)

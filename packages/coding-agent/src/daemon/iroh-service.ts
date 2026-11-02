@@ -159,6 +159,12 @@ import {
 	revokeIrohManagedRelayAppEndpoint,
 	revokeIrohManagedRelayCredential,
 } from "./relay-credential.ts";
+import {
+	VOLT_CANARY_RELAY_CREDENTIAL_SERVICE_URL,
+	VOLT_CANARY_RELAY_URLS,
+	VOLT_PRODUCTION_RELAY_CREDENTIAL_SERVICE_URL,
+	VOLT_PRODUCTION_RELAY_URLS,
+} from "./relay-deployments.ts";
 import { RELAY_OFFER_RETRY, type RelayLifecycleOwner, RelayRegistry } from "./relay-stream.ts";
 import {
 	type RemoteIntentHost,
@@ -259,16 +265,6 @@ let activeConnectionSequence = 0;
 let activeStreamSequence = 0;
 
 export type IrohRelayMode = "disabled" | "development" | "production";
-
-/**
- * The Volt-operated relay fleet. Endpoints bind against these by default
- * ("production" mode); the n0 public relays ("development" mode) are for
- * development only and must be opted into via VOLT_IROH_RELAY_MODE=development.
- */
-export const VOLT_PRODUCTION_RELAY_URLS = ["https://iroh-relay-us-central.volt-cli.dev"];
-export const VOLT_PRODUCTION_RELAY_CREDENTIAL_SERVICE_URL = "https://credentials.volt-cli.dev";
-export const VOLT_CANARY_RELAY_URLS = ["https://iroh-relay-us-central-canary.volt-cli.dev"];
-export const VOLT_CANARY_RELAY_CREDENTIAL_SERVICE_URL = "https://credentials-canary.volt-cli.dev";
 
 export interface IrohDaemonServiceConfig {
 	relayMode?: IrohRelayMode;

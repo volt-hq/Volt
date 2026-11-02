@@ -30,10 +30,6 @@ import {
 	IrohPhysicalStreamOwner,
 	resolveIrohRelayConfig,
 	resolveIrohRelayCredentialServiceUrl,
-	VOLT_CANARY_RELAY_CREDENTIAL_SERVICE_URL,
-	VOLT_CANARY_RELAY_URLS,
-	VOLT_PRODUCTION_RELAY_CREDENTIAL_SERVICE_URL,
-	VOLT_PRODUCTION_RELAY_URLS,
 } from "../src/daemon/iroh-service.ts";
 import {
 	createLifecycleFencedIrohStream,
@@ -42,6 +38,12 @@ import {
 import { runVoltDaemon } from "../src/daemon/main.ts";
 import { getDaemonPaths } from "../src/daemon/paths.ts";
 import type { IrohManagedRelayCredential } from "../src/daemon/relay-credential.ts";
+import {
+	VOLT_CANARY_RELAY_CREDENTIAL_SERVICE_URL,
+	VOLT_CANARY_RELAY_URLS,
+	VOLT_PRODUCTION_RELAY_CREDENTIAL_SERVICE_URL,
+	VOLT_PRODUCTION_RELAY_URLS,
+} from "../src/daemon/relay-deployments.ts";
 import { type DaemonProbeResult, probeDaemon } from "../src/daemon/spawn.ts";
 import { InProcessWorkerLauncher } from "./suite/in-process-worker-launcher.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
