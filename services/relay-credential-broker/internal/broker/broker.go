@@ -503,13 +503,15 @@ func (b *Broker) ApprovePairingClaim(
 		if !now.Before(host.RefreshInactiveExpiresAt) {
 			return Approval{}, ErrRefreshExpired
 		}
+		// The approving node's own endpoint is replaced below, so it does not
+		// count against the grant's capacity.
 		var appCount int
 		if err := transaction.QueryRow(ctx, `
 			SELECT count(*)
 			FROM endpoints
-			WHERE grant_id = $1 AND kind = 'app'
+			WHERE grant_id = $1 AND kind = 'app' AND node_id <> $3
 			  AND revoked_at IS NULL AND refresh_inactive_expires_at > $2
-		`, grant.ID, now).Scan(&appCount); err != nil {
+		`, grant.ID, now, appNodeID).Scan(&appCount); err != nil {
 			return Approval{}, fmt.Errorf("count active app endpoints: %w", err)
 		}
 		if appCount >= b.config.MaxAppEndpointsPerGrant {
@@ -528,6 +530,15 @@ func (b *Broker) ApprovePairingClaim(
 		return Approval{}, err
 	}
 
+	// A phone pairing with this computer again replaces its earlier endpoint.
+	// The grant row lock serializes approvals, so no other active endpoint
+	// for this node can appear before the insert.
+	if _, err := transaction.Exec(ctx, `
+		UPDATE endpoints SET revoked_at = $3
+		WHERE grant_id = $1 AND kind = 'app' AND node_id = $2 AND revoked_at IS NULL
+	`, grant.ID, appNodeID, now); err != nil {
+		return Approval{}, fmt.Errorf("replace app endpoint: %w", err)
+	}
 	app, err := insertEndpoint(ctx, transaction, grant.ID, "app", appNodeID, appRefreshHash, now, b.config.RefreshInactivityTTL)
 	if err != nil {
 		return Approval{}, mapEndpointInsertError(err)
