@@ -1,4 +1,4 @@
-name: npm audit
+name: Dependency audit
 
 on:
   schedule:
@@ -10,7 +10,47 @@ permissions:
 
 jobs:
   audit:
+    name: npm audit (${{ matrix.graph }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        graph: [root, site, firebase, gondolin, sandbox, with-deps, custom-provider-anthropic, shrinkwrap]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22.23.1'
+          package-manager-cache: false
+
+      - name: Install npm 11.17.0
+        working-directory: ${{ runner.temp }}
+        run: npm install -g npm@11.17.0 --ignore-scripts
+
+      - name: Audit locked production and development dependencies
+        env:
+          AUDIT_GRAPH: ${{ matrix.graph }}
+        run: node scripts/audit-dependencies.mjs --graph "$AUDIT_GRAPH" --output "$RUNNER_TEMP/dependency-audit"
+
+      - name: Retain audit reports even on failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-audit-${{ matrix.graph }}
+          path: ${{ runner.temp }}/dependency-audit/
+          retention-days: 14
+          if-no-files-found: warn
+
+  signatures:
+    name: Root production registry signatures
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -30,8 +70,68 @@ jobs:
       - name: Install dependencies without lifecycle scripts
         run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Audit production vulnerabilities
-        run: npm audit --omit=dev --audit-level=moderate
-
       - name: Verify registry signatures
-        run: npm audit signatures --omit=dev
+        shell: bash
+        run: |
+          set -o pipefail
+          npm audit signatures --omit=dev 2>&1 | tee "$RUNNER_TEMP/npm-signatures.txt"
+
+      - name: Retain signature report even on failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-signatures
+          path: ${{ runner.temp }}/npm-signatures.txt
+          retention-days: 14
+          if-no-files-found: warn
+
+  broker:
+    name: Go broker module vulnerabilities
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22.23.1'
+          package-manager-cache: false
+
+      - name: Install npm 11.17.0
+        working-directory: ${{ runner.temp }}
+        run: npm install -g npm@11.17.0 --ignore-scripts
+
+      - name: Install dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+          cache-dependency-path: services/relay-credential-broker/go.sum
+
+      - name: Install govulncheck 1.9.0
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+
+      - name: Verify the real scanner contract against a local database
+        run: node --test scripts/audit-go-dependencies.integration.test.mjs
+
+      # Query JSON exits successfully even with advisories; the wrapper validates
+      # module/version ranges and explicitly gates on findings and scanner errors.
+      - name: Scan all broker modules
+        run: node scripts/audit-go-dependencies.mjs --output "$RUNNER_TEMP/broker-govulncheck"
+
+      - name: Retain broker report even on failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: broker-govulncheck
+          path: ${{ runner.temp }}/broker-govulncheck/
+          retention-days: 14
+          if-no-files-found: warn
