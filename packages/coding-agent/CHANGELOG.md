@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.7.0] - 2026-11-03
+
+Standalone Windows executables in this release are not code-signed. Windows may show a SmartScreen warning when you first run them.
+
+### Highlights
+
+- Added [pull request review](https://volt-cli.dev/docs/usage/#code-review) for Azure DevOps Services repositories, including publishing a review as one comment thread per inline finding and one for the summary. ([#985](https://github.com/volt-hq/Volt/issues/985))
+  Volt authenticates with a personal access token from `VOLT_ADO_PAT` or `AZURE_DEVOPS_EXT_PAT`, or with the Azure CLI account, which it also uses when Azure DevOps refuses the token. Publishing again after a failure posts only the missing threads. Pull requests from forks and daemon review worktrees are not supported yet.
+- Paired devices such as the phone app can now run extension commands you allow in `/extensions` (Remote commands) or the global setting [`extensions.<id>.remoteSafeCommands`](https://volt-cli.dev/docs/settings/#extensions), even when the extension did not mark them remote-safe.
+- [Plan mode](https://volt-cli.dev/docs/quickstart/#switch-models) now looks like a first-class mode: the composer's border takes the Plan mode color, the transcript marks each switch between Build and Plan mode, a ready plan shows one cue with its actions as buttons at every width, and an approved plan's execution shows as a card with its checklist instead of the model's instructions and step ids.
+  The plan pane, Plan Details, and the plan status above the editor share one look with the planning tools' transcript cards: a ◆ PLAN · PHASE badge, checklist items drawn as the cards draw them, a progress bar, and a pane divider that lights up while the pane is focused.
+
+### Breaking Changes
+
+- **themes:** Custom themes must define the new `planMode` color token.
+  Add a [`planMode`](https://volt-cli.dev/docs/themes/#plan-mode-1-color) color to your theme's `colors` (for example `"planMode": "#56b6c2"`); Volt uses it for the composer border in Plan mode, the transcript's mode divider, and the plan status marks. A theme without it fails to load and Volt falls back to the built-in `dark` theme.
+- **plan:** Approved-plan checklists now execute sequentially, with one current item and a committed start before completion.
+  SDK callers and model tools must start the earliest unfinished executable leaf with `in_progress` in one committed update before completing it. An update may complete the current leaf and start the next, but cannot skip items, start parallel work, complete multiple leaves, or reopen completed work. Same-status evidence edits and current-item pauses remain supported.
+
+  Use `request_replan` and obtain fresh approval to revisit completed work; returning to draft preserves completed leaves and evidence and resets active leaves to `pending`. Historical snapshots remain readable, but nonsequential current active plans require replanning, and nonsequential ready plans require Change Plan or feedback before reapproval.
+
+### Improvements
+
+- **daemon:** Sessions in Azure DevOps repositories are linked to their pull request, and its status is kept up to date in the background, as for GitHub. ([#985](https://github.com/volt-hq/Volt/issues/985))
+- **jobs:** A foreground bash command that produces no output for its silence timeout now keeps running as a [background job](https://volt-cli.dev/docs/usage/#background-jobs) instead of being killed, and the model gets the job ID to collect its output with `jobs wait`.
+  The silence timeout is still 300 seconds by default. Without the jobs tool, or while the conversation already runs 8 jobs, the command is killed as hung. The bash tool description now also tells the model not to pipe output through `tail`, `head`, or `sort` just to shorten it, since those hide progress until the command exits.
+- **review:** The /review target selector offers the current branch's pull request from the daemon's link to it, without waiting on the code host, so Azure DevOps pull requests appear there too. ([#985](https://github.com/volt-hq/Volt/issues/985))
+- **rpc:** Pull request review now selects its code-host provider from the repository remote, and `resolve_pr_review` and `prepare_pr_review` report that provider's id in `pullRequest.provider`.
+  The value is `github` or `azure-devops`. Protocol clients should accept any provider id and treat `url` and `repository` as display values that provider owns; `@hansjm10/volt-protocol` types `provider` as a string.
+- **tui:** A working draft now shows as the agent writes it: in the plan pane beside the conversation at 129x24 and larger, and as its title and outcomes above the editor in smaller terminals.
+- **tui:** Reopening a conversation at startup with `--continue`, `--session`, or `--session-id` is faster, since Volt opens the session store once instead of several times.
+
+### Fixes
+
+- **plan:** Plan changes now continue through read-only revision and resubmission without a manual continuation message, while implementation still waits for explicit reapproval.
+- **review:** Review accounting now reports the model-priced estimate instead of "unavailable", and requests with complete provider usage count as complete rather than partial.
+- **windows:** Stopped /review and other daemon-run helper commands from briefly flashing a console window on Windows.
+
 ## [0.6.0] - 2026-10-23
 
 Standalone Windows executables in this release are not code-signed. Windows may show a SmartScreen warning when you first run them.
