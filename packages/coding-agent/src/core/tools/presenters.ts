@@ -79,6 +79,10 @@ function bashStatus(text: string): { output: string; status?: BashStatus } {
 	if (match) return { output, status: { text: `timed out after ${match[1]}s`, token: "warning" } };
 	match = /^Command produced no output for (\d+(?:\.\d+)?) seconds and was killed as hung\./.exec(last);
 	if (match) return { output, status: { text: `killed after ${match[1]}s without output`, token: "warning" } };
+	match = /^Command produced no output for (\d+(?:\.\d+)?) seconds and is still running as background job /.exec(last);
+	if (match) {
+		return { output, status: { text: `moved to background after ${match[1]}s without output`, token: "warning" } };
+	}
 	if (last === "Command aborted") return { output, status: { text: "aborted", token: "warning" } };
 	return { output: text };
 }
@@ -120,8 +124,9 @@ function omittedBefore(details: unknown): number {
 
 /**
  * bash: `$ command` (with the timeout in force), the output as terminal
- * lines, and how a failed command ended. Collapsed, a running or failed
- * command shows its newest five lines (and how it ended); a passing one shows
+ * lines, and how a failed command ended or that a silent one moved to a
+ * background job. Collapsed, a running, failed, or moved command shows its
+ * newest five lines (and how it ended); a passing one shows
  * output that fits in five lines whole, and otherwise how many lines it wrote.
  * While the command runs, a line it is still writing is kept apart, so new
  * output reaches clients as appended lines.
@@ -149,8 +154,10 @@ export const presentBash: ToolPresenter = (input) => {
 	const result = input.result;
 	const running = result?.partial === true;
 	const text = resultText(result);
+	// A command that went silent and moved to a background job ends its call with how it moved.
+	const moved = input.state === "done" && namesJob(result?.details);
 	// A failed command's status follows its truncation footer, so the status comes off first.
-	const ended = input.state === "done" && result?.isError ? bashStatus(text) : { output: text };
+	const ended = input.state === "done" && (result?.isError || moved) ? bashStatus(text) : { output: text };
 	const { status } = ended;
 	const output = withoutTruncationFooter(ended.output);
 	const lines = outputLines(output);
@@ -168,7 +175,7 @@ export const presentBash: ToolPresenter = (input) => {
 	// Passing output the summary cannot show whole is a count: its newest lines say little of it.
 	// A failure's newest lines are where it says why, so they show.
 	const counted =
-		input.state === "done" && result?.isError !== true && (omitted > 0 || all.length > BASH_SUMMARY_LINES);
+		input.state === "done" && result?.isError !== true && !moved && (omitted > 0 || all.length > BASH_SUMMARY_LINES);
 	const summary: UiNode[] = [
 		...commandLine,
 		...(counted

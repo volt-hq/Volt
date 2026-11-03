@@ -21,12 +21,14 @@ import {
 	createIrohDaemonService,
 	type IrohDaemonServiceConfig,
 	type IrohDaemonServiceDependencies,
-	VOLT_PRODUCTION_RELAY_CREDENTIAL_SERVICE_URL,
-	VOLT_PRODUCTION_RELAY_URLS,
 } from "../src/daemon/iroh-service.ts";
 import { runVoltDaemon } from "../src/daemon/main.ts";
 import { getDaemonPaths } from "../src/daemon/paths.ts";
 import type { IrohManagedRelayCredential } from "../src/daemon/relay-credential.ts";
+import {
+	VOLT_PRODUCTION_RELAY_CREDENTIAL_SERVICE_URL,
+	VOLT_PRODUCTION_RELAY_URLS,
+} from "../src/daemon/relay-deployments.ts";
 import { probeDaemon } from "../src/daemon/spawn.ts";
 import { createEmptyVoltdState, type VoltdStateFileV1 } from "../src/daemon/state.ts";
 import { main } from "../src/main.ts";

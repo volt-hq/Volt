@@ -92,7 +92,8 @@ func (s *Server) handleAttestationRegister(writer http.ResponseWriter, request *
 		return
 	}
 	if err = s.broker.RegisterAttestationKey(request.Context(), bound, body.Challenge, object, check, entitlement); err != nil {
-		s.logger.Warn("pairing attestation rejected", "stage", "register", "reason", broker.AttestationRejectionReason(err))
+		_, code, _ := brokerErrorResponse(err, "invalid_attestation_request")
+		s.logger.Warn("pairing attestation rejected", "stage", "register", "reason", broker.AttestationRejectionReason(err), "code", code)
 		s.writeBrokerError(writer, err, "invalid_attestation_request")
 		return
 	}
