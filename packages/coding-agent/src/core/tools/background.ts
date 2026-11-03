@@ -48,22 +48,13 @@ function labelOf(description: string | undefined, input: Record<string, unknown>
 			: "Subagent batch";
 }
 
-/** A foreground Bash call that went silent and moved to a job: its output so far, and the job to collect. */
-function movedResult(
-	job: JobSummary,
-	silentSeconds: number,
-	latest: AgentToolResult<unknown> | undefined,
-): AgentToolResult<unknown> {
-	const output = (latest?.content ?? [])
-		.filter((part) => part.type === "text")
-		.map((part) => part.text)
-		.join("");
+/** A foreground Bash call's move acknowledgement, without output that has not passed its result policy. */
+function movedResult(job: JobSummary, silentSeconds: number): AgentToolResult<unknown> {
 	const status = `Command produced no output for ${silentSeconds} seconds and is still running as background job ${job.id}. Use jobs wait to collect its result, jobs read for its latest output, or jobs cancel if it is hung.`;
-	const details = latest?.details;
 	return {
-		content: [{ type: "text", text: output ? `${output}\n\n${status}` : status }],
-		// Truncation details keep presenting the output so far; the job names the call as moved.
-		details: { ...(typeof details === "object" && details !== null ? details : {}), job },
+		content: [{ type: "text", text: status }],
+		// As with explicit background starts, only the settled job result passes the tool's result policy.
+		details: { job },
 	};
 }
 
@@ -209,7 +200,7 @@ export function withBackgroundJobs<T extends TProperties, TDetails>(
 								);
 							},
 						});
-						answer(movedResult(job, silentSeconds, latest));
+						answer(movedResult(job, silentSeconds));
 						return true;
 					} catch {
 						// No job can take it: the command is killed as hung, and the call returns that.
