@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { constants } from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
 import type { AgentTool, AgentToolResult } from "@hansjm10/volt-agent-core";
@@ -36,16 +37,30 @@ const DEFAULT_STALL_TIMEOUT_SECONDS = 300;
 /** Upper bound applied to explicitly requested timeouts. */
 const MAX_TIMEOUT_SECONDS = 3600;
 
+/**
+ * Moves a foreground command that went silent for its stall deadline into a
+ * background job, where it keeps running. Resolves whether it moved; a command
+ * that did not move is killed as hung.
+ */
+export type BashStallMove = (silentSeconds: number) => Promise<boolean>;
+
+const stallMoveContext = new AsyncLocalStorage<BashStallMove>();
+
+/** Run a bash execution whose stall deadline moves it to the background instead of killing it. */
+export function withBashStallMove<T>(move: BashStallMove, execute: () => Promise<T>): Promise<T> {
+	return stallMoveContext.run(move, execute);
+}
+
 const bashSchema = Type.Object({
 	command: Type.String({ description: "Bash command to execute" }),
 	timeout: Type.Optional(
 		Type.Number({
-			description: `Overall wall-clock limit in seconds (max ${MAX_TIMEOUT_SECONDS}). Usually unnecessary: a command that goes silent for ${DEFAULT_STALL_TIMEOUT_SECONDS}s is killed automatically, so there is no need to inflate this to protect against hangs.`,
+			description: `Overall wall-clock limit in seconds (max ${MAX_TIMEOUT_SECONDS}); the command is killed when it passes. Usually unnecessary: silence is detected separately (see stallTimeout), so there is no need to set this to protect against hangs.`,
 		}),
 	),
 	stallTimeout: Type.Optional(
 		Type.Number({
-			description: `Seconds without output before the command is presumed hung and killed (default ${DEFAULT_STALL_TIMEOUT_SECONDS}, max ${MAX_TIMEOUT_SECONDS}, 0 disables). Raise this only for commands that are legitimately silent for long stretches.`,
+			description: `Seconds without output before the command is presumed hung (default ${DEFAULT_STALL_TIMEOUT_SECONDS}, max ${MAX_TIMEOUT_SECONDS}, 0 disables). Raise this only for commands that are legitimately silent for long stretches.`,
 		}),
 	),
 	description: Type.Optional(
@@ -228,7 +243,7 @@ export function createBashToolDefinition(
 	return {
 		name: "bash",
 		label: "bash",
-		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. A command that produces no output for ${DEFAULT_STALL_TIMEOUT_SECONDS}s is killed as hung, so long-running commands do not need a large timeout to be safe.`,
+		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to the last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first); if truncated, the full output is saved to a temp file. Do not pipe output through tail, head, or sort just to shorten it: they print nothing until the command exits, so a long command looks silent. A command that produces no output for ${DEFAULT_STALL_TIMEOUT_SECONDS}s is killed as hung, so long-running commands do not need a large timeout to be safe.`,
 		promptSnippet: "Execute bash commands (ls, grep, find, etc.)",
 		promptGuidelines: [
 			"Give bash a short description when the command's purpose is not obvious from the command alone (pipelines, multi-line scripts, builds, tests, git operations); the user sees it as the call's title above the command.",
@@ -243,6 +258,7 @@ export function createBashToolDefinition(
 		) {
 			const wallTimeout = clampTimeoutSeconds(timeout);
 			const stallSeconds = resolveStallSeconds(stallTimeout);
+			const moveOnStall = stallMoveContext.getStore();
 			const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
 			const spawnContext = resolveSpawnContext(resolvedCommand, cwd, spawnHook);
 			const output = new OutputAccumulator({ tempFilePrefix: "volt-bash" });
@@ -301,6 +317,10 @@ export function createBashToolDefinition(
 				abortCause ??= "caller";
 			};
 			let stallTimer: NodeJS.Timeout | undefined;
+			// Moved to a background job: silence no longer ends the command.
+			let moved = false;
+			// A move is being decided: output meanwhile does not re-arm the deadline.
+			let moving = false;
 
 			const clearStallTimer = () => {
 				if (stallTimer) {
@@ -313,11 +333,23 @@ export function createBashToolDefinition(
 			// total runtime: a command that keeps talking is never killed by it.
 			const armStallTimer = () => {
 				clearStallTimer();
-				if (stallSeconds <= 0) return;
+				if (stallSeconds <= 0 || moved || moving) return;
 				stallTimer = setTimeout(() => {
-					abortCause ??= "stall";
-					stallController.abort();
+					stallTimer = undefined;
+					void stalled();
 				}, stallSeconds * 1000);
+			};
+
+			// The deadline passed: the command moves to the background when the caller can take it, else it dies as hung.
+			const stalled = async () => {
+				if (moveOnStall) {
+					moving = true;
+					moved = await moveOnStall(stallSeconds).catch(() => false);
+					moving = false;
+					if (moved) return;
+				}
+				abortCause ??= "stall";
+				stallController.abort();
 			};
 
 			const handleData = (data: Buffer) => {

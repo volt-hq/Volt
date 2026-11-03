@@ -39,7 +39,7 @@ function deferred() {
 }
 
 /** Replace only the shell backend; definitions, grants, wrappers, and policies stay native. */
-function controlledBash(holdAbortCleanup = false, exitCode = 0) {
+function controlledBash(holdAbortCleanup = false, exitCode = 0, output = "worker output: untrusted payload\n") {
 	const started = deferred();
 	const aborted = deferred();
 	const finish = deferred();
@@ -55,7 +55,7 @@ function controlledBash(holdAbortCleanup = false, exitCode = 0) {
 			};
 			signal?.addEventListener("abort", onAbort, { once: true });
 			if (signal?.aborted) onAbort();
-			options.onData(Buffer.from("worker output: untrusted payload\n"));
+			options.onData(Buffer.from(output));
 			started.resolve();
 			try {
 				await finish.promise;
@@ -266,6 +266,74 @@ describe("AgentSession background jobs", () => {
 		expect(noticeInputs(harness)).toEqual([]);
 		expect(harness.faux.state.callCount).toBe(3);
 	});
+
+	it.each([
+		{ outcome: "completed", exitCode: 0, output: "worker output: untrusted payload\n" },
+		{ outcome: "failed", exitCode: 1, output: "worker output: untrusted payload\n".repeat(2200) },
+	])(
+		"withholds unprocessed output when moving a foreground Bash call with final status $outcome",
+		async ({ outcome, exitCode, output }) => {
+			const backend = controlledBash(false, exitCode, output);
+			const results: ToolResultEvent[] = [];
+			const harness = await setup({
+				extensionFactories: [
+					(volt) => {
+						volt.on("tool_result", (event) => {
+							if (event.toolName !== "bash") return;
+							results.push(event);
+							return { content: [{ type: "text", text: "policy-redacted output" }] };
+						});
+					},
+				],
+			});
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("bash", { command: "controlled work", stallTimeout: 0.2 }), {
+					stopReason: "toolUse",
+				}),
+				(context) => {
+					const moved = harness.session.messages.find(
+						(message) => message.role === "toolResult" && message.toolName === "bash",
+					);
+					const job = jobOf(moved);
+					expect(job).toMatchObject({ status: "running", label: "controlled work" });
+					expect(moved?.role === "toolResult" && moved.details).toEqual({ job });
+					expect(JSON.stringify(moved)).not.toContain("untrusted payload");
+					expect(context.messages.map(getMessageText).join("\n")).not.toContain("untrusted payload");
+					expect(getMessageText(moved)).toContain(`still running as background job ${job.id}`);
+					// Streaming output remains available to the job, not in its start acknowledgement.
+					expect(harness.session.jobs.get(job.id).output).toContain("untrusted payload");
+					return fauxAssistantMessage(fauxToolCall("jobs", { action: "wait", ids: [job.id] }), {
+						stopReason: "toolUse",
+					});
+				},
+				(context) => {
+					const waited = context.messages.find(
+						(message) => message.role === "toolResult" && message.toolName === "jobs",
+					);
+					expect(getMessageText(waited)).toContain(outcome);
+					expect(getMessageText(waited)).toContain("policy-redacted output");
+					expect(context.messages.map(getMessageText).join("\n")).not.toContain("untrusted payload");
+					return fauxAssistantMessage("Collected the moved result.");
+				},
+			]);
+			const prompt = harness.session.prompt("Run the work");
+			await vi.waitFor(() => expect(harness.session.jobs.listWaits()).toHaveLength(1));
+			// The move is a start acknowledgement: hooks see only the job's settled result.
+			expect(results).toHaveLength(0);
+			expect(backend.signal?.aborted).toBe(false);
+			backend.finish.resolve();
+			await prompt;
+			await harness.session.waitForIdle();
+			expect(lastAssistantText(harness.session)).toBe("Collected the moved result.");
+			expect(results).toHaveLength(1);
+			expect(getMessageText(results[0])).toContain("untrusted payload");
+			expect(harness.session.jobs.get(harness.session.jobs.list()[0]!.id)).toMatchObject({
+				status: outcome,
+				output: "policy-redacted output",
+			});
+			expect(notices(harness)).toHaveLength(0);
+		},
+	);
 
 	it("withdraws a queued notice when the model reads the finished job first", async () => {
 		const backend = controlledBash();

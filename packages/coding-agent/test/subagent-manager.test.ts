@@ -1824,7 +1824,12 @@ describe("SubagentManager", () => {
 					sourceSessionId: childSession.sessionId,
 					targetSessionId: childSession.sessionId,
 				});
-				activePlan = childSession.planningState.plan as typeof activePlan;
+				const active = childSession.planningState.plan!;
+				activePlan = await childSession.updatePlanProgress({
+					planId: active.id,
+					expectedRevision: active.revision,
+					updates: [{ id: active.steps[0]!.id, status: "in_progress" }],
+				});
 			},
 			responses: [
 				() => {
@@ -1910,7 +1915,12 @@ describe("SubagentManager", () => {
 					sourceSessionId: childSession.sessionId,
 					targetSessionId: childSession.sessionId,
 				});
-				activePlan = childSession.planningState.plan as typeof activePlan;
+				const active = childSession.planningState.plan!;
+				activePlan = await childSession.updatePlanProgress({
+					planId: active.id,
+					expectedRevision: active.revision,
+					updates: [{ id: active.steps[0]!.id, status: "in_progress" }],
+				});
 			},
 			responses: [
 				() => {

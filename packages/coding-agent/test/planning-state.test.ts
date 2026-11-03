@@ -1022,7 +1022,12 @@ describe("native planning state", () => {
 			}),
 		).rejects.toThrow("only in Plan mode");
 
-		const active = session.planningState.plan!;
+		const beforeStart = session.planningState.plan!;
+		const active = await session.updatePlanProgress({
+			planId: beforeStart.id,
+			expectedRevision: beforeStart.revision,
+			updates: [{ id: beforeStart.steps[0]!.id, status: "in_progress" }],
+		});
 		const executionPolicy = session.state.systemPrompt;
 		const executionTools = session.getActiveToolNames();
 		expect(executionPolicy).toContain("[VOLT APPROVED PLAN — TRUSTED HOST POLICY]");
@@ -1093,13 +1098,19 @@ describe("native planning state", () => {
 		const executionCheckpoint = createPlanExecutionPrompt(reactivatedPlan);
 		expect(executionCheckpoint).toContain("[x] Inspect the architecture — Architecture inspected");
 		expect(executionCheckpoint).toContain(`Revision: ${reactivatedPlan.revision}`);
-		const completed = await session.updatePlanProgress({
-			planId: reactivatedPlan.id,
-			expectedRevision: reactivatedPlan.revision,
-			updates: reactivatedPlan.steps
-				.filter((step) => step.status !== "completed")
-				.map((step) => ({ id: step.id, status: "completed" as const })),
-		});
+		let completed = reactivatedPlan;
+		for (const step of reactivatedPlan.steps.filter((step) => step.status !== "completed")) {
+			const started = await session.updatePlanProgress({
+				planId: completed.id,
+				expectedRevision: completed.revision,
+				updates: [{ id: step.id, status: "in_progress" }],
+			});
+			completed = await session.updatePlanProgress({
+				planId: started.id,
+				expectedRevision: started.revision,
+				updates: [{ id: step.id, status: "completed" }],
+			});
+		}
 		expect(completed.phase).toBe("completed");
 		expect(session.getActiveToolNames()).not.toContain("update_plan_progress");
 		expect(session.getActiveToolNames()).not.toContain("request_replan");
@@ -1162,13 +1173,21 @@ describe("native planning state", () => {
 			note: "Started persistence",
 		});
 
-		const groupedComplete = await session.updatePlanProgress({
+		const secondStarted = await session.updatePlanProgress({
 			planId: started.id,
 			expectedRevision: started.revision,
-			updates: started.steps[0]!.substeps!.map((substep) => ({
-				id: substep.id,
-				status: "completed" as const,
-			})),
+			updates: [
+				{ id: firstSubstep.id, status: "completed" },
+				{ id: started.steps[0]!.substeps![1]!.id, status: "in_progress" },
+			],
+		});
+		const groupedComplete = await session.updatePlanProgress({
+			planId: secondStarted.id,
+			expectedRevision: secondStarted.revision,
+			updates: [
+				{ id: secondStarted.steps[0]!.substeps![1]!.id, status: "completed" },
+				{ id: secondStarted.steps[1]!.id, status: "in_progress" },
+			],
 		});
 		expect(groupedComplete.phase).toBe("active");
 		expect(groupedComplete.steps[0]).toMatchObject({ status: "completed" });

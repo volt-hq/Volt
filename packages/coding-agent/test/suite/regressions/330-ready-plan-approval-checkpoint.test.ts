@@ -1,4 +1,6 @@
-import { fauxAssistantMessage } from "@hansjm10/volt-ai";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { type Component, setKeybindings, type TuiMainScreen } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
@@ -66,7 +68,7 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 		setKeybindings(new KeybindingsManager());
 	});
 
-	async function createFixture(columns: number, rows: number): Promise<Fixture> {
+	async function createFixture(columns: number, rows: number, executing = false): Promise<Fixture> {
 		const harness = await createTuiHarness({ globalSettings: { theme: "dark", retry: { enabled: false } } });
 		const session = harness.startup.session;
 		await session.setAgentMode("plan");
@@ -75,6 +77,21 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 			summary: PLAN_SUMMARY,
 			steps: [{ text: "Apply the approved change" }],
 		});
+		if (executing) {
+			const ready = await session.submitPlan({
+				planId: draft.id,
+				expectedRevision: draft.revision,
+				title: PLAN_TITLE,
+				summary: PLAN_SUMMARY,
+			});
+			await session.activatePlan(ready.id, ready.revision, {
+				id: "tui-replan-execution",
+				approvedRevision: ready.revision,
+				strategy: "retain_context",
+				sourceSessionId: session.sessionId,
+				targetSessionId: session.sessionId,
+			});
+		}
 		executePlan.mockReset();
 		const tui = await harness.startMode({ columns, rows });
 		const control = tui.mode as unknown as ModeControl;
@@ -130,12 +147,16 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 		await run.finish();
 		expect(control.planDetails).toBeDefined();
 		expect(control.renderer.getFocusedComponent()).toBe(control.planDetails);
-		expect(await screen(fixture)).toContain("Plan ready — choose the next step");
+		const chooser = await screen(fixture);
+		expect(chooser).toMatch(/\[ Execute Plan \] +Execute Plan & Clear Context +Change Plan/);
+		// The chooser holds focus, so the composer says only that typing still reaches it.
+		expect(chooser).toContain("PLAN READY · Type to send feedback");
 
 		terminal.sendInput("l");
 		expect(control.planDetails).toBeUndefined();
 		expect(control.renderer.getFocusedComponent()).toBe(control.defaultEditor);
 		expect(control.defaultEditor.getText()).toBe("l");
+		expect(await screen(fixture)).toMatch(/PLAN READY · (Alt|Option)\+P choose next step · Enter send feedback/);
 
 		// Dismissal sticks: an unrelated planning refresh does not reopen the chooser.
 		control.defaultEditor.setText("");
@@ -166,8 +187,10 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 		expect(control.planDetails).toBeUndefined();
 		expect(control.renderer.getFocusedComponent()).toBe(control.defaultEditor);
 		const output = await screen(fixture);
-		expect(output).toContain("PLAN READY · APPROVAL NEEDED");
+		// One row names the plan; the composer's label says how to decide on it.
+		expect(output).toContain(`PLAN · READY  ${PLAN_TITLE}`);
 		expect(output).toMatch(/PLAN READY · (Alt|Option)\+P choose next step · Enter send feedback/);
+		expect(output.match(/choose next step/g)).toHaveLength(1);
 
 		// Enter sends the draft as feedback on the plan: a prompt, never its execution.
 		harness.faux.setResponses([fauxAssistantMessage("Revising the plan")]);
@@ -183,22 +206,100 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 		expect(fixture.executePlan).not.toHaveBeenCalled();
 	});
 
+	it.each([
+		{ columns: 120, hasDraft: false },
+		{ columns: 160, hasDraft: false },
+		{ columns: 120, hasDraft: true },
+		{ columns: 160, hasDraft: true },
+	])(
+		"offers a resubmitted replan without a continuation message ($columns columns, draft: $hasDraft)",
+		async ({ columns, hasDraft }) => {
+			const fixture = await createFixture(columns, 36, true);
+			const { harness, session, control, terminal } = fixture;
+			const evidence = join(harness.tempDir, "replan-evidence.txt");
+			writeFileSync(evidence, "A separate verification step is required.");
+			if (hasDraft) control.defaultEditor.setText("keep this editor draft");
+			const active = session.planningState.plan!;
+			harness.faux.setResponses([
+				fauxAssistantMessage(
+					fauxToolCall("request_replan", {
+						planId: active.id,
+						expectedRevision: active.revision,
+						reason: "A separate verification step is required.",
+					}),
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage(fauxToolCall("read", { path: evidence }), { stopReason: "toolUse" }),
+				() => {
+					const draft = session.planningState.plan!;
+					return fauxAssistantMessage(
+						fauxToolCall("update_plan", {
+							planId: draft.id,
+							expectedRevision: draft.revision,
+							title: "Revised approval checkpoint",
+							summary: "Add separate verification because implementation revealed another requirement.",
+							steps: [...draft.steps.map(({ id, text }) => ({ id, text })), { text: "Verify the requirement" }],
+						}),
+						{ stopReason: "toolUse" },
+					);
+				},
+				() => {
+					const draft = session.planningState.plan!;
+					return fauxAssistantMessage(
+						fauxToolCall("submit_plan", {
+							planId: draft.id,
+							expectedRevision: draft.revision,
+							title: draft.title!,
+							summary: draft.summary!,
+						}),
+						{ stopReason: "toolUse" },
+					);
+				},
+			]);
+
+			await session.prompt("Execute the approved plan");
+			await session.waitForIdle();
+			expect(session.planningState).toMatchObject({ mode: "plan", plan: { phase: "ready" } });
+			expect(session.messages.filter((message) => message.role === "user")).toHaveLength(1);
+			expect(harness.faux.getPendingResponseCount()).toBe(0);
+			expect(executePlan).not.toHaveBeenCalled();
+			const readyScreen = await screen(fixture);
+			if (hasDraft) {
+				expect(control.renderer.getFocusedComponent()).toBe(control.defaultEditor);
+				expect(control.defaultEditor.getText()).toBe("keep this editor draft");
+				expect(readyScreen).toMatch(/PLAN READY · (Alt|Option)\+P choose next step/);
+				terminal.sendInput("\x1bp");
+			} else {
+				expect(control.renderer.getFocusedComponent()).toBe(
+					columns >= 129 ? control.planInspector : control.planDetails,
+				);
+			}
+			const chooser = await screen(fixture);
+			expect(chooser).toContain("Revised approval checkpoint");
+			expect(chooser).toContain("Execute Plan");
+			expect(chooser).toContain("Change Plan");
+			expect(executePlan).not.toHaveBeenCalled();
+		},
+	);
+
 	it("focuses the split inspector only after settlement and returns typing to the composer", async () => {
 		const fixture = await createFixture(160, 30);
 		const { control, terminal } = fixture;
 		const run = await submitDuringRun(fixture);
 		const during = await screen(fixture);
-		expect(during).toContain("APPROVAL NEEDED");
+		expect(during).toContain("PLAN · READY");
 		expect(control.planInspector.focused).toBe(false);
 		expect(control.renderer.getFocusedComponent()).toBe(control.defaultEditor);
 
 		await run.finish();
 		expect(control.planInspector.focused).toBe(true);
+		expect(await screen(fixture)).toContain("PLAN READY · Type to send feedback");
 
 		terminal.sendInput("x");
 		expect(control.planInspector.focused).toBe(false);
 		expect(control.renderer.getFocusedComponent()).toBe(control.defaultEditor);
 		expect(control.defaultEditor.getText()).toBe("x");
+		expect(await screen(fixture)).toMatch(/PLAN READY · (Alt|Option)\+P choose next step/);
 		expect(fixture.executePlan).not.toHaveBeenCalled();
 	});
 });

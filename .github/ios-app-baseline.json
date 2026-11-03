@@ -1,0 +1,11 @@
+{
+	"build": "15",
+	"version": "1.0.0",
+	"status": "in App Review",
+	"appCommit": "13f418eaf8cc519b704a4e782211c1ed138f867b",
+	"protocolContract": {
+		"voltCommit": "7fb3632fc1e9493623a3beff477e30a0dadc5ca7",
+		"sha256": "a4517322c1742f923d9fd4956853d9d1bd78e13ad0f662d50b9ace00846bd85f"
+	},
+	"voltIroh": "1.1.1-volt.2"
+}

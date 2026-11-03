@@ -120,7 +120,7 @@ Multiple historical grants may have the same host node ID. This avoids public bo
 
 Constraints:
 
-- unique `(grant_id, kind, node_id)`;
+- unique `(grant_id, kind, node_id)` among active (unrevoked) endpoints, through a partial unique index;
 - at most one `host` endpoint per grant through a partial unique index;
 - unique `refresh_token_hash`;
 - revoked or expired endpoints remain as tombstones for a bounded retention period rather than being immediately deleted.
@@ -225,7 +225,7 @@ Before mutation, the broker verifies the Apple chain, signature, exact app/envir
 4. locks the registered App Attest key, verifies its immutable subscription/device owner, consumes the exact request-bound challenge, verifies the assertion signature and any signed app/build metadata, and advances its counter;
 5. revokes any older daemon grant bound to this subscription, unless a newer claim already superseded this one;
 6. for bootstrap, creates and binds the replacement grant and host endpoint;
-7. creates the app endpoint, or accepts an exact retry with the same node and refresh hash;
+7. creates the app endpoint, revoking any earlier active endpoint for the same node in the grant so a phone can pair with the same computer again, or accepts an exact retry with the same node and refresh hash;
 8. rechecks challenge, claim, token and entitlement expiry after blocking locks, then records approval.
 
 A reused App Check `jti` fails the entire transaction. A retry after response loss obtains a fresh App Check token, challenge and higher-counter assertion, while retaining the same app node and refresh hash. After commit, KMS signs an app access JWT. If signing fails, committed approval remains retryable and no secret is lost.

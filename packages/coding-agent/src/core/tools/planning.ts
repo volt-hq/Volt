@@ -93,7 +93,9 @@ const requestReplanSchema = Type.Object(
 	{
 		planId: Type.String(),
 		expectedRevision: Type.Integer({ minimum: 0 }),
-		reason: Type.String({ description: "Implementation evidence that requires changing the approved scope" }),
+		reason: Type.String({
+			description: "Implementation evidence requiring revised scope or revisiting completed work",
+		}),
 	},
 	{ additionalProperties: false },
 );
@@ -156,7 +158,7 @@ export function createPlanningToolDefinitions(
 			name: "update_plan",
 			label: "update plan",
 			description:
-				"Create or replace the current working draft after an initial orientation. The title, summary, and checklist form a handoff artifact that may be executed in a fresh session without the planning transcript. Keep them compact and decision-focused, explicitly name referenced reviews and findings only when they affect implementation, and revise them whenever material evidence changes the context, scope, approach, ordering, or verification. Use the fewest independently verifiable outcomes that preserve clear scope, add one level of executable substeps where useful, and allow large tasks as many items as required. Preserve canonical ids only for unchanged outcomes and substeps. Approved execution scope cannot be changed with this tool.",
+				"Create or replace the current working draft after an initial orientation. The title, summary, and checklist form a handoff artifact that may be executed in a fresh session without the planning transcript. Keep them compact and decision-focused, explicitly name referenced reviews and findings only when they affect implementation, and revise them whenever material evidence changes the context, scope, approach, ordering, or verification. Use the fewest independently verifiable outcomes that preserve clear scope, add one level of executable substeps where useful, and allow large tasks as many items as required. Order outcomes and substeps for sequential execution. Preserve canonical ids only for unchanged outcomes and substeps. Approved execution scope cannot be changed with this tool.",
 			promptSnippet: "Create or refine the self-contained working plan as research changes understanding",
 			parameters: updatePlanSchema,
 			present: presentPlanning("update_plan"),
@@ -212,7 +214,7 @@ export function createPlanningToolDefinitions(
 			name: "update_plan_progress",
 			label: "update plan progress",
 			description:
-				"Update only status and execution evidence for existing approved executable leaf ids. Mark work in_progress when starting it and completed once its required outcome and verification are supported by evidence, before moving to unrelated work; do not wait until the end. Batch related transitions or leaves genuinely completed together, not mechanical updates after every tool call. Group outcome status is derived from its substeps. The approved title, summary, outcome and substep text, order, hierarchy, and scope are immutable.",
+				"Update only status and execution evidence for existing approved executable leaf ids. Mark work in_progress when starting it and completed once its required outcome and verification are supported by evidence, before moving to unrelated work; do not wait until the end. Only the earliest unfinished leaf may start, and its in_progress start must commit in a previous call before completion. Batch status transitions only to complete the current leaf and start the next, in either argument order; never skip items, activate parallel leaves, or complete multiple leaves together. Same-status evidence edits/clearing are allowed on any leaf, and returning the current active leaf to pending pauses it. Completed work requires request_replan and reapproval to revisit. Group outcome status is derived from its substeps. The approved title, summary, outcome and substep text, order, hierarchy, and scope are immutable.",
 			promptSnippet: "Keep approved plan progress current as work starts and verified outcomes finish",
 			parameters: updatePlanProgressSchema,
 			present: presentPlanning("update_plan_progress"),
@@ -239,8 +241,8 @@ export function createPlanningToolDefinitions(
 			name: "request_replan",
 			label: "request replan",
 			description:
-				"Pause approved execution when implementation evidence requires a structural plan change. This returns the plan to draft, ends the execution run, and requires new user approval.",
-			promptSnippet: "Pause execution and request approval for a revised plan",
+				"Pause implementation when evidence requires a structural plan change or revisiting completed work. This preserves completed leaves and evidence, resets in_progress leaves to pending, clears execution approval, and returns the plan to a read-only draft. After success, continue automatically with fresh read-only research, revise with update_plan, explain the reason and proposed changes in the canonical summary, and call submit_plan without waiting for a user continuation message. Implementation resumes only after explicit approval of the submitted revision.",
+			promptSnippet: "Pause implementation, automatically revise read-only, and submit for reapproval",
 			parameters: requestReplanSchema,
 			present: presentPlanning("request_replan"),
 			async execute(_toolCallId, input) {
@@ -254,7 +256,6 @@ export function createPlanningToolDefinitions(
 					content: [{ type: "text", text: stateResultText(planning) }],
 					details: planning,
 					isError: false,
-					disposition: "stop",
 				};
 			},
 		},

@@ -6,9 +6,11 @@
  *
  * The transcript is the active branch from its newest compaction, as the
  * model sees the conversation: the compaction, the entries it kept, then
- * everything after it. When the client moves (`ended{moved}`), the store
- * holds nothing until the target's snapshot resets it: it is moving, and
- * what the TUI sends waits for the target (`settled`). A snapshot of the same
+ * everything after it. The last planning snapshot before those entries is
+ * retained too, so mode dividers start in the correct mode. When the client
+ * moves (`ended{moved}`), the store holds nothing until the target's snapshot
+ * resets it: it is moving, and what the TUI sends waits for the target
+ * (`settled`). A snapshot of the same
  * conversation (a resync, or a resubscription after a gap) resets it as well.
  * A subscription that ends otherwise (`ended{lost}`, at shutdown `closed`)
  * ends what the store shows.
@@ -56,12 +58,13 @@ export type TuiStoreChange =
 	/** The subscription ended for good: the conversation lost its log, closed, or the host shut down. */
 	| { readonly type: "ended"; readonly reason: "closed" | "lost" | "shutdown" };
 
-/** The entry types a transcript shows. */
+/** The entry types a transcript shows; a planning change shows only where it switches the agent mode. */
 const TRANSCRIPT_ENTRY_TYPES: ReadonlySet<ProjectedEntry["type"]> = new Set([
 	"message",
 	"custom_message",
 	"compaction",
 	"branch_summary",
+	"planning_state_change",
 ]);
 
 function isTranscriptEntry(entry: ProjectedEntry): boolean {
@@ -70,8 +73,9 @@ function isTranscriptEntry(entry: ProjectedEntry): boolean {
 
 /**
  * The transcript of a branch (root first): from its newest compaction, the
- * compaction, the entries it kept before it, then the entries after it;
- * without one, the branch. Only the entry types a transcript shows.
+ * compaction, the last planning snapshot before the kept entries, the kept
+ * entries, then the entries after it; without one, the branch. Only the
+ * entry types a transcript shows.
  */
 export function transcriptOf(branch: readonly ProjectedEntry[]): ProjectedEntry[] {
 	let compactionIndex = -1;
@@ -86,8 +90,17 @@ export function transcriptOf(branch: readonly ProjectedEntry[]): ProjectedEntry[
 	const firstKeptId = compaction?.type === "compaction" ? compaction.payload?.firstKeptEntryId : undefined;
 	const firstKept = firstKeptId === undefined ? -1 : branch.findIndex((entry) => entry.id === firstKeptId);
 	const keptFrom = firstKept === -1 || firstKept > compactionIndex ? compactionIndex : firstKept;
+	let planningBeforeKept: ProjectedEntry | undefined;
+	for (let index = keptFrom - 1; index >= 0; index--) {
+		const entry = branch[index];
+		if (entry?.type === "planning_state_change") {
+			planningBeforeKept = entry;
+			break;
+		}
+	}
 	return [
 		...(compaction === undefined ? [] : [compaction]),
+		...(planningBeforeKept === undefined ? [] : [planningBeforeKept]),
 		...branch.slice(keptFrom, compactionIndex).filter(isTranscriptEntry),
 		...branch.slice(compactionIndex + 1).filter(isTranscriptEntry),
 	];

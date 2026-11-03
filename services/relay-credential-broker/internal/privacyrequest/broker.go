@@ -107,7 +107,7 @@ func preview(ctx context.Context, tx pgx.Tx, scope Scope) (Plan, error) {
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(max(version),0), count(*) FROM schema_migrations`).Scan(&version, &count); err != nil {
 		return Plan{}, err
 	}
-	if version != 4 || count != 4 {
+	if version != 5 || count != 5 {
 		return Plan{}, errors.New("unsupported schema; review the deletion queries against its migrations")
 	}
 	args := []interface{}{scope.GrantIDs, scope.AppTransactionIDs, scope.ClaimIDs}

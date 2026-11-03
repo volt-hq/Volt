@@ -27,6 +27,15 @@ async function createReadyPlan(harness: Harness): Promise<void> {
 	});
 }
 
+async function startCurrentItem(harness: Harness) {
+	const plan = harness.session.planningState.plan!;
+	return harness.session.updatePlanProgress({
+		planId: plan.id,
+		expectedRevision: plan.revision,
+		updates: [{ id: plan.steps[0]!.id, status: "in_progress" }],
+	});
+}
+
 /** Whether a log batch delivers a user message: a turn's delivery commit. */
 function deliversUserMessage(batch: ConversationLogAppend): boolean {
 	return batch.entries.some(
@@ -198,7 +207,7 @@ describe("regression #199: approved plan finalization", () => {
 			sourceSessionId: harness.session.sessionId,
 			targetSessionId: harness.session.sessionId,
 		});
-		const active = harness.session.planningState.plan!;
+		const active = await startCurrentItem(harness);
 		const requestSnapshots: Array<{ tools: string[]; systemPrompt: string }> = [];
 		harness.setResponses([
 			(context) => {
@@ -284,7 +293,7 @@ describe("regression #199: approved plan finalization", () => {
 			sourceSessionId: harness.session.sessionId,
 			targetSessionId: harness.session.sessionId,
 		});
-		const active = harness.session.planningState.plan!;
+		const active = await startCurrentItem(harness);
 		const requestSnapshots: Array<{ tools: string[]; systemPrompt: string }> = [];
 		let retriedRequestContainedQueuedInput: boolean | undefined;
 		let clearedQueuedDeliveries: number | undefined;
@@ -374,7 +383,7 @@ describe("regression #199: approved plan finalization", () => {
 			sourceSessionId: harness.session.sessionId,
 			targetSessionId: harness.session.sessionId,
 		});
-		const active = harness.session.planningState.plan!;
+		const active = await startCurrentItem(harness);
 		const requestSnapshots: Array<{ tools: string[]; systemPrompt: string }> = [];
 		let compactedRequestContainedQueuedInput: boolean | undefined;
 		let clearedQueuedDeliveries: number | undefined;
