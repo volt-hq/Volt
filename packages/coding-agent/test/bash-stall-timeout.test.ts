@@ -5,8 +5,11 @@
  * has to be set generously and the excess becomes dead wall time. These tests
  * cover the silence-based deadline that replaces that guess.
  */
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { withBackgroundJobs } from "../src/core/tools/background.ts";
 import { type BashOperations, createBashToolDefinition } from "../src/core/tools/bash.ts";
+import { type JobStart, type JobSummary, jobOfDetails } from "../src/core/tools/jobs.ts";
+import { createTestJobRuntime, type TestJobRuntime } from "./utilities/job-runtime.ts";
 
 const ctx = {} as never;
 
@@ -101,6 +104,94 @@ describe("bash stall detection", () => {
 				await tool.execute("stall-5", { command: "hang", stallTimeout: 1 }, controller.signal, undefined, ctx),
 			),
 		).toMatch(/killed as hung/);
+	}, 15000);
+});
+
+describe("moving a silent foreground command to a background job", () => {
+	const runtimes: TestJobRuntime[] = [];
+	afterEach(async () => {
+		await Promise.all(runtimes.splice(0).map((created) => created.close()));
+	});
+
+	/** Bash as a session offers it: foreground calls can move to the runtime's jobs, unless `start` refuses. */
+	async function jobCapableBash(start?: (job: JobStart) => Promise<JobSummary>) {
+		const created = await createTestJobRuntime();
+		runtimes.push(created);
+		const tool = withBackgroundJobs(createBashToolDefinition(process.cwd()), {
+			start: start ?? ((job) => created.jobs.start(job)),
+		});
+		return { jobs: created.jobs, tool };
+	}
+
+	function text(result: { content: ReadonlyArray<{ type: string; text?: string }> }): string {
+		return result.content.map((part) => part.text ?? "").join("");
+	}
+
+	test("keeps the command running as a job and returns its output so far", async () => {
+		const { jobs, tool } = await jobCapableBash();
+		const result = await tool.execute(
+			"move-1",
+			{ command: "printf 'started\\n'; sleep 3; printf 'done\\n'", stallTimeout: 1 },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(result.isError).toBeUndefined();
+		const job = jobOfDetails(result.details);
+		if (!job) throw new Error("Expected the call to name a job");
+		expect(job).toMatchObject({ tool: "bash", status: "running", toolCallId: "move-1" });
+		expect(text(result)).toContain("started");
+		expect(text(result)).toContain(
+			`Command produced no output for 1 seconds and is still running as background job ${job.id}.`,
+		);
+		const [final] = (await jobs.wait([job.id])).results;
+		expect(final.status).toBe("completed");
+		expect(final.output).toContain("started\ndone");
+	}, 20000);
+
+	test("the job, not the call, controls a moved command", async () => {
+		const { jobs, tool } = await jobCapableBash();
+		const call = new AbortController();
+		const result = await tool.execute(
+			"move-2",
+			{ command: "sleep 2; printf 'survived\\n'; sleep 30", stallTimeout: 1 },
+			call.signal,
+			undefined,
+			ctx,
+		);
+		const job = jobOfDetails(result.details);
+		if (!job) throw new Error("Expected the call to name a job");
+		// The call's turn ending no longer stops the command, and silence no longer kills it.
+		call.abort();
+		await vi.waitFor(() => expect(jobs.get(job.id).output).toContain("survived"), { timeout: 10000 });
+		await jobs.cancel(job.id);
+		const [final] = (await jobs.wait([job.id])).results;
+		expect(final.status).toBe("cancelled");
+		expect(final.output).toContain("Command aborted");
+	}, 20000);
+
+	test("kills the command as hung when no job can take it", async () => {
+		const { jobs, tool } = await jobCapableBash(() =>
+			Promise.reject(new Error("Background bash requires both bash and jobs to be active.")),
+		);
+		expect(
+			failureText(await tool.execute("move-3", { command: "sleep 30", stallTimeout: 1 }, undefined, undefined, ctx)),
+		).toMatch(/produced no output for 1 seconds and was killed as hung/);
+		expect(jobs.list()).toEqual([]);
+	}, 15000);
+
+	test("a call that finishes or is aborted before its deadline does not move", async () => {
+		const { jobs, tool } = await jobCapableBash();
+		const finished = await tool.execute("move-4a", { command: "printf 'quick\\n'" }, undefined, undefined, ctx);
+		expect(finished).toEqual({ content: [{ type: "text", text: "quick\n" }] });
+		const controller = new AbortController();
+		setTimeout(() => controller.abort(), 150);
+		expect(
+			failureText(
+				await tool.execute("move-4b", { command: "sleep 30", stallTimeout: 5 }, controller.signal, undefined, ctx),
+			),
+		).toMatch(/Command aborted/);
+		expect(jobs.list()).toEqual([]);
 	}, 15000);
 });
 

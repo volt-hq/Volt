@@ -246,6 +246,27 @@ describe("bash presenter", () => {
 		expect(plain(presented.body)).not.toContain("Command");
 	});
 
+	it("says a silent command moved to a background job and shows its newest output", () => {
+		const lines = Array.from({ length: 8 }, (_, index) => `line ${index + 1}`);
+		const presented = present(
+			presentBackground(presentBash),
+			input({ command: "x" }, "done", {
+				text: `${lines.join("\n")}\n\nCommand produced no output for 300 seconds and is still running as background job job_1. Use jobs wait to collect its result, jobs read for its latest output, or jobs cancel if it is hung.`,
+				details: { job: { id: "job_1", tool: "bash", label: "x", status: "running" } },
+			}),
+		);
+		expect(presented.summary).toEqual([
+			{ type: "terminal", key: "tail", lines: lines.slice(-5), omittedLines: 3 },
+			{
+				type: "text",
+				key: "status",
+				text: "moved to background after 300s without output",
+				token: "warning",
+			},
+		]);
+		expect(plain(presented.body)).not.toContain("Command");
+	});
+
 	it("does not duplicate final full output truncation details", async () => {
 		const operations: BashOperations = {
 			exec: async (_command, _cwd, { onData }) => {

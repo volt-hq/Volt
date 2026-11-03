@@ -4,7 +4,8 @@ import { type Static, type TObject, type TProperties, Type } from "typebox";
 import { cloneCanonicalData } from "../canonical-data.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { ToolPresenter } from "../ui/presentation.ts";
-import { withBackgroundCleanup } from "./background-cleanup.ts";
+import { withBackgroundCleanup, withMovableCleanup } from "./background-cleanup.ts";
+import { withBashStallMove } from "./bash.ts";
 import { type JobStart, type JobSummary, type JobToolName, jobResult } from "./jobs.ts";
 import { presentBackground } from "./presenters.ts";
 
@@ -47,6 +48,25 @@ function labelOf(description: string | undefined, input: Record<string, unknown>
 			: "Subagent batch";
 }
 
+/** A foreground Bash call that went silent and moved to a job: its output so far, and the job to collect. */
+function movedResult(
+	job: JobSummary,
+	silentSeconds: number,
+	latest: AgentToolResult<unknown> | undefined,
+): AgentToolResult<unknown> {
+	const output = (latest?.content ?? [])
+		.filter((part) => part.type === "text")
+		.map((part) => part.text)
+		.join("");
+	const status = `Command produced no output for ${silentSeconds} seconds and is still running as background job ${job.id}. Use jobs wait to collect its result, jobs read for its latest output, or jobs cancel if it is hung.`;
+	const details = latest?.details;
+	return {
+		content: [{ type: "text", text: output ? `${output}\n\n${status}` : status }],
+		// Truncation details keep presenting the output so far; the job names the call as moved.
+		details: { ...(typeof details === "object" && details !== null ? details : {}), job },
+	};
+}
+
 /** Applied only to native Bash/subagent definitions, before extension overrides. */
 export function withBackgroundJobs<T extends TProperties, TDetails>(
 	definition: ToolDefinition<TObject<T>, TDetails>,
@@ -71,7 +91,7 @@ export function withBackgroundJobs<T extends TProperties, TDetails>(
 	return {
 		...base,
 		parameters,
-		description: `${definition.description} Set background: true (with a short description) to return a job ID and continue independent work; use jobs to read, wait, or cancel. Subagent confirmation preflight still returns directly. Background jobs are cancelled on session abort; a job running when the runtime stops ends interrupted.`,
+		description: `${definition.description}${toolName === "bash" ? " With jobs active, a foreground command that goes silent for its stallTimeout is not killed: it keeps running as a background job, and the result names the job to wait for." : ""} Set background: true (with a short description) to return a job ID and continue independent work; use jobs to read, wait, or cancel. Subagent confirmation preflight still returns directly. Background jobs are cancelled on session abort; a job running when the runtime stops ends interrupted.`,
 		promptGuidelines: [
 			...(definition.promptGuidelines ?? []),
 			`Use ${toolName} with background: true only for independent work, and give it a short description the user sees instead of the raw ${toolName === "bash" ? "command" : "task"}. Use jobs to collect the result before relying on it or reporting success.`,
@@ -101,51 +121,125 @@ export function withBackgroundJobs<T extends TProperties, TDetails>(
 			}
 			const needsPreflight =
 				toolName === "subagent" && "confirm" in definition.parameters.properties && !input.confirm;
-			if (!background || needsPreflight) {
-				return (await definition.execute(
+			const execute = (
+				runSignal: AbortSignal | undefined,
+				update: ((partial: AgentToolResult<unknown>) => void) | undefined,
+				runCtx: typeof ctx,
+			) =>
+				definition.execute(
 					toolCallId,
 					input as OriginalArgs,
-					signal,
-					onUpdate ? (update) => onUpdate(update as AgentToolResult<unknown>) : undefined,
-					ctx,
-				)) as AgentToolResult<unknown>;
+					runSignal,
+					update ? (partial) => update(partial as AgentToolResult<unknown>) : undefined,
+					runCtx,
+				) as Promise<AgentToolResult<unknown>>;
+			// A job's final result: the tool's, or its error, through the original tool's result policy.
+			const settleJob = async (
+				run: () => Promise<AgentToolResult<unknown>>,
+				jobSignal: AbortSignal,
+			): Promise<AgentToolResult<unknown>> => {
+				let result: AgentToolResult<unknown>;
+				try {
+					result = await run();
+				} catch (error) {
+					result = {
+						content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+						isError: true,
+					};
+				}
+				result = cloneCanonicalData(result, "Background tool final result");
+				// Subagent terminal status is authoritative even when the existing
+				// foreground tool carries failure in details instead of isError.
+				if (
+					toolName === "subagent" &&
+					result.details &&
+					typeof result.details === "object" &&
+					"status" in result.details &&
+					result.details.status !== "completed"
+				) {
+					result = { ...result, isError: true };
+				}
+				return options.finalize ? options.finalize(toolName, toolCallId, input, result, jobSignal) : result;
+			};
+			if (needsPreflight || (!background && toolName !== "bash")) return execute(signal, onUpdate, ctx);
+			if (!background) {
+				// A foreground command that goes silent for its stall deadline moves to a
+				// job instead of dying. Until the job owns it, the call's signal stops it
+				// and its progress reaches the call; then the job's signal and progress do.
+				const controller = new AbortController();
+				let jobOwns = false;
+				const stopForeground = () => {
+					if (!jobOwns) controller.abort(signal?.reason);
+				};
+				if (signal?.aborted) stopForeground();
+				else signal?.addEventListener("abort", stopForeground, { once: true });
+				let latest: AgentToolResult<unknown> | undefined;
+				let jobUpdate: ((partial: AgentToolResult<unknown>) => void) | undefined;
+				const update = (partial: AgentToolResult<unknown>) => {
+					latest = partial;
+					if (jobUpdate) jobUpdate(partial);
+					else onUpdate?.(partial);
+				};
+				// While a move is being decided, the call does not return the command's own result.
+				let moving = false;
+				let answer!: (result: AgentToolResult<unknown> | Promise<AgentToolResult<unknown>>) => void;
+				const answered = new Promise<AgentToolResult<unknown>>((resolve) => {
+					answer = resolve;
+				});
+				const move = async (silentSeconds: number): Promise<boolean> => {
+					if (signal?.aborted) return false;
+					moving = true;
+					try {
+						const job = await options.start({
+							tool: "bash",
+							toolCallId,
+							label: labelOf(description, input),
+							run: (jobSignal, toJob) => {
+								jobOwns = true;
+								signal?.removeEventListener("abort", stopForeground);
+								movable.moveToBackground();
+								jobUpdate = toJob;
+								if (latest) toJob(latest);
+								const stopJob = () => controller.abort(jobSignal.reason);
+								if (jobSignal.aborted) stopJob();
+								else jobSignal.addEventListener("abort", stopJob, { once: true });
+								return settleJob(
+									() => movable.result.finally(() => jobSignal.removeEventListener("abort", stopJob)),
+									jobSignal,
+								);
+							},
+						});
+						answer(movedResult(job, silentSeconds, latest));
+						return true;
+					} catch {
+						// No job can take it: the command is killed as hung, and the call returns that.
+						moving = false;
+						answer(movable.result);
+						return false;
+					}
+				};
+				const movable = withMovableCleanup(() =>
+					withBashStallMove(move, () => execute(controller.signal, update, { ...ctx, signal: controller.signal })),
+				);
+				const settled = () => {
+					if (!moving) answer(movable.result);
+				};
+				movable.result.then(settled, settled);
+				try {
+					return await answered;
+				} finally {
+					if (!jobOwns) signal?.removeEventListener("abort", stopForeground);
+				}
 			}
 			const job = await options.start({
 				tool: toolName,
 				toolCallId,
 				label: labelOf(description, input),
-				run: async (jobSignal, update) => {
-					let result: AgentToolResult<unknown>;
-					try {
-						result = (await withBackgroundCleanup(() =>
-							definition.execute(
-								toolCallId,
-								input as OriginalArgs,
-								jobSignal,
-								(partial) => update(partial as AgentToolResult<unknown>),
-								{ ...ctx, signal: jobSignal },
-							),
-						)) as AgentToolResult<unknown>;
-					} catch (error) {
-						result = {
-							content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-							isError: true,
-						};
-					}
-					result = cloneCanonicalData(result, "Background tool final result");
-					// Subagent terminal status is authoritative even when the existing
-					// foreground tool carries failure in details instead of isError.
-					if (
-						toolName === "subagent" &&
-						result.details &&
-						typeof result.details === "object" &&
-						"status" in result.details &&
-						result.details.status !== "completed"
-					) {
-						result = { ...result, isError: true };
-					}
-					return options.finalize ? options.finalize(toolName, toolCallId, input, result, jobSignal) : result;
-				},
+				run: (jobSignal, update) =>
+					settleJob(
+						() => withBackgroundCleanup(() => execute(jobSignal, update, { ...ctx, signal: jobSignal })),
+						jobSignal,
+					),
 			});
 			return jobResult(job);
 		},

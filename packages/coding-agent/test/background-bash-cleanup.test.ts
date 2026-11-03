@@ -63,33 +63,77 @@ describe("background native Bash cleanup", () => {
 		15_000,
 	);
 
-	it("preserves fast foreground cancellation before teardown completion", async () => {
+	it("holds a moved job's ownership until process-tree teardown settles after cancel", async () => {
 		const barrier = holdTeardownCompletion();
-		const controller = new AbortController();
-		const ready = deferred();
-		const execution = createBashTool(process.cwd()).execute(
-			"foreground-cleanup",
-			{ command: "printf 'ready\\n'; sleep 30" },
-			controller.signal,
-			(update) => {
-				if (update.content.some((part) => part.type === "text" && part.text.includes("ready"))) ready.resolve();
-			},
+		const { jobs, work, close } = await createTestJobRuntime();
+		const tool = wrapToolDefinition(
+			withBackgroundJobs(createBashToolDefinition(process.cwd()), { start: (job) => jobs.start(job) }),
 		);
-		const aborted = expect(execution).resolves.toMatchObject({
-			isError: true,
-			content: [{ type: "text", text: expect.stringContaining("Command aborted") }],
-		});
 		try {
-			await ready.promise;
-			controller.abort();
+			// A foreground call that goes silent moves to a job instead of being killed.
+			const result = await tool.execute("bash-moved-cleanup", {
+				command: "printf 'ready\\n'; sleep 30",
+				stallTimeout: 1,
+			});
+			const { id } = jobOfDetails(result.details) as JobSummary;
+			await vi.waitFor(() => expect(jobs.get(id).output).toContain("ready"));
+			await jobs.cancel(id);
 			await barrier.shellStopped.promise;
-			// This must resolve before releasing finishTeardown.
-			await aborted;
-		} finally {
-			controller.abort();
+			expect(jobs.hasRunning).toBe(true);
+			expect(jobs.get(id).status).toBe("cancelling");
 			barrier.finishTeardown.resolve();
-			await aborted;
+			const final = (await jobs.wait([id])).results[0];
+			expect(final.status).toBe("cancelled");
+			expect(final.output).toContain("Command aborted");
+			await work.waitForIdle();
+			expect(jobs.hasRunning).toBe(false);
+		} finally {
+			barrier.finishTeardown.resolve();
+			await close();
 			barrier.spy.mockRestore();
 		}
 	}, 15_000);
+
+	it.each(["standalone", "job-capable"] as const)(
+		"preserves fast %s foreground cancellation before teardown completion",
+		async (kind) => {
+			const barrier = holdTeardownCompletion();
+			const runtime = kind === "job-capable" ? await createTestJobRuntime() : undefined;
+			const tool = runtime
+				? wrapToolDefinition(
+						withBackgroundJobs(createBashToolDefinition(process.cwd()), {
+							start: (job) => runtime.jobs.start(job),
+						}),
+					)
+				: createBashTool(process.cwd());
+			const controller = new AbortController();
+			const ready = deferred();
+			const execution = tool.execute(
+				"foreground-cleanup",
+				{ command: "printf 'ready\\n'; sleep 30" },
+				controller.signal,
+				(update) => {
+					if (update.content.some((part) => part.type === "text" && part.text.includes("ready"))) ready.resolve();
+				},
+			);
+			const aborted = expect(execution).resolves.toMatchObject({
+				isError: true,
+				content: [{ type: "text", text: expect.stringContaining("Command aborted") }],
+			});
+			try {
+				await ready.promise;
+				controller.abort();
+				await barrier.shellStopped.promise;
+				// This must resolve before releasing finishTeardown.
+				await aborted;
+			} finally {
+				controller.abort();
+				barrier.finishTeardown.resolve();
+				await aborted;
+				await runtime?.close();
+				barrier.spy.mockRestore();
+			}
+		},
+		15_000,
+	);
 });

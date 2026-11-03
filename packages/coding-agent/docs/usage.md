@@ -96,6 +96,8 @@ The optional `description` is a short label for the job. Job lists, the work sta
 
 `bash` accepts `description` on every call, not only background ones. A foreground call's card shows it as the title, with the command beneath it so you can always see what actually runs. For `subagent`, `description` applies only to background calls.
 
+A foreground `bash` command that produces no output for its silence timeout (`stallTimeout`, 300 seconds by default) is not killed while `jobs` is active. It keeps running as a background job, and the call returns the output so far and the job ID to wait for. A moved command is not killed for further silence, but its wall-clock `timeout` still applies. Without `jobs`, or while the conversation already runs 8 jobs, the command is killed as hung.
+
 Subagent confirmation is unchanged. The first spawning call returns the registry preflight directly without starting a job. Repeat the exact request with its `confirm` token and `background: true` to start a background single, parallel, or chain job. Child concurrency, budget, tool-policy, and duplicate-request safeguards still apply. Background mode does not apply to registry list/follow/resume operations.
 
 The `jobs` tool controls the conversation's background jobs:
@@ -111,7 +113,7 @@ The `jobs` tool controls the conversation's background jobs:
 - `wait` takes 1–64 unique job `ids` and waits for terminal events without a default deadline. `mode: "any"` (the default) returns when at least one selected job is terminal; `"all"` waits for every selected job. Already-terminal jobs return immediately. An optional integer `timeoutMs` from 0 to 300000 supplies an explicit deadline; it never cancels the jobs. Use `id` only for `read` and `cancel`.
 - `cancel` requests cancellation. Status remains `cancelling` until the worker settles, then becomes `cancelled`. A cancellation request is not proof that a process has already stopped.
 - Terminal statuses are `completed`, `failed`, `cancelled`, and `interrupted`. Read the result before relying on the work or reporting success.
-- A conversation runs at most 8 jobs at once; `list` shows the newest 64. Existing Bash wall-clock and silence timeouts remain active.
+- A conversation runs at most 8 jobs at once; `list` shows the newest 64. Bash wall-clock timeouts apply to background jobs, and a job started with `background: true` is killed after its silence timeout.
 
 After completing useful independent work, call `wait` once rather than polling or issuing shell `sleep` commands. The parent makes no model requests while the tool call waits. Worker output can update the UI without ending the wait. User steering interrupts the wait but leaves jobs running; completion notices of other jobs do not, and follow-up messages remain queued. Ordinary tool-batch boundaries still apply when sibling foreground tools are executing.
 

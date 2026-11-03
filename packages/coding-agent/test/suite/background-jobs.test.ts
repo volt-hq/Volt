@@ -267,6 +267,58 @@ describe("AgentSession background jobs", () => {
 		expect(harness.faux.state.callCount).toBe(3);
 	});
 
+	it("moves a silent foreground Bash call to a job whose result passes the result hooks once", async () => {
+		const backend = controlledBash();
+		const results: ToolResultEvent[] = [];
+		const harness = await setup({
+			extensionFactories: [
+				(volt) => {
+					volt.on("tool_result", (event) => {
+						if (event.toolName !== "bash") return;
+						results.push(event);
+						return { content: [{ type: "text", text: "policy-redacted output" }] };
+					});
+				},
+			],
+		});
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("bash", { command: "controlled work", stallTimeout: 0.2 }), {
+				stopReason: "toolUse",
+			}),
+			() => {
+				const moved = harness.session.messages.find(
+					(message) => message.role === "toolResult" && message.toolName === "bash",
+				);
+				const job = jobOf(moved);
+				expect(job).toMatchObject({ status: "running", label: "controlled work" });
+				expect(getMessageText(moved)).toContain("worker output");
+				expect(getMessageText(moved)).toContain(`still running as background job ${job.id}`);
+				return fauxAssistantMessage(fauxToolCall("jobs", { action: "wait", ids: [job.id] }), {
+					stopReason: "toolUse",
+				});
+			},
+			(context) => {
+				const waited = context.messages.find(
+					(message) => message.role === "toolResult" && message.toolName === "jobs",
+				);
+				expect(getMessageText(waited)).toContain("completed");
+				expect(getMessageText(waited)).toContain("policy-redacted output");
+				return fauxAssistantMessage("Collected the moved result.");
+			},
+		]);
+		const prompt = harness.session.prompt("Run the work");
+		await vi.waitFor(() => expect(harness.session.jobs.listWaits()).toHaveLength(1));
+		// The move is a start acknowledgement: hooks see only the job's settled result.
+		expect(results).toHaveLength(0);
+		expect(backend.signal?.aborted).toBe(false);
+		backend.finish.resolve();
+		await prompt;
+		await harness.session.waitForIdle();
+		expect(lastAssistantText(harness.session)).toBe("Collected the moved result.");
+		expect(results).toHaveLength(1);
+		expect(notices(harness)).toHaveLength(0);
+	});
+
 	it("withdraws a queued notice when the model reads the finished job first", async () => {
 		const backend = controlledBash();
 		const harness = await setup();
