@@ -2302,13 +2302,16 @@ async function generateModels() {
 
 	// OpenAI Codex (ChatGPT OAuth) models
 	// NOTE: These are not fetched from models.dev; we keep a small, explicit list to avoid aliases.
-	// Every model uses the 272k default context from the Codex catalog (verified 2026-09-29 against
-	// openai/codex codex-rs/models-manager/models.json). GPT-6 and GPT-5.6 models accept up to 872k
-	// only when the client opts in, which users can do with a contextWindow model override.
+	// Context limits verified 2026-11-03. GPT-6 Astra, Sol, and Luna use the 872k max_context_window:
+	// https://github.com/openai/codex/blob/126a0ee92ed2c5e73cd8a8f7e37563e8527552d7/codex-rs/models-manager/models.json
+	// GPT-6.1 Sol uses the documented 500k Codex default, despite the bundled catalog still listing 272k:
+	// https://developers.openai.com/api/docs/models/gpt-6.1-sol
+	// GPT-5 models retain 272k; GPT-5.6 and GPT-6.1 Sol can opt into 872k via a contextWindow override.
 	// GPT-5.3 Codex Spark, GPT-5.4, and GPT-5.4 mini are retired from Codex with ChatGPT sign-in
 	// (https://developers.openai.com/codex/models, verified 2026-09-29).
 	const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 	const CODEX_CONTEXT = 272000;
+	const CODEX_EXTENDED_CONTEXT = 872000;
 	const CODEX_MAX_TOKENS = 128000;
 	const codexModels: Model<"openai-codex-responses">[] = [
 		{
@@ -2320,7 +2323,7 @@ async function generateModels() {
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { ...GPT_6_ASTRA_COST },
-			contextWindow: CODEX_CONTEXT,
+			contextWindow: CODEX_EXTENDED_CONTEXT,
 			maxTokens: CODEX_MAX_TOKENS,
 		},
 		{
@@ -2346,7 +2349,12 @@ async function generateModels() {
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { ...model.cost },
-			contextWindow: CODEX_CONTEXT,
+			contextWindow:
+				model.id === GPT_6_1_SOL_MODEL.id
+					? 500000
+					: GPT_6_SOL_LUNA_MODEL_IDS.has(model.id)
+						? CODEX_EXTENDED_CONTEXT
+						: CODEX_CONTEXT,
 			maxTokens: CODEX_MAX_TOKENS,
 		});
 	}

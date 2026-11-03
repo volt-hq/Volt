@@ -21,6 +21,15 @@ describe("GPT-6 Astra model metadata", () => {
 		});
 	});
 
+	it("defaults to the Codex catalog's 872k extended context without changing the output limit", () => {
+		expect(getModel("openai-codex", "gpt-6-astra")).toMatchObject({
+			api: "openai-codex-responses",
+			baseUrl: "https://chatgpt.com/backend-api",
+			contextWindow: 872_000,
+			maxTokens: 128_000,
+		});
+	});
+
 	it.each(["openai", "azure-openai-responses", "openai-codex"] as const)(
 		"supports only documented reasoning levels through %s",
 		(provider) => {
