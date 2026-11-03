@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.1] - 2026-11-03
+
+Standalone Windows executables in this release are not code-signed. Windows may show a SmartScreen warning when you first run them.
+
+### Improvements
+
+- **models:** Raised Codex context defaults to 500K tokens for GPT-6.1 Sol and 872K for GPT-6 Astra, GPT-6 Sol, and GPT-6 Luna, allowing longer sessions before auto-compaction.
+
+### Fixes
+
+- **security:** Updated vulnerable dependencies, including protection against cross-origin MCP credential and request-body forwarding.
+
 ## [0.7.0] - 2026-11-03
 
 Standalone Windows executables in this release are not code-signed. Windows may show a SmartScreen warning when you first run them.
