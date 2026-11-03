@@ -1,7 +1,8 @@
 /**
  * The TUI's transcript (architecture rewrite §10): the store's transcript as
  * rows in a container (user and assistant messages, tool calls, user shell
- * commands, custom messages, and summaries), then what streams: the
+ * commands, custom messages, summaries, and a divider where a planning change
+ * switches between Build and Plan mode), then what streams: the
  * assistant message the live lane builds and the tool calls it runs. Rows
  * draw the projected entries' payloads and the presentations the host
  * computed: a committed call's `view.presentation`, a running call's live
@@ -52,9 +53,11 @@ import {
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 } from "../../../core/messages.ts";
+import type { AgentMode } from "../../../core/planning.ts";
 import { parseSkillBlock } from "../../../core/skill-block.ts";
 import type { TruncationResult } from "../../../core/tools/truncate.ts";
 import { readCompactionOutcome } from "../compaction-outcome.ts";
+import { AgentModeDividerComponent } from "../components/agent-mode-divider.ts";
 import { AssistantMessageComponent } from "../components/assistant-message.ts";
 import { BashExecutionComponent } from "../components/bash-execution.ts";
 import { BranchSummaryMessageComponent } from "../components/branch-summary-message.ts";
@@ -188,6 +191,8 @@ export class TranscriptView {
 	private shellRows: ShellRow[] = [];
 	/** The row of the shell command the live `bash` value shows. */
 	private liveShell: ShellRow | undefined;
+	/** The agent mode as of the entries drawn; a conversation starts in Build mode. */
+	private agentMode: AgentMode = "build";
 
 	constructor(store: TranscriptSource, container: Container, host: TranscriptViewHost) {
 		this.store = store;
@@ -283,6 +288,7 @@ export class TranscriptView {
 		this.shownTools.clear();
 		this.entries.clear();
 		this.rendered = [];
+		this.agentMode = "build";
 	}
 
 	private add(component: Component): void {
@@ -334,6 +340,14 @@ export class TranscriptView {
 					),
 				);
 				return;
+			case "planning_state_change": {
+				const mode = entry.payload?.planning.mode;
+				if (mode === undefined || mode === this.agentMode) return;
+				this.agentMode = mode;
+				if (this.container.children.length > 0) this.add(new Spacer(1));
+				this.add(new AgentModeDividerComponent(mode));
+				return;
+			}
 			default:
 				return;
 		}

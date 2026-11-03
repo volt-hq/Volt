@@ -530,6 +530,7 @@ describe("InteractiveMode plan pane integration", () => {
 			planInspector: inspector,
 			planPaneReturnFocus: undefined,
 			getConversationFocusTarget: () => editor,
+			updateEditorBorderColor: vi.fn(),
 		};
 		(
 			InteractiveMode as unknown as {
@@ -660,7 +661,10 @@ describe("InteractiveMode plan pane integration", () => {
 			getConversationFocusTarget: () => editor,
 			planDetails: details,
 			planDetailsContainer: detailsContainer,
+			planStatus: new TestFocusableComponent("PLAN_STATUS"),
+			planStatusContainer: new Container(),
 			ui,
+			updateEditorBorderColor: vi.fn(),
 		};
 		ui.addChild(detailsContainer);
 		ui.setFocus(details);
@@ -721,9 +725,12 @@ describe("InteractiveMode plan pane integration", () => {
 			planDetailsContainer: detailsContainer,
 			planInspector: inspector,
 			planPaneReturnFocus: undefined,
+			planStatus: new TestFocusableComponent("PLAN_STATUS"),
+			planStatusContainer: new Container(),
 			renderer: ui,
 			planning: () => ({ mode: "build", plan: { phase: "active" } }),
 			ui,
+			updateEditorBorderColor: vi.fn(),
 		};
 		fakeThis.getConversationFocusTarget = () =>
 			(InteractiveMode as any).prototype.getConversationFocusTarget.call(fakeThis);
@@ -794,6 +801,7 @@ describe("InteractiveMode plan pane integration", () => {
 			planInspector: inspector,
 			planPaneReturnFocus: undefined,
 			planStatus: { setPlanning: vi.fn() },
+			planStatusContainer: new Container(),
 			readyPlanFocusKey: undefined,
 			renderer: ui,
 			planning: () => planning,
@@ -860,6 +868,7 @@ describe("InteractiveMode plan pane integration", () => {
 			planning: () => ({ mode: "build", plan: { phase: "active" } }),
 			showPlanDetails,
 			ui,
+			updateEditorBorderColor: vi.fn(),
 		};
 		fakeThis.getConversationFocusTarget = () =>
 			(InteractiveMode as any).prototype.getConversationFocusTarget.call(fakeThis);
@@ -934,8 +943,11 @@ describe("InteractiveMode plan pane integration", () => {
 					steps: [],
 				},
 			}),
+			planStatus: new TestFocusableComponent("PLAN_STATUS"),
+			planStatusContainer: new Container(),
 			settingsManager: { getFullscreenScrollbar: () => "auto" },
 			ui,
+			updateEditorBorderColor: vi.fn(),
 		};
 		fakeThis.getConversationFocusTarget = () =>
 			(InteractiveMode as any).prototype.getConversationFocusTarget.call(fakeThis);

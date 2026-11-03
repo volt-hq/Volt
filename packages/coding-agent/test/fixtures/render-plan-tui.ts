@@ -21,6 +21,7 @@ import type { PlanningState, PlanPhase, PlanState } from "../../src/core/plannin
 import { getEditorTheme, initTheme, theme } from "../../src/core/theme/runtime.ts";
 import { BUILTIN_PRESENTERS } from "../../src/core/tools/presenters.ts";
 import { presentToolCall, type ToolPresentResult } from "../../src/core/ui/presentation.ts";
+import { editorTopBorderLabelForState } from "../../src/modes/interactive/components/keybinding-hints.ts";
 import { PlanInspectorComponent } from "../../src/modes/interactive/components/plan-inspector.ts";
 import { PlanDetailsComponent, PlanStatusComponent } from "../../src/modes/interactive/components/plan-status.ts";
 import { ResponsivePlanLayoutComponent } from "../../src/modes/interactive/components/responsive-plan-layout.ts";
@@ -124,15 +125,25 @@ const details = new PlanDetailsComponent({
 });
 const detailsContainer = new Container();
 if (process.env.VOLT_PLAN_DETAILS === "1") detailsContainer.addChild(details);
-const editor = new Editor(tui, getEditorTheme(), {
-	topBorderLabel: planning.mode === "plan" ? "PLAN · AGENT READ-ONLY" : "ASK VOLT · BUILD",
-	placeholder: "Tell Volt what to change",
-});
+const editor = new Editor(tui, getEditorTheme(), { placeholder: "Tell Volt what to change" });
+if (planning.mode === "plan") editor.borderColor = theme.getPlanModeBorderColor();
+const labelEditor = (planChooserFocused: boolean) =>
+	editor.setTopBorderLabel(
+		editorTopBorderLabelForState({
+			bashMode: false,
+			streaming: false,
+			hasText: false,
+			agentMode: planning.mode,
+			planReady: phase === "ready",
+			planChooserFocused,
+		}),
+	);
 const actionMessage = new Text("", 1, 0);
 let inspector: PlanInspectorComponent;
 const focusEditor = () => {
 	transcriptScroll.setPrimary(true);
 	tui.setFocus(editor);
+	labelEditor(false);
 };
 const toggleFocus = () => {
 	if (inspector.focused) focusEditor();
@@ -140,6 +151,7 @@ const toggleFocus = () => {
 		transcriptScroll.setPrimary(false);
 		inspector.setFullscreenActive(fullscreen);
 		tui.setFocus(inspector);
+		labelEditor(true);
 	}
 	tui.requestRender();
 };
@@ -153,7 +165,7 @@ inspector = new PlanInspectorComponent({
 	onToggleFocus: toggleFocus,
 	requestRender: () => tui.requestRender(),
 });
-const status = new PlanStatusComponent(planning);
+const status = new PlanStatusComponent(planning, { getTerminalRows: () => tui.terminal.rows });
 const tool = new ToolCallRow("update_plan", tui);
 const result: ToolPresentResult = {
 	content: [{ type: "text", text: JSON.stringify({ mode: planning.mode, planId: plan.id, steps: plan.steps }) }],
@@ -207,7 +219,8 @@ if (process.env.VOLT_PLAN_SCENARIO === "scrollback") {
 const streamingText = new Text("Assistant stream: chunk 1", 1, 0);
 if (process.env.VOLT_PLAN_STREAM === "1") transcript.addChild(streamingText);
 const statusContainer = new Container();
-statusContainer.addChild(status);
+// Plan Details replaces the status strip while it shows, as in the TUI.
+if (process.env.VOLT_PLAN_DETAILS !== "1") statusContainer.addChild(status);
 const editorContainer = new Container();
 editorContainer.addChild(actionMessage);
 editorContainer.addChild(editor);
@@ -246,8 +259,10 @@ if (process.env.VOLT_PLAN_FOCUSED === "1") {
 	transcriptScroll.setPrimary(false);
 	inspector.setFullscreenActive(fullscreen);
 	tui.setFocus(inspector);
+	labelEditor(true);
 } else {
 	tui.setFocus(editor);
+	labelEditor(false);
 }
 tui.addInputListener((data) => {
 	if (!keybindings.matches(data, "app.plan.togglePane")) return undefined;

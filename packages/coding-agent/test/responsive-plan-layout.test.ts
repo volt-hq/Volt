@@ -16,7 +16,7 @@ import { resetCapabilitiesCache, setCapabilities, setCellDimensions } from "../.
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { PlanningState, PlanState } from "../src/core/planning.ts";
-import { initTheme } from "../src/core/theme/runtime.ts";
+import { initTheme, theme } from "../src/core/theme/runtime.ts";
 import { usesAsciiPlanMarkers } from "../src/modes/interactive/components/plan-content.ts";
 import { PlanInspectorComponent } from "../src/modes/interactive/components/plan-inspector.ts";
 import type { PlanDetailsAction } from "../src/modes/interactive/components/plan-status.ts";
@@ -205,12 +205,15 @@ describe("responsive plan dimensions", () => {
 		});
 	});
 
-	it("keeps research and working drafts compact until the plan is reviewable", () => {
+	it("splits for a plan in any phase, a working draft included, but not for research before it", () => {
 		expect(getResponsivePlanDimensions(160, 30, { mode: "build", plan: null })).toBeUndefined();
 		expect(getResponsivePlanDimensions(160, 30, { mode: "plan", plan: null })).toBeUndefined();
-		expect(getResponsivePlanDimensions(160, 30, { mode: "plan", plan: plan("draft") })).toBeUndefined();
-		expect(getResponsivePlanDimensions(160, 30, { mode: "plan", plan: plan("ready") })).toBeDefined();
-		expect(getResponsivePlanDimensions(160, 30, { mode: "build", plan: plan("active") })).toBeDefined();
+		for (const phase of ["draft", "ready"] as const) {
+			expect(getResponsivePlanDimensions(160, 30, { mode: "plan", plan: plan(phase) })).toBeDefined();
+		}
+		for (const phase of ["active", "completed", "handed_off"] as const) {
+			expect(getResponsivePlanDimensions(160, 30, { mode: "build", plan: plan(phase) })).toBeDefined();
+		}
 	});
 });
 
@@ -228,13 +231,23 @@ describe("ResponsivePlanLayoutComponent", () => {
 		}
 	});
 
-	it("keeps a working draft in compact flow even when the terminal can split", () => {
+	it("shows a working draft in the plan pane once the terminal can split", () => {
 		const compactOnly = new LinesComponent(["COMPACT_WORKING_DRAFT"]);
 		const planning: PlanningState = { mode: "plan", plan: plan("draft") };
 		const { layout } = createLayout({ columns: 160, rows: 30, planning, compact: [compactOnly] });
 		const rendered = layout.render(160).lines.map(stripAnsi).join("\n");
-		expect(rendered).toContain("COMPACT_WORKING_DRAFT");
-		expect(rendered).not.toContain("Responsive Plan");
+		expect(rendered).not.toContain("COMPACT_WORKING_DRAFT");
+		expect(rendered).toContain("PLAN · DRAFT");
+		expect(rendered).toContain("Responsive Plan");
+		expect(rendered).toContain("revision 2");
+
+		const research = createLayout({
+			columns: 160,
+			rows: 30,
+			planning: { mode: "plan", plan: null },
+			compact: [compactOnly],
+		});
+		expect(research.layout.render(160).lines.map(stripAnsi).join("\n")).toContain("COMPACT_WORKING_DRAFT");
 	});
 
 	it("pins controls and inspector while retaining older conversation rows in scrollback", () => {
@@ -386,6 +399,27 @@ describe("ResponsivePlanLayoutComponent", () => {
 		} finally {
 			tui.stop({ preserveScreen: true });
 		}
+	});
+
+	it("keeps the divider quiet and lights it in the plan's color while the pane holds attention", () => {
+		const glyph = usesAsciiPlanMarkers() ? "|" : "│";
+		const quiet = theme.fg("borderMuted", glyph);
+		const lit = theme.fg("planMode", glyph);
+		const { layout, inspector } = createLayout({ columns: 160, rows: 24 });
+		const output = () => layout.render(160).lines.join("\n");
+		expect(output()).toContain(quiet);
+		expect(output()).not.toContain(lit);
+
+		inspector.focused = true;
+		expect(output()).toContain(lit);
+		expect(output()).not.toContain(quiet);
+
+		// A search overlay may hold focus while the pane stays selected.
+		inspector.focused = false;
+		inspector.setSelected(true);
+		expect(output()).toContain(lit);
+		inspector.setSelected(false);
+		expect(output()).toContain(quiet);
 	});
 
 	it("leaves rows scrolled out of the viewport undecorated so scrollback stays readable", () => {
@@ -729,7 +763,7 @@ describe("ResponsivePlanLayoutComponent", () => {
 				actions,
 			});
 			const output = layout.render(129).lines.map(stripAnsi).join("\n");
-			expect(output).toContain("> Execute Plan");
+			expect(output).toContain("[ Execute Plan ]");
 			expect(output).toContain("CONTROL_3");
 			inspector.handleInput("\r");
 			expect(actions).toEqual(["retain_context"]);
@@ -877,14 +911,15 @@ describe("ResponsivePlanLayoutComponent", () => {
 	});
 
 	it("requests scrollback preservation for state-only layout transitions", () => {
-		const compactPlanning: PlanningState = { mode: "plan", plan: plan("draft") };
+		// Research gives way to the first draft's pane, which leaves when the plan does.
+		const compactPlanning: PlanningState = { mode: "plan", plan: null };
 		const { layout, inspector, splitChanges, preserveScrollbackChanges } = createLayout({
 			columns: 160,
 			rows: 24,
 			planning: compactPlanning,
 		});
 		layout.render(160).lines;
-		const splitPlanning: PlanningState = { mode: "plan", plan: plan("ready") };
+		const splitPlanning: PlanningState = { mode: "plan", plan: plan("draft") };
 		layout.setPlanning(splitPlanning);
 		inspector.setPlanning(splitPlanning);
 		layout.render(160).lines;

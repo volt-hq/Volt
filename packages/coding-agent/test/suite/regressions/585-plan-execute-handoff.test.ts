@@ -1,3 +1,6 @@
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
 import { executePlan } from "../../../src/core/host/plan-handoff.ts";
@@ -113,6 +116,158 @@ describe("regression #585: executing a plan in a new session hands it off throug
 			await stored.closePersistence();
 		}
 	});
+
+	it.each(["retain_context", "new_session"] as const)(
+		"enforces sequential progress after execution starts (%s)",
+		async (strategy) => {
+			const { source, tui, ready } = await setup();
+			const draft = (await source.session.changePlan(ready.id, ready.revision)).plan!;
+			const revised = await source.session.updatePlan({
+				planId: draft.id,
+				expectedRevision: draft.revision,
+				steps: [...draft.steps.map(({ id, text }) => ({ id, text })), { text: "Verify the change" }],
+			});
+			const approved = await source.session.submitPlan({
+				planId: revised.id,
+				expectedRevision: revised.revision,
+				title: revised.title!,
+				summary: revised.summary!,
+			});
+			await tui.executePlan(approved.id, approved.revision, strategy);
+			const target = tui.session;
+			await target.waitForIdle();
+			let current = target.planningState.plan!;
+			const [first, second] = current.steps;
+			await expect(
+				target.updatePlanProgress({
+					planId: current.id,
+					expectedRevision: current.revision,
+					updates: [{ id: second!.id, status: "in_progress" }],
+				}),
+			).rejects.toThrow(first!.id);
+			current = await target.updatePlanProgress({
+				planId: current.id,
+				expectedRevision: current.revision,
+				updates: [{ id: first!.id, status: "in_progress" }],
+			});
+			current = await target.updatePlanProgress({
+				planId: current.id,
+				expectedRevision: current.revision,
+				updates: [
+					{ id: first!.id, status: "completed" },
+					{ id: second!.id, status: "in_progress" },
+				],
+			});
+			expect(
+				(
+					await target.updatePlanProgress({
+						planId: current.id,
+						expectedRevision: current.revision,
+						updates: [{ id: second!.id, status: "completed" }],
+					})
+				).phase,
+			).toBe("completed");
+		},
+	);
+
+	it.each(["retain_context", "new_session"] as const)(
+		"automatically revises a plan and waits for reapproval after execution starts (%s)",
+		async (strategy) => {
+			const { harness, source, tui, ready } = await setup();
+			const evidence = join(harness.tempDir, "replan-evidence.txt");
+			const output = join(harness.tempDir, "approved-output.txt");
+			writeFileSync(evidence, "A separate verification outcome is required.");
+			const sourceId = source.id;
+			harness.faux.setResponses([
+				(context) => {
+					expect(context.systemPrompt).toContain("Approval authorizes all remaining checklist items");
+					const active = tui.session.planningState.plan!;
+					return fauxAssistantMessage(
+						fauxToolCall("request_replan", {
+							planId: active.id,
+							expectedRevision: active.revision,
+							reason: "A separate verification outcome is required.",
+						}),
+						{ stopReason: "toolUse" },
+					);
+				},
+				fauxAssistantMessage(fauxToolCall("read", { path: evidence }), { stopReason: "toolUse" }),
+				() => {
+					const draft = tui.session.planningState.plan!;
+					return fauxAssistantMessage(
+						fauxToolCall("update_plan", {
+							planId: draft.id,
+							expectedRevision: draft.revision,
+							summary: "Add separate verification because implementation revealed another requirement.",
+							steps: [...draft.steps.map(({ id, text }) => ({ id, text })), { text: "Verify the requirement" }],
+						}),
+						{ stopReason: "toolUse" },
+					);
+				},
+				() => {
+					const draft = tui.session.planningState.plan!;
+					return fauxAssistantMessage(
+						fauxToolCall("submit_plan", {
+							planId: draft.id,
+							expectedRevision: draft.revision,
+							title: draft.title!,
+							summary: draft.summary!,
+						}),
+						{ stopReason: "toolUse" },
+					);
+				},
+				fauxAssistantMessage(fauxToolCall("write", { path: output, content: "approved" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("Resumed after explicit reapproval."),
+			]);
+
+			await tui.executePlan(ready.id, ready.revision, strategy);
+			const target = tui.session;
+			await target.waitForIdle();
+			const revised = target.planningState.plan!;
+			expect(target.sessionId === sourceId).toBe(strategy === "retain_context");
+			expect(target.planningState).toMatchObject({ mode: "plan", plan: { id: ready.id, phase: "ready" } });
+			expect(revised.execution).toBeUndefined();
+			expect(revised.steps.map((step) => step.text)).toEqual(["Make the change", "Verify the requirement"]);
+			expect(target.messages.filter((message) => message.role === "user")).toEqual([]);
+			expect(existsSync(output)).toBe(false);
+			expect(harness.faux.getPendingResponseCount()).toBe(2);
+			await expect(tui.executePlan(ready.id, ready.revision, "retain_context")).rejects.toThrow("Plan changed");
+
+			await tui.executePlan(revised.id, revised.revision, "retain_context");
+			await target.waitForIdle();
+			expect(target.planningState).toMatchObject({ mode: "build", plan: { phase: "active" } });
+			expect(readFileSync(output, "utf8")).toBe("approved");
+			expect(harness.faux.getPendingResponseCount()).toBe(0);
+		},
+	);
+
+	it.each(["retain_context", "new_session"] as const)(
+		"rejects a nonsequential ready plan before creating a target (%s)",
+		async (strategy) => {
+			const { harness, source, tui, ready, shutdowns } = await setup();
+			const invalid = {
+				...ready,
+				steps: [...ready.steps, { id: "later-active", text: "Later work", status: "in_progress" as const }],
+			};
+			await source.session.sessionWriter.appendPlanningState({ mode: "plan", plan: invalid });
+			const manager = source.session.sessionManager;
+			const before = await SessionManager.list(manager.getCwd(), manager.getSessionDir(), undefined, {
+				includeMessageFreeDurable: true,
+			});
+			await expect(tui.executePlan(ready.id, ready.revision, strategy)).rejects.toThrow(/Change Plan/);
+			expect(
+				await SessionManager.list(manager.getCwd(), manager.getSessionDir(), undefined, {
+					includeMessageFreeDurable: true,
+				}),
+			).toEqual(before);
+			expect(tui.session).toBe(source.session);
+			expect(harness.host.list()).toEqual([source]);
+			expect(shutdowns).toEqual([]);
+			expect(source.session.planningState.plan).toEqual(invalid);
+		},
+	);
 
 	it("keeps the client on the source, with the plan still ready, when the handoff cannot be recorded there", async () => {
 		const { harness, source, tui, ready, shutdowns } = await setup();

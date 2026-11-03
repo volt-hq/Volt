@@ -79,6 +79,7 @@ describe("built-in light theme contrast", () => {
 			"thinkingHigh",
 			"thinkingXhigh",
 			"bashMode",
+			"planMode",
 		]) {
 			expectContrast(theme, token, "#ffffff");
 		}

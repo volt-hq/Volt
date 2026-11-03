@@ -22,6 +22,7 @@ import { type OperationGrantProfile, RESEARCH_OPERATION_GRANT_PROFILE } from "..
 import {
 	type AgentMode,
 	assertPlanRevision,
+	assertSequentialPlanExecution,
 	branchPlanningState,
 	clonePlanningState,
 	clonePlanState,
@@ -146,7 +147,7 @@ export class SessionPlanning {
 		this.readyPlanClaim = { planKey, owner };
 		const nextPlanningState = parsePlanningState({
 			mode: "plan",
-			plan: { ...readyPlan, revision: readyPlan.revision + 1, phase: "draft" },
+			plan: this.draftFromPlan(readyPlan),
 		});
 		const checkpoint = this.createCheckpointMessage(nextPlanningState);
 		return {
@@ -221,7 +222,7 @@ export class SessionPlanning {
 		return clonePlanningState(this.state);
 	}
 
-	private draftFromExecutedPlan(plan: PlanState): PlanState {
+	private draftFromPlan(plan: PlanState): PlanState {
 		const cloned = clonePlanState(plan);
 		return {
 			id: cloned.id,
@@ -229,7 +230,15 @@ export class SessionPlanning {
 			phase: "draft",
 			...(cloned.title ? { title: cloned.title } : {}),
 			...(cloned.summary ? { summary: cloned.summary } : {}),
-			steps: cloned.steps,
+			steps: cloned.steps.map((step) => {
+				const pause = (item: PlanItem): PlanItem => ({
+					...item,
+					status: item.status === "in_progress" ? "pending" : item.status,
+				});
+				if (!step.substeps) return pause(step);
+				const substeps = step.substeps.map(pause);
+				return { ...step, status: derivePlanStepStatus(substeps), substeps };
+			}),
 		};
 	}
 
@@ -281,7 +290,7 @@ export class SessionPlanning {
 			this.researchGeneration = undefined;
 		}
 		if (mode === "plan" && plan?.phase === "active") {
-			const next = await this.commit({ mode, plan: this.draftFromExecutedPlan(plan) });
+			const next = await this.commit({ mode, plan: this.draftFromPlan(plan) });
 			await this.deliverCheckpoint(next);
 			return next;
 		}
@@ -376,6 +385,7 @@ export class SessionPlanning {
 		if (input.updates.length === 0) {
 			throw new Error("At least one plan progress update is required");
 		}
+		assertSequentialPlanExecution(this.state.plan);
 		const updates = new Map<string, { status: PlanStepStatus; note?: string }>();
 		const executableIds = new Set(getPlanLeafSteps(this.state.plan).map((step) => step.id));
 		const groupIds = new Set(
@@ -413,6 +423,29 @@ export class SessionPlanning {
 			const substeps = step.substeps.map(applyUpdate);
 			return { id: step.id, text: step.text, status: derivePlanStepStatus(substeps), substeps };
 		});
+		const previousLeaves = getPlanLeafSteps(this.state.plan);
+		const current = previousLeaves.find((step) => step.status !== "completed");
+		const nextLeaves = getPlanLeafSteps({ steps });
+		const nextCurrent = nextLeaves.find((step) => step.status !== "completed");
+		for (const [index, previous] of previousLeaves.entries()) {
+			const next = nextLeaves[index]!;
+			if (previous.status === next.status) continue;
+			if (previous.status === "completed") {
+				throw new Error(
+					`Completed plan item ${previous.id} (${previous.text}) cannot be reopened; use request_replan and obtain approval for revised work`,
+				);
+			}
+			if (next.status === "completed" && (previous.status !== "in_progress" || previous.id !== current?.id)) {
+				throw new Error(
+					`Cannot complete plan item ${previous.id} (${previous.text}); current item ${current?.id} (${current?.text}) must have a committed in_progress start before completion`,
+				);
+			}
+			if (next.status === "in_progress" && next.id !== nextCurrent?.id) {
+				throw new Error(
+					`Cannot start plan item ${next.id} (${next.text}); finish current item ${nextCurrent?.id} (${nextCurrent?.text}) first`,
+				);
+			}
+		}
 		if (planStepsSemanticallyEqual(this.state.plan.steps, steps)) {
 			throw new Error("Plan progress update made no changes");
 		}
@@ -422,6 +455,7 @@ export class SessionPlanning {
 			phase: getPlanLeafSteps({ steps }).every((step) => step.status === "completed") ? "completed" : "active",
 			steps,
 		};
+		assertSequentialPlanExecution(plan);
 		await this.commit({ mode: "build", plan });
 		return clonePlanState(plan);
 	}
@@ -447,7 +481,7 @@ export class SessionPlanning {
 		this.researchGeneration = undefined;
 		return this.commit({
 			mode: "plan",
-			plan: this.draftFromExecutedPlan(this.state.plan),
+			plan: this.draftFromPlan(this.state.plan),
 		});
 	}
 
@@ -514,11 +548,7 @@ export class SessionPlanning {
 		}
 		const next = await this.commit({
 			mode: "plan",
-			plan: {
-				...this.state.plan,
-				revision: this.state.plan.revision + 1,
-				phase: "draft",
-			},
+			plan: this.draftFromPlan(this.state.plan),
 		});
 		if (deliverCheckpoint) {
 			await this.deliverCheckpoint(next);
@@ -564,6 +594,7 @@ export class SessionPlanning {
 		if (this.state.plan.phase !== "ready") {
 			throw new Error("Only a ready plan can be executed");
 		}
+		assertSequentialPlanExecution(this.state.plan);
 		if (this.state.mode === "plan") {
 			await this.host.tools().prepareUnrestrictedMcpForBuild();
 		}
@@ -579,6 +610,7 @@ export class SessionPlanning {
 		if (this.state.plan.phase !== "ready") {
 			throw new Error("Only a ready plan can be executed");
 		}
+		assertSequentialPlanExecution(this.state.plan);
 		return {
 			planning: await this.commit({
 				mode: "build",
@@ -611,6 +643,7 @@ export class SessionPlanning {
 		if (this.state.plan.phase !== "ready") {
 			throw new Error("Only a ready plan can be handed off");
 		}
+		assertSequentialPlanExecution(this.state.plan);
 		if (this.state.mode === "plan") {
 			await this.host.tools().prepareUnrestrictedMcpForBuild();
 			assertPlanRevision(this.state, planId, expectedRevision);
@@ -618,6 +651,7 @@ export class SessionPlanning {
 				throw new Error("Only a ready plan can be handed off");
 			}
 		}
+		assertSequentialPlanExecution(this.state.plan);
 		return this.commit({
 			mode: "build",
 			plan: {
