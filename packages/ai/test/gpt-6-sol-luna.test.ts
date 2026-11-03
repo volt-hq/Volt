@@ -35,12 +35,12 @@ describe.each(models)("$name metadata", ({ id, name, cost }) => {
 		expect(clampThinkingLevel(model, "minimal")).toBe("low");
 	});
 
-	it("uses the authenticated Codex catalog's default context and reasoning levels", () => {
+	it("defaults to the Codex catalog's 872k extended context with unchanged reasoning levels", () => {
 		const model = getModel("openai-codex", id);
 		expect(model).toMatchObject({
 			api: "openai-codex-responses",
 			baseUrl: "https://chatgpt.com/backend-api",
-			contextWindow: 272_000,
+			contextWindow: 872_000,
 			maxTokens: 128_000,
 			cost,
 		});

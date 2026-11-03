@@ -143,11 +143,12 @@ describe("OpenAI Codex catalog", () => {
 	});
 
 	// https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json
-	it("uses the Codex default 272k context for every model", () => {
-		for (const model of getModels("openai-codex")) {
-			expect(model.contextWindow, model.id).toBe(272_000);
-		}
-	});
+	it.each(["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] as const)(
+		"keeps the 272k Codex default context for %s",
+		(id) => {
+			expect(getModel("openai-codex", id).contextWindow).toBe(272_000);
+		},
+	);
 });
 
 // https://api-docs.deepseek.com/api/list-models/

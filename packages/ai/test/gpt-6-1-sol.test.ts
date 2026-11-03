@@ -7,7 +7,8 @@ import { streamSimple } from "./test-client.ts";
 // https://developers.openai.com/api/docs/models/gpt-6.1-sol
 // https://developers.openai.com/api/docs/guides/prompt-caching
 // https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json
-// Verified 2026-09-29. These tests never send provider requests.
+// Capabilities verified 2026-09-29; Codex default context rechecked against the model page 2026-11-03.
+// These tests never send provider requests.
 const cost = { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 };
 const supportedLevels = ["low", "medium", "high", "xhigh", "max"];
 
@@ -36,12 +37,12 @@ describe("GPT-6.1 Sol metadata", () => {
 		expect(clampThinkingLevel(model, "minimal")).toBe("low");
 	});
 
-	it("uses the Codex catalog's default context, reasoning levels, and Fast tier", () => {
+	it("uses the documented 500k Codex default context, reasoning levels, and Fast tier", () => {
 		const model = getModel("openai-codex", "gpt-6.1-sol");
 		expect(model).toMatchObject({
 			api: "openai-codex-responses",
 			baseUrl: "https://chatgpt.com/backend-api",
-			contextWindow: 272_000,
+			contextWindow: 500_000,
 			maxTokens: 128_000,
 			cost,
 		});
