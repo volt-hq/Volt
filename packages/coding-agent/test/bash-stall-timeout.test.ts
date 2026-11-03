@@ -127,7 +127,7 @@ describe("moving a silent foreground command to a background job", () => {
 		return result.content.map((part) => part.text ?? "").join("");
 	}
 
-	test("keeps the command running as a job and returns its output so far", async () => {
+	test("keeps the command and its output in a job and returns only the handoff status", async () => {
 		const { jobs, tool } = await jobCapableBash();
 		const result = await tool.execute(
 			"move-1",
@@ -140,7 +140,9 @@ describe("moving a silent foreground command to a background job", () => {
 		const job = jobOfDetails(result.details);
 		if (!job) throw new Error("Expected the call to name a job");
 		expect(job).toMatchObject({ tool: "bash", status: "running", toolCallId: "move-1" });
-		expect(text(result)).toContain("started");
+		expect(text(result)).not.toContain("started");
+		expect(result.details).toEqual({ job });
+		expect(jobs.get(job.id).output).toContain("started");
 		expect(text(result)).toContain(
 			`Command produced no output for 1 seconds and is still running as background job ${job.id}.`,
 		);
