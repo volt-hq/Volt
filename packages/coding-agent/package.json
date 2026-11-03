@@ -74,26 +74,32 @@
 		"@jimp/js-jpeg": "1.6.1",
 		"@jimp/js-png": "1.6.1",
 		"@jimp/plugin-resize": "1.6.1",
-		"@modelcontextprotocol/sdk": "1.31.0",
+		"@modelcontextprotocol/sdk": "1.32.2",
 		"chalk": "5.6.2",
 		"clipboard-image": "0.1.0",
 		"cross-spawn": "7.0.6",
 		"diff": "8.0.4",
-		"glob": "13.0.6",
+		"glob": "14.0.3",
 		"highlight.js": "10.7.3",
 		"htmlparser2": "12.0.0",
 		"hosted-git-info": "9.0.3",
 		"ignore": "7.0.5",
 		"jiti": "2.7.0",
-		"minimatch": "10.2.5",
+		"minimatch": "11.0.4",
 		"proper-lockfile": "4.1.2",
 		"qrcode-terminal": "0.12.0",
 		"semver": "7.8.0",
 		"typebox": "1.1.38",
-		"undici": "8.10.2",
+		"undici": "8.12.3",
 		"yaml": "2.9.0"
 	},
 	"overrides": {
+		"@mistralai/mistralai": {
+			"zod": "4.6.6"
+		},
+		"@modelcontextprotocol/sdk": {
+			"zod": "4.6.6"
+		},
 		"rimraf": "6.1.2",
 		"gaxios": {
 			"rimraf": "6.1.2"
