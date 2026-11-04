@@ -1,0 +1,718 @@
+# Code mode
+
+- Status: Draft. The runtime layer, the bridge contract, the model-facing result, failure semantics, and tool scope are decided (section 5). The rest of the product surface and integration are open (section 8).
+- Date: 2026-11-04
+- Audience: Volt maintainers.
+- Scope: A sandboxed script tool that lets the model call Volt tools programmatically, so intermediate results stay out of the model context. This document covers the runtime that executes scripts, how it is supervised, and the constraints Volt places on it.
+- Decision so far: model-written JavaScript runs in [`quickjs-wasi`](https://github.com/vercel-labs/quickjs-wasi) (QuickJS-NG compiled to WebAssembly) on a per-process pool of worker threads, one fresh VM per script, booted by creating the VM and running a trusted prelude. Scripts are bounded by a compute budget and a nested-call budget, not by a default wall-clock deadline. Adding `quickjs-wasi` is a new dependency and needs maintainer approval before implementation. Values cross the bridge through a lossless JSON codec built on native `JSON.parse` `context.source` and `JSON.rawJSON`; nested calls resolve to text or internal per-tool projections, fail with typed `ToolCallError`s, and return images as opaque references that only reach the model when the script shows them (section 5.9). The model reads one plain-text result: an ordered output stream with multi-line items fenced, a 50 KB budget split by priority with structural truncation of the return value, and the full output spilled to a temp file (section 5.10). A failed script keeps its partial output and adds a failure kind, an error block, and a grouped summary of the nested calls that may have changed state (section 5.11). Scripts can call only operations the model could call directly in the same session, excluding user, session, job, and delegation tools (section 5.12).
+
+## 1. Objective
+
+Every Volt tool call today is a separate model-issued call whose result enters the transcript. For work that fans out or iterates (list 200 records and act on some, pull many issues and classify them, page through MCP results), the model must read every intermediate result and write every call. Context grows with the work, and arithmetic and bookkeeping over many records degrade.
+
+Code mode adds a tool whose input is a script. The script calls tools as `await tools.<name>(args)`, loops, branches, filters, and aggregates, and only what it prints or returns reaches the model. Nested calls remain real tool calls: they pass through Volt's tool-call policy, and their side effects are not undone if the script fails.
+
+### Evidence that shapes the goals
+
+- Code mode pays off on long, tool-heavy tasks and costs more on small ones. Pydantic's 5,276-run benchmark ([article](https://pydantic.dev/articles/why-code-mode-is-the-future)) measured -58% cost, -51% wall time, and +16 points success on long tasks, but +21% to +38% cost at 5 items on three of five tasks. The savings came from fewer tokens per request, not fewer round trips; models already batch independent calls.
+- It does not improve ordinary coding work. DeepSeek's scaffold comparison on its own model ([model card](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/README.md)) shows its PTC mode at 67.6 on DeepSWE v1.1 against 70.5 for its standard mode and 72.6 for its minimal bash-and-edit mode, and equal to standard on Terminal-Bench 2.1 (85.8).
+- Reported failure modes: rerun snippets repeating writes (Pydantic), models skipping discovery and inventing tool names (Goose), and nested approvals diverging from outer approvals ([openai/codex#32848](https://github.com/openai/codex/issues/32848)).
+
+Code mode is therefore an opt-in complement to direct tool calls, not a replacement.
+
+### Prior art
+
+| Implementation | Runtime | Relation to direct tools | State between scripts |
+|---|---|---|---|
+| Pi ([docs](https://pi.dev/docs/latest/codemode)) | QuickJS in WASM, worker thread per script | Complements; optional "only" mode | `store()`/`load()` persisted in the session |
+| DeepSeek Harness PTC ([design note](https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/feature/2026-06-15-ptc.md)) | Node child process under the OS sandbox (replaced a worker-thread runtime after an escape) | Replaces, per agent | None, to keep sessions reconstructable from the log |
+| Pydantic AI Harness ([docs](https://pydantic.dev/docs/ai/harness/code-mode/)) | Monty (Rust Python subset), worker process | Complements, selected tools | REPL persists within a run |
+| OpenCode 2 | Hand-rolled JS interpreter | MCP through `execute` by default | Not documented |
+| Codex CLI | V8, out-of-process host | `exec`, plus a code-mode-only option | Session key-value store |
+| Goose ([docs](https://goose-docs.ai/docs/guides/managing-tools/code-mode/)) | Boa, worker per run | Replaces when enabled | None |
+| Anthropic and OpenAI APIs | Hosted Python container / hosted V8 | Per-tool `allowed_callers` | Container state / none |
+| Cloudflare | V8 isolate per run | Single tool | Durable call log with replay |
+
+Every implementation exposes no ambient file, network, process, or environment access to the script; tool bindings are its only capability.
+
+## 2. Current state
+
+Checked against `4e9366efa`.
+
+- **Tools.** `ToolDefinition` (`src/core/extensions/types.ts:850`) has a TypeBox `parameters` schema, `executionMode`, `execute`, and `present`. It has no output schema, no exposure levels, and no API for one tool to call another. The agent loop runs `prepareArguments` and then `validateToolArguments` before executing a call (`packages/agent/src/agent-loop.ts:756-787`).
+- **Tool-call policy.** `SessionTurnPolicy` (`src/core/session/turn-policy.ts`) composes the session's tool-call and tool-result policy with registered turn policies. Extension services (`src/core/session/extension-services.ts`) already run trusted read tools outside the model loop through the same tool-call and tool-result gates, attributing them with `ExtensionOperationOrigin` (`src/core/extensions/services-types.ts:202`), whose variants are currently `agent` and `extension`.
+- **Parallelism.** The agent loop runs a batch of tool calls sequentially if any tool in it declares `executionMode: "sequential"` (`packages/agent/src/agent-loop.ts`). The MCP gateway and direct MCP tools both declare `sequential` (`src/core/mcp/gateway-tool.ts:109`, `src/core/mcp/direct-tools.ts:34`).
+- **MCP results.** The gateway bounds model-facing output and retains large results in a session-scoped output store with opaque cache ids and `read_cache` selection ([mcp.md](mcp.md)). It renders content blocks to text with `contentPartToText` (`src/core/mcp/manager.ts:158`), so MCP images reach the model only as placeholders. `@modelcontextprotocol/sdk` 1.32.2 decodes every message with plain `JSON.parse`, so integers above `Number.MAX_SAFE_INTEGER` are rounded before Volt sees them ([#1024](https://github.com/volt-hq/Volt/issues/1024)).
+- **Bash.** No default wall-clock timeout; stall detection after 300 s of silence (`src/core/tools/bash.ts:35`) can move a foreground command into a background job through an `AsyncLocalStorage` context (`bash.ts:47`). A non-zero exit code produces an error result (`bash.ts:445`). Output beyond the model-facing limit is saved to a temp file reported as `fullOutputPath`. A caller abort keeps the partial output and appends `Command aborted`; a stall kill appends an instruction to pass a larger `stallTimeout` (`bash.ts:395-440`).
+- **Process model.** Each interactive conversation runs in its own conversation worker process supervised by voltd ([daemon-hosted-conversations-design.md](daemon-hosted-conversations-design.md) section 5). Subagents are child conversations in the same host process ([architecture-rewrite-design.md](architecture-rewrite-design.md) section 7), with a default limit of 16 active descendants (`src/core/subagents/delegation-scope.ts:45`).
+- **Worker threads.** Volt already ships worker threads, including in the standalone binary (`src/core/session-store/client.ts`, `src/utils/image-resize.ts`).
+- **Native code.** Volt ships a Rust napi addon (`native/workspace-fs`) with prebuilds for eight targets. The standalone binary is a Node 22.23.1 single executable application (`compliance/standalone-runtime.json`); the engines floor is Node 22.19.0.
+- **Sandboxing.** Volt has no OS sandbox backend (no Seatbelt, Landlock, or bubblewrap integration).
+- **Tool results.** A tool's `AgentToolResult.content` (`packages/agent/src/types.ts:373`) is what the model reads; `createToolResultMessage` (`packages/agent/src/agent-loop.ts:950`) adds it to the conversation. The OpenAI Completions and Responses providers join a result's text blocks with newlines (`packages/ai/src/providers/openai-completions.ts:908`, `openai-responses-shared.ts:258`), so separate text blocks do not preserve boundaries on every provider.
+- **Output spill.** `OutputAccumulator` (`src/core/tools/output-accumulator.ts`) writes over-limit output to `os.tmpdir()` with a random name and mode 0600 and does not delete it. The `read` tool is authorized by tool (`workspace.read`, `src/core/operation-authorization.ts:74`), not by path.
+- **Operation classification.** `getTrustedToolOperationResolver` (`src/core/operation-authorization.ts:220`) resolves a tool call to operation capabilities such as `workspace.read`, `workspace.write`, or `process.execute` (bash). `jobs`, `image_gen`, `subagent_registry`, direct MCP tools, and extension tools have no trusted resolver.
+- **Active tools.** The default active tools are `request_user_input`, `jobs`, `read`, `bash`, `edit`, `write`, `image_gen`, `web_search`, and `web_fetch`; `grep`, `find`, `ls`, `inspect`, and `lsp` are available but inactive by default (`src/core/tools/index.ts:249`). The `background` option that bash and subagent accept comes from `withBackgroundJobs` (`src/core/tools/background.ts`).
+- **Plan research evidence.** The tool-result policy records Plan research evidence for a successful call whose authorized operation provides it, keyed by tool call ID (`src/core/session/turn-policy.ts:466-474`).
+
+## 3. Goals and non-goals
+
+### Goals
+
+- Let the model compose tool calls in a script whose intermediate results never enter the model context.
+- Keep the sandbox a real security boundary: the script's only capability is calling bindings the host chose to expose.
+- Route every nested call through the same validation and tool-call policy as a model-issued call.
+- Bound compute, memory, nested calls, and output without imposing a wall-clock deadline on legitimate long-running tool work.
+- Run identically on every standalone target, including Windows, without a native build step.
+- Keep the runtime replaceable behind a backend interface (section 5.8).
+
+### Non-goals
+
+- Replacing direct tool calls or making code mode the default calling convention.
+- Heavy computation inside scripts. The engine is an interpreter; scripts are glue code.
+- Persistent interpreter state across scripts in v1.
+- Durable replay or suspend/resume of a running script across process restarts in v1.
+- Speculative execution of tool calls while the model is still streaming.
+- An OS sandbox. A future one could host a different backend, but code mode does not depend on it.
+
+## 4. Terms
+
+- **Script:** the model-written JavaScript body run by one code-mode tool call.
+- **Nested call:** a tool call made by a script through a binding.
+- **Binding:** a `tools.<name>` function the prelude installs for one tool the host exposes to the script.
+- **Prelude:** trusted JavaScript evaluated in each fresh VM before the script, which owns the single host bridge and builds the bindings.
+- **Host:** the conversation process thread that owns the tool pipeline, policy, call records, and supervision.
+- **Worker:** a worker thread that hosts at most one VM at a time.
+
+## 5. Runtime and bridge decisions
+
+### 5.1 Engine
+
+Decided: `quickjs-wasi` (QuickJS-NG compiled to `wasm32-wasip1`), pinned to an exact version. At the time of writing that is 3.6.3, which bundles QuickJS-NG 0.17.0.
+
+- Each VM is a separate WebAssembly instance with its own linear memory. Engine memory corruption stays inside that memory; escaping requires a V8 WebAssembly bug or a bug in the host-side glue.
+- The bare engine has no file, network, process, or environment access. The VM's imports are six `env.host_*` functions (call, interrupt, timezone, unhandled rejection, module normalize, module load) and six WASI functions (clock, random, `fd_write`, and stubs). The host implements all of them.
+- The package is MIT-licensed, has no runtime dependencies and no install scripts, and ships a roughly 640 KB WASM binary.
+- The language is JavaScript because the bare engine has no ambient authority, JSON tool data maps directly onto it, promise-based async maps directly onto tool calls, and TypeBox schemas render naturally as TypeScript declarations. No head-to-head evidence shows models writing better JavaScript than Python for this purpose.
+
+Alternatives and why they were rejected are in section 6.
+
+### 5.2 Isolation boundary and threading
+
+Decided: the security boundary is the WebAssembly instance plus the host bridge. The worker thread is not a security boundary.
+
+Each VM runs on a worker thread for two reasons:
+
+1. QuickJS runs synchronously. A computing script on the host thread would block the conversation's event loop.
+2. Interrupts are not sufficient to stop every script. Built-ins that do not poll the interrupt handler, such as `String.prototype.indexOf` over a large string, ran 2.5 s past a 300 ms interrupt deadline in testing. `worker.terminate()` stopped the same workload in about 4 ms. The worker is the hard-kill backstop.
+
+Running the VM on the host thread is therefore ruled out.
+
+### 5.3 Worker pool
+
+Decided:
+
+- **Scope:** one pool per conversation process. Separate conversations never share or contend for workers. No cross-process limit through voltd.
+- **One VM per worker.** A worker hosts at most one VM at a time. Sharing a worker among VMs would let one computing script block the others, and a hard kill would fail every co-tenant script after its side effects had already happened.
+- **Elastic size:** the pool starts with no workers, grows on demand up to a per-process cap, and stops idle workers after an idle timeout.
+- **Concurrency:** each conversation (a root conversation or a subagent) runs at most one script at a time.
+- **Bounded queue:** when the cap is reached, scripts wait in a bounded queue; beyond it, the code-mode call fails immediately with a clear error instead of hanging the turn.
+- **No nesting:** scripts cannot call `subagent` or the code-mode tool. Without nested waits on the pool, deadlock is impossible at any cap.
+- **Prepared VMs:** after code mode is first used in a process, an idle worker boots the next VM in advance so boot time is off the critical path. Processes that never use code mode pay nothing.
+
+Initial defaults, to be tuned: a cap of 4 workers per process (the maximum width of one parallel subagent spawn), a queue of 4 waiting scripts, and an idle timeout on the order of minutes.
+
+Subagents share their parent's pool because they run in the same process. With a cap of 4, four parallel subagents can each run a script concurrently; further scripts queue.
+
+### 5.4 VM boot
+
+Decided: create a fresh VM for every script and evaluate the prelude in it, behind a `bootVm()` interface.
+
+- The prelude captures private references to the built-ins it depends on (primordials) before any script code runs, instead of freezing the whole realm. Scripts may patch globals without affecting the bridge, and boot is cheaper.
+- The VM's `Math.random()` seed is set explicitly. QuickJS seeds its generator from the first clock reading during context creation, and with the shim's coarse clock, two VMs created back to back produced identical sequences in testing. The host overrides the WASI clock during creation so the seed comes from `crypto.randomInt()`, then restores the real clock.
+- `maxStackSize` is always set (512 KiB, `MAX_STACK_SIZE`), and workers run with `resourceLimits.stackSizeMb: 8`. QuickJS's stack guard measures the stack it keeps in linear memory, but WebAssembly call frames also use the worker's native stack, which the guard does not see. Without the guard, deep recursion overflowed the host stack. With the guard and the 4 MB worker default, recursion ended in a catchable guest `RangeError` but a 100,000-level `JSON.parse` still overflowed the native stack; with 8 MB, every probe ended in a catchable guest `RangeError`. A host-side `RangeError` from a VM operation is still treated as a sandbox failure that discards the VM (section 5.11).
+
+Rejected for now:
+
+- **Snapshot restore** (about 0.8 ms against about 4.9 ms for create plus a 16.8 KB prelude). With a fresh VM per script, the prelude already runs before untrusted code, so a snapshot gives no integrity advantage. It adds fingerprinting and invalidation, re-registration of host callbacks, identical random state across restores, and a raw memory image that must be trusted like native code. Boot is off the critical path once VMs are prepared in advance, so the latency difference does not matter. Revisit if the prelude grows enough to matter or if suspend/resume is built; `quickjs-wasi` can snapshot any VM regardless of how it booted.
+- **Precompiled prelude bytecode.** It saved 1.2 ms because executing the prelude, not parsing it, dominates. QuickJS-NG treats untrusted bytecode as out of scope, and the format is tied to the engine version.
+- **Reusing a VM across scripts.** State would leak between scripts, WebAssembly memory never shrinks, and any tampering with the prelude would persist.
+
+### 5.5 Bridge mechanics
+
+Decided:
+
+- Async host calls use promises and job-queue draining, without Asyncify or JSPI. A binding creates a promise in the VM and posts the call to the host. The VM drains its pending jobs and goes idle. When the host settles the call, it resolves the promise in the VM and drains again. Many nested calls can be in flight at once, and results can arrive in any order. JSPI is unavailable on the Node 22 standalone binary in any case.
+- Exactly one host function is registered: the bridge, held by the prelude in a closure the script cannot reach. `quickjs-wasi` dispatches host callbacks by a name stored in guest memory, so a guest whose memory is corrupted could call any registered callback; registering only one keeps that surface to the bridge itself.
+- The host treats everything arriving through the bridge as untrusted, even though only the prelude calls it:
+  - It accepts only primitive strings and checks `isString` before reading a handle. Calling `toString()` on a non-string handle executes guest code and would re-enter the VM.
+  - It creates handles inside `withScope` and never uses a handle after disposal, which reads freed WebAssembly memory.
+  - It never re-enters the VM from inside a host callback.
+  - Any host-side exception from a VM operation discards that VM.
+- `executePendingJobs()` honored the interrupt handler for `while (true) await null` (interrupted at 302 ms in testing), so the runtime uses only the public API and does not depend on internal exports.
+
+The bridge contract built on these mechanics is in section 5.9.
+
+### 5.6 Supervision and budgets
+
+Decided: a compute budget and a nested-call budget, with no default wall-clock deadline. Waits on nested tools behave like waits on direct tool calls: bounded by each tool's own limits (for example MCP `callTimeoutMs` and bash stall detection) and by user cancellation.
+
+- **Compute budget.** Default 30 s of time spent executing inside the VM. The worker sums the time spent inside `evalCode` and `executePendingJobs` calls, and the interrupt handler compares the sum with the budget. Time awaiting nested calls, approvals, or user input does not count.
+- **Watchdog.** The worker publishes a "computing since" timestamp in shared memory whenever the VM executes. A host-side watchdog terminates the worker when continuous execution exceeds the budget plus the grace period, which covers built-ins that do not poll the interrupt handler.
+- **Nested-call budget.** Default 200 calls per script, counted before each call is scheduled. Exhausting it aborts the script with a clear error that the script cannot catch.
+- **Optional script timeout.** The model may set a wall-clock `timeoutMs` for one script, capped (initially 30 min), to bound its own work.
+- **Cancellation.** A user abort (Esc, or cancelling from a remote client) aborts in-flight nested calls through their signals, sets the interrupt flag, and terminates the worker if the VM has not stopped within the grace period.
+- **Stop sequence.** Interrupt flag, then a grace period (initially 250 ms; honored interrupts stopped within about 70 ms in testing), then `worker.terminate()` and a background respawn.
+- **Excluded time.** VM boot and waiting in the pool queue count toward no budget.
+- **Memory.** `memoryLimit` is set on every VM. A 32 MiB limit held in testing: a string bomb and `new ArrayBuffer(1e9)` both failed with a catchable out-of-memory error, linear memory stayed at 32.3 MiB, and the VM remained usable. The default is open; 64 MiB is the working assumption.
+- **Bash stall move.** Bash calls made from a script run without the stall-move context, because a script needs the command's result, not a background job handle.
+
+Rejected: a single elapsed deadline covering tool and approval waits (Pi, DeepSeek). Approvals answered from a phone would count against it, the model would have to guess a timeout, and legitimate long work would fail. An overall cap that pauses while a nested call waits on the user may be added later if needed. Codex-style yield-and-poll is rejected; an opt-in background mode that reuses Volt's existing jobs and completion-wake mechanism is the preferred direction for long scripts, outside v1.
+
+### 5.7 Engine configuration
+
+Decided:
+
+- **Intrinsics:** all except `WEAK_REF`. `WeakRef` and `FinalizationRegistry` add garbage-collection timing nondeterminism and finalizers can fire after the script settles. `EVAL` is kept because it only creates code inside the same VM; `PROXY` is kept because disabling it also removes `Reflect`, and the host only receives strings from the guest, so proxy traps cannot run in host code. `BIG_INT` cannot be disabled in QuickJS-NG.
+- **Extensions:** none in v1. The optional URL, encoding, Headers, crypto, and structured-clone extensions use a dynamic-linking ABI that `quickjs-wasi` describes as experimental, add C and C++ attack surface, and add license notices. If UTF-8 encoding becomes necessary, a small JavaScript implementation in the prelude is preferred over loading an extension.
+- **Timezone:** the host timezone, matching bash. Scripts are not re-executed on replay, so determinism is not required.
+- **Module loader:** none. Without one, `import` fails inside the VM.
+- **Engine diagnostics:** QuickJS writes to WASI file descriptors 1 and 2; the host discards that output so it never reaches the terminal or a client.
+
+### 5.8 Host and worker protocol
+
+Decided: the host and the worker exchange framed, transport-neutral messages. The worker-thread backend is the only backend in v1, but a future backend (for example a Rust sidecar process with OS-level memory and CPU limits, or a process under an OS sandbox) should replace the transport without changing the bridge, policy, or tool integration above it.
+
+### 5.9 Bridge contract
+
+Decided. The contract has four layers: the script API, the prelude's bridge function, the messages between worker and host, and host dispatch into the tool pipeline.
+
+#### Value codec
+
+Values cross the VM boundary only as JSON text. The prelude encodes and decodes with built-ins it captured before the script ran. The host never inspects guest objects (no `dump()` or `hostToHandle()` on guest values), so no guest getter, proxy trap, or `toJSON` method runs on the host side.
+
+The codec is lossless: a value either round-trips exactly or fails with an error that names its path, for example `args.when: Date is not JSON; use .toISOString()`.
+
+- **Accepted values:** `null`, booleans, finite numbers (including `-0`), BigInt, strings (including lone surrogates), dense arrays, and plain objects whose prototype is `Object.prototype` or `null`.
+- **Rejected values:** `NaN`, `Infinity`, `-Infinity`, `undefined` in arrays, array holes, functions, symbols, symbol-keyed properties, non-plain objects (`Date`, `Map`, `Set`, `RegExp`, typed arrays, `ArrayBuffer`, errors, boxed primitives, class instances), cycles, keys named `__proto__`, and nesting deeper than 64 levels. `toJSON` is never called, so nothing converts silently.
+- **One normalization:** object properties whose value is `undefined` are omitted. A missing field and `undefined` mean the same thing in tool arguments.
+- **Encoding:** numbers are written as exact literals. BigInt values and `-0` are written with `JSON.rawJSON`.
+- **Decoding:** a number literal decodes to a number when a double holds its value exactly, and otherwise to a BigInt if it is an integer. JSON has one number type, so the codec preserves values, not the number/BigInt distinction: a BigInt that a double holds exactly arrives as a number. Decoded numbers must be finite.
+- **Invariant:** neither side can produce a non-integer literal that a double cannot hold exactly, because both sides only hold doubles and BigInts. Receiving one is a protocol violation. When [#1024](https://github.com/volt-hq/Volt/issues/1024) brings exact decimals from MCP servers, the codec gains a type for them; `lossless-json`'s `LosslessNumber` is the reference design.
+- **Implementation:** native on both sides, using a `JSON.parse` reviver that reads `context.source`, and `JSON.rawJSON`. Both are available in QuickJS-NG 0.17 and in Node 22.20 and 24.20. The host decodes with plain `JSON.parse` when the text cannot contain an unsafe or non-finite number literal (no run of 16 or more digits and no exponent of three or more digits), and with the reviver otherwise.
+- **Script-side parsing:** the script's own `JSON.parse` keeps standard semantics. Guidance shows the `context.source` reviver for scripts that parse large integers out of text output.
+
+Rejected:
+
+- Marshaling with `dump()` and `hostToHandle()`, which walks guest objects from the host and re-enters the VM.
+- Plain `JSON.stringify` and `JSON.parse`, which coerce `NaN`, `-0`, `Date`, and `Map` silently and round large integers.
+- `lossless-json` inside the VM: on a 0.89 MiB payload it parsed in 308.6 ms against 41.6 ms for the native reviver, stringified in 194.6 ms against 40.5 ms, and added 10.9 ms to every VM boot.
+- `lossless-json` on the host: its slow path is 2 to 3 times faster than the native reviver and it rejects conflicting duplicate keys, but it is a new dependency for a path the fast path rarely takes. Duplicate keys cannot create a parser differential, because the host parses each frame once and policy and the tool see the same object.
+
+The bridge cannot recover precision a transport has already lost. MCP results are rounded by the MCP SDK today ([#1024](https://github.com/volt-hq/Volt/issues/1024), [modelcontextprotocol/typescript-sdk#3150](https://github.com/modelcontextprotocol/typescript-sdk/issues/3150)).
+
+#### Script API
+
+- `tools.<name>(args)` takes zero or one argument. An omitted or `undefined` argument becomes `{}`; anything else must encode to a plain object. It returns a promise of the call's script value. An encoding error rejects that promise without issuing a call.
+- **Script values:**
+  - **Default:** the tool result's text blocks joined with newlines.
+  - **bash:** `{ output, exitCode, truncated, fullOutputPath? }` for a command that ran to completion with any exit code. A command that could not start, timed out, or was aborted rejects. When the output exceeds the model-facing limit, `output` holds up to 1 MiB: the first and last 512 KiB of `fullOutputPath`.
+  - **read:** the text result for a text file, and an image reference for an image file.
+  - **MCP tool calls:** `{ text, structured?, images }`. `structured` is the result's `structuredContent`, typed from the tool's output schema when it has one. `images` holds image references for image blocks. `text` joins the remaining blocks as the gateway renders them for the model (`contentPartToText`).
+  - Projections are internal to built-in tools and MCP in v1. `ToolDefinition` is unchanged, and extension tools get the default.
+- **Size:** a script value is at most 1 MiB once encoded. Projections bound themselves before materializing a value, for example by reading only the head and tail of `fullOutputPath`. A value that still exceeds the cap rejects with `failed` (`result_too_large`).
+- **Errors:** a failed nested call rejects with a `ToolCallError` (an `Error` subclass the prelude provides) carrying `tool`, `kind`, an optional `reason`, and a `message` of at most 8 KiB. Kinds:
+  - `invalid_arguments`: argument preparation or schema validation failed.
+  - `blocked`: the tool-call policy denied the call.
+  - `failed`: the tool returned an error result or threw, or the call hit a limit. `reason` distinguishes `result_too_large`, `limit_exceeded`, and `unavailable`.
+  - `cancelled`: the call was aborted.
+
+  Scripts can catch these, and `Promise.allSettled` keeps the results of calls that succeed. Projections may resolve instead of rejecting where a failure is ordinary data, as bash does for exit codes.
+- **Terminations:** exhausting the call budget or the compute budget, the script timeout, a user abort, the output limit, and a protocol violation end the script. The script cannot catch them, and pending awaits never resume. Section 5.11 describes how they are reported.
+
+#### Images
+
+Nested calls never move image bytes into the VM. An image resolves to a reference:
+
+```ts
+interface ImageRef {
+	type: "image";
+	ref: string;
+	mimeType: string;
+	width?: number;
+	height?: number;
+	bytes: number;
+	path?: string; // present when the image came from a file
+}
+```
+
+- The host keeps the bytes for the lifetime of the script. References are valid only within the script that received them.
+- Only images the script passes to `image(ref)` reach the model, at most 10 per script. An image shown without a file (from MCP or `image_gen`) is saved to a temp file and its path is reported, so a later turn can pass it to tools that take image paths.
+- When a script ends with images it never showed, the result lists them, so the model learns the rule from the feedback instead of losing images silently.
+- The host retains at most 64 MiB of image bytes per script. A nested call whose images would exceed that rejects with `failed` (`limit_exceeded`).
+- Passing references as tool arguments is a non-goal: Volt's image tools take file paths (`image_gen` takes `referenced_image_paths`), which scripts pass as strings.
+
+Rejected:
+
+- Attaching every nested image to the outer result (DeepSeek, Pydantic, OpenCode). Nothing is forgotten, but a script that reads many images floods the model and the session, and a count cap drops images arbitrarily.
+- base64 inside the VM (Pi). Volt's image tools take paths, so the bytes buy nothing, they count against the VM memory limit, the argument cap would block passing them on, and the model can print them by mistake.
+- Including every image unless the script calls `image()`. An implicit mode switch with no precedent.
+
+#### Bridge function
+
+The prelude calls one host function with two primitive strings: a kind (`call`, `output`, or `done`) and a payload. The worker checks `isString` on both before reading them and forwards them to the host. The prelude numbers call attempts with `seq` values 1, 2, 3, and so on.
+
+#### Messages
+
+| Direction | Message | Contents |
+|---|---|---|
+| Worker to host | `ready` | `protocol`, `engine` versions |
+| Worker to host | `call` | `seq`, `binding`, `args` (codec text) |
+| Worker to host | `output` | One output item: text, console text, or an image reference |
+| Worker to host | `done` | `ok` with the return value (codec text), or the script error |
+| Worker to host | `crash` | `reason` |
+| Host to worker | `start` | `script`, binding names, limits, random seed |
+| Host to worker | `result` | `seq` with a script value (codec text), or a `ToolCallError` description |
+| Host to worker | `stop` | none |
+
+- Each `seq` receives at most one `result`, and the host sends nothing after `done`. The worker applies results only while the VM is idle.
+- A `protocol` version mismatch fails closed. This catches packaging errors such as a stale worker file in the standalone binary; it is not a compatibility path.
+- Messages travel over `postMessage` as plain objects with string fields today. A process backend would carry the same messages as length-prefixed UTF-8 JSON frames.
+- The host validates every message as if the worker were untrusted. Worker code is trusted today, but a future backend may not be. A malformed message is a protocol violation: the host terminates the VM, and the script fails with a `sandbox` error.
+
+#### Host checks for each call
+
+1. **Message shape.** `seq` is exactly one more than the previous `seq`; `binding` is a string of at most 256 characters; `args` is a string within the argument cap. Any violation is a protocol violation.
+2. **Call budget.** Counted here, so attempts that fail in later checks still count. Exhaustion terminates the script.
+3. **Binding set.** The binding must be in the set fixed when the script started; otherwise it is a protocol violation, because the prelude exposes only those bindings.
+4. **Outstanding argument bytes** across unfinished calls must stay within their cap; otherwise the call rejects with `failed` (`limit_exceeded`).
+5. **Decode `args`** with the codec. The result must be a plain object; otherwise `invalid_arguments`.
+6. **Tool still active.** An MCP server may have disconnected or a tool may have been disabled since the script started; otherwise `failed` (`unavailable`).
+7. **`prepareArguments` and `validateToolArguments`,** the same path as the agent loop; otherwise `invalid_arguments`.
+8. **Tool-call policy,** with an origin naming the parent tool call and `seq`, and the call ID `<parentToolCallId>:cm:<seq>`. IDs follow attempts, so invalid attempts leave gaps. A denial rejects with `blocked`.
+9. **Schedule and execute,** with an abort signal linked to the script's. Scheduling order is an open decision (section 8).
+10. **Tool-result policy, projection, and size cap,** then the `result` message.
+11. **Record the call** for the outer result: tool name, a bounded summary of the arguments, status, duration, and error.
+
+#### End of a script
+
+When the script finishes, fails, or is terminated, the host aborts in-flight nested calls through their signals and waits up to about 1 s for them to settle. Calls that settle are recorded with their final status; calls still unsettled are recorded as possibly applied, because a tool can apply a change before it stops. Results that arrive later are discarded. DeepSeek drains before settling, Goose bounds its drain at 1 s, and Pydantic reports unfinished calls as possibly applied.
+
+#### Caps
+
+Initial defaults, to be tuned:
+
+| Limit | Default |
+|---|---|
+| Arguments per call | 1 MiB encoded |
+| Outstanding argument bytes per script | 16 MiB |
+| Script value per nested call | 1 MiB encoded |
+| `ToolCallError` message | 8 KiB |
+| Message frame | 8 MiB |
+| JSON nesting depth | 64 |
+| Binding name | 256 characters |
+| Images shown per script | 10 |
+| Image bytes retained per script | 64 MiB |
+
+The call budget (section 5.6) bounds how many calls can be outstanding. Caps on script output are in section 5.10.
+
+### 5.10 Model-facing result
+
+Decided. While the script runs, its output items arrive at the host as `output` messages, and the host accumulates them. After the end-of-script drain (section 5.9), the host assembles the code-mode tool's `AgentToolResult`. Its `content`, made of text and image blocks, is the only part of a code-mode call the model reads; `details` carries records for the TUI, session records, and remote clients (section 8). This section describes a successful script; failures reuse the same rendering (section 5.11).
+
+#### Output channels
+
+- `text(value)`, `console.log`, `console.info`, `console.debug`, `console.warn`, `console.error`, and `image(ref)` append items to one stream in call order.
+- Output formatting is lenient and never throws, unlike the bridge codec. Strings render as-is. Other values render as compact JSON, with descriptive forms for values JSON cannot represent: `12n`, `undefined`, `Map(1) {"k" => 1}`, `Set(2) {1, 2}`, ISO dates, `TypeError: message`, `[Function name]`, and `[Circular]`.
+- Console arguments are joined with spaces. `console.warn` and `console.error` items are prefixed `warn: ` and `error: `; the other levels are not.
+- A top-level `return` adds a final item labeled `Return value: `. Returning `undefined` adds nothing.
+- `image(ref)` adds an image block preceded by a caption line: `[image img_1: image/png 1280x720, <path>]`.
+
+Rejected:
+
+- A separate console block (Pi). It loses the order between console and other output; fences (below) solve the boundary problem it was introduced for.
+- Removing `console` (Codex, OpenAI). No evidence supports it, and models write `console.log` by habit.
+- A separator before every item (Pi). It doubled the tokens for 50 single-line `text()` calls in the prototype (927 against 471).
+
+#### Rendering
+
+- The first line is a status line: `Script completed in 3.2 s (14 tool calls)`.
+- Items follow, one per line. An item whose text spans several lines is fenced, and the fence header states its line count, so the end of the item is unambiguous even if the item itself contains `>>>`:
+
+  ```
+  <<< output #3, 12 lines
+  ...
+  >>>
+  ```
+
+  Pi had to fix outputs running together because models could not tell where one ended and the next began ([v1.1.0](https://github.com/earendil-works/pi/releases/tag/v1.1.0)). Fencing only multi-line items keeps boundaries unambiguous at no cost when items are single lines.
+- A script that printed nothing and returned `undefined` renders `(no output)`.
+- Images not shown with `image(ref)` are listed on one line after the return value: `2 images not shown: img_3 (read b.png), img_4 (MCP browser.screenshot)`.
+- Nested-call records do not appear in a successful result; they go to `details`. Models use whatever reaches them: Cloudflare moved call records out of model output after models rebuilt answers from them, and Pi shows nested calls to the model only after a failure.
+- Text blocks are split around image blocks. Boundaries are marked in the text, so providers that join text blocks still see them.
+- The result is plain text, not a JSON envelope. In the prototype a compact JSON envelope cost about the same tokens, cost more with images (108 against 70), and became invalid JSON once truncated.
+
+Example:
+
+```
+Script completed in 3.2 s (14 tool calls)
+reading 2 files
+<<< output #2, 2 lines
+export const a = 1;
+export const b = 2;
+>>>
+warn: b.ts has CRLF endings
+[image img_1: image/png 1280x720, C:\repo\test-results\login.png]
+(image block)
+Return value: {"files":["a.ts","b.ts"],"lines":5}
+1 image not shown: img_2 (read old.png)
+```
+
+#### Truncation and spill
+
+- **Budget.** Volt's standard model-facing limit, 50 KB and 2000 lines (`src/core/tools/truncate.ts`), applied to the whole rendered text.
+- **Priority.**
+  1. The status line is always kept.
+  2. The return value may use up to half the budget. A larger return value is truncated structurally: array lengths and string lengths are capped uniformly until it fits, with `"[N more items]"` and `"... [N more chars]"` markers, so it remains valid JSON. A string return value keeps its head and tail.
+  3. The output stream uses the remaining budget, keeping its head and tail around one marker.
+
+  Either part may use budget the other leaves unused.
+- **Spill.** When anything is truncated, the full rendering is written to a temp file through `OutputAccumulator`, as bash does, and the marker names it: `[... 3365 lines omitted (4002 lines, 315 KB total). Full output: <path> (read with offset/limit)]`. The model reads it with `read`, which is authorized in Build and Plan alike. Temp files are left for the OS to clean up, as bash's are.
+- **No per-script override** of the budget (unlike Pi's `max_output_tokens`), matching bash. The model reads the spill file when it needs more.
+
+Rejected:
+
+- Head and tail over the whole output (Pi, Codex, DeepSeek). It can cut a large return value mid-JSON.
+- Dropping the middle without a spill file (Codex, whose users have asked for one).
+- The MCP output store as the spill target. It is MCP-specific and readable only through the `mcp` tool, which exists only when MCP is configured.
+
+#### Retained output
+
+While the script runs, the host retains at most 16 Mi characters of output text and 100,000 output items, Pi's limits enforced on the host instead of in the guest. Exceeding either terminates the script with an output-limit failure the script cannot catch. Output retained up to that point is kept and spilled.
+
+### 5.11 Failures
+
+Decided. A failed script returns the rendering of section 5.10 with a failure status line, an error block, and a summary of its nested calls, and the result is marked `isError: true`. Partial output is always kept, including after an abort. Bash does the same: a caller abort keeps the command's partial output and appends `Command aborted`. DeepSeek instead replaces an aborted run's output with `tool call aborted`, and OpenCode discards finished results on interrupt, an open bug ([anomalyco/opencode#54222](https://github.com/anomalyco/opencode/issues/54222)).
+
+#### Failure kinds
+
+| Kind | Cause | Status line ending |
+|---|---|---|
+| `script_error` | An uncaught exception or rejection: syntax errors, a stack overflow inside the guest, out-of-memory, an uncaught `ToolCallError` | `uncaught TypeError` (the error's name), `syntax error` |
+| `compute_budget` | The compute budget ran out (interrupt or watchdog) | `compute budget of 30 s exhausted` |
+| `call_budget` | The nested-call budget ran out | `call budget of 200 exhausted` |
+| `timeout` | The script's own `timeoutMs` passed | `timed out after 60 s` |
+| `aborted` | The user or caller aborted | `aborted` |
+| `output_limit` | Retained output exceeded its limit | `output limit exceeded` |
+| `sandbox` | The worker crashed or failed to start, a protocol violation, or any host-side exception from a VM operation, including a host-side `RangeError` | `sandbox failure` |
+
+- A script that never started, because the pool queue was full or it was aborted or timed out while waiting for a worker, says `The script did not start.` in its error block. It consumed no budget.
+- Scripts cannot intercept the terminations of section 5.9. In testing, a `try`/`catch` around a spinning loop did not catch the interrupt the host raises.
+
+#### Rendering
+
+The status line names the kind: `Script failed after 6.4 s (49 tool calls): uncaught TypeError`. The output stream follows as in section 5.10, then the error block, then the nested-call summary.
+
+**Error block:**
+
+- `script_error`: `Name: message` followed by the stack. Frames carry script line and column numbers (`at parse (script.js:2:10)`), because the script shares its first line with the wrapper prefix; column numbers on that first line are corrected for the prefix. A `cause` chain renders up to three levels (`Caused by: SyntaxError: ...`), and an `AggregateError` renders up to five inner errors. A thrown value that is not an `Error` renders as `Thrown string: ...`, `Thrown object: {...}`, or `Thrown null`. A describe step in the prelude captures all of this before the value leaves the VM; read from the host, a thrown object becomes `[object Object]`.
+- Out-of-memory adds a hint: `The script exceeded its memory limit (64 MiB). Filter or aggregate data instead of accumulating it.`
+- Other kinds get one sentence naming the limit and what to do next, following DeepSeek's call-limit message:
+  - `call_budget`: `Call 201 was not made. The script may loop without end; check loop termination, or split the work into several scripts.`
+  - `compute_budget`: `The script computed for more than 30 s without waiting on a tool. Process less data per script, or move heavy work into tools.`
+  - `timeout`: `The script's timeoutMs of 60000 passed. Nested calls in flight were cancelled.`
+  - `aborted`: `The script was aborted. Nested calls in flight were cancelled.`
+  - `output_limit`: `The script printed more than 16 Mi characters or 100,000 items. Print summaries and return selected fields instead of whole results.`
+  - `sandbox`: `The sandbox failed: <reason>. Calls listed below may have taken effect.`
+- The error block is at most 8 KiB.
+
+**Nested-call summary:**
+
+- A totals line with exact counts: `Nested tool calls: 49 (46 completed, 1 failed, 1 cancelled, 1 may have applied). Completed calls were not undone.` A script that made no calls says `No tool calls were made.`
+- Read-only calls are collapsed per tool: `Read-only: read ×41 (1 cancelled), grep ×3`. A call is read-only when its trusted operation resolution contains only read capabilities (`workspace.read`, `network.read`, `process.inspect`, `integration.discover`, `integration.read`).
+- Every other call is listed individually under `May have changed state:`: calls that resolve to a write, execute, or prompt capability (bash resolves to `process.execute`), and calls with no trusted resolver, such as `image_gen` and extension tools. Each entry shows the tool name, an argument preview, and the outcome.
+  - Argument preview: strings of up to 60 characters in full, longer strings as `<1470 chars>`, other values as compact JSON, at most 120 characters per call.
+  - Outcomes: `completed`, `failed: <message>`, `cancelled before it ran`, and `still running when stopped; may have applied`.
+- At most 20 entries are listed, followed by `(N more not shown)`; the totals stay exact.
+- Full call records go to `details` on success and failure alike. A successful result omits the summary (section 5.10).
+
+Example:
+
+```
+Script failed after 6.4 s (49 tool calls): uncaught TypeError
+generated 6 test files
+warn: widget3 has no default export
+
+TypeError: cannot read property 'length' of undefined
+    at summarize (script.js:24:18)
+    at <anonymous> (script.js:31:7)
+
+Nested tool calls: 49 (46 completed, 1 failed, 1 cancelled, 1 may have applied). Completed calls were not undone.
+Read-only: read ×41 (1 cancelled)
+May have changed state:
+- write path="src/generated/widget0.test.tsx" content=<1470 chars>: completed
+- write path="src/generated/widget1.test.tsx" content=<1470 chars>: completed
+- bash command="npx vitest run src/generated --reporter=dot": failed: Command exited with code 1
+- mcp__github__create_issue owner="volt-hq" repo="Volt" title="Generated tests fail for widget3" body=<400 chars>: still running when stopped; may have applied
+```
+
+**Background rejections.** A promise that rejects without the script handling it is reported as a `warn: unhandled rejection: <description>` line in the output, on success and failure alike, at most 10 per script. QuickJS's rejection callback also fires for the script's own promise when the script fails; the host excludes that one.
+
+**Truncation priority.** Under the budget of section 5.10, a failed result keeps, in order: the status line, the error block, the nested-call summary, and then the output stream, head and tail.
+
+Rejected:
+
+- Names and statuses only (Pi). For the 49-call prototype it cost 216 tokens without showing which writes happened.
+- Every call in order, capped at 20 entries (Pydantic). It cost 299 tokens, and the 20 entries shown were all reads, hiding the writes.
+- Discarding output on abort (DeepSeek, OpenCode).
+- No summary (Codex). Its users have asked for one ([openai/codex#49908](https://github.com/openai/codex/issues/49908)).
+
+### 5.12 Tool scope and bindings
+
+Decided. The binding set is computed once, when a script starts (section 5.9), from three rules: no escalation, eligibility by operation capability, and the session's grant profile.
+
+#### No escalation
+
+A binding exists only for an operation the model could call directly in the same session at that moment:
+
+- Built-in and extension tools must be active after tool policy: `--tools`, `--exclude-tools`, and a subagent's own tool policy. Available but inactive tools get no binding; by default that includes `grep`, `find`, `ls`, `inspect`, and `lsp`.
+- MCP tools require the `mcp` tool to be active and the tool to pass its server's `includeTools`/`excludeTools` filters and project trust.
+
+Code mode therefore never grants a capability the session lacks. A subagent's scripts get bindings from the subagent's own tool policy.
+
+#### Eligibility
+
+Bindable tools:
+
+| Tools | Operation capability |
+|---|---|
+| `read`, `grep`, `find`, `ls` | `workspace.read` |
+| `web_search`, `web_fetch` | `network.read` |
+| `inspect`, `lsp` | Resolved per action: reads, plus `workspace.write` for `lsp` `rename` and `fix` |
+| `edit`, `write` | `workspace.write` |
+| `bash` | `process.execute` |
+| `image_gen` | No trusted resolver |
+| MCP tools | Integration capabilities, through the MCP resolver |
+| Extension tools | No trusted resolver |
+
+Never bindable:
+
+- `request_user_input` (`session.input`). Questions for the user belong in the conversation; Pi likewise never lets scripts call tools that ask the user (its `model-only` exposure).
+- `update_plan`, `submit_plan`, `update_plan_progress`, and `request_replan` (`session.*`), which control the session.
+- `jobs`. Background jobs belong to model turns and their completion wake-ups, not to a bounded script.
+- `subagent` and `subagent_registry` (section 5.3).
+- The code-mode tool itself.
+- The `mcp` gateway tool. Its management actions (connect, authenticate, enable) are lifecycle operations, and MCP tool calls get their own bindings.
+- MCP prompts, which are user-preview by design, and MCP resources, which the model reads directly through the gateway.
+
+Nested calls cannot start background jobs: a nested call with `background: true` rejects with `invalid_arguments` (`Scripts cannot start background jobs`).
+
+#### Writes and bash
+
+Scripts may call `edit`, `write`, and `bash` in Build mode. OpenAI recommends direct calls for writes and approval-sensitive actions "to preserve a clear authorization boundary" ([guide](https://developers.openai.com/api/docs/guides/tools-programmatic-tool-calling)). In Volt that boundary holds per call: every nested call passes the same tool-call policy and hooks as a direct call, carries a parent-call origin, and appears in the failure summary (section 5.11). Bulk edits and repeated commands are among the main uses of code mode, and Pi, Codex, and DeepSeek allow both.
+
+Shell commands written inside JavaScript are fragile. In testing, 6 of 12 realistic commands written in plain template literals changed or failed: `${HOME}` became JavaScript interpolation, `\d` lost its backslash, a Windows path gained a carriage return, and an embedded backtick was a syntax error. Written with `String.raw` and `$VAR` instead of `${VAR}`, 11 of 12 were intact and the remaining one failed loudly. Guidance recommends that form, and the bash script value carries `exitCode` and the output, so a mangled command is visible. Pydantic keeps its shell tools out of scripts for this reason; Volt keeps bash and mitigates instead.
+
+#### MCP tools
+
+- One binding per MCP tool. Calls dispatch through the MCP manager's call path, so server filters, `trustedReads` revalidation in restricted profiles, risk classification, audit, and authentication apply as they do to gateway calls. They do not go through the gateway's generic `call` action.
+- A lazy server connects on its first call. A server that needs authentication fails the call with `failed` (`unavailable`) and a message naming the sign-in command.
+- A tool promoted with `directTools` gets no second binding.
+- For failure summaries (section 5.11), an MCP call counts as read-only only when the MCP resolver authorizes it as a trusted read.
+- Binding names and discovery are part of the model-facing contract (section 8).
+
+#### Restricted profiles
+
+- In Plan mode the binding set is narrowed to tools the research profile can authorize: workspace reads, network reads, process inspection, and MCP tools configured as trusted reads. Per-call authorization still applies, so `lsp` `rename` and `fix` reject with `blocked`.
+- The code-mode tool gets a trusted operation resolver that advertises the capability sets of its bindings, so a grant profile can make it visible (`isToolVisibleUnderGrant`, `src/core/operation-authorization.ts:232`) and authorize it.
+- Successful nested reads record Plan research evidence through the existing tool-result policy, because nested calls pass that policy under their own call IDs.
+
+#### Declarations
+
+Volt's 14 built-in tools measure about 3.25k tokens as native JSON Schema declarations and about 3.0k as TypeScript declarations. In complement mode the native declarations are already in context, so the size of the binding set matters mainly through how bindings are presented, which is part of the model-facing contract (section 8).
+
+Rejected:
+
+- MCP tools only. Scripts could not combine MCP results with file reads, edits, or commands.
+- Read-only tools only (OpenAI's default). It gives up bulk edits and repeated commands, while per-call policy already keeps the authorization boundary.
+- Making tools callable from scripts whenever they are registered, even when inactive (Pi's `codemode` and `deferred` exposures). Code mode would reach tools the session's policy left out.
+- Routing MCP calls through the `mcp` gateway's `call` action. It loses per-tool declarations and makes scripts pass server and tool names as strings.
+
+## 6. Rejected alternatives
+
+| Alternative | Reason |
+|---|---|
+| `node:vm`, plain worker threads, the Node permission model, ShadowRealm | Not security boundaries. Node's documentation says `node:vm` "is not a security mechanism", and the permission model "does not provide security guarantees in the presence of malicious code". DeepSeek's worker-thread runtime was escaped with `import('node:fs')` ([discussion #3245](https://github.com/deepseek-ai/deepseek-harness/discussions/3245)). |
+| vm2 or another JavaScript-level membrane | Repeated sandbox escapes as V8 changes. |
+| SES / Hardened JavaScript in process | A capability boundary without memory or time limits, and `lockdown()` would freeze Volt's own realm. |
+| `isolated-vm` | Maintenance mode, majors coupled to Node release lines, native build at install, soft memory limit, and a critical 2026 escape in its native glue. |
+| Sandboxed Node child process (DeepSeek) | Safe only under an OS sandbox, which Volt lacks; reported at about 100 ms per program. |
+| Native engine in Volt's process (rquickjs, Boa via napi) | Loses WebAssembly memory containment. QuickJS-NG does not issue CVEs; Boa reportedly lacked a heap cap. A crash or panic (`workspace-fs` builds with `panic = "abort"`) ends the conversation process. A second V8 cannot practically be embedded in Node's process. |
+| Rust sidecar process (Codex approach) | Not rejected; deferred as a future backend (section 5.8). Costs a new executable for every target, a hardened IPC protocol, and pool management. |
+| Custom interpreter (OpenCode) | Large maintenance burden; OpenCode's has no memory cap. |
+| `quickjs-emscripten` | Older bundled QuickJS-NG, single maintainer, and its Asyncify variant supports only one suspended host call at a time. |
+| Python (Monty, Pyodide) | A second language runtime; Pyodide is heavy. Monty's Node WASM build was not evaluated. |
+
+## 7. Integration requirements
+
+These follow from Volt's architecture and apply whatever the open decisions in section 8 settle.
+
+- **Policy.** Every nested call passes argument validation and the session's tool-call and tool-result gates, as extension services already do. The host never calls `ToolDefinition.execute` directly for a nested call.
+- **Attribution.** Nested calls need a parent-call origin so hooks, audit, and policy can tell them apart from model-issued calls. `ExtensionOperationOrigin` is the existing attribution type to extend.
+- **Restricted profiles.** In restricted profiles such as Plan mode, a script must not reach operations the profile does not authorize, including MCP tools outside `trustedReads` (section 5.12).
+- **Bash.** Nested bash calls run without the stall-move context (section 5.6).
+- **Public tool API.** Script-value projections are internal to built-in tools and MCP in v1, so `ToolDefinition` does not change.
+- **Exact MCP numbers.** The lossless codec cannot recover integers the MCP SDK has already rounded. Fixing that needs an exact-number decode path upstream ([modelcontextprotocol/typescript-sdk#3150](https://github.com/modelcontextprotocol/typescript-sdk/issues/3150)) and Volt-side changes through the MCP manager and output store ([#1024](https://github.com/volt-hq/Volt/issues/1024)), likely including an upgrade to MCP SDK v2.
+- **iOS app compatibility.** The app rejects unknown fields and variants in host frames ([AGENTS.md](https://github.com/volt-hq/Volt/blob/main/AGENTS.md#ios-app-compatibility)). New protocol events for nested calls would require a compatible app build first; until then, nested-call records travel inside the outer tool result.
+- **Packaging.** The standalone binary must ship `quickjs.wasm` and the worker entry as files, as it already does for native prebuilds and the session-store worker.
+- **Licensing.** The `quickjs-wasi` package license covers only Vercel's wrapper. The WASM binary also contains QuickJS-NG (MIT) and components linked by the wasi-sdk build, whose notices are not in the npm package and must be added to the standalone license files. The exact component list must be derived from the `quickjs-wasi` build.
+- **Dependency approval.** `quickjs-wasi` is a new direct dependency, pinned exactly, and requires maintainer approval and a shrinkwrap update.
+- **Engine updates.** QuickJS-NG states that it no longer accepts private security reports or issues CVEs, and that untrusted bytecode is out of scope ([SECURITY.md](https://github.com/quickjs-ng/quickjs/blob/master/SECURITY.md)). Volt tracks QuickJS-NG releases through `quickjs-wasi` and never loads bytecode or snapshots from untrusted sources.
+
+## 8. Open decisions
+
+1. **Nested-call scheduling.** Proposed: honor each tool's `executionMode`, so `sequential` tools run one at a time even when a script uses `Promise.all`, with a bounded overlap for parallel-safe tools (similar to DeepSeek's `maxParallelSubCalls`).
+2. **Model-facing contract.** Tool name; input shape (proposed: `{ code, description }` JSON, which every provider supports; JSON input makes the model escape code twice, which compounds the shell-quoting problem of section 5.12, so raw input is worth considering where providers support it); binding names, including MCP namespaces; presenting bindings for natively declared tools without repeating their declarations; TypeScript declarations generated from TypeBox schemas, including `ToolCallError`, `ImageRef`, and the projected script values; in-script discovery (`search`/`describe`) for tools not listed in the description; prompt-cache-stable descriptions; guidance on `Promise.allSettled`, `image(ref)`, and the `context.source` reviver.
+3. **Enablement.** Opt-in setting, per-model routing, and interaction with the MCP gateway and `directTools`.
+4. **Observability.** The `details` shape, and how nested calls appear in the TUI, session records, audit, and remote clients within the iOS constraint (section 7).
+5. **State.** Proposed: no cross-script `store()`/`load()` in v1.
+6. **Tuning.** `memoryLimit` default, pool cap, queue size, idle timeout, grace period, worker stack size, the bridge caps (section 5.9), the output budget split (section 5.10), and the summary and error-block bounds (section 5.11).
+
+## 9. Risks
+
+- **Engine vulnerabilities without CVEs.** Mitigated by WebAssembly containment, the single-bridge rule, host-side validation of every call, exact pinning, and tracking QuickJS-NG releases.
+- **Maintainer concentration.** `quickjs-wasi` has two maintainers. It is MIT-licensed with a documented wasi-sdk build, so Volt can rebuild or fork it.
+- **Documentation drift.** The `quickjs-wasi` README states that the stack guard is unavailable on WASI and lists seven imports; version 3.6.3 has a working `maxStackSize` option and twelve imports. Volt pins behavior with its own tests rather than relying on the README.
+- **Interpreter speed.** Heavy computation is slow. Acceptable for glue code; the compute budget bounds abuse.
+- **Cost on small tasks.** Code mode costs more than direct calls on short tasks. Mitigated by keeping it opt-in and keeping its guidance compact.
+- **Repeated side effects.** Scripts that fail after writes, or that the model reruns, can repeat side effects. Mitigated by failure results that list nested calls and calls that possibly applied (sections 5.9 and 5.11).
+- **BigInt surprises.** Integers beyond the safe range arrive in scripts as BigInt, and mixing them with numbers throws (`id + 1`). This is rare, because most APIs send 64-bit IDs as strings, and an exception is preferable to silent rounding. Guidance covers it.
+- **Forgotten images.** A script that never calls `image(ref)` shows no images. Mitigated by listing unshown images in the result.
+- **Models printing whole tool results.** Models often print entire results back into the output; in one Codex dataset, 748 of about 2,340 cells printed a whole `exec_command` result. Mitigated by compact script values (section 5.9), the output budget with structural truncation and spill (section 5.10), and guidance.
+
+## 10. Validation so far
+
+Measured on Windows with Node 24.20.0 and `quickjs-wasi` 3.6.3 (QuickJS-NG 0.17.0), using throwaway scripts outside the repository.
+
+| Check | Result |
+|---|---|
+| Module compile | 2 ms |
+| VM create | 0.55 to 0.68 ms |
+| Create plus 16.8 KB prelude with 40 bindings | 4.9 ms |
+| Snapshot restore | 0.8 ms (1.6 MiB raw snapshot) |
+| Baseline VM linear memory | 1.3 MiB |
+| Worker thread plus VM, end to end | about 44 ms per script (72 ms first run) |
+| Ten parallel 100 ms nested calls | 164 ms total, ten in flight |
+| Ambient globals | `process`, `require`, `fetch`, `setTimeout`, `WebAssembly` undefined; `import('node:fs')` fails |
+| `while (true) {}` and `while (true) await null` with a 500 ms deadline | Interrupted at about 512 ms |
+| Regex backtracking, comparator sort, large `JSON.stringify` | Interrupted within 300 to 370 ms; VM reusable |
+| Large `indexOf` loop | Ignored the interrupt for 2.5 s; `worker.terminate()` stopped it in 3.7 ms |
+| 32 MiB `memoryLimit` | Catchable out-of-memory error; linear memory 32.3 MiB |
+| Deep recursion | Host-side `RangeError` by default; catchable guest `RangeError` with `maxStackSize` (see the stack table below) |
+| Interrupt handler | Called about every 5,000 loop iterations; 13 to 20% overhead on a tight loop |
+| 11.5 MiB JSON passed in, parsed, and filtered | 127 ms |
+| Idle worker with one VM | Roughly 1 to 9 MiB (Windows working-set figures understate committed memory) |
+
+Codec primitives and costs, on a 0.89 MiB payload containing integers above `Number.MAX_SAFE_INTEGER` (every exact method returned them exactly):
+
+| Check | Node 24.20 | Node 22.20 | QuickJS-NG 0.17 |
+|---|---|---|---|
+| `context.source` in `JSON.parse` revivers, `JSON.rawJSON` | Available | Available | Available |
+| `JSON.parse('-0')` is `-0`; lone surrogates round-trip | Yes | Yes | Yes |
+| Plain `JSON.parse` (lossy) | 2.7 ms | 5.2 ms | 13.5 ms |
+| `JSON.parse` with a `context.source` reviver | 24.1 ms | 34.7 ms | 41.6 ms |
+| `lossless-json` 4.3.3 parse | 10.7 ms | 12.0 ms | 308.6 ms |
+| `JSON.stringify` with a `JSON.rawJSON` replacer | 6.8 ms | 8.4 ms | 40.5 ms |
+| `lossless-json` 4.3.3 stringify | 7.5 ms | 12.8 ms | 194.6 ms |
+
+`@modelcontextprotocol/client` 2.4.0 decodes `{"id":9007199254740993}` in `structuredContent` as `9007199254740992` ([modelcontextprotocol/typescript-sdk#3150](https://github.com/modelcontextprotocol/typescript-sdk/issues/3150)).
+
+Output format prototype: a lenient guest prelude in QuickJS rendered realistic scripts in four candidate formats, counted with the o200k tokenizer:
+
+| Scenario | Pi separators | Unmarked stream | Fenced stream (decided) | JSON envelope |
+|---|---|---|---|---|
+| One log line and a small return value | 45 | 40 | 40 | 44 |
+| 150 log lines, a summary, a 20-row return value | 1781 | 1760 | 1760 | 1767 |
+| Map, Set, Date, BigInt, cycle, error values | 124 | 102 | 102 | 117 |
+| Two captioned images | 85 | 70 | 70 | 108 |
+| Two multi-line `text()` items and console lines | 103 | 73 (ambiguous) | 95 | 80 |
+| 50 single-line `text()` calls | 927 | 471 | 471 | 475 |
+| 40 lines of code with quotes and backslashes | 1396 | 1381 | 1392 | 1385 |
+| 315 KB of output, truncated to 50 KB | 9909 | 9903 | 9904 | 9462, invalid JSON |
+
+A 20-row return value cost 522 tokens as compact JSON and 842 pretty-printed. Structural truncation reduced a 2.5 MB return value to 25 KB of valid JSON ending in `"[4936 more items]"`.
+
+Stack guard against the worker's native stack (recursion through plain and async functions, and a 100,000-level `JSON.parse`):
+
+| Worker native stack | `maxStackSize` | Recursion | Async recursion | Deep `JSON.parse` |
+|---|---|---|---|---|
+| 1 MB | 512 KiB | Host overflow | Host overflow | Host overflow |
+| 4 MB (worker default) | 512 KiB | Guest `RangeError` | Guest `RangeError` | Host overflow |
+| 8 MB | 512 KiB | Guest `RangeError` | Guest `RangeError` | Guest `RangeError` |
+| 4 MB | 256 KiB | Guest `RangeError` | Guest `RangeError` | Guest `RangeError` |
+
+Error reporting in QuickJS, through the same-line wrapper:
+
+- Syntax errors report exact lines and columns (`script.js:3:11`); runtime stacks name functions with script lines (`at parse (script.js:2:10)`).
+- `cause` chains, `AggregateError` inner errors, and thrown non-`Error` values are recoverable inside the guest; read from the host, a thrown object renders as `[object Object]`.
+- The unhandled-rejection callback fires for background rejections and also for the script's own rejected promise.
+- Out-of-memory surfaces as a catchable `InternalError: out of memory`; the host's interrupt cannot be caught.
+
+Nested-call summary formats for a failed script with 49 calls (41 reads, 6 writes, a failed bash call, and an MCP call still running when stopped):
+
+| Format | Tokens | Shows which writes happened |
+|---|---|---|
+| Names and statuses (Pi) | 216 | No |
+| Every call with arguments, first 20 (Pydantic-like) | 299 | No; the first 20 calls were reads |
+| Grouped: read-only collapsed, state changes listed (decided) | 231 | Yes, with paths |
+
+Declarations of Volt's built-in tools, measured from the built tool definitions with the o200k tokenizer: 3,254 tokens as JSON Schema declarations and 3,015 tokens as one TypeScript declaration block (largest: `lsp` 593, `request_user_input` 353, `bash` 313, `jobs` 309; smallest: `write` 84).
+
+Shell commands written inside a script, evaluated in QuickJS:
+
+| Command intended | Plain template literal | `String.raw` with `$VAR` |
+|---|---|---|
+| `git log --oneline -5` | Intact | Intact |
+| `grep -rn "TODO" src` | Intact | Intact |
+| `echo ${HOME}` | `ReferenceError: HOME is not defined` | Intact (`echo $HOME`) |
+| `for f in *.ts; do echo "$f"; done` | Intact | Intact |
+| `awk '{print $1}' file.txt` | Intact | Intact |
+| `grep -E "\d+\.\d+" versions.txt` | Changed to `d+.d+` | Intact |
+| `printf "a\tb\n"` | Changed to real tab and newline | Intact |
+| `sed -i 's/foo/bar/g' a.txt` | Intact | Intact |
+| `jq ".items[] \| select(.id == $id)" --arg id 3 data.json` | Intact | Intact |
+| `find . -name '*.log' -exec rm {} \;` | Changed: backslash lost | Intact |
+| `echo "C:\repo\src"` | Changed: carriage return inserted | Intact |
+| ``npm test -- --grep `date +%F` `` | `SyntaxError` | `SyntaxError` |
+
+Gaps:
+
+- Repeat the runtime measurements on Node 22.23.1, the standalone runtime, and on Linux and macOS, including the stack-guard table, which depends on native stack usage. The codec primitives are confirmed on Node 22.20.
+- Verify loading `quickjs.wasm` and the worker entry from the standalone binary.
+- Derive the license notices embedded in the WASM binary.
+
+## 11. References
+
+- Pi codemode: <https://pi.dev/docs/latest/codemode>; release notes: <https://github.com/earendil-works/pi/releases/tag/v0.99.0>
+- DeepSeek Harness PTC note: <https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/feature/2026-06-15-ptc.md>
+- DeepSeek-V4.1-Flash scaffold comparison: <https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/README.md>
+- Pydantic benchmark: <https://pydantic.dev/articles/why-code-mode-is-the-future>; CodeMode docs: <https://pydantic.dev/docs/ai/harness/code-mode/>
+- Anthropic programmatic tool calling: <https://platform.claude.com/docs/en/agents-and-tools/tool-use/programmatic-tool-calling>
+- OpenAI programmatic tool calling: <https://developers.openai.com/api/docs/guides/tools-programmatic-tool-calling>
+- Cloudflare Code Mode: <https://developers.cloudflare.com/agents/tools/codemode/>
+- Goose Code Mode: <https://goose-docs.ai/docs/guides/managing-tools/code-mode/>
+- `quickjs-wasi`: <https://github.com/vercel-labs/quickjs-wasi>
+- QuickJS-NG security policy: <https://github.com/quickjs-ng/quickjs/blob/master/SECURITY.md>
+- Node `vm` documentation: <https://nodejs.org/api/vm.html>
+- `lossless-json`: <https://github.com/josdejong/lossless-json>
+- Go MCP SDK precision fix: <https://github.com/modelcontextprotocol/go-sdk/issues/1236>, <https://github.com/modelcontextprotocol/go-sdk/pull/1239>
+- TypeScript MCP SDK exact-number decode request: <https://github.com/modelcontextprotocol/typescript-sdk/issues/3150>
+- Volt MCP exact numbers: <https://github.com/volt-hq/Volt/issues/1024>
+- Pi v1.1.0 release notes (output item boundaries): <https://github.com/earendil-works/pi/releases/tag/v1.1.0>
+- Codex code mode issues: output spill request <https://github.com/openai/codex/issues/49907>, unbounded output <https://github.com/openai/codex/issues/42367>, completed calls on failure <https://github.com/openai/codex/issues/49908>
+- Cloudflare call records leaking into model output: <https://github.com/cloudflare/agents/issues/2143>
+- Pi failure rendering: `dist/extensions/codemode/execute.js` in `@earendil-works/pi-coding-agent` 1.5.0 on npm
+- DeepSeek Harness run failures: <https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/core/tool-executor-ptc/src/errors.ts>, <https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/core/tool-executor-ptc/src/ptc.ts>
+- OpenCode interrupt discarding finished results: <https://github.com/anomalyco/opencode/issues/54222>
+- Pi callable tools: `dist/extensions/codemode/tool.js` (`getCodemodeCallableTools`) in `@earendil-works/pi-coding-agent` 1.5.0 on npm; Pi tool exposure: <https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md>
+
+Vendor benchmark figures are as published by each vendor. Figures for Anthropic, Cloudflare, OpenCode, Codex, and Goose come from a research summary that cited their documentation and issues; they were not each re-verified for this document. The Pi output-boundary fix was verified against its release notes, Pi's failure rendering against its published package, DeepSeek's failure text against its source, Pydantic's failure reporting and shell exclusion against its documentation, and OpenAI's routing guidance against its guide.
