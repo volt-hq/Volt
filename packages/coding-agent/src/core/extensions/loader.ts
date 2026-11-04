@@ -615,9 +615,9 @@ function createExtensionAPI(
 			runtime.sendMessage(message, options);
 		},
 
-		sendUserMessage(content, options): void {
+		sendUserMessage(content, options) {
 			assertRunning();
-			runtime.sendUserMessage(content, options);
+			return runtime.sendUserMessage(content, options);
 		},
 
 		appendEntry<T>(customType: string, data?: JsonCompatibleInput<T>): Promise<void> {

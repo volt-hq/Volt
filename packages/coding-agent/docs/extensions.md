@@ -716,7 +716,7 @@ Inside `before_agent_start`, `event.systemPrompt` and `ctx.getSystemPrompt()` bo
 
 #### agent_start / agent_end
 
-Fired once per user prompt.
+Fired for each agent loop. Retries and compaction recovery can run additional loops for one prompt. `agent_end` is **not** successful foreground settlement; use `agent_settled` for automatic continuation.
 
 ```typescript
 volt.on("agent_start", async (_event, ctx) => {});
@@ -725,6 +725,28 @@ volt.on("agent_end", async (event, ctx) => {
   // event.messages - messages from this prompt
 });
 ```
+
+#### agent_settled
+
+Fired after an actual foreground operation finishes, including automatic retries, compaction, and queued successors. Handled commands and intercepted inputs that run no agent do not fire this extension event. It is distinct from the SDK's notification-only `agent_settled` event.
+
+`event.outcome` is `completed`, `aborted`, `failed` (including failed recovery), or `stopped` (policy/tool stop). Return `{ prompt }` to **propose** a fresh extension-source prompt; do not send input from this handler. The first valid proposal in extension load/registration order wins. All handlers may observe the settlement.
+
+```typescript
+volt.on("agent_settled", async (event, ctx) => {
+  if (event.outcome !== "completed" || event.signal.aborted) return;
+  // Read your extension's current, explicitly enabled automation state here.
+  // Return undefined when finished, paused, blocked, or awaiting user input.
+  if (!goalIsActive()) return;
+  return { prompt: "Continue the confirmed goal; stop if blocked or complete." };
+});
+```
+
+Volt admits a proposal only while its originating operation, branch, extension instance, and stop generation are still current, with no newer or pending input. Plan mode and review discussions never admit these proposals. Abort (including a late abort after terminal notification), input, navigation, reload, disable, or closure can revoke one. Revoked proposals are discarded, not queued for replay. Ordinary input and `before_agent_start` hooks still run for an admitted prompt; the host rechecks its authority after asynchronous preflight and receipt persistence, before starting the reserved turn.
+
+`event.signal` and this handler's `ctx.signal` represent proposal cancellation, not the already-ended operation's signal. Check it after awaits and use it to pause extension-owned automation if cancellation arrives while preparing a proposal. Host cancellation reasons are `aborted` (a stop), `superseded` (newer input, newer work, or session changes), `refused` (Plan mode, a review discussion, a closed admission gate, or a session operation or extension command still running), and `failed` (dispatch failed; also reported as an extension error); retirement/closure may use the platform's default abort reason. A returned proposal is either admitted or its signal is aborted with one of these reasons, so automation that waits on the signal never strands. Steering, follow-ups, and slash commands emit no `input` event but still supersede pending settlements. A superseded notification must not mutate newer automation state. Remove extension-owned listeners when no longer needed, and retain no session contexts across retirement. Hooks run outside the conversation's serialized event-delivery tail. `session.waitForIdle()` includes pending proposals and turns they start, whereas the SDK settlement notification still describes the operation just ended.
+
+There is no built-in continuation count. Extensions must stop on completion, explicit pause/abort, failure, or host policy; they must not reinterpret cancellation as permission to try again. Daemon sessions may continue after clients detach, so make that behavior explicit before enabling automation.
 
 #### turn_start / turn_end
 
@@ -1746,7 +1768,18 @@ volt.sendUserMessage("And then summarize", { deliverAs: "followUp" });
   - `"steer"` - Queues the message for delivery after the current assistant turn finishes executing its tool calls
   - `"followUp"` - Waits for agent to finish all tools
 
-When not streaming, the message is sent immediately and triggers a new turn. When streaming without `deliverAs`, throws an error.
+When not streaming, the message is sent immediately and triggers a new turn. When streaming without `deliverAs`, the message is refused.
+
+`sendUserMessage()` returns a promise that resolves once the host admitted or refused the message; it never rejects, so ignoring it is safe:
+
+- `{ success: true, outcome: "admitted" }` - the message starts a turn, or was queued for the running one.
+- `{ success: true, outcome: "handled" }` - an extension's `input` hook handled it; no turn runs for it.
+- `{ success: false, error }` - refused before admission (no model or credentials, the agent busy without `deliverAs`, a stop or session change, closure). The error is also reported as an extension error.
+
+```typescript
+const sent = await volt.sendUserMessage("Resume the task.");
+if (!sent.success) ctx.ui.notify(`Could not start: ${sent.error}`, "warning");
+```
 
 See [send-user-message.ts](../examples/extensions/send-user-message.ts) for a complete example.
 

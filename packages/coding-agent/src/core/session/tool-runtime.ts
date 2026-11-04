@@ -642,16 +642,20 @@ export class SessionToolRuntime {
 		].filter(
 			(tool) => isAllowedExtensionTool(tool.definition.name) && !NATIVE_PLAN_TOOL_NAMES.has(tool.definition.name),
 		);
+		// A `baseToolsOverride` tool is the caller's implementation, so it is labeled an SDK tool, not a built-in.
+		// Planning and direct MCP tools replace an override of the same name and keep the built-in label.
+		const baseToolsOverride = this.baseToolsOverride;
+		const baseToolSourceInfo = (name: string): SourceInfo =>
+			baseToolsOverride !== undefined &&
+			Object.hasOwn(baseToolsOverride, name) &&
+			!this.trustedHostToolNames.has(name) &&
+			!this.directMcpToolNames.has(name)
+				? createSyntheticSourceInfo(`<sdk:${name}>`, { source: "sdk" })
+				: createSyntheticSourceInfo(`<builtin:${name}>`, { source: "builtin" });
 		const definitionRegistry = new Map<string, ToolDefinitionEntry>(
 			Array.from(this.baseToolDefinitions.entries())
 				.filter(([name]) => isAllowedListedTool(name))
-				.map(([name, definition]) => [
-					name,
-					{
-						definition,
-						sourceInfo: createSyntheticSourceInfo(`<builtin:${name}>`, { source: "builtin" }),
-					},
-				]),
+				.map(([name, definition]) => [name, { definition, sourceInfo: baseToolSourceInfo(name) }]),
 		);
 		for (const tool of allCustomTools) {
 			definitionRegistry.set(tool.definition.name, {
@@ -683,10 +687,7 @@ export class SessionToolRuntime {
 		const wrappedBuiltInTools = wrapRegisteredTools(
 			Array.from(this.baseToolDefinitions.values())
 				.filter((definition) => isAllowedListedTool(definition.name))
-				.map((definition) => ({
-					definition,
-					sourceInfo: createSyntheticSourceInfo(`<builtin:${definition.name}>`, { source: "builtin" }),
-				})),
+				.map((definition) => ({ definition, sourceInfo: baseToolSourceInfo(definition.name) })),
 			runner,
 			this.host.lostSignal,
 		);
