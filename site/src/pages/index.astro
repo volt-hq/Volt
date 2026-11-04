@@ -1,18 +1,25 @@
 ---
 import { getCollection } from "astro:content";
+import VoltCast from "../components/VoltCast.astro";
+import "../styles/site.css";
 
 const installUnix = "curl -fsSL https://volt-cli.dev/install.sh | sh";
 const installWindows = "irm https://volt-cli.dev/install.ps1 | iex";
 const title = "Volt — a coding agent from terminal to phone";
 const description =
   "Volt is an open-source coding agent that runs on your machine, adapts to your workflow, and lets you continue the same live session from your phone.";
-const hasPublishedPosts = (await getCollection("blog", ({ data }) => !data.draft)).length > 0;
+const posts = (await getCollection("blog", ({ data }) => !data.draft)).sort(
+  (left, right) => right.data.publishedAt.valueOf() - left.data.publishedAt.valueOf(),
+);
+const hasPublishedPosts = posts.length > 0;
+const dateFormatter = new Intl.DateTimeFormat("en", { dateStyle: "long", timeZone: "UTC" });
 ---
 
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f7f5f0" />
     <title>{title}</title>
     <meta name="description" content={description} />
     <meta property="og:title" content={title} />
@@ -23,12 +30,12 @@ const hasPublishedPosts = (await getCollection("blog", ({ data }) => !data.draft
     <link rel="alternate" type="application/rss+xml" title="Volt Blog" href="/rss.xml" />
   </head>
   <body>
-    <header class="nav">
+    <header class="site-nav">
       <a class="brand" href="/">
-        <img src="/volt-icon.png" width="28" height="28" alt="" />
+        <img src="/volt-mark.svg" width="64" height="100" alt="" />
         volt
       </a>
-      <nav>
+      <nav aria-label="Main navigation">
         {hasPublishedPosts && <a href="/blog/">Blog</a>}
         <a href="/docs/">Docs</a>
         <a href="/docs/quickstart/">Quickstart</a>
@@ -36,23 +43,19 @@ const hasPublishedPosts = (await getCollection("blog", ({ data }) => !data.draft
       </nav>
     </header>
 
-    <main>
+    <main class="site-main">
       <section class="hero">
-        <p class="badge">Public beta</p>
+        <p class="kicker">Open source · Public beta</p>
         <h1>Your coding agent,<br />from terminal to phone.</h1>
-        <p class="sub">
+        <p class="lede">
           Volt keeps the agent runtime, credentials, and tools on your machine. Bring your
           preferred model, adapt the workflow with extensions, and continue the same live
           session from your iPhone when you step away.
         </p>
-        <div
-          class="install"
-          id="install-box"
-          data-unix={installUnix}
-          data-windows={installWindows}
-        >
+        <div class="install" id="install-box" data-unix={installUnix} data-windows={installWindows}>
+          <span class="install-legend" id="install-label">Install · macOS / Linux</span>
           <code id="install-cmd">{installUnix}</code>
-          <button id="copy-btn" aria-label="Copy install command">Copy</button>
+          <button id="copy-btn" type="button" aria-label="Copy install command">Copy</button>
         </div>
         <p class="install-alt">
           or <code>npm install -g --ignore-scripts @hansjm10/volt-coding-agent</code>
@@ -62,12 +65,126 @@ const hasPublishedPosts = (await getCollection("blog", ({ data }) => !data.draft
         <div class="cta">
           <a class="btn primary" href="/docs/quickstart/">Get started</a>
           <a class="btn" href="/docs/">Read the docs</a>
+          <a class="btn" href="https://github.com/volt-hq/Volt">GitHub</a>
         </div>
       </section>
 
-      <section class="showcase" aria-labelledby="showcase-title">
-        <h2 id="showcase-title">Start on your desk. Finish from anywhere.</h2>
-        <figure class="explainer">
+      <section class="section" aria-labelledby="product-title">
+        <header class="section-head">
+          <p class="label">The terminal</p>
+          <h2 id="product-title">A terminal built for agents.</h2>
+          <p>
+            A responsive TUI with native Plan mode, subagents, configurable keybindings, themes,
+            session branching, and compaction. Works in tmux, over SSH, even on Termux.
+          </p>
+        </header>
+        <figure class="product">
+          <img
+            class="shot"
+            src="/docs-images/interactive-mode.png"
+            width="1964"
+            height="2536"
+            loading="lazy"
+            decoding="async"
+            alt="Volt terminal session in a sample project. Below the startup header, the user asks Volt to make a failing slugify test pass. Volt reads src/slugify.js, runs npm test and sees the failure, edits the file with an inline diff, reruns npm test successfully, and summarizes the fix. The editor and footer show the project path, git branch, session name, model, and context usage."
+          />
+          <figcaption class="margin-notes">
+            <ol>
+              <li>
+                <h3>Every step stays in the transcript</h3>
+                <p>
+                  File reads, edits as inline diffs, and shell commands with their result. Long
+                  output collapses; <kbd>ctrl+o</kbd> expands it.
+                </p>
+              </li>
+              <li>
+                <h3>The editor shows the mode</h3>
+                <p>
+                  Build mode works directly. Plan mode limits the agent to research and asks you to
+                  approve the plan before it executes.
+                </p>
+              </li>
+              <li>
+                <h3>The footer keeps the context</h3>
+                <p>Working directory, branch, session name, model, context use, and cost.</p>
+              </li>
+            </ol>
+            <p class="shot-meta">A real session: Volt fixing a failing test in a sample project. Volt 0.2.1.</p>
+          </figcaption>
+        </figure>
+      </section>
+
+      <section class="section" id="phone" aria-labelledby="phone-title">
+        <header class="section-head">
+          <p class="label">Terminal to phone</p>
+          <h2 id="phone-title">Start on your desk. Finish from anywhere.</h2>
+          <p>
+            Every conversation you open in <code>volt</code> runs in a background daemon on your
+            computer. The terminal is one client and a paired iPhone is another; any number of them
+            can attach to the same conversation at once. Iroh connects
+            devices directly when possible and falls back to end-to-end encrypted relays.
+          </p>
+        </header>
+
+        <VoltCast />
+
+        <figure class="pair">
+          <img
+            class="shot phone"
+            src="/docs-images/shared-session-phone.png"
+            width="603"
+            height="1311"
+            loading="lazy"
+            decoding="async"
+            alt="Volt iOS app showing the conversation Discuss a Small Todo App in the volt workspace on branch fix/511-stale-default-models. The prompt Tell me about a small todo app, sent from the phone, is followed by the model's reply. The composer shows Build mode and the gpt-6-luna model."
+          />
+          <img
+            class="shot"
+            src="/docs-images/shared-session-terminal.png"
+            width="1964"
+            height="880"
+            loading="lazy"
+            decoding="async"
+            alt="The same conversation open in the Volt terminal UI on the computer, showing the same prompt and reply. The footer shows the branch, session name, gpt-6-luna, and [phone 1], meaning one phone is attached."
+          />
+          <figcaption>
+            One conversation in the Volt iOS app and in the terminal. The prompt came from the phone
+            and ran on the computer; <code>[phone 1]</code> in the terminal footer shows the attached
+            phone. Volt 0.2.1.
+          </figcaption>
+        </figure>
+
+        <div class="setup">
+          <div>
+            <h3>Pair a phone</h3>
+            <pre class="commands"><code><span class="prompt" aria-hidden="true">$ </span>volt daemon start
+<span class="prompt" aria-hidden="true">$ </span>volt remote workspace add /path/to/project --name my-project
+<span class="prompt" aria-hidden="true">$ </span>volt remote pair --workspace my-project</code></pre>
+            <p>
+              Or open <code>/remote</code> inside Volt. Scan the pairing QR code with the app once;
+              later reconnects use the saved computer.
+            </p>
+            <p class="links">
+              <a href="/docs/quickstart/#continue-from-your-iphone">Set up phone access →</a>
+              <a href="/docs/usage/#remote-access-over-iroh-preview">How remote access works →</a>
+            </p>
+          </div>
+          <ul class="notes">
+            <li>The iPhone app is in App Store review.</li>
+            <li>
+              Phone access needs the npm install (Node.js 22.19 or newer) on macOS with Apple
+              silicon, Linux, or Windows. Standalone executables work locally only.
+            </li>
+            <li>Keep the computer running and reachable while you're away.</li>
+            <li>
+              The managed relay and completion notifications are Volt Pro services; direct and
+              self-hosted connections are separate.
+            </li>
+          </ul>
+        </div>
+
+        <details class="tour">
+          <summary>Watch the 64-second tour</summary>
           <video
             controls
             playsinline
@@ -79,92 +196,80 @@ const hasPublishedPosts = (await getCollection("blog", ({ data }) => !data.draft
           >
             <source src="/media/volt-showcase.mp4" type="video/mp4" />
           </video>
-          <figcaption>A tour of Volt, from your terminal to your iPhone. 64 seconds, sound on.</figcaption>
-        </figure>
+          <p>A tour of Volt, from your terminal to your iPhone. Sound on.</p>
+        </details>
       </section>
 
-      <section class="features" aria-label="Features">
-        <div class="card">
-          <h3>A terminal built for agents</h3>
-          <p>
-            A responsive TUI with native Plan mode, subagents, configurable keybindings,
-            themes, session branching, and compaction. Works in tmux, over SSH, even on Termux.
-          </p>
-        </div>
-        <div class="card">
-          <h3>Choose your model</h3>
-          <p>
-            Sign in to a built-in provider with a subscription or API key, add endpoints that
-            speak the OpenAI, Anthropic, or Google APIs, or connect anything else with an
-            extension. Switch models from inside a session.
-          </p>
-        </div>
-        <div class="card">
-          <h3>Hackable by design</h3>
-          <p>
-            Volt ships with powerful defaults and skips the bloat. Add what you need with
-            skills, extensions, prompt templates, and installable Volt packages — or ask
-            Volt to build them for you.
-          </p>
-        </div>
+      <section class="section" aria-labelledby="more-title">
+        <header class="section-head">
+          <p class="label">Also in the box</p>
+          <h2 id="more-title">Your model. Your tools. Your workflow.</h2>
+        </header>
+        <dl class="specs">
+          <div>
+            <dt><a href="/docs/providers/">Choose your model</a></dt>
+            <dd>
+              Sign in to a built-in provider with a subscription or API key, add endpoints that speak
+              the OpenAI, Anthropic, or Google APIs, or connect anything else with an extension.
+              Switch models from inside a session.
+            </dd>
+          </div>
+          <div>
+            <dt><a href="/docs/extensions/">Hackable by design</a></dt>
+            <dd>
+              Volt ships with powerful defaults and skips the bloat. Add what you need with skills,
+              extensions, prompt templates, and installable Volt packages — or ask Volt to build them
+              for you.
+            </dd>
+          </div>
+          <div>
+            <dt><a href="/docs/security/">Supply chain, taken seriously</a></dt>
+            <dd>
+              Exact-pinned dependencies, shrinkwrapped releases, installs with lifecycle scripts
+              disabled, and documented containerization patterns when you want hard boundaries.
+            </dd>
+          </div>
+          <div>
+            <dt><a href="/docs/sdk/">Scriptable and embeddable</a></dt>
+            <dd>
+              Drive Volt programmatically with the SDK, RPC mode, or a JSON event stream. Build your
+              own tools on the same runtime the CLI uses.
+            </dd>
+          </div>
+        </dl>
       </section>
 
-      <section class="features secondary" aria-label="More about Volt">
-        <div class="card minor">
-          <h3>Supply chain, taken seriously</h3>
-          <p>
-            Exact-pinned dependencies, shrinkwrapped releases, installs with lifecycle
-            scripts disabled, and documented containerization patterns when you want hard
-            boundaries.
-          </p>
-        </div>
-        <div class="card minor">
-          <h3>Scriptable and embeddable</h3>
-          <p>
-            Drive Volt programmatically with the SDK, RPC mode, or a JSON event stream.
-            Build your own tools on the same runtime the CLI uses.
-          </p>
-        </div>
-      </section>
-
-      <section class="remote" id="phone" aria-labelledby="phone-title">
-        <h2 id="phone-title">Continue from your iPhone</h2>
-        <p>
-          <code>volt daemon start</code> keeps the agent runtime, provider credentials, and
-          tools on your workstation. Pair your iPhone from <code>/remote</code>, register
-          workspaces by name, and continue the same live sessions with transcripts and
-          completion notifications. Iroh connects
-          devices directly when possible and falls back to end-to-end encrypted relays.
-        </p>
-        <ul class="notes">
-          <li>The iPhone app is in App Store review.</li>
-          <li>
-            Phone access needs the npm install (Node.js 22.19 or newer) on macOS with Apple
-            silicon, Linux, or Windows. Standalone executables work locally only.
-          </li>
-          <li>Keep the computer running and reachable while you're away.</li>
-          <li>
-            The managed relay and completion notifications are Volt Pro services; direct and
-            self-hosted connections are separate.
-          </li>
-        </ul>
-        <div class="cta">
-          <a class="btn" href="/docs/quickstart/#continue-from-your-iphone">Set up phone access</a>
-          <a class="btn" href="/docs/usage/#remote-access-over-iroh-preview">How remote access works</a>
-        </div>
-      </section>
-
-      <section class="closing" aria-labelledby="closing-title">
-        <h2 id="closing-title">Try Volt</h2>
-        <p>Install it with one command, sign in to a model provider, and hand it your first task.</p>
-        <div class="cta">
-          <a class="btn primary" href="/docs/quickstart/">Get started</a>
-          <a class="btn" href="/docs/">Read the docs</a>
-        </div>
-      </section>
+      {
+        hasPublishedPosts && (
+          <section class="section" aria-labelledby="writing-title">
+            <header class="section-head split">
+              <div>
+                <p class="label">From the blog</p>
+                <h2 id="writing-title">Notes from building Volt.</h2>
+              </div>
+              <a href="/blog/">All posts →</a>
+            </header>
+            <ol class="writing">
+              {posts.slice(0, 2).map((post) => (
+                <li>
+                  <time datetime={post.data.publishedAt.toISOString()}>
+                    {dateFormatter.format(post.data.publishedAt)}
+                  </time>
+                  <div>
+                    <h3>
+                      <a href={`/blog/${post.id}/`}>{post.data.title}</a>
+                    </h3>
+                    <p>{post.data.description}</p>
+                  </div>
+                </li>
+              ))}
+            </ol>
+          </section>
+        )
+      }
     </main>
 
-    <footer>
+    <footer class="site-footer">
       <p>
         Maintained and distributed by{" "}
         <a href="https://github.com/hansjm10">Jordan Hans</a>. Derived from{" "}
@@ -172,7 +277,7 @@ const hasPublishedPosts = (await getCollection("blog", ({ data }) => !data.draft
         under the MIT License. Built in the open at{" "}
         <a href="https://github.com/volt-hq/Volt">github.com/volt-hq/Volt</a>.
       </p>
-      <nav>
+      <nav aria-label="Footer navigation">
         {hasPublishedPosts && <a href="/blog/">Blog</a>}
         <a href="/docs/">Docs</a>
         <a href="/docs/security/">Security</a>
@@ -185,12 +290,14 @@ const hasPublishedPosts = (await getCollection("blog", ({ data }) => !data.draft
     <script>
       // Server-rendered default is macOS/Linux; swap to PowerShell on Windows hosts.
       const box = document.getElementById("install-box");
+      const label = document.getElementById("install-label");
       const cmdEl = document.getElementById("install-cmd");
       const otherLabel = document.getElementById("install-other-label");
       const otherCmd = document.getElementById("install-other-cmd");
       const uaData = (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData;
       const platform = uaData?.platform || navigator.platform || navigator.userAgent;
-      if (/windows|win32|win64/i.test(platform) && box && cmdEl && otherLabel && otherCmd) {
+      if (/windows|win32|win64/i.test(platform) && box && label && cmdEl && otherLabel && otherCmd) {
+        label.textContent = "Install · Windows";
         cmdEl.textContent = box.dataset.windows ?? "";
         otherLabel.textContent = "macOS / Linux";
         otherCmd.textContent = box.dataset.unix ?? "";
@@ -198,139 +305,492 @@ const hasPublishedPosts = (await getCollection("blog", ({ data }) => !data.draft
 
       const btn = document.getElementById("copy-btn");
       btn?.addEventListener("click", async () => {
-        await navigator.clipboard.writeText(cmdEl?.textContent ?? "");
-        btn.textContent = "Copied";
+        try {
+          await navigator.clipboard.writeText(cmdEl?.textContent ?? "");
+          btn.textContent = "Copied";
+        } catch {
+          btn.textContent = "Select and copy";
+        }
         setTimeout(() => (btn.textContent = "Copy"), 1500);
       });
     </script>
 
     <style>
-      :root {
-        --bg: #171420;
-        --panel: #1d1a28b8;
-        --border: #39304f;
-        --text: #d4d4d4;
-        --muted: #808080;
-        --accent: #bf5af2;
-        --accent-bright: #e066ff;
-        --accent-dim: #7d6bfa;
-        --accent-soft: #322c44;
+      .hero {
+        padding-block: 6rem 5.5rem;
       }
-      * { box-sizing: border-box; margin: 0; }
-      body {
-        background: var(--bg);
-        background-image: radial-gradient(ellipse 80% 50% at 50% -10%, var(--accent-soft), transparent);
-        color: var(--text);
-        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+
+      .kicker {
+        margin: 0 0 1.4rem;
+        color: var(--muted);
+        font-family: var(--font-mono);
+        font-size: 0.78rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(2.6rem, 6.6vw, 4.75rem);
+        font-weight: 700;
+        line-height: 1.02;
+        letter-spacing: -0.04em;
+      }
+
+      .lede {
+        max-width: 38rem;
+        margin: 1.6rem 0 2.6rem;
+        color: var(--ink-soft);
+        font-size: 1.15rem;
         line-height: 1.6;
       }
-      code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
-      a { color: var(--accent); text-decoration: none; }
-      a:focus-visible { border-radius: 3px; outline: 2px solid var(--accent); outline-offset: 3px; }
 
-      .nav {
-        display: flex; justify-content: space-between; align-items: center;
-        max-width: 62rem; margin: 0 auto; padding: 1.2rem 1.5rem;
-      }
-      .brand {
-        display: flex; align-items: center; gap: 0.4rem;
-        font-weight: 700; font-size: 1.25rem; color: var(--text);
-      }
-      .brand img { border-radius: 6px; }
-      .nav nav { display: flex; flex-wrap: wrap; gap: 1.4rem; }
-      .nav nav a { color: var(--muted); font-size: 0.95rem; }
-      .nav nav a:hover { color: var(--text); }
-
-      main { max-width: 62rem; margin: 0 auto; padding: 0 1.5rem; }
-
-      .hero { text-align: center; padding: 4.5rem 0 4rem; }
-      .badge {
-        display: inline-block; padding: 0.25rem 0.8rem; border-radius: 99px;
-        border: 1px solid var(--border); color: var(--accent);
-        font-size: 0.85rem; margin-bottom: 1.4rem; background: var(--panel);
-      }
-      h1 { font-size: clamp(1.7rem, 4.5vw, 2.8rem); line-height: 1.15; letter-spacing: -0.02em; }
-      .sub { color: var(--muted); max-width: 44rem; margin: 1.2rem auto 2rem; font-size: 1.08rem; }
-
+      /* Framed like the Volt TUI editor: a border with its legend set into the top edge. */
       .install {
-        display: inline-flex; align-items: center; gap: 1rem;
-        background: #120f1a; border: 1px solid var(--border); border-radius: 10px;
-        padding: 0.85rem 1.1rem; max-width: 100%;
+        position: relative;
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        max-width: 44rem;
+        padding: 1.1rem 0.6rem 0.9rem 1.1rem;
+        border: 1.5px solid var(--violet);
+        border-radius: 4px;
       }
-      .install code { color: var(--accent); font-size: 0.95rem; overflow-x: auto; white-space: nowrap; }
+
+      .install-legend {
+        position: absolute;
+        top: 0;
+        left: 0.8rem;
+        padding-inline: 0.35rem;
+        background: var(--paper);
+        color: var(--violet);
+        font-family: var(--font-mono);
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        line-height: 1;
+        text-transform: uppercase;
+        transform: translateY(-50%);
+      }
+
+      .install code {
+        flex: 1;
+        overflow-x: auto;
+        color: var(--ink);
+        font-size: 0.95rem;
+        white-space: nowrap;
+      }
+
       .install button {
-        background: var(--accent); color: var(--bg); border: 0; border-radius: 6px;
-        padding: 0.35rem 0.9rem; font-weight: 600; cursor: pointer; flex-shrink: 0;
+        flex: none;
+        padding: 0.3rem 0.75rem;
+        border: 1px solid var(--rule-strong);
+        border-radius: 4px;
+        background: transparent;
+        color: var(--ink-soft);
+        font: inherit;
+        font-size: 0.85rem;
+        cursor: pointer;
       }
-      .install button:hover { background: var(--accent-bright); }
-      .install-alt { color: var(--muted); font-size: 0.82rem; margin-top: 0.8rem; }
-      .install-alt code { color: var(--muted); }
 
-      .cta { display: flex; gap: 0.8rem; justify-content: center; margin-top: 2rem; }
+      .install button:hover {
+        border-color: var(--violet);
+        color: var(--violet);
+      }
+
+      .install-alt {
+        max-width: 44rem;
+        margin: 0.9rem 0 0;
+        color: var(--muted);
+        font-size: 0.82rem;
+      }
+
+      .install-alt code {
+        color: var(--ink-soft);
+      }
+
+      .cta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.7rem;
+        margin-top: 2.2rem;
+      }
+
       .btn {
-        display: inline-block; padding: 0.6rem 1.3rem; border-radius: 8px;
-        border: 1px solid var(--border); color: var(--text); font-weight: 600;
+        display: inline-block;
+        padding: 0.6rem 1.15rem;
+        border: 1px solid var(--rule-strong);
+        border-radius: 5px;
+        color: var(--ink);
+        font-size: 0.95rem;
+        font-weight: 600;
       }
-      .btn:hover { border-color: var(--accent-dim); }
-      .btn.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
-      .btn.primary:hover { background: var(--accent-bright); }
 
-      .features {
-        display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
-        gap: 1rem; padding-bottom: 1rem;
+      .btn:hover {
+        border-color: var(--ink);
+        text-decoration: none;
       }
-      .features.secondary { padding-bottom: 4rem; }
-      .card {
-        border: 1px solid var(--border); border-radius: 12px; padding: 1.4rem;
-        background: var(--panel); transition: border-color 120ms ease;
-      }
-      .card:hover { border-color: var(--accent-dim); }
-      .card h3 { margin-bottom: 0.5rem; font-size: 1.05rem; }
-      .card p { color: var(--muted); font-size: 0.95rem; }
-      .card.minor { padding: 1.1rem 1.4rem; }
-      .card.minor h3 { font-size: 0.95rem; }
-      .card.minor p { font-size: 0.88rem; }
 
-      .showcase { text-align: center; padding-bottom: 4rem; }
-      .showcase h2, .remote h2, .closing h2 { font-size: 1.6rem; margin-bottom: 1rem; }
+      .btn.primary {
+        border-color: var(--ink);
+        background: var(--ink);
+        color: var(--paper);
+      }
 
-      .remote {
-        text-align: center; border: 1px solid var(--border); border-radius: 16px;
-        padding: 3rem 2rem; margin-bottom: 4rem; background: var(--panel);
+      .btn.primary:hover {
+        border-color: var(--violet);
+        background: var(--violet);
       }
-      .explainer { max-width: 52rem; margin: 0 auto; }
-      .explainer video {
-        display: block; width: 100%; height: auto; aspect-ratio: 16 / 9;
-        border: 1px solid var(--border); border-radius: 12px; background: #120f1a;
+
+      .section {
+        padding-block: 5rem;
+        border-top: 1px solid var(--rule);
       }
-      .explainer figcaption { color: var(--muted); font-size: 0.85rem; margin-top: 0.6rem; }
-      .remote p { color: var(--muted); max-width: 42rem; margin: 0 auto 1.6rem; }
-      .remote code { color: var(--accent); }
+
+      .section-head {
+        max-width: 42rem;
+        margin-bottom: 3rem;
+      }
+
+      .section-head.split {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 1rem 2rem;
+        max-width: none;
+      }
+
+      .section h2 {
+        margin: 0;
+        font-size: clamp(1.7rem, 3.4vw, 2.3rem);
+        line-height: 1.12;
+        letter-spacing: -0.03em;
+      }
+
+      .section-head p:not(.label) {
+        margin: 1rem 0 0;
+        color: var(--ink-soft);
+        font-size: 1.05rem;
+      }
+
+      .section h3 {
+        margin: 0;
+        font-size: 1rem;
+        line-height: 1.35;
+      }
+
+      main :not(pre) > code,
+      kbd {
+        padding: 0.1em 0.35em;
+        border-radius: 3px;
+        background: var(--paper-sunk);
+        font-size: 0.88em;
+      }
+
+      .install code,
+      .install-alt code {
+        padding: 0;
+        background: none;
+      }
+
+      .shot {
+        display: block;
+        width: 100%;
+        height: auto;
+        border-radius: 8px;
+        background: var(--night);
+      }
+
+      .product {
+        display: grid;
+        grid-template-columns: minmax(0, 7fr) minmax(0, 4fr);
+        gap: 3rem;
+        align-items: start;
+        margin: 0;
+      }
+
+      .margin-notes {
+        position: sticky;
+        top: 2rem;
+      }
+
+      .margin-notes ol {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        counter-reset: note;
+      }
+
+      .margin-notes li {
+        padding-block: 1.1rem;
+        border-top: 1px solid var(--rule);
+        counter-increment: note;
+      }
+
+      .margin-notes li:first-child {
+        padding-top: 0;
+        border-top: 0;
+      }
+
+      .margin-notes h3::before {
+        content: counter(note, decimal-leading-zero);
+        margin-right: 0.6rem;
+        color: var(--muted);
+        font-family: var(--font-mono);
+        font-size: 0.8rem;
+        font-weight: 400;
+      }
+
+      .margin-notes p {
+        margin: 0.35rem 0 0;
+        color: var(--ink-soft);
+        font-size: 0.93rem;
+      }
+
+      .shot-meta,
+      .pair figcaption,
+      .tour p {
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+
+      .margin-notes .shot-meta {
+        margin-top: 1.2rem;
+        padding-top: 1.1rem;
+        border-top: 1px solid var(--rule);
+      }
+
+      .pair {
+        display: grid;
+        grid-template-columns: minmax(0, 46fr) minmax(0, 223fr);
+        gap: 1.25rem;
+        align-items: start;
+        margin: 4.5rem 0 0;
+      }
+
+      .shot.phone {
+        border-radius: 18px;
+      }
+
+      .pair figcaption {
+        grid-column: 1 / -1;
+        max-width: 46rem;
+      }
+
+      .setup {
+        display: grid;
+        grid-template-columns: minmax(0, 7fr) minmax(0, 4fr);
+        gap: 3rem;
+        margin-top: 3.5rem;
+      }
+
+      .setup h3 {
+        margin-bottom: 0.9rem;
+      }
+
+      .commands {
+        overflow-x: auto;
+        margin: 0;
+        padding: 1rem 1.2rem;
+        border-radius: 6px;
+        background: var(--night);
+        color: var(--night-text);
+        font-size: 0.88rem;
+        line-height: 1.7;
+      }
+
+      .commands .prompt {
+        color: #8d879a;
+        user-select: none;
+      }
+
+      .setup p {
+        margin: 1rem 0 0;
+        color: var(--ink-soft);
+        font-size: 0.95rem;
+      }
+
+      .setup .links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem 1.6rem;
+        font-weight: 600;
+      }
+
       .notes {
-        list-style: none; padding: 0; max-width: 42rem; margin: 0 auto;
-        color: var(--muted); font-size: 0.9rem; text-align: left;
-      }
-      .notes li { position: relative; padding-left: 1.2rem; margin-bottom: 0.4rem; }
-      .notes li::before {
-        content: ""; position: absolute; left: 0.2rem; top: 0.65em;
-        width: 0.4rem; height: 0.4rem; border-radius: 50%; background: var(--accent-dim);
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        color: var(--ink-soft);
+        font-size: 0.9rem;
       }
 
-      .closing { text-align: center; padding-bottom: 5rem; }
-      .closing p { color: var(--muted); max-width: 42rem; margin: 0 auto; }
-
-      footer {
-        border-top: 1px solid var(--border); padding: 2rem 1.5rem; color: var(--muted);
-        display: flex; justify-content: space-between; flex-wrap: wrap; gap: 1rem;
-        max-width: 62rem; margin: 0 auto; font-size: 0.9rem;
+      .notes li {
+        padding-block: 0.7rem;
+        border-top: 1px solid var(--rule);
       }
-      footer nav { display: flex; flex-wrap: wrap; gap: 1.2rem; }
+
+      .notes li:first-child {
+        padding-top: 0;
+        border-top: 0;
+      }
+
+      .tour {
+        margin-top: 3rem;
+      }
+
+      .tour summary {
+        width: fit-content;
+        color: var(--violet);
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      .tour video {
+        display: block;
+        width: 100%;
+        max-width: 52rem;
+        height: auto;
+        aspect-ratio: 16 / 9;
+        margin-top: 1.2rem;
+        border-radius: 8px;
+        background: var(--night);
+      }
+
+      .tour p {
+        margin: 0.6rem 0 0;
+      }
+
+      .specs {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0 3rem;
+        margin: 0;
+      }
+
+      .specs div {
+        padding-block: 1.3rem 1.6rem;
+        border-top: 1px solid var(--rule);
+      }
+
+      .specs dt {
+        font-weight: 650;
+      }
+
+      .specs dt a {
+        color: var(--ink);
+      }
+
+      .specs dt a:hover {
+        color: var(--violet);
+      }
+
+      .specs dd {
+        margin: 0.4rem 0 0;
+        color: var(--ink-soft);
+        font-size: 0.95rem;
+      }
+
+      .section-head.split > a {
+        flex: none;
+        font-weight: 600;
+      }
+
+      .writing {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .writing li {
+        display: grid;
+        grid-template-columns: 12rem minmax(0, 1fr);
+        gap: 0.4rem 2rem;
+        padding-block: 1.5rem;
+        border-top: 1px solid var(--rule);
+      }
+
+      .writing time {
+        padding-top: 0.25rem;
+        color: var(--muted);
+        font-family: var(--font-mono);
+        font-size: 0.8rem;
+      }
+
+      .writing h3 {
+        font-size: 1.35rem;
+        letter-spacing: -0.02em;
+      }
+
+      .writing h3 a {
+        color: var(--ink);
+      }
+
+      .writing h3 a:hover {
+        color: var(--violet);
+      }
+
+      .writing p {
+        max-width: 40rem;
+        margin: 0.4rem 0 0;
+        color: var(--ink-soft);
+      }
+
+      @media (max-width: 860px) {
+        .product,
+        .setup {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .margin-notes {
+          position: static;
+        }
+
+        .pair {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .shot.phone {
+          width: min(60%, 16rem);
+        }
+
+        .pair .shot:not(.phone) {
+          grid-row: 1;
+        }
+      }
 
       @media (max-width: 600px) {
-        main { padding: 0 1rem; }
-        .remote { padding: 2rem 1.1rem; }
-        .install { flex-direction: column; gap: 0.6rem; align-items: stretch; text-align: center; }
-        .cta { flex-wrap: wrap; }
+        .hero {
+          padding-block: 3.5rem 3.5rem;
+        }
+
+        .install {
+          flex-direction: column;
+          align-items: stretch;
+          gap: 0.7rem;
+          padding-right: 1.1rem;
+        }
+
+        .install code {
+          white-space: pre-wrap;
+          overflow-wrap: anywhere;
+        }
+
+        .install button {
+          align-self: flex-start;
+        }
+
+        .section {
+          padding-block: 3.5rem;
+        }
+
+        .specs {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .writing li {
+          grid-template-columns: minmax(0, 1fr);
+        }
       }
     </style>
   </body>

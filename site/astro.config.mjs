@@ -13,7 +13,7 @@ export default defineConfig({
     starlight({
       title: "Volt",
       description: "A coding agent that runs on your machine and follows you from terminal to phone.",
-      logo: { src: "./public/volt-icon.png", alt: "Volt" },
+      logo: { src: "./public/volt-mark.svg", alt: "Volt" },
       favicon: "/volt-icon.png",
       social: [{ icon: "github", label: "GitHub", href: "https://github.com/volt-hq/Volt" }],
       sidebar,
