@@ -155,7 +155,8 @@ export const presentBash: ToolPresenter = (input) => {
 		description === undefined
 			? [
 					{ text: "$ ", bold: true },
-					{ text: head.first },
+					// The command is code: clients that highlight a shell call's code show it highlighted.
+					{ text: head.first, ...(command === undefined ? {} : { code: true }) },
 					...(head.more ? [{ text: head.more, token: "muted" as const }] : []),
 					...timeoutSuffix,
 				]

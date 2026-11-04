@@ -4,7 +4,7 @@ import { type MessagePresentation, PRESENTATION_MAX_SERIALIZED_BYTES } from "@ha
 import { resetCapabilitiesCache, setCapabilities, setCellDimensions, type TUI, visibleWidth } from "@hansjm10/volt-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { CustomMessage } from "../src/core/messages.ts";
-import { initTheme } from "../src/core/theme/runtime.ts";
+import { initTheme, theme } from "../src/core/theme/runtime.ts";
 import { presentBackground, presentBash, presentRead, presentWrite } from "../src/core/tools/presenters.ts";
 import {
 	HOST_UI_POLICY,
@@ -112,6 +112,37 @@ describe("host-presented tool rows", () => {
 		component.setExpanded(true);
 		expect(text(component)).toContain("Hidden resource instructions");
 		component.dispose();
+	});
+
+	it("colors what a call acts on in its title apart from the accent", () => {
+		const { component } = row("read", presentRead, {
+			args: { path: "src/app.ts" },
+			argsComplete: true,
+			state: "pending",
+		});
+		try {
+			const header = component.render(80).lines.find((line) => stripAnsi(line).includes("read src/app.ts")) ?? "";
+			expect(header).toContain(`${theme.getFgAnsi("toolTarget")} src/app.ts`);
+			expect(header).not.toContain(theme.getFgAnsi("accent"));
+		} finally {
+			component.dispose();
+		}
+	});
+
+	it("highlights a shell call's command in its title, and other code as inline code", () => {
+		const input = { args: { command: "npm test" }, argsComplete: true, state: "pending" } as const;
+		const header = (toolName: string): string => {
+			const { component } = row(toolName, presentBash, input);
+			try {
+				return component.render(80).lines.find((line) => stripAnsi(line).includes("$ npm test")) ?? "";
+			} finally {
+				component.dispose();
+			}
+		};
+		const shell = header("bash");
+		expect(shell).toContain(`${theme.getFgAnsi("syntaxFunction")}npm`);
+		expect(shell).not.toContain(theme.getFgAnsi("mdCode"));
+		expect(header("other")).toContain(`${theme.getFgAnsi("mdCode")}npm test`);
 	});
 
 	it("shows the result's images only while images are shown", () => {

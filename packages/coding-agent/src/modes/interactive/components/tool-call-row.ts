@@ -178,6 +178,7 @@ export class ToolCallRow implements Component {
 			isError: state === "done" && isError === true,
 			expanded: this.expanded,
 			expandHint: this.expandHint,
+			shellTitle: this.toolName === "bash",
 			...(elapsedMs === undefined ? {} : { elapsedMs }),
 			images: this.showImages ? this.images() : [],
 			...(work.length === 0 ? {} : { work }),

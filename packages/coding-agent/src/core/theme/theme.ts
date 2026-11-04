@@ -16,7 +16,7 @@ export const ThemeJsonSchema = Type.Object({
 	name: Type.String(),
 	vars: Type.Optional(Type.Record(Type.String(), ColorValueSchema)),
 	colors: Type.Object({
-		// Core UI (10 colors)
+		// Core UI (12 colors)
 		accent: ColorValueSchema,
 		border: ColorValueSchema,
 		borderAccent: ColorValueSchema,
@@ -24,11 +24,12 @@ export const ThemeJsonSchema = Type.Object({
 		success: ColorValueSchema,
 		error: ColorValueSchema,
 		warning: ColorValueSchema,
+		info: ColorValueSchema,
 		muted: ColorValueSchema,
 		dim: ColorValueSchema,
 		text: ColorValueSchema,
 		thinkingText: ColorValueSchema,
-		// Backgrounds & Content Text (11 required, 3 optional)
+		// Backgrounds & Content Text (12 required, 3 optional)
 		selectedBg: ColorValueSchema,
 		scrollbarThumb: Type.Optional(ColorValueSchema),
 		searchMatchBg: Type.Optional(ColorValueSchema),
@@ -42,6 +43,7 @@ export const ThemeJsonSchema = Type.Object({
 		toolSuccessBg: ColorValueSchema,
 		toolErrorBg: ColorValueSchema,
 		toolTitle: ColorValueSchema,
+		toolTarget: ColorValueSchema,
 		toolOutput: ColorValueSchema,
 		// Markdown (10 colors)
 		mdHeading: ColorValueSchema,

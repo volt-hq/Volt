@@ -139,7 +139,10 @@ describe("live feed", () => {
 		await harness.session.waitForIdle();
 		const tools = items().filter((item): item is Extract<LiveItem, { type: "tool" }> => item.type === "tool");
 		const start = tools.find((item) => item.op === "start");
-		expect(start?.presentation?.title).toEqual([{ text: "$ ", bold: true }, { text: command }]);
+		expect(start?.presentation?.title).toEqual([
+			{ text: "$ ", bold: true },
+			{ text: command, code: true },
+		]);
 		// Output streamed as appended lines of the presentation the client holds.
 		const appends = tools
 			.flatMap((item) => [...(item.patch?.summary ?? []), ...(item.patch?.body ?? [])])
@@ -216,7 +219,10 @@ describe("live feed", () => {
 		// The call is presented before it runs, with its arguments complete at last.
 		const start = all.findIndex((item) => item.type === "tool" && item.op === "start");
 		expect(all.indexOf(presented[0]!)).toBeLessThan(start);
-		expect(presented.at(-1)?.presentation.title).toEqual([{ text: "$ ", bold: true }, { text: command }]);
+		expect(presented.at(-1)?.presentation.title).toEqual([
+			{ text: "$ ", bold: true },
+			{ text: command, code: true },
+		]);
 		// A client folding them holds the presentation with the streaming message until the call runs.
 		const fold = foldLiveItems(emptyLiveFold(), all.slice(0, start));
 		const toolCallId = presented.at(-1)?.toolCallId ?? "";

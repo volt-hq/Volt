@@ -128,7 +128,7 @@ describe("bash presenter", () => {
 		const presented = present(presentBash, input({ command }, "done", { text: "a\nb" }));
 		expect(presented.title).toEqual([
 			{ text: "$ ", bold: true },
-			{ text: "for f in *; do" },
+			{ text: "for f in *; do", code: true },
 			{ text: " … +2 lines", token: "muted" },
 		]);
 		expect(presented.body?.[0]).toEqual({ type: "code", key: "command", language: "bash", code: command });
@@ -668,7 +668,10 @@ describe("background calls", () => {
 
 	it("keeps the tool's title and shows nothing more once the job started", () => {
 		expect(present(background, input({ command: "npm test", background: true }, "running"))).toEqual({
-			title: [{ text: "$ ", bold: true }, { text: "npm test" }],
+			title: [
+				{ text: "$ ", bold: true },
+				{ text: "npm test", code: true },
+			],
 			activity: "Starting background job",
 		});
 		const job = { id: "job_1", tool: "bash", toolCallId: "call", label: "npm test", status: "running" };
@@ -680,7 +683,12 @@ describe("background calls", () => {
 			}),
 		);
 		// The job is a work item clients show live under the call; its state at start would go stale.
-		expect(presented).toEqual({ title: [{ text: "$ ", bold: true }, { text: "npm test" }] });
+		expect(presented).toEqual({
+			title: [
+				{ text: "$ ", bold: true },
+				{ text: "npm test", code: true },
+			],
+		});
 		// The description titles the job's work item, not the call.
 		expect(
 			present(

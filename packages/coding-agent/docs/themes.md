@@ -66,6 +66,7 @@ vim ~/.volt/agent/themes/my-theme.json
     "success": "#00ff00",
     "error": "#ff0000",
     "warning": "#ffff00",
+    "info": "#00aaff",
     "muted": "secondary",
     "dim": 240,
     "text": "",
@@ -83,6 +84,7 @@ vim ~/.volt/agent/themes/my-theme.json
     "toolSuccessBg": "#1e2e1e",
     "toolErrorBg": "#2e1e1e",
     "toolTitle": "primary",
+    "toolTarget": "#00ffff",
     "toolOutput": "",
     "mdHeading": "#ffaa00",
     "mdLink": "primary",
@@ -143,15 +145,15 @@ vim ~/.volt/agent/themes/my-theme.json
 
 - `name` is required and must be unique.
 - `vars` is optional. Define reusable colors here, then reference them in `colors`.
-- `colors` must define all 52 required tokens. `scrollbarThumb`, `searchMatchBg`, and `searchMatchText` are optional and use the fallbacks below.
+- `colors` must define all 54 required tokens. `scrollbarThumb`, `searchMatchBg`, and `searchMatchText` are optional and use the fallbacks below.
 
 The `$schema` field enables editor auto-completion and validation.
 
 ## Color Tokens
 
-Every theme must define all 52 required color tokens. Fullscreen's optional `scrollbarThumb` and `searchMatchBg` tokens fall back to `selectedBg`; optional `searchMatchText` falls back to `text`. Existing custom themes therefore remain valid. Transcript search renders ordinary matches as underlined `searchMatchText` on `searchMatchBg`, and renders the current match as bold text with that foreground/background pair reversed.
+Every theme must define all 54 required color tokens. Fullscreen's optional `scrollbarThumb` and `searchMatchBg` tokens fall back to `selectedBg`; optional `searchMatchText` falls back to `text`. Existing custom themes therefore remain valid. Transcript search renders ordinary matches as underlined `searchMatchText` on `searchMatchBg`, and renders the current match as bold text with that foreground/background pair reversed.
 
-### Core UI (11 colors)
+### Core UI (12 colors)
 
 | Token | Purpose |
 |-------|---------|
@@ -162,12 +164,13 @@ Every theme must define all 52 required color tokens. Fullscreen's optional `scr
 | `success` | Success states |
 | `error` | Error states |
 | `warning` | Warning states |
+| `info` | Informational states (info notifications, info-styled text) |
 | `muted` | Secondary text |
 | `dim` | Tertiary text |
 | `text` | Default text (usually `""`) |
 | `thinkingText` | Thinking block text |
 
-### Backgrounds & Content (11 required, 3 optional)
+### Backgrounds & Content (12 required, 3 optional)
 
 | Token | Purpose |
 |-------|---------|
@@ -184,6 +187,7 @@ Every theme must define all 52 required color tokens. Fullscreen's optional `scr
 | `toolSuccessBg` | Tool box (success) |
 | `toolErrorBg` | Tool box (error) |
 | `toolTitle` | Tool title |
+| `toolTarget` | What a tool call acts on in its title (paths, patterns, resolved commands) |
 | `toolOutput` | Tool output text |
 
 ### Markdown (10 colors)

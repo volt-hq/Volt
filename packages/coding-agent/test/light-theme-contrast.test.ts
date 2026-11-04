@@ -56,12 +56,14 @@ describe("built-in light theme contrast", () => {
 			"success",
 			"error",
 			"warning",
+			"info",
 			"muted",
 			"dim",
 			"text",
 			"thinkingText",
 			"customMessageLabel",
 			"toolTitle",
+			"toolTarget",
 			"toolOutput",
 			"mdHeading",
 			"mdLink",
@@ -95,6 +97,7 @@ describe("built-in light theme contrast", () => {
 		expectContrast(theme, "customMessageLabel", "customMessageBg");
 		for (const surface of ["toolPendingBg", "toolSuccessBg", "toolErrorBg"]) {
 			expectContrast(theme, "toolTitle", surface);
+			expectContrast(theme, "toolTarget", surface);
 			expectContrast(theme, "toolOutput", surface);
 		}
 	});
