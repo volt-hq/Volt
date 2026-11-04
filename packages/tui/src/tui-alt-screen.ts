@@ -283,6 +283,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.pressedUrl = undefined;
 		this.selectionDragged = false;
 		this.resetRenderState();
+		this.terminal.write(`${ENTER_ALT_SCREEN}${DISABLE_AUTOWRAP}\x1b[2J\x1b[H\x1b[?25l`);
+	}
+
+	protected override afterTerminalStart(): void {
+		if (!this.mouseEnabled) return;
+		// Windows console input initialization can disable mouse forwarding. Request
+		// reporting only after raw mode and VT input are configured, including on restart.
 		const term = process.env["TERM"]?.toLowerCase() ?? "";
 		// Multiplexers can lag when every pointer movement is forwarded. Button-motion
 		// tracking preserves clicks, wheel events, selections, and scrollbar dragging.
@@ -294,9 +301,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			term.startsWith("screen")
 				? ENABLE_BUTTON_MOTION_MOUSE
 				: ENABLE_ALL_MOTION_MOUSE;
-		this.terminal.write(
-			`${ENTER_ALT_SCREEN}${DISABLE_AUTOWRAP}${this.mouseEnabled ? mouseSequence : ""}\x1b[2J\x1b[H\x1b[?25l`,
-		);
+		this.terminal.write(mouseSequence);
 	}
 
 	protected override beforeTerminalStop(_options: TuiStopOptions): void {
