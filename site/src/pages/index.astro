@@ -7,7 +7,7 @@ const installUnix = "curl -fsSL https://volt-cli.dev/install.sh | sh";
 const installWindows = "irm https://volt-cli.dev/install.ps1 | iex";
 const title = "Volt — a coding agent from terminal to phone";
 const description =
-  "Volt is an open-source coding agent that runs on your machine, adapts to your workflow, and lets you continue the same live session from your phone.";
+  "Volt is an open-source coding agent that runs on your computer. Start a conversation in the terminal and pick it up from your iPhone.";
 const posts = (await getCollection("blog", ({ data }) => !data.draft)).sort(
   (left, right) => right.data.publishedAt.valueOf() - left.data.publishedAt.valueOf(),
 );
@@ -48,9 +48,9 @@ const dateFormatter = new Intl.DateTimeFormat("en", { dateStyle: "long", timeZon
         <p class="kicker">Open source · Public beta</p>
         <h1>Your coding agent,<br />from terminal to phone.</h1>
         <p class="lede">
-          Volt keeps the agent runtime, credentials, and tools on your machine. Bring your
-          preferred model, adapt the workflow with extensions, and continue the same live
-          session from your iPhone when you step away.
+          Volt is a coding agent that runs in your terminal, on your own computer, using the model
+          subscription or API key you already have. When you step away, you can open the same
+          conversation on your iPhone and keep going.
         </p>
         <div class="install" id="install-box" data-unix={installUnix} data-windows={installWindows}>
           <span class="install-legend" id="install-label">Install · macOS / Linux</span>
@@ -72,10 +72,15 @@ const dateFormatter = new Intl.DateTimeFormat("en", { dateStyle: "long", timeZon
       <section class="section" aria-labelledby="product-title">
         <header class="section-head">
           <p class="label">The terminal</p>
-          <h2 id="product-title">A terminal built for agents.</h2>
+          <h2 id="product-title">What a session looks like</h2>
           <p>
-            A responsive TUI with native Plan mode, subagents, configurable keybindings, themes,
-            session branching, and compaction. Works in tmux, over SSH, even on Termux.
+            Here Volt is fixing a failing test in a small sample project. It reads the code, runs
+            the tests, edits the function, and reruns the tests until they pass.
+          </p>
+          <p>
+            Plan mode, subagents, session branching, and compaction are built in, and you can change
+            the keybindings and theme. It works in tmux and over SSH, and it runs on Android through
+            Termux.
           </p>
         </header>
         <figure class="product">
@@ -91,25 +96,25 @@ const dateFormatter = new Intl.DateTimeFormat("en", { dateStyle: "long", timeZon
           <figcaption class="margin-notes">
             <ol>
               <li>
-                <h3>Every step stays in the transcript</h3>
                 <p>
-                  File reads, edits as inline diffs, and shell commands with their result. Long
-                  output collapses; <kbd>ctrl+o</kbd> expands it.
+                  Tool calls show up inline as they run. Long output collapses so the transcript
+                  stays readable, and <kbd>ctrl+o</kbd> expands it.
                 </p>
               </li>
               <li>
-                <h3>The editor shows the mode</h3>
                 <p>
-                  Build mode works directly. Plan mode limits the agent to research and asks you to
-                  approve the plan before it executes.
+                  The label on the input box shows the mode. In Plan mode, Volt can only research,
+                  and it asks you to approve a plan before it changes anything.
                 </p>
               </li>
               <li>
-                <h3>The footer keeps the context</h3>
-                <p>Working directory, branch, session name, model, context use, and cost.</p>
+                <p>
+                  The footer has the working directory, branch, session name, model, how much context
+                  you've used, and what the session has cost so far.
+                </p>
               </li>
             </ol>
-            <p class="shot-meta">A real session: Volt fixing a failing test in a sample project. Volt 0.2.1.</p>
+            <p class="shot-meta">Screenshot from Volt 0.2.1.</p>
           </figcaption>
         </figure>
       </section>
@@ -117,12 +122,16 @@ const dateFormatter = new Intl.DateTimeFormat("en", { dateStyle: "long", timeZon
       <section class="section" id="phone" aria-labelledby="phone-title">
         <header class="section-head">
           <p class="label">Terminal to phone</p>
-          <h2 id="phone-title">Start on your desk. Finish from anywhere.</h2>
+          <h2 id="phone-title">Continue from your iPhone</h2>
           <p>
-            Every conversation you open in <code>volt</code> runs in a background daemon on your
-            computer. The terminal is one client and a paired iPhone is another; any number of them
-            can attach to the same conversation at once. Iroh connects
+            When you open a conversation in <code>volt</code>, it runs in a background daemon on your
+            computer, not inside the terminal window. Your phone attaches to that same conversation,
+            so you can close the terminal and keep going from the app. Iroh connects
             devices directly when possible and falls back to end-to-end encrypted relays.
+          </p>
+          <p>
+            I built this because prompting a tmux session over SSH from my phone felt like using the
+            wrong controller. I wrote about that in <a href="/blog/why-i-forked-pi-to-build-volt/">Why I Forked Pi to Build Volt</a>.
           </p>
         </header>
 
@@ -148,9 +157,9 @@ const dateFormatter = new Intl.DateTimeFormat("en", { dateStyle: "long", timeZon
             alt="The same conversation open in the Volt terminal UI on the computer, showing the same prompt and reply. The footer shows the branch, session name, gpt-6-luna, and [phone 1], meaning one phone is attached."
           />
           <figcaption>
-            One conversation in the Volt iOS app and in the terminal. The prompt came from the phone
-            and ran on the computer; <code>[phone 1]</code> in the terminal footer shows the attached
-            phone. Volt 0.2.1.
+            The same conversation in the app and in the terminal. The prompt was sent from the phone,
+            and <code>[phone 1]</code> in the terminal footer means a phone is attached. Screenshots
+            from Volt 0.2.1.
           </figcaption>
         </figure>
 
@@ -161,8 +170,8 @@ const dateFormatter = new Intl.DateTimeFormat("en", { dateStyle: "long", timeZon
 <span class="prompt" aria-hidden="true">$ </span>volt remote workspace add /path/to/project --name my-project
 <span class="prompt" aria-hidden="true">$ </span>volt remote pair --workspace my-project</code></pre>
             <p>
-              Or open <code>/remote</code> inside Volt. Scan the pairing QR code with the app once;
-              later reconnects use the saved computer.
+              You can also do all of this from <code>/remote</code> inside Volt. You only scan the QR
+              code once. After that, the app remembers your computer.
             </p>
             <p class="links">
               <a href="/docs/quickstart/#continue-from-your-iphone">Set up phone access →</a>
@@ -172,13 +181,13 @@ const dateFormatter = new Intl.DateTimeFormat("en", { dateStyle: "long", timeZon
           <ul class="notes">
             <li>The iPhone app is in App Store review.</li>
             <li>
-              Phone access needs the npm install (Node.js 22.19 or newer) on macOS with Apple
-              silicon, Linux, or Windows. Standalone executables work locally only.
+              Phone access needs the npm install (Node.js 22.19 or newer) on an Apple silicon Mac,
+              Linux, or Windows. The standalone executables only work locally.
             </li>
-            <li>Keep the computer running and reachable while you're away.</li>
+            <li>Your computer has to stay on and reachable while you're away.</li>
             <li>
-              The managed relay and completion notifications are Volt Pro services; direct and
-              self-hosted connections are separate.
+              The managed relay and completion notifications are part of Volt Pro. Direct and
+              self-hosted connections are separate from Pro.
             </li>
           </ul>
         </div>
@@ -196,44 +205,45 @@ const dateFormatter = new Intl.DateTimeFormat("en", { dateStyle: "long", timeZon
           >
             <source src="/media/volt-showcase.mp4" type="video/mp4" />
           </video>
-          <p>A tour of Volt, from your terminal to your iPhone. Sound on.</p>
+          <p>It has sound and captions.</p>
         </details>
       </section>
 
       <section class="section" aria-labelledby="more-title">
         <header class="section-head">
-          <p class="label">Also in the box</p>
-          <h2 id="more-title">Your model. Your tools. Your workflow.</h2>
+          <p class="label">More</p>
+          <h2 id="more-title">What else Volt does</h2>
         </header>
         <dl class="specs">
           <div>
-            <dt><a href="/docs/providers/">Choose your model</a></dt>
+            <dt><a href="/docs/providers/">Models</a></dt>
             <dd>
-              Sign in to a built-in provider with a subscription or API key, add endpoints that speak
-              the OpenAI, Anthropic, or Google APIs, or connect anything else with an extension.
-              Switch models from inside a session.
+              Sign in to a built-in provider with a subscription or an API key, or add any endpoint
+              that speaks the OpenAI, Anthropic, or Google API. Anything else can be connected with an
+              extension. You can switch models in the middle of a session.
             </dd>
           </div>
           <div>
-            <dt><a href="/docs/extensions/">Hackable by design</a></dt>
+            <dt><a href="/docs/extensions/">Extensions</a></dt>
             <dd>
-              Volt ships with powerful defaults and skips the bloat. Add what you need with skills,
-              extensions, prompt templates, and installable Volt packages — or ask Volt to build them
-              for you.
+              Volt keeps the common coding-agent features in the core and leaves project-specific
+              behavior to skills, extensions, prompt templates, and Volt packages. If the one you need
+              doesn't exist, you can ask Volt to write it.
             </dd>
           </div>
           <div>
-            <dt><a href="/docs/security/">Supply chain, taken seriously</a></dt>
+            <dt><a href="/docs/security/">Supply chain</a></dt>
             <dd>
-              Exact-pinned dependencies, shrinkwrapped releases, installs with lifecycle scripts
-              disabled, and documented containerization patterns when you want hard boundaries.
+              Dependencies are pinned to exact versions, releases ship with a shrinkwrap, and the
+              installer runs npm with lifecycle scripts turned off. The docs also cover running Volt
+              in a container if you want harder boundaries.
             </dd>
           </div>
           <div>
-            <dt><a href="/docs/sdk/">Scriptable and embeddable</a></dt>
+            <dt><a href="/docs/sdk/">SDK and RPC</a></dt>
             <dd>
-              Drive Volt programmatically with the SDK, RPC mode, or a JSON event stream. Build your
-              own tools on the same runtime the CLI uses.
+              The CLI runs on the same runtime you get through the SDK, RPC mode, and the JSON event
+              stream, so you can build your own tools on top of it.
             </dd>
           </div>
         </dl>
@@ -245,7 +255,7 @@ const dateFormatter = new Intl.DateTimeFormat("en", { dateStyle: "long", timeZon
             <header class="section-head split">
               <div>
                 <p class="label">From the blog</p>
-                <h2 id="writing-title">Notes from building Volt.</h2>
+                <h2 id="writing-title">Recent posts</h2>
               </div>
               <a href="/blog/">All posts →</a>
             </header>
@@ -532,19 +542,19 @@ const dateFormatter = new Intl.DateTimeFormat("en", { dateStyle: "long", timeZon
         border-top: 0;
       }
 
-      .margin-notes h3::before {
+      .margin-notes li::before {
         content: counter(note, decimal-leading-zero);
-        margin-right: 0.6rem;
+        display: block;
+        margin-bottom: 0.3rem;
         color: var(--muted);
         font-family: var(--font-mono);
         font-size: 0.8rem;
-        font-weight: 400;
       }
 
       .margin-notes p {
-        margin: 0.35rem 0 0;
+        margin: 0;
         color: var(--ink-soft);
-        font-size: 0.93rem;
+        font-size: 0.95rem;
       }
 
       .shot-meta,
