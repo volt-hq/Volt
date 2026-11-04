@@ -1125,7 +1125,7 @@ describe("Iroh remote transcript views", () => {
 			role: "tool",
 			toolName: "bash",
 			status: "completed",
-			text: "$ pwd && cat /workspace/src/index.ts (timeout 5s) (completed)",
+			text: "$ pwd && cat /workspace/src/index.ts (completed)",
 		});
 		expect(JSON.stringify(bash?.presentation)).toContain("pwd && cat /workspace/src/index.ts");
 		const read = await view(readId);

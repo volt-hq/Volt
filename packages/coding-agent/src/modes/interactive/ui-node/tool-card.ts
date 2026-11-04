@@ -6,8 +6,8 @@
  * images, and the work the call started (a background job), live. Work the
  * presentation binds an `open_work` or `cancel_work` action to is the
  * presentation's to show, and the card does not list it again. Collapsed, the
- * card shows the summary; expanded, the body, or the summary when there is no
- * body. The content sits under the title, past the glyph, in the theme's tool
+ * card shows the summary, each terminal line in at most three rows; expanded,
+ * the body, or the summary when there is no body, in full. The content sits under the title, past the glyph, in the theme's tool
  * output colors, so it stands apart from the assistant's text. A hidden
  * presentation renders nothing.
  */
@@ -86,6 +86,9 @@ const HEADER_TITLE_MIN_WIDTH = 16;
 
 /** What the content is indented by: it sits under the title, past the state glyph. */
 const CONTENT_INDENT = "  ";
+
+/** Most rows one terminal line takes in a collapsed card: one long line cannot fill the transcript. */
+const COLLAPSED_TERMINAL_ROWS_PER_LINE = 3;
 
 /** A finished call whose presentation shows its duration shows it from this long on. */
 const DURATION_DISPLAY_THRESHOLD_MS = 1000;
@@ -195,7 +198,10 @@ function boundWorkIds(presentation: ToolPresentation): Set<string> {
  */
 export class ToolCard implements Component {
 	private props: ToolCardProps;
-	private readonly content: ViewReconciler<UiNode>;
+	/** The content collapsed, its terminal lines bounded in rows. */
+	private readonly collapsedContent: ViewReconciler<UiNode>;
+	/** The content expanded, in full. */
+	private readonly expandedContent: ViewReconciler<UiNode>;
 	/** The actions, images, and work below the content. */
 	private readonly extras: ViewReconciler<UiNode>;
 	private cache: { width: number; frame: RenderFrame } | undefined;
@@ -205,7 +211,12 @@ export class ToolCard implements Component {
 	constructor(props: ToolCardProps, options: UiNodeViewOptions = {}) {
 		this.props = props;
 		const views = { semanticTheme: TOOL_OUTPUT_SEMANTIC_THEME, ...options };
-		this.content = createUiNodeView({ ...views, fullTerminals: true });
+		this.collapsedContent = createUiNodeView({
+			...views,
+			fullTerminals: true,
+			terminalRowsPerLine: COLLAPSED_TERMINAL_ROWS_PER_LINE,
+		});
+		this.expandedContent = createUiNodeView({ ...views, fullTerminals: true });
 		this.extras = createUiNodeView(views);
 		this.sync();
 	}
@@ -217,13 +228,15 @@ export class ToolCard implements Component {
 
 	invalidate(): void {
 		this.cache = undefined;
-		this.content.invalidate();
+		this.collapsedContent.invalidate();
+		this.expandedContent.invalidate();
 		this.extras.invalidate();
 	}
 
 	dispose(): void {
 		this.cache = undefined;
-		this.content.dispose();
+		this.collapsedContent.dispose();
+		this.expandedContent.dispose();
 		this.extras.dispose();
 	}
 
@@ -240,7 +253,7 @@ export class ToolCard implements Component {
 		// A column of margin on either side; the content sits under the title.
 		const inner = Math.max(1, width - 2);
 		const contentWidth = Math.max(1, inner - CONTENT_INDENT.length);
-		const content = [this.content.render(contentWidth)];
+		const content = [(expanded ? this.expandedContent : this.collapsedContent).render(contentWidth)];
 		if (expandHint && !expanded && (presentation.body?.length ?? 0) > 0) {
 			content.push(createRenderFrame([truncateToWidth(keyHint("app.tools.expand", "to expand"), contentWidth, "")]));
 		}
@@ -256,7 +269,9 @@ export class ToolCard implements Component {
 		this.cache = undefined;
 		const { presentation, expanded, images = [], work = [] } = this.props;
 		const shown = expanded && presentation.body !== undefined ? presentation.body : (presentation.summary ?? []);
-		this.content.update(shown);
+		// Only the shown view retains components; the other is reconciled afresh when the card toggles.
+		(expanded ? this.expandedContent : this.collapsedContent).update(shown);
+		(expanded ? this.collapsedContent : this.expandedContent).update([]);
 		const extras: UiNode[] = [];
 		if (presentation.actions && presentation.actions.length > 0) {
 			extras.push({ type: "actions", key: "actions", actions: [...presentation.actions] });
