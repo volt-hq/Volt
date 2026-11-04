@@ -1,4 +1,5 @@
 ---
+import "../styles/site.css";
 import "../styles/blog.css";
 
 interface Props {
@@ -33,6 +34,7 @@ const rssUrl = new URL("/rss.xml", siteUrl).href;
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f7f5f0" />
     <title>{title}</title>
     <meta name="description" content={description} />
     <link rel="canonical" href={canonicalUrl} />
@@ -60,7 +62,7 @@ const rssUrl = new URL("/rss.xml", siteUrl).href;
   <body>
     <header class="site-nav">
       <a class="brand" href="/" aria-label="Volt home">
-        <img src="/volt-icon.png" width="28" height="28" alt="" />
+        <img src="/volt-mark.svg" width="64" height="100" alt="" />
         volt
       </a>
       <nav aria-label="Main navigation">

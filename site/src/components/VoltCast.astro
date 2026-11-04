@@ -1,0 +1,277 @@
+---
+// Volt's architecture as the showcase cast. The art is the rest pose of the character components
+// in the private volt-hq/volt-showcase-video repository (src/characters/*.tsx), which share one
+// 1920x1080 frame with the floor at y=840. Each figure crops a 460-unit-wide column around its
+// character so the four stand on one continuous floor line.
+---
+
+<figure class="cast" aria-label="How the Volt CLI, daemon, Iroh, and Volt App connect">
+  <div class="cast-zones">
+    <span class="zone-computer">On your computer</span>
+    <span>Between devices</span>
+    <span>On your iPhone</span>
+  </div>
+  <ol class="cast-row">
+    <li class="cast-member">
+      <svg viewBox="190 370 460 480" aria-hidden="true" focusable="false">
+        <line class="floor" x1="190" y1="840" x2="650" y2="840" />
+        <ellipse class="shadow" cx="420" cy="836" rx="130" ry="10" />
+        <g stroke="#0f0923" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="378" y1="712" x2="378" y2="812" stroke-width="16" />
+          <line x1="378" y1="712" x2="378" y2="812" stroke="#b5b0c7" stroke-width="8" />
+          <line x1="462" y1="712" x2="462" y2="812" stroke-width="16" />
+          <line x1="462" y1="712" x2="462" y2="812" stroke="#b5b0c7" stroke-width="8" />
+          <ellipse cx="362" cy="822" rx="40" ry="19" fill="#b544ea" stroke-width="5" />
+          <ellipse cx="478" cy="822" rx="40" ry="19" fill="#b544ea" stroke-width="5" />
+          <line x1="420" y1="487" x2="420" y2="440" stroke-width="16" />
+          <line x1="420" y1="487" x2="420" y2="440" stroke="#b5b0c7" stroke-width="8" />
+          <path d="M430 382 L404 420 L420 420 L410 452 L440 408 L424 408 Z" fill="#a27af7" stroke-width="4" />
+          <line x1="278" y1="612" x2="236" y2="672" stroke-width="16" />
+          <line x1="278" y1="612" x2="236" y2="672" stroke="#b5b0c7" stroke-width="8" />
+          <circle cx="232" cy="678" r="18" fill="#f2f2e8" stroke-width="5" />
+          <line x1="562" y1="592" x2="622" y2="526" stroke-width="16" />
+          <line x1="562" y1="592" x2="622" y2="526" stroke="#b5b0c7" stroke-width="8" />
+          <circle cx="627" cy="519" r="18" fill="#f2f2e8" stroke-width="5" />
+          <rect x="272" y="487" width="296" height="231" rx="30" fill="#f2f2e8" stroke-width="6" />
+          <rect x="296" y="506" width="250" height="178" rx="22" fill="#242426" stroke-width="5" />
+          <rect x="357" y="540" width="32" height="46" rx="16" fill="#be9df4" stroke="none" />
+          <rect x="451" y="540" width="32" height="46" rx="16" fill="#be9df4" stroke="none" />
+          <path d="M397 633 L415 646 L397 659" fill="none" stroke="#a27af7" stroke-width="7" />
+          <rect x="423" y="654" width="28" height="6" rx="3" fill="#a27af7" stroke="none" />
+          <line x1="304" y1="698" x2="362" y2="698" stroke="#c9c6d6" stroke-width="4" />
+          <line x1="304" y1="709" x2="346" y2="709" stroke="#c9c6d6" stroke-width="4" />
+          <circle cx="539" cy="701" r="9" fill="#67de80" stroke-width="3" />
+        </g>
+      </svg>
+      <h3>Volt CLI</h3>
+      <p>What you run in the terminal. It starts the daemon if it isn't already running.</p>
+    </li>
+
+    <li class="cast-member">
+      <svg viewBox="560 370 460 480" aria-hidden="true" focusable="false">
+        <line class="floor" x1="560" y1="840" x2="1020" y2="840" />
+        <ellipse class="shadow" cx="790" cy="836" rx="125" ry="10" />
+        <g stroke="#0f0923" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="740" cy="826" rx="46" ry="17" fill="#5b48b3" stroke-width="5" />
+          <ellipse cx="842" cy="826" rx="46" ry="17" fill="#5b48b3" stroke-width="5" />
+          <path d="M898 770 C 955 770 975 715 960 668" fill="none" stroke-width="18" />
+          <path d="M898 770 C 955 770 975 715 960 668" fill="none" stroke="#7960f0" stroke-width="9" />
+          <path d="M944 676 L958 636 L978 670 Z" fill="#f2f2e8" stroke-width="4" />
+          <path d="M714 522 C 700 494 704 472 716 452 C 726 478 740 494 756 506 Z" fill="#f2f2e8" stroke-width="5" />
+          <path d="M866 522 C 880 494 876 472 864 452 C 854 478 840 494 824 506 Z" fill="#f2f2e8" stroke-width="5" />
+          <ellipse cx="656" cy="728" rx="18" ry="20" fill="#7960f0" stroke-width="5" />
+          <line x1="902" y1="604" x2="930" y2="556" stroke-width="22" />
+          <line x1="902" y1="604" x2="930" y2="556" stroke="#7960f0" stroke-width="12" />
+          <circle cx="934" cy="548" r="18" fill="#7960f0" stroke-width="5" />
+          <path
+            d="M790 500 C 872 500 912 562 912 660 L 912 734 C 912 792 870 814 790 814 C 710 814 668 792 668 734 L 668 660 C 668 562 708 500 790 500 Z"
+            fill="#7960f0"
+            stroke-width="6"
+          />
+          <ellipse cx="790" cy="740" rx="84" ry="66" fill="#b5a6f9" stroke="none" />
+          <circle cx="742" cy="618" r="36" fill="#f6f4f0" stroke-width="5" />
+          <circle cx="838" cy="618" r="36" fill="#f6f4f0" stroke-width="5" />
+          <circle cx="746" cy="626" r="13" fill="#0f0923" stroke="none" />
+          <circle cx="834" cy="626" r="13" fill="#0f0923" stroke="none" />
+          <circle cx="750" cy="621" r="4" fill="#ffffff" stroke="none" />
+          <circle cx="838" cy="621" r="4" fill="#ffffff" stroke="none" />
+          <path d="M707.42 608 A36 36 0 0 1 776.58 608 Z" fill="#664ddc" stroke-width="5" />
+          <path d="M803.42 608 A36 36 0 0 1 872.58 608 Z" fill="#664ddc" stroke-width="5" />
+          <path d="M770 684 Q790 700 810 684" fill="none" stroke-width="5" />
+          <path d="M795 692 L799 704 L804 691 Z" fill="#ffffff" stroke-width="2" />
+        </g>
+      </svg>
+      <h3>Volt daemon</h3>
+      <p>Runs your conversations in the background on your computer. Your provider credentials and tools stay there too.</p>
+    </li>
+
+    <li class="cast-member">
+      <svg viewBox="900 370 460 480" aria-hidden="true" focusable="false">
+        <line class="floor" x1="900" y1="840" x2="1360" y2="840" />
+        <ellipse class="shadow" cx="1130" cy="836" rx="115" ry="10" />
+        <g stroke="#0f0923" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="1082" cy="828" rx="34" ry="14" fill="#f1cbfc" stroke-width="5" />
+          <ellipse cx="1176" cy="828" rx="34" ry="14" fill="#f1cbfc" stroke-width="5" />
+          <path
+            d="M1130 568 C 1206 568 1240 622 1240 702 L 1240 756 C 1240 800 1200 816 1130 816 C 1060 816 1022 800 1022 756 L 1022 702 C 1022 622 1056 568 1130 568 Z"
+            fill="#a954d5"
+            stroke-width="6"
+          />
+          <ellipse cx="1122" cy="764" rx="72" ry="50" fill="#d693f2" stroke="none" />
+          <rect x="1024" y="616" width="214" height="13" fill="#0f0923" stroke="none" />
+          <circle cx="1090" cy="624" r="34" fill="#dbd4e6" stroke-width="5" />
+          <circle cx="1166" cy="624" r="34" fill="#dbd4e6" stroke-width="5" />
+          <circle cx="1090" cy="624" r="24" fill="#f6f4f0" stroke-width="3" />
+          <circle cx="1166" cy="624" r="24" fill="#f6f4f0" stroke-width="3" />
+          <circle cx="1093" cy="628" r="9" fill="#0f0923" stroke="none" />
+          <circle cx="1163" cy="628" r="9" fill="#0f0923" stroke="none" />
+          <path d="M1124 624 L1132 624" fill="none" stroke-width="5" />
+          <ellipse cx="1128" cy="684" rx="44" ry="30" fill="#f1cbfc" stroke-width="5" />
+          <ellipse cx="1128" cy="670" rx="12" ry="8" fill="#0f0923" stroke="none" />
+          <path d="M1118 692 Q1128 700 1138 692" fill="none" stroke-width="3" />
+          <path d="M1090 680 L1058 672 M1090 690 L1056 694 M1166 680 L1198 672 M1166 690 L1200 694" fill="none" stroke-width="2.5" />
+          <circle cx="1020" cy="745" r="26" fill="#eebefc" stroke-width="5" />
+          <ellipse cx="1030" cy="716" rx="9" ry="15" fill="#eebefc" stroke-width="4" />
+          <path d="M1150 704 L1212 742" fill="none" stroke-width="5" />
+          <rect x="1168" y="738" width="88" height="62" rx="12" fill="#f2f1ec" stroke-width="5" />
+          <path d="M1170 756 L1254 756" fill="none" stroke-width="3" />
+          <path d="M1205 772 V765 A7 7 0 0 1 1219 765 V772" fill="none" stroke="#7a5ef1" stroke-width="3.5" />
+          <rect x="1201" y="771" width="22" height="17" rx="3" fill="#7a5ef1" stroke="none" />
+          <line x1="1228" y1="726" x2="1222" y2="694" stroke-width="20" />
+          <line x1="1228" y1="726" x2="1222" y2="694" stroke="#a954d5" stroke-width="10" />
+          <circle cx="1220" cy="670" r="26" fill="#eebefc" stroke-width="5" />
+        </g>
+      </svg>
+      <h3>Iroh</h3>
+      <p>The networking library that connects your phone to the daemon. You pair a phone once with a QR code.</p>
+    </li>
+
+    <li class="cast-member">
+      <svg viewBox="1250 370 460 480" aria-hidden="true" focusable="false">
+        <line class="floor" x1="1250" y1="840" x2="1710" y2="840" />
+        <ellipse class="shadow" cx="1480" cy="836" rx="120" ry="10" />
+        <g stroke="#0f0923" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="1440" y1="738" x2="1440" y2="812" stroke-width="16" />
+          <line x1="1440" y1="738" x2="1440" y2="812" stroke="#b5b0c7" stroke-width="8" />
+          <line x1="1520" y1="738" x2="1520" y2="812" stroke-width="16" />
+          <line x1="1520" y1="738" x2="1520" y2="812" stroke="#b5b0c7" stroke-width="8" />
+          <ellipse cx="1425" cy="823" rx="38" ry="17" fill="#7960f0" stroke-width="5" />
+          <ellipse cx="1535" cy="823" rx="38" ry="17" fill="#7960f0" stroke-width="5" />
+          <line x1="1374" y1="612" x2="1346" y2="650" stroke-width="16" />
+          <line x1="1374" y1="612" x2="1346" y2="650" stroke="#b5b0c7" stroke-width="8" />
+          <circle cx="1342" cy="655" r="17" fill="#f2f2e8" stroke-width="5" />
+          <line x1="1586" y1="562" x2="1608" y2="498" stroke-width="16" />
+          <line x1="1586" y1="562" x2="1608" y2="498" stroke="#b5b0c7" stroke-width="8" />
+          <circle cx="1611" cy="490" r="17" fill="#f2f2e8" stroke-width="5" />
+          <rect x="1368" y="410" width="224" height="334" rx="44" fill="#212123" stroke-width="14" />
+          <rect x="1368" y="410" width="224" height="334" rx="44" fill="#212123" stroke="#b5b0c7" stroke-width="5" />
+          <rect x="1386" y="428" width="188" height="298" rx="30" fill="#f2f2e8" stroke="none" />
+          <rect x="1452" y="440" width="56" height="16" rx="8" fill="#212123" stroke="none" />
+          <path d="M1485 464 L1473 481 L1481 481 L1476 494 L1490 476 L1482 476 Z" fill="#a27af7" stroke="none" />
+          <circle cx="1440" cy="545" r="27" fill="#ffffff" stroke-width="5" />
+          <circle cx="1520" cy="545" r="27" fill="#ffffff" stroke-width="5" />
+          <circle cx="1443" cy="549" r="12" fill="#0f0923" stroke="none" />
+          <circle cx="1517" cy="549" r="12" fill="#0f0923" stroke="none" />
+          <circle cx="1447" cy="544" r="4" fill="#ffffff" stroke="none" />
+          <circle cx="1521" cy="544" r="4" fill="#ffffff" stroke="none" />
+          <ellipse cx="1414" cy="588" rx="16" ry="9" fill="#d7c6f3" stroke="none" />
+          <ellipse cx="1546" cy="588" rx="16" ry="9" fill="#d7c6f3" stroke="none" />
+          <path d="M1462 596 Q1480 612 1498 596" fill="none" stroke-width="5" />
+        </g>
+      </svg>
+      <h3>Volt App</h3>
+      <p>The iPhone app. Prompts you send from it run on your computer. It can join a conversation that's open in your terminal or start a new one.</p>
+    </li>
+  </ol>
+</figure>
+
+<style>
+  .cast {
+    margin: 0;
+  }
+
+  .cast-zones,
+  .cast-row {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .cast-zones {
+    margin-bottom: 1.5rem;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .cast-zones span {
+    position: relative;
+    margin-inline: 0.75rem;
+    padding-bottom: 0.45rem;
+    border-bottom: 1px solid var(--rule-strong);
+    text-align: center;
+  }
+
+  .cast-zones span::before,
+  .cast-zones span::after {
+    content: "";
+    position: absolute;
+    top: 100%;
+    width: 1px;
+    height: 0.4rem;
+    background: var(--rule-strong);
+  }
+
+  .cast-zones span::before {
+    left: 0;
+  }
+
+  .cast-zones span::after {
+    right: 0;
+  }
+
+  .zone-computer {
+    grid-column: 1 / 3;
+  }
+
+  .cast-row {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .cast-member svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    aspect-ratio: 460 / 480;
+  }
+
+  .floor {
+    stroke: var(--rule-strong);
+    stroke-width: 1.5;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .shadow {
+    fill: var(--ink);
+    opacity: 0.1;
+  }
+
+  .cast-member h3 {
+    margin: 1.2rem 0 0.35rem;
+    padding-inline: 0.75rem;
+    font-size: 1rem;
+    line-height: 1.3;
+  }
+
+  .cast-member p {
+    margin: 0;
+    padding-inline: 0.75rem;
+    color: var(--ink-soft);
+    font-size: 0.92rem;
+    line-height: 1.55;
+  }
+
+  @media (max-width: 760px) {
+    .cast-zones {
+      display: none;
+    }
+
+    .cast-row {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      row-gap: 2.5rem;
+    }
+  }
+
+  @media (max-width: 420px) {
+    .cast-row {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .cast-member svg {
+      max-width: 14rem;
+    }
+  }
+</style>

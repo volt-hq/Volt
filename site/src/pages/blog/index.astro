@@ -13,31 +13,21 @@ const dateFormatter = new Intl.DateTimeFormat("en", {
 
 <BlogShell
   title="Volt Blog"
-  description="Engineering notes about Volt, coding agents, local-first infrastructure, and remote sessions over Iroh."
+  description="What I'm working on in Volt, and why."
   canonicalPath="/blog/"
 >
   <header class="blog-header">
-    <p class="eyebrow">Volt Blog</p>
+    <p class="label">Volt Blog</p>
     <h1>Building Volt in the open.</h1>
-    <p>Engineering notes about coding agents, local-first infrastructure, and remote sessions over Iroh.</p>
+    <p>What I'm working on in Volt, and why.</p>
   </header>
 
   {
     posts.length > 0 ? (
       <ol class="post-list">
         {posts.map((post) => (
-          <li>
-            <a class="post-card" href={`/blog/${post.id}/`}>
-              {post.data.image && (
-                <img
-                  class="post-card-image"
-                  src={post.data.image}
-                  alt={post.data.imageAlt ?? ""}
-                  width="1200"
-                  height="630"
-                  loading="lazy"
-                />
-              )}
+          <li class="post-row">
+            <div>
               <div class="post-meta">
                 <time datetime={post.data.publishedAt.toISOString()}>
                   {dateFormatter.format(post.data.publishedAt)}
@@ -46,9 +36,16 @@ const dateFormatter = new Intl.DateTimeFormat("en", {
                 <span>{post.data.author}</span>
                 {post.data.draft && <span class="draft-badge">Draft</span>}
               </div>
-              <h2>{post.data.title}</h2>
+              <h2>
+                <a href={`/blog/${post.id}/`}>{post.data.title}</a>
+              </h2>
               <p>{post.data.description}</p>
-            </a>
+            </div>
+            {post.data.image && (
+              <a class="post-thumb" href={`/blog/${post.id}/`} tabindex="-1" aria-hidden="true">
+                <img src={post.data.image} alt="" width="1200" height="630" loading="lazy" />
+              </a>
+            )}
           </li>
         ))}
       </ol>
