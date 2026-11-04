@@ -278,6 +278,44 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("enables mouse reporting after terminal input initialization on startup and restart", () => {
+		const terminal = new RecordingTerminal();
+		const tui = new TuiAltScreen(terminal);
+		try {
+			for (let cycle = 0; cycle < 2; cycle++) {
+				const eventCount = terminal.events.length;
+				tui.start();
+				const events = terminal.events.slice(eventCount);
+				const startIndex = events.findIndex((event) => event.type === "start");
+				assert.ok(startIndex >= 0);
+				for (const mode of [1000, 1002, 1006]) {
+					const mouseEnableIndex = events.findIndex(
+						(event) => event.type === "write" && event.data.includes(`\x1b[?${mode}h`),
+					);
+					assert.ok(mouseEnableIndex > startIndex, `mouse mode ${mode} must be enabled after input setup`);
+				}
+				tui.stop({ preserveScreen: true });
+			}
+		} finally {
+			tui.stop({ preserveScreen: true });
+		}
+	});
+
+	it("does not enable mouse reporting when mouse capture is disabled", () => {
+		const terminal = new RecordingTerminal();
+		const tui = new TuiAltScreen(terminal, undefined, undefined, { mouse: false });
+		try {
+			tui.start();
+			assert.ok(
+				terminal.events.every(
+					(event) => event.type !== "write" || !/\x1b\[\?(?:1000|1002|1003|1006)h/.test(event.data),
+				),
+			);
+		} finally {
+			tui.stop({ preserveScreen: true });
+		}
+	});
+
 	it("uses button-motion tracking inside terminal multiplexers", () => {
 		const environmentKeys = ["TMUX", "ZELLIJ", "STY", "TERM"] as const;
 		const previousEnvironment = new Map(environmentKeys.map((key) => [key, process.env[key]]));
