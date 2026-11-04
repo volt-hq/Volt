@@ -1,10 +1,10 @@
 # Code mode
 
-- Status: Draft. The runtime layer, the bridge contract, the model-facing result, failure semantics, and tool scope are decided (section 5). The rest of the product surface and integration are open (section 8).
+- Status: Draft. The runtime layer, the bridge contract, the model-facing result, failure semantics, tool scope, and nested-call scheduling are decided (section 5). The rest of the product surface and integration are open (section 8).
 - Date: 2026-11-04
 - Audience: Volt maintainers.
 - Scope: A sandboxed script tool that lets the model call Volt tools programmatically, so intermediate results stay out of the model context. This document covers the runtime that executes scripts, how it is supervised, and the constraints Volt places on it.
-- Decision so far: model-written JavaScript runs in [`quickjs-wasi`](https://github.com/vercel-labs/quickjs-wasi) (QuickJS-NG compiled to WebAssembly) on a per-process pool of worker threads, one fresh VM per script, booted by creating the VM and running a trusted prelude. Scripts are bounded by a compute budget and a nested-call budget, not by a default wall-clock deadline. Adding `quickjs-wasi` is a new dependency and needs maintainer approval before implementation. Values cross the bridge through a lossless JSON codec built on native `JSON.parse` `context.source` and `JSON.rawJSON`; nested calls resolve to text or internal per-tool projections, fail with typed `ToolCallError`s, and return images as opaque references that only reach the model when the script shows them (section 5.9). The model reads one plain-text result: an ordered output stream with multi-line items fenced, a 50 KB budget split by priority with structural truncation of the return value, and the full output spilled to a temp file (section 5.10). A failed script keeps its partial output and adds a failure kind, an error block, and a grouped summary of the nested calls that may have changed state (section 5.11). Scripts can call only operations the model could call directly in the same session, excluding user, session, job, and delegation tools (section 5.12).
+- Decision so far: model-written JavaScript runs in [`quickjs-wasi`](https://github.com/vercel-labs/quickjs-wasi) (QuickJS-NG compiled to WebAssembly) on a per-process pool of worker threads, one fresh VM per script, booted by creating the VM and running a trusted prelude. Scripts are bounded by a compute budget and a nested-call budget, not by a default wall-clock deadline. Adding `quickjs-wasi` is a new dependency and needs maintainer approval before implementation. Values cross the bridge through a lossless JSON codec built on native `JSON.parse` `context.source` and `JSON.rawJSON`; nested calls resolve to text or internal per-tool projections, fail with typed `ToolCallError`s, and return images as opaque references that only reach the model when the script shows them (section 5.9). The model reads one plain-text result: an ordered output stream with multi-line items fenced, a 50 KB budget split by priority with structural truncation of the return value, and the full output spilled to a temp file (section 5.10). A failed script keeps its partial output and adds a failure kind, an error block, and a grouped summary of the nested calls that may have changed state (section 5.11). Scripts can call only operations the model could call directly in the same session, excluding user, session, job, and delegation tools (section 5.12). Nested calls run concurrently up to 10 per script; tools that declare `sequential` run alone, and MCP calls are limited per server rather than serialized (section 5.13).
 
 ## 1. Objective
 
@@ -41,7 +41,9 @@ Checked against `4e9366efa`.
 
 - **Tools.** `ToolDefinition` (`src/core/extensions/types.ts:850`) has a TypeBox `parameters` schema, `executionMode`, `execute`, and `present`. It has no output schema, no exposure levels, and no API for one tool to call another. The agent loop runs `prepareArguments` and then `validateToolArguments` before executing a call (`packages/agent/src/agent-loop.ts:756-787`).
 - **Tool-call policy.** `SessionTurnPolicy` (`src/core/session/turn-policy.ts`) composes the session's tool-call and tool-result policy with registered turn policies. Extension services (`src/core/session/extension-services.ts`) already run trusted read tools outside the model loop through the same tool-call and tool-result gates, attributing them with `ExtensionOperationOrigin` (`src/core/extensions/services-types.ts:202`), whose variants are currently `agent` and `extension`.
-- **Parallelism.** The agent loop runs a batch of tool calls sequentially if any tool in it declares `executionMode: "sequential"` (`packages/agent/src/agent-loop.ts`). The MCP gateway and direct MCP tools both declare `sequential` (`src/core/mcp/gateway-tool.ts:109`, `src/core/mcp/direct-tools.ts:34`).
+- **Parallelism.** The agent loop runs a batch of tool calls sequentially if any tool in it declares `executionMode: "sequential"` (`packages/agent/src/agent-loop.ts`). The MCP gateway and direct MCP tools both declare `sequential` (`src/core/mcp/gateway-tool.ts:109`, `src/core/mcp/direct-tools.ts:34`), with no rationale recorded in code, docs, or tests; `subagent` and `request_user_input` also declare it. Otherwise the loop runs each call's preparation and policy hooks in submission order, then executes the allowed calls concurrently without a cap (`packages/agent/src/agent-loop.ts:651`).
+- **File mutations.** `edit` and `write` serialize mutations per canonical file path (`src/core/tools/file-mutation-queue.ts`); mutations of different files run concurrently.
+- **MCP connections.** Concurrent callers of one server share a single in-flight connection attempt (`src/core/mcp/server-supervisor.ts:172-218`), and the MCP client multiplexes requests by JSON-RPC ID.
 - **MCP results.** The gateway bounds model-facing output and retains large results in a session-scoped output store with opaque cache ids and `read_cache` selection ([mcp.md](mcp.md)). It renders content blocks to text with `contentPartToText` (`src/core/mcp/manager.ts:158`), so MCP images reach the model only as placeholders. `@modelcontextprotocol/sdk` 1.32.2 decodes every message with plain `JSON.parse`, so integers above `Number.MAX_SAFE_INTEGER` are rounded before Volt sees them ([#1024](https://github.com/volt-hq/Volt/issues/1024)).
 - **Bash.** No default wall-clock timeout; stall detection after 300 s of silence (`src/core/tools/bash.ts:35`) can move a foreground command into a background job through an `AsyncLocalStorage` context (`bash.ts:47`). A non-zero exit code produces an error result (`bash.ts:445`). Output beyond the model-facing limit is saved to a temp file reported as `fullOutputPath`. A caller abort keeps the partial output and appends `Command aborted`; a stall kill appends an instruction to pass a larger `stallTimeout` (`bash.ts:395-440`).
 - **Process model.** Each interactive conversation runs in its own conversation worker process supervised by voltd ([daemon-hosted-conversations-design.md](daemon-hosted-conversations-design.md) section 5). Subagents are child conversations in the same host process ([architecture-rewrite-design.md](architecture-rewrite-design.md) section 7), with a default limit of 16 active descendants (`src/core/subagents/delegation-scope.ts:45`).
@@ -289,7 +291,7 @@ The prelude calls one host function with two primitive strings: a kind (`call`, 
 6. **Tool still active.** An MCP server may have disconnected or a tool may have been disabled since the script started; otherwise `failed` (`unavailable`).
 7. **`prepareArguments` and `validateToolArguments`,** the same path as the agent loop; otherwise `invalid_arguments`.
 8. **Tool-call policy,** with an origin naming the parent tool call and `seq`, and the call ID `<parentToolCallId>:cm:<seq>`. IDs follow attempts, so invalid attempts leave gaps. A denial rejects with `blocked`.
-9. **Schedule and execute,** with an abort signal linked to the script's. Scheduling order is an open decision (section 8).
+9. **Schedule and execute,** with an abort signal linked to the script's, under the scheduling rules of section 5.13.
 10. **Tool-result policy, projection, and size cap,** then the `result` message.
 11. **Record the call** for the outer result: tool name, a bounded summary of the arguments, status, duration, and error.
 
@@ -537,6 +539,48 @@ Rejected:
 - Making tools callable from scripts whenever they are registered, even when inactive (Pi's `codemode` and `deferred` exposures). Code mode would reach tools the session's policy left out.
 - Routing MCP calls through the `mcp` gateway's `call` action. It loses per-tool declarations and makes scripts pass server and tool names as strings.
 
+### 5.13 Nested-call scheduling
+
+Decided. After the host checks of section 5.9, each nested call enters a per-script scheduler.
+
+#### Scheduling classes
+
+| Class | Tools | Rule |
+|---|---|---|
+| Parallel | Tools without an `executionMode`, which is every bindable built-in tool | Runs concurrently with other calls |
+| Exclusive | Tools that declare `executionMode: "sequential"`, in practice extension tools | Waits until running calls finish, runs alone, and holds back later calls until it completes |
+| Per server | MCP tools | At most `maxConcurrentCalls` calls run at once per server |
+
+- The exclusive class respects what a tool's author declared, as DeepSeek's exclusive calls and Pydantic's `sequential=True` tools do. Pi does not: its nested calls run as soon as they are issued and ignore `executionMode` (`runToolCall` in `@earendil-works/pi-agent-core`).
+- MCP tools are limited per server instead of following their top-level `sequential` flag. No rationale for that flag is recorded, and the MCP SDK Volt ships (1.32.2) ran 40 concurrent calls on one stdio connection in 309 ms with the server handling all 40 at once. In simulation, honoring the flag made 40 MCP calls take 12.4 s; four per server took 3.1 s. MCP fan-out is one of the main uses of code mode.
+- Same-file edits need no scheduler rule: `edit` and `write` already serialize per canonical path.
+
+#### Limits
+
+- **Per script:** at most 10 nested calls run at once (DeepSeek's default). With the pool's cap of four scripts per process (section 5.3), a process runs at most 40 nested calls at once.
+- **Per MCP server:** at most 4 calls at once by default, counted across every script in the process. A server's MCP configuration may set `maxConcurrentCalls` to change this; 1 serializes a server that does not handle concurrent requests well. This adds one optional field to the MCP server configuration format.
+
+#### Ordering
+
+- Host checks, including tool-call policy, run in submission order (section 5.9), as the agent loop prepares calls in order before executing them.
+- Calls start in submission order under the per-script limit and within each MCP server.
+- A call waiting only for its server's limit does not hold back calls to other servers or calls to other tools.
+- An exclusive call is a full barrier: no later call starts before it finishes.
+- A call cancelled while queued never starts and is recorded as `cancelled before it ran` (section 5.11).
+
+#### The code-mode tool at the top level
+
+The code-mode tool declares `executionMode: "sequential"`, so the agent loop runs it alone within its batch. Sibling top-level calls in the same model response therefore never run during a script, where a sibling MCP call would bypass the per-server limit. Models rarely issue code mode in the same response as other calls, so the cost is small.
+
+Rejected:
+
+- No scheduling (Pi). Unbounded concurrency, and extension tools' `sequential` declarations would be ignored.
+- One call at a time. 4.1 s instead of 0.8 s for a script reading 50 files, fetching 10 pages, editing 10 files, and running one command.
+- Treating MCP tools as exclusive, following their top-level flag. It serializes MCP fan-out without a protocol reason.
+- Per-server limits with strict submission order. A call waiting on one server held back calls to other servers; two servers took 12.1 s instead of 6.2 s at one call per server.
+
+Volt's top-level MCP tools are serialized for the same unrecorded reason. Changing that is outside code mode.
+
 ## 6. Rejected alternatives
 
 | Alternative | Reason |
@@ -566,16 +610,16 @@ These follow from Volt's architecture and apply whatever the open decisions in s
 - **Packaging.** The standalone binary must ship `quickjs.wasm` and the worker entry as files, as it already does for native prebuilds and the session-store worker.
 - **Licensing.** The `quickjs-wasi` package license covers only Vercel's wrapper. The WASM binary also contains QuickJS-NG (MIT) and components linked by the wasi-sdk build, whose notices are not in the npm package and must be added to the standalone license files. The exact component list must be derived from the `quickjs-wasi` build.
 - **Dependency approval.** `quickjs-wasi` is a new direct dependency, pinned exactly, and requires maintainer approval and a shrinkwrap update.
+- **MCP configuration.** Per-server `maxConcurrentCalls` (section 5.13) is a new optional field in MCP server configuration.
 - **Engine updates.** QuickJS-NG states that it no longer accepts private security reports or issues CVEs, and that untrusted bytecode is out of scope ([SECURITY.md](https://github.com/quickjs-ng/quickjs/blob/master/SECURITY.md)). Volt tracks QuickJS-NG releases through `quickjs-wasi` and never loads bytecode or snapshots from untrusted sources.
 
 ## 8. Open decisions
 
-1. **Nested-call scheduling.** Proposed: honor each tool's `executionMode`, so `sequential` tools run one at a time even when a script uses `Promise.all`, with a bounded overlap for parallel-safe tools (similar to DeepSeek's `maxParallelSubCalls`).
-2. **Model-facing contract.** Tool name; input shape (proposed: `{ code, description }` JSON, which every provider supports; JSON input makes the model escape code twice, which compounds the shell-quoting problem of section 5.12, so raw input is worth considering where providers support it); binding names, including MCP namespaces; presenting bindings for natively declared tools without repeating their declarations; TypeScript declarations generated from TypeBox schemas, including `ToolCallError`, `ImageRef`, and the projected script values; in-script discovery (`search`/`describe`) for tools not listed in the description; prompt-cache-stable descriptions; guidance on `Promise.allSettled`, `image(ref)`, and the `context.source` reviver.
-3. **Enablement.** Opt-in setting, per-model routing, and interaction with the MCP gateway and `directTools`.
-4. **Observability.** The `details` shape, and how nested calls appear in the TUI, session records, audit, and remote clients within the iOS constraint (section 7).
-5. **State.** Proposed: no cross-script `store()`/`load()` in v1.
-6. **Tuning.** `memoryLimit` default, pool cap, queue size, idle timeout, grace period, worker stack size, the bridge caps (section 5.9), the output budget split (section 5.10), and the summary and error-block bounds (section 5.11).
+1. **Model-facing contract.** Tool name; input shape (proposed: `{ code, description }` JSON, which every provider supports; JSON input makes the model escape code twice, which compounds the shell-quoting problem of section 5.12, so raw input is worth considering where providers support it); binding names, including MCP namespaces; presenting bindings for natively declared tools without repeating their declarations; TypeScript declarations generated from TypeBox schemas, including `ToolCallError`, `ImageRef`, and the projected script values; in-script discovery (`search`/`describe`) for tools not listed in the description; prompt-cache-stable descriptions; guidance on `Promise.allSettled`, `image(ref)`, and the `context.source` reviver.
+2. **Enablement.** Opt-in setting, per-model routing, and interaction with the MCP gateway and `directTools`.
+3. **Observability.** The `details` shape, and how nested calls appear in the TUI, session records, audit, and remote clients within the iOS constraint (section 7).
+4. **State.** Proposed: no cross-script `store()`/`load()` in v1.
+5. **Tuning.** `memoryLimit` default, pool cap, queue size, idle timeout, grace period, worker stack size, the bridge caps (section 5.9), the output budget split (section 5.10), the summary and error-block bounds (section 5.11), and the scheduling limits (section 5.13).
 
 ## 9. Risks
 
@@ -684,6 +728,19 @@ Shell commands written inside a script, evaluated in QuickJS:
 | `echo "C:\repo\src"` | Changed: carriage return inserted | Intact |
 | ``npm test -- --grep `date +%F` `` | `SyntaxError` | `SyntaxError` |
 
+Nested-call scheduling, simulated with tool latencies of 15 ms (`read`), 20 ms (`edit`), 250 ms (`web_fetch`), 400 ms (`bash`), and 300 ms (MCP), and a per-script limit of 10:
+
+| Policy | 40 MCP calls, one server | 20 + 20 MCP calls, two servers | 50 reads, 10 fetches, 10 edits, 1 command | 10 × (MCP call, then 3 reads) |
+|---|---|---|---|---|
+| No scheduling (Pi) | 0.3 s, 40 at once | 0.3 s, 40 at once | 0.7 s, 50 at once | 0.3 s |
+| One call at a time | 12.4 s | 12.4 s | 4.1 s | 3.6 s |
+| Exclusive MCP calls (DeepSeek, Pydantic semantics) | 12.4 s | 12.4 s | 0.8 s | 3.2 s |
+| One per server, strict submission order | 12.4 s | 12.1 s | 0.8 s | 3.1 s |
+| One per server, others not held back | 12.4 s | 6.2 s | 0.8 s | 3.1 s |
+| Four per server, others not held back (decided) | 3.1 s | 1.5 s | 0.8 s | 1.0 s |
+
+MCP concurrency with the SDK Volt ships (`@modelcontextprotocol/sdk` 1.32.2), a stdio server whose tool waits 300 ms: 1 call took 320 ms; 10 and 40 concurrent calls took 309 ms each, with the server running 10 and 40 calls at once.
+
 Gaps:
 
 - Repeat the runtime measurements on Node 22.23.1, the standalone runtime, and on Linux and macOS, including the stack-guard table, which depends on native stack usage. The codec primitives are confirmed on Node 22.20.
@@ -713,6 +770,7 @@ Gaps:
 - Pi failure rendering: `dist/extensions/codemode/execute.js` in `@earendil-works/pi-coding-agent` 1.5.0 on npm
 - DeepSeek Harness run failures: <https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/core/tool-executor-ptc/src/errors.ts>, <https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/core/tool-executor-ptc/src/ptc.ts>
 - OpenCode interrupt discarding finished results: <https://github.com/anomalyco/opencode/issues/54222>
+- Pi nested calls: `runToolCall` in `dist/agent-loop.js` of `@earendil-works/pi-agent-core` 1.5.0 on npm
 - Pi callable tools: `dist/extensions/codemode/tool.js` (`getCodemodeCallableTools`) in `@earendil-works/pi-coding-agent` 1.5.0 on npm; Pi tool exposure: <https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md>
 
-Vendor benchmark figures are as published by each vendor. Figures for Anthropic, Cloudflare, OpenCode, Codex, and Goose come from a research summary that cited their documentation and issues; they were not each re-verified for this document. The Pi output-boundary fix was verified against its release notes, Pi's failure rendering against its published package, DeepSeek's failure text against its source, Pydantic's failure reporting and shell exclusion against its documentation, and OpenAI's routing guidance against its guide.
+Vendor benchmark figures are as published by each vendor. Figures for Anthropic, Cloudflare, OpenCode, Codex, and Goose come from a research summary that cited their documentation and issues; they were not each re-verified for this document. The Pi output-boundary fix was verified against its release notes, Pi's failure rendering against its published package, DeepSeek's failure text against its source, Pydantic's failure reporting and shell exclusion against its documentation, OpenAI's routing guidance against its guide, and Pi's nested-call scheduling against its published package.
