@@ -40,7 +40,12 @@ import { formatDuration } from "../../../core/tools/render-utils.ts";
 import { stripTerminalControls } from "../../../core/ui/ansi-tokens.ts";
 import { keyHint } from "../components/keybinding-hints.ts";
 import { createUiNodeView, isRenderVolatile, type UiNodeViewOptions } from "./registry.ts";
-import { TOOL_OUTPUT_SEMANTIC_THEME, TOOL_TITLE_SEMANTIC_THEME, TUI_SEMANTIC_THEME } from "./semantic-theme.ts";
+import {
+	SHELL_TOOL_TITLE_SEMANTIC_THEME,
+	TOOL_OUTPUT_SEMANTIC_THEME,
+	TOOL_TITLE_SEMANTIC_THEME,
+	TUI_SEMANTIC_THEME,
+} from "./semantic-theme.ts";
 
 export type ToolCardState = "pending" | "running" | "done";
 
@@ -79,6 +84,8 @@ export interface ToolCardProps {
 	readonly work?: readonly ToolCardWork[];
 	/** Collapsed with a body, the card says how to expand it. True by default. */
 	readonly expandHint?: boolean;
+	/** The call runs a shell command: the title's code shows highlighted as Bash. */
+	readonly shellTitle?: boolean;
 }
 
 /** Narrowest title, in cells, the header keeps beside the activity and elapsed time before it moves them below. */
@@ -317,7 +324,8 @@ export class ToolCard implements Component {
 	/** The title within `width`: styled as its spans say, or bold when it is plain text. */
 	private title(width: number): string {
 		const { title } = this.props.presentation;
-		const text = truncateStyledText(title, width, TOOL_TITLE_SEMANTIC_THEME);
-		return typeof title === "string" ? TOOL_TITLE_SEMANTIC_THEME.bold(text) : text;
+		const titleTheme = this.props.shellTitle ? SHELL_TOOL_TITLE_SEMANTIC_THEME : TOOL_TITLE_SEMANTIC_THEME;
+		const text = truncateStyledText(title, width, titleTheme);
+		return typeof title === "string" ? titleTheme.bold(text) : text;
 	}
 }

@@ -6,7 +6,7 @@
  */
 
 import type { SemanticTheme } from "@hansjm10/volt-tui";
-import { theme } from "../../../core/theme/runtime.ts";
+import { highlightShellCommand, theme } from "../../../core/theme/runtime.ts";
 
 export const TUI_SEMANTIC_THEME: SemanticTheme = {
 	text: (text) => theme.fg("text", text),
@@ -15,7 +15,7 @@ export const TUI_SEMANTIC_THEME: SemanticTheme = {
 	success: (text) => theme.fg("success", text),
 	warning: (text) => theme.fg("warning", text),
 	error: (text) => theme.fg("error", text),
-	info: (text) => theme.fg("accent", text),
+	info: (text) => theme.fg("info", text),
 	bold: (text) => theme.bold(text),
 	italic: (text) => theme.italic(text),
 	underline: (text) => theme.underline(text),
@@ -33,8 +33,19 @@ export const TOOL_OUTPUT_SEMANTIC_THEME: SemanticTheme = {
 	muted: (text) => theme.fg("dim", text),
 };
 
-/** A tool call's title: unstyled text in the theme's tool title color. */
+/**
+ * A tool call's title: unstyled text in the theme's tool title color, and
+ * accented text (what the call acts on: a path, a pattern) in the theme's tool
+ * target color, so the accent color stays for focus and selection.
+ */
 export const TOOL_TITLE_SEMANTIC_THEME: SemanticTheme = {
 	...TUI_SEMANTIC_THEME,
 	text: (text) => theme.fg("toolTitle", text),
+	accent: (text) => theme.fg("toolTarget", text),
+};
+
+/** A shell tool call's title: as any tool's, with its code (the command) highlighted as Bash. */
+export const SHELL_TOOL_TITLE_SEMANTIC_THEME: SemanticTheme = {
+	...TOOL_TITLE_SEMANTIC_THEME,
+	code: (text) => highlightShellCommand(text).join(" "),
 };

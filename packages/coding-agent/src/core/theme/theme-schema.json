@@ -42,6 +42,7 @@
 				"success",
 				"error",
 				"warning",
+				"info",
 				"muted",
 				"dim",
 				"text",
@@ -56,6 +57,7 @@
 				"toolSuccessBg",
 				"toolErrorBg",
 				"toolTitle",
+				"toolTarget",
 				"toolOutput",
 				"mdHeading",
 				"mdLink",
@@ -116,6 +118,10 @@
 				"warning": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Warning states"
+				},
+				"info": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Informational states (info notifications and info-styled UI text)"
 				},
 				"muted": {
 					"$ref": "#/$defs/colorValue",
@@ -184,6 +190,10 @@
 				"toolTitle": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Tool execution box title color"
+				},
+				"toolTarget": {
+					"$ref": "#/$defs/colorValue",
+					"description": "What a tool call acts on in its title (paths, patterns, commands it resolves to)"
 				},
 				"toolOutput": {
 					"$ref": "#/$defs/colorValue",
