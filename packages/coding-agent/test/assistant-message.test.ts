@@ -53,6 +53,53 @@ describe("AssistantMessageComponent", () => {
 		expect(hidden).not.toContain("Check the render hierarchy");
 	});
 
+	test("renders thinking markdown elements in the thinking text color only", () => {
+		initTheme("dark");
+		const thinking = [
+			"## Plan",
+			"",
+			"Read `assistant-message.ts` and **the theme** via [docs](https://example.com).",
+			"",
+			"- first step",
+			"",
+			"> quoted note",
+			"",
+			"```ts",
+			"const x = 1;",
+			"```",
+		].join("\n");
+		const lines = new AssistantMessageComponent(createAssistantMessage([{ type: "thinking", thinking }])).render(
+			80,
+		).lines;
+		const bodyLines = lines.filter((line) => !line.includes("[thinking]"));
+		const body = bodyLines.join("\n");
+
+		const thinkingForeground = theme.fg("thinkingText", "\u0000").split("\u0000")[0];
+		const foregrounds = new Set(body.match(/\x1b\[38;[0-9;]*m/g));
+		expect(foregrounds).toEqual(new Set([thinkingForeground]));
+
+		const plain = stripAnsi(body);
+		expect(plain).toContain("Plan");
+		expect(plain).not.toContain("## Plan");
+		expect(plain).toContain("Read assistant-message.ts and the theme via docs");
+		expect(plain).toContain("- first step");
+		expect(plain).toContain("│ quoted note");
+		expect(plain).toContain("const x = 1;");
+		const codeLine = bodyLines.find((line) => stripAnsi(line).includes("const x = 1;"));
+		expect(codeLine).toContain(theme.fg("thinkingText", "const x = 1;"));
+	});
+
+	test("keeps reply markdown colors for assistant text", () => {
+		initTheme("dark");
+		const rendered = new AssistantMessageComponent(
+			createAssistantMessage([{ type: "text", text: "Read `assistant-message.ts`." }]),
+		)
+			.render(80)
+			.lines.join("\n");
+
+		expect(rendered).toContain(theme.fg("mdCode", "assistant-message.ts"));
+	});
+
 	test("renders only the latest content after multiple updates before a frame", () => {
 		initTheme("dark");
 		const component = new AssistantMessageComponent();

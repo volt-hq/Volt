@@ -15,12 +15,35 @@ const OSC133_ZONE_END = "\x1b]133;B\x07";
 const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 
 /**
+ * The markdown theme for thinking blocks: markdown structure and emphasis stay,
+ * but every element renders in the thinking text color instead of its reply color.
+ */
+function createThinkingMarkdownTheme(base: MarkdownTheme): MarkdownTheme {
+	const thinkingText = (text: string) => theme.fg("thinkingText", text);
+	return {
+		...base,
+		heading: thinkingText,
+		link: thinkingText,
+		linkUrl: thinkingText,
+		code: thinkingText,
+		codeBlock: thinkingText,
+		codeBlockBorder: thinkingText,
+		quote: thinkingText,
+		quoteBorder: thinkingText,
+		hr: thinkingText,
+		listBullet: thinkingText,
+		highlightCode: (code: string) => code.split("\n").map((line) => thinkingText(line)),
+	};
+}
+
+/**
  * Component that renders a complete assistant message
  */
 export class AssistantMessageComponent extends Container {
 	private contentContainer: Container;
 	private hideThinkingBlock: boolean;
 	private markdownTheme: MarkdownTheme;
+	private thinkingMarkdownTheme: MarkdownTheme;
 	private lastMessage?: DeepReadonly<AssistantMessage>;
 	private contentDirty = false;
 	private hasToolCalls = false;
@@ -34,6 +57,7 @@ export class AssistantMessageComponent extends Container {
 
 		this.hideThinkingBlock = hideThinkingBlock;
 		this.markdownTheme = markdownTheme;
+		this.thinkingMarkdownTheme = createThinkingMarkdownTheme(markdownTheme);
 
 		// Container for text/thinking content
 		this.contentContainer = new Container();
@@ -112,7 +136,7 @@ export class AssistantMessageComponent extends Container {
 				} else {
 					this.contentContainer.addChild(new Text(thinkingLabel, 1, 0));
 					this.contentContainer.addChild(
-						new Markdown(content.thinking.trim(), 1, 0, this.markdownTheme, {
+						new Markdown(content.thinking.trim(), 1, 0, this.thinkingMarkdownTheme, {
 							color: (text: string) => theme.fg("thinkingText", text),
 							italic: true,
 						}),
