@@ -160,7 +160,7 @@
         </g>
       </svg>
       <h3>Volt App</h3>
-      <p>The iPhone app. Prompts you send from it run on your computer, in the same conversation you had open in the terminal.</p>
+      <p>The iPhone app. Prompts you send from it run on your computer. It can join a conversation that's open in your terminal or start a new one.</p>
     </li>
   </ol>
 </figure>
@@ -262,6 +262,16 @@
     .cast-row {
       grid-template-columns: repeat(2, minmax(0, 1fr));
       row-gap: 2.5rem;
+    }
+  }
+
+  @media (max-width: 420px) {
+    .cast-row {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .cast-member svg {
+      max-width: 14rem;
     }
   }
 </style>
