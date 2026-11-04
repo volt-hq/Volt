@@ -1,6 +1,6 @@
 import { visibleWidth } from "@hansjm10/volt-tui";
 import { beforeAll, describe, expect, it } from "vitest";
-import { initTheme } from "../src/core/theme/runtime.ts";
+import { initTheme, theme } from "../src/core/theme/runtime.ts";
 import { StartupHeaderComponent } from "../src/modes/interactive/components/logo.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -25,7 +25,7 @@ describe("StartupHeaderComponent", () => {
 		const text = lines.map(stripAnsi).join("\n");
 
 		expect(text).toContain("VOLT v1.2.3");
-		expect(text).not.toContain("______");
+		expect(text).not.toContain("█");
 		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(120);
 	});
 
@@ -36,11 +36,14 @@ describe("StartupHeaderComponent", () => {
 		expect(lines.join("\n")).toContain("ctrl+o more");
 	});
 
-	it("uses the full wordmark only when both width and height are spacious", () => {
+	it("uses the full half-block lockup only when both width and height are spacious", () => {
 		const lines = createHeader(45).render(160).lines;
-		const text = lines.map(stripAnsi).join("\n");
+		const plain = lines.map(stripAnsi);
+		const lockup = plain.slice(0, plain.findIndex((line) => line.endsWith(" v1.2.3")) + 1);
 
-		expect(text).toContain("______");
+		expect(lockup).toHaveLength(10);
+		for (const line of lockup) expect(line).toMatch(/^[ ▀▄█]+( v1\.2\.3)?$/);
+		expect(lines.join("\n")).toContain(theme.getFgAnsi("accent"));
 		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(160);
 	});
 });

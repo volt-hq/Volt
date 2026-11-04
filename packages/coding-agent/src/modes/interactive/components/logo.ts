@@ -8,26 +8,92 @@ import {
 } from "@hansjm10/volt-tui";
 import { APP_NAME } from "../../../config.ts";
 import { theme } from "../../../core/theme/runtime.ts";
-
-const VOLT_WORDMARK = [
-	"__        __   ______    _        _________ ",
-	"\\ \\      / /  /  __  \\  | |      |___   ___|",
-	" \\ \\    / /  |  /  \\  | | |          | |    ",
-	"  \\ \\  / /   | |    | | | |          | |    ",
-	"   \\ \\/ /    | |    | | | |          | |    ",
-	"    \\  /     |  \\__/  | | |____      | |    ",
-	"     \\/       \\______/  |______|     |_|   ",
-];
+import { bgAnsi, fgAnsi } from "../../../core/theme/tokens.ts";
+import type { ThemeColorValue } from "../../../core/theme/types.ts";
 
 /**
- * Render the startup logo: an ASCII wordmark for "volt" with the version
- * appended, or a plain text logo when the app was renamed via voltConfig.name.
+ * The startup lockup as a pixel map: the bolt from site/public/volt-mark.svg and the "VOLT"
+ * wordmark. Each pair of rows becomes one terminal line of half blocks. "#" takes the theme
+ * accent, "d" and "l" are the bolt's dark and light halves, and spaces stay transparent.
+ */
+const VOLT_LOCKUP_PIXELS = [
+	"                  #####          #####        ###########        ####              ####################",
+	"     d             ####          ####        #############       ####              ####################",
+	"     dd            #####        #####       ###############      ####              ####################",
+	"     dd            #####        #####      #################     ####              ####################",
+	"     ddd            ####        ####      #####         #####    ####                      ####",
+	"     dddd           #####      #####      ####           ####    ####                      ####",
+	"     dddd           #####      #####      ####           ####    ####                      ####",
+	"     ddddd           #####    #####       ####           ####    ####                      ####",
+	"      ddddd          #####    #####       ####           ####    ####                      ####",
+	"llllllddddd           ####    ####        ####           ####    ####                      ####",
+	" lllll                #####  #####        ####           ####    ####                      ####",
+	" lllll                #####  #####        ####           ####    ####                      ####",
+	"  llll                 ####  ####         ####           ####    ####                      ####",
+	"   lll                 ##########         ####           ####    ####                      ####",
+	"   lll                 ##########         ####           ####    ####                      ####",
+	"    ll                  ########          #####         #####    ####                      ####",
+	"    lll                 ########           #################     ##############            ####",
+	"     ll                  ######             ###############      ##############            ####",
+	"      l                  ######              #############       ##############            ####",
+	"                         ######               ###########        ##############            ####",
+];
+
+const BOLT_DARK = "#6d4dc4";
+const BOLT_LIGHT = "#a685ff";
+const RESET_COLORS = "\x1b[39m\x1b[49m";
+
+function lockupPixelColor(pixel: string): ThemeColorValue {
+	if (pixel === "d") return BOLT_DARK;
+	if (pixel === "l") return BOLT_LIGHT;
+	return theme.resolvedColors["accent"] ?? "";
+}
+
+/** Encode the lockup pixel map as half-block lines (▀ ▄ █), one terminal line per pair of pixel rows. */
+function renderLockup(): string[] {
+	const mode = theme.getColorMode();
+	const fg = (pixel: string) => fgAnsi(lockupPixelColor(pixel), mode);
+	const lines: string[] = [];
+	for (let row = 0; row < VOLT_LOCKUP_PIXELS.length; row += 2) {
+		const top = VOLT_LOCKUP_PIXELS[row] ?? "";
+		const bottom = VOLT_LOCKUP_PIXELS[row + 1] ?? "";
+		let line = "";
+		let activeStyle = "";
+		for (let x = 0; x < Math.max(top.length, bottom.length); x++) {
+			const upper = top[x] ?? " ";
+			const lower = bottom[x] ?? " ";
+			let style = "";
+			let glyph = " ";
+			if (upper !== " " && (lower === " " || lower === upper)) {
+				style = fg(upper);
+				glyph = lower === upper ? "█" : "▀";
+			} else if (upper === " " && lower !== " ") {
+				style = fg(lower);
+				glyph = "▄";
+			} else if (upper !== " ") {
+				style = fg(upper) + bgAnsi(lockupPixelColor(lower), mode);
+				glyph = "▀";
+			}
+			if (style !== activeStyle) {
+				line += activeStyle ? RESET_COLORS + style : style;
+				activeStyle = style;
+			}
+			line += glyph;
+		}
+		lines.push(activeStyle ? line + RESET_COLORS : line);
+	}
+	return lines;
+}
+
+/**
+ * Render the startup logo: the half-block bolt and "VOLT" wordmark with the
+ * version appended, or a plain text logo when the app was renamed via voltConfig.name.
  */
 export function renderLogo(version: string): string {
 	if (APP_NAME !== "volt") {
 		return theme.bold(theme.fg("accent", APP_NAME)) + theme.fg("dim", ` v${version}`);
 	}
-	const lines = VOLT_WORDMARK.map((line) => theme.bold(theme.fg("accent", line)));
+	const lines = renderLockup();
 	lines[lines.length - 1] += theme.fg("dim", ` v${version}`);
 	return lines.join("\n");
 }
