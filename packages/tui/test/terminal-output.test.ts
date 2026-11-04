@@ -32,6 +32,34 @@ describe("TerminalOutput", () => {
 		}
 	});
 
+	it("bounds the rows one wrapped line takes, ending a cut line with an ellipsis", () => {
+		const lines: StyledText[] = ["short", "aa bb cc dd ee ff gg", "one two three four five six"];
+		const output = new TerminalOutput(PLAIN_SEMANTIC_THEME, { lines, maxRowsPerLine: 2 });
+		// The ellipsis follows a row with room for it, and takes the last cell of a full one.
+		assert.deepStrictEqual(output.render(10).lines.map(stripAnsi), [
+			"short",
+			"aa bb cc",
+			"dd ee ff…",
+			"one two",
+			"three fou…",
+		]);
+		for (const width of [10, 1]) {
+			for (const line of output.render(width).lines) assert.ok(visibleWidth(line) <= width, line);
+		}
+
+		// Without the bound, the same lines wrap whole.
+		output.setProps({ lines });
+		assert.deepStrictEqual(output.render(10).lines, [
+			"short",
+			"aa bb cc",
+			"dd ee ff",
+			"gg",
+			"one two",
+			"three four",
+			"five six",
+		]);
+	});
+
 	it("renders only appended lines when props extend the previous lines", () => {
 		const { theme, styled } = countingTheme();
 		const first: StyledText[] = ["one", "two"];

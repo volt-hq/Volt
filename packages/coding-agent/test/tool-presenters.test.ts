@@ -113,18 +113,29 @@ describe("bash presenter", () => {
 		await running;
 	});
 
-	it("titles the call with its command and the timeout in force", () => {
-		const presented = present(presentBash, input({ command: "npm test", timeout: 99_999 }, "running"));
+	it("titles the call with its command and the timeout in force until it ends", () => {
+		const args = { command: "npm test", timeout: 99_999 };
+		const presented = present(presentBash, input(args, "running"));
 		expect(title(presented)).toBe("$ npm test (timeout 3600s)");
 		expect(presented.showsDuration).toBe(true);
 		expect(presented.body).toBeUndefined();
+		expect(title(present(presentBash, input(args, "pending")))).toBe("$ npm test (timeout 3600s)");
+		expect(title(present(presentBash, input(args, "done", { text: "ok" })))).toBe("$ npm test");
 	});
 
-	it("shows a long or multi-line command in full below its one-line title", () => {
-		const command = "for f in *; do\n  echo $f\ndone";
+	it("titles a multi-line command by its first line and shows it in full below", () => {
+		const command = "for f in *; do\n  echo $f\ndone\n";
 		const presented = present(presentBash, input({ command }, "done", { text: "a\nb" }));
-		expect(title(presented)).toBe("$ for f in *; do echo $f done");
+		expect(presented.title).toEqual([
+			{ text: "$ ", bold: true },
+			{ text: "for f in *; do" },
+			{ text: " … +2 lines", token: "muted" },
+		]);
 		expect(presented.body?.[0]).toEqual({ type: "code", key: "command", language: "bash", code: command });
+		const heredoc = present(presentBash, input({ command: "python - <<'PY'\nprint(1)\nPY" }, "running"));
+		expect(title(heredoc)).toBe("$ python - <<'PY' … +2 lines");
+		const continued = present(presentBash, input({ command: "npm run build \\\r\n  --verbose" }, "running"));
+		expect(title(continued)).toBe("$ npm run build \\ … +1 line");
 	});
 
 	it("titles a described call by its description and keeps the command beneath it", () => {
@@ -132,7 +143,12 @@ describe("bash presenter", () => {
 			presentBash,
 			input({ command: "npm test", description: "Run the unit tests", timeout: 60 }, "done", { text: "ok" }),
 		);
-		expect(presented.title).toEqual([{ text: "Run the unit tests" }, { text: " (timeout 60s)", token: "muted" }]);
+		expect(presented.title).toEqual([{ text: "Run the unit tests" }]);
+		const running = present(
+			presentBash,
+			input({ command: "npm test", description: "Run the unit tests", timeout: 60 }, "running"),
+		);
+		expect(running.title).toEqual([{ text: "Run the unit tests" }, { text: " (timeout 60s)", token: "muted" }]);
 		expect(presented.summary).toEqual([
 			{ type: "text", key: "command", text: "$ npm test", token: "muted" },
 			{ type: "terminal", key: "tail", lines: ["ok"] },
@@ -167,7 +183,7 @@ describe("bash presenter", () => {
 		expect(presented.summary?.[0]).toEqual({
 			type: "text",
 			key: "command",
-			text: "$ for f in *; do echo $f done",
+			text: "$ for f in *; do … +2 lines",
 			token: "muted",
 		});
 		expect(presented.body?.[0]).toEqual({ type: "code", key: "command", language: "bash", code: command });

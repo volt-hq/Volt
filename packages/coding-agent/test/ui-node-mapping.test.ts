@@ -459,6 +459,37 @@ describe("tool card", () => {
 		expect(toolCard.render(60).lines).toEqual([]);
 	});
 
+	it("bounds a long terminal line to three rows collapsed and shows it whole expanded", () => {
+		const long = Array.from({ length: 30 }, (_, index) => `word${index}`).join(" ");
+		const props: ToolCardProps = {
+			...base,
+			state: "done",
+			presentation: {
+				title: "$ x",
+				summary: [
+					{ type: "terminal", key: "tail", lines: ["Traceback", long] },
+					{ type: "text", key: "status", text: "exit 1" },
+				],
+			},
+		};
+		const toolCard = card(props);
+		const collapsed = lines(toolCard, 40);
+		expect(collapsed).toEqual([
+			"",
+			" ✓ $ x",
+			"   Traceback",
+			"   word0 word1 word2 word3 word4 word5",
+			"   word6 word7 word8 word9 word10",
+			"   word11 word12 word13 word14 word15…",
+			"   exit 1",
+		]);
+		// Without a body, expanding shows the summary itself in full.
+		toolCard.setProps({ ...props, expanded: true });
+		expect(text(toolCard, 40)).toContain("word29");
+		toolCard.setProps(props);
+		expect(lines(toolCard, 40)).toEqual(collapsed);
+	});
+
 	it("renders actions and result images below the content", () => {
 		const sink = new RecordingSink();
 		const toolCard = card(

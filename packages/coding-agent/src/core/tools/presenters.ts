@@ -122,8 +122,15 @@ function omittedBefore(details: unknown): number {
 	return typeof totalLines === "number" && typeof kept === "number" && totalLines > kept ? totalLines - kept : 0;
 }
 
+/** A command's first line, and how many lines follow it: what one line shows of a multi-line command. */
+function commandHead(command: string): { first: string; more: string } {
+	const lines = command.trim().split(/\r?\n/);
+	const rest = lines.length - 1;
+	return { first: oneLine(lines[0] ?? ""), more: rest === 0 ? "" : ` … +${rest} line${rest === 1 ? "" : "s"}` };
+}
+
 /**
- * bash: `$ command` (with the timeout in force), the output as terminal
+ * bash: `$ command` (with the timeout in force until it ends), the output as terminal
  * lines, and how a failed command ended or that a silent one moved to a
  * background job. Collapsed, a running, failed, or moved command shows its
  * newest five lines (and how it ended); a passing one shows
@@ -131,26 +138,34 @@ function omittedBefore(details: unknown): number {
  * While the command runs, a line it is still writing is kept apart, so new
  * output reaches clients as appended lines.
  *
- * A call with a description is titled by it (with the timeout in force). The
- * model wrote the description and nothing checks it against the command, so
- * the command stays in view: a muted `$ command` line opens the summary, and
- * a body opens with the command in full.
+ * A call with a description is titled by it (with the timeout in force until
+ * it ends). The model wrote the description and nothing checks it against the
+ * command, so the command stays in view: a muted `$ command` line opens the
+ * summary, and a body opens with the command in full. In one line, a
+ * multi-line command shows its first line and how many lines follow.
  */
 export const presentBash: ToolPresenter = (input) => {
 	const command = stringArg(input.args, "command");
 	const description = stringArg(input.args, "description")?.trim() || undefined;
-	const timeout = timeoutSeconds(input.args.timeout);
+	// A call that ended says how it ended, a timeout included, so the timeout shows only until then.
+	const timeout = input.state === "done" ? undefined : timeoutSeconds(input.args.timeout);
 	const timeoutSuffix = timeout === undefined ? [] : [{ text: ` (timeout ${timeout}s)`, token: "muted" as const }];
-	const commandText = command === undefined ? "…" : oneLine(command);
+	const head = command === undefined ? { first: "…", more: "" } : commandHead(command);
 	const title: UiNodeStyledText =
 		description === undefined
-			? [{ text: "$ ", bold: true }, { text: commandText }, ...timeoutSuffix]
+			? [
+					{ text: "$ ", bold: true },
+					{ text: head.first },
+					...(head.more ? [{ text: head.more, token: "muted" as const }] : []),
+					...timeoutSuffix,
+				]
 			: [{ text: oneLine(description) }, ...timeoutSuffix];
 	const commandNode: UiNode[] =
 		command !== undefined && (command.includes("\n") || command.trim().length > TITLE_TEXT_MAX_CHARS)
 			? [{ type: "code", key: "command", language: "bash", code: command }]
 			: [];
-	const commandLine: UiNode[] = description === undefined ? [] : [textNode("command", `$ ${commandText}`, "muted")];
+	const commandLine: UiNode[] =
+		description === undefined ? [] : [textNode("command", `$ ${head.first}${head.more}`, "muted")];
 	const result = input.result;
 	const running = result?.partial === true;
 	const text = resultText(result);

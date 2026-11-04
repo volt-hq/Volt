@@ -13,6 +13,8 @@ export interface TerminalOutputProps {
 	maxVisibleRows?: number;
 	/** Wrap long lines instead of truncating them. Defaults to true. */
 	wrap?: boolean;
+	/** Most rows one wrapped line takes; the rest of a longer line is cut with an ellipsis. Defaults to no bound. */
+	maxRowsPerLine?: number;
 }
 
 const DEFAULT_MAX_LINES = 1000;
@@ -42,7 +44,9 @@ export class TerminalOutput implements Component {
 			props.lines.length >= previous.lines.length &&
 			(props.omittedLines ?? 0) === (previous.omittedLines ?? 0) &&
 			previous.lines.every((line, index) => props.lines[index] === line);
-		if (props.wrap !== previous.wrap) this.renderedWidth = undefined;
+		if (props.wrap !== previous.wrap || props.maxRowsPerLine !== previous.maxRowsPerLine) {
+			this.renderedWidth = undefined;
+		}
 		if (extendsPrevious) {
 			this.trim();
 			this.appendLines(props.lines.slice(previous.lines.length));
@@ -98,7 +102,14 @@ export class TerminalOutput implements Component {
 
 	private renderLine(line: StyledText, width: number): string[] {
 		if (this.props.wrap === false) return [truncateStyledText(line, width, this.theme)];
-		return wrapStyledText(line, width, this.theme).map((row) => truncateToWidth(row, width, ""));
+		const rows = wrapStyledText(line, width, this.theme).map((row) => truncateToWidth(row, width, ""));
+		const maxRows =
+			this.props.maxRowsPerLine === undefined ? undefined : Math.max(1, Math.floor(this.props.maxRowsPerLine));
+		if (maxRows === undefined || rows.length <= maxRows) return rows;
+		const kept = rows.slice(0, maxRows);
+		// The last kept row ends with an ellipsis, after a reset so it carries none of the row's styling.
+		kept[maxRows - 1] = `${truncateToWidth(kept[maxRows - 1] ?? "", width - 1, "")}\x1b[0m…`;
+		return kept;
 	}
 
 	private trim(): void {

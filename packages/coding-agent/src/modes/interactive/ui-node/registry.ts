@@ -77,6 +77,8 @@ export interface UiNodeViewOptions {
 	readonly imageWidthCells?: number;
 	/** Show every line of terminal nodes instead of their newest 12, as tool cards do. */
 	readonly fullTerminals?: boolean;
+	/** Most rows one terminal line wraps to; the rest of a longer line is cut. Defaults to no bound. */
+	readonly terminalRowsPerLine?: number;
 	/** How the views style semantic tokens; the TUI theme's tokens by default. */
 	readonly semanticTheme?: SemanticTheme;
 }
@@ -561,12 +563,13 @@ class FormView extends Form {
 	}
 }
 
-function terminalProps(node: UiTerminalNode, full: boolean) {
+function terminalProps(node: UiTerminalNode, full: boolean, rowsPerLine: number | undefined) {
 	return {
 		lines: node.lines,
 		omittedLines: node.omittedLines,
 		maxLines: UI_NODE_TERMINAL_MAX_LINES,
 		...(full ? {} : { maxVisibleRows: TERMINAL_VISIBLE_ROWS }),
+		...(rowsPerLine === undefined ? {} : { maxRowsPerLine: rowsPerLine }),
 	};
 }
 
@@ -585,6 +588,7 @@ export function createUiNodeRegistry(options: UiNodeViewOptions = {}): ViewRegis
 	const showImages = options.showImages ?? true;
 	const imageWidthCells = Math.max(1, Math.floor(options.imageWidthCells ?? IMAGE_MAX_WIDTH_CELLS));
 	const fullTerminals = options.fullTerminals === true;
+	const { terminalRowsPerLine } = options;
 	const registry = new ViewRegistry<UiNode>();
 	registry.register("text", {
 		create: (node) => new StyledTextView(semantic, node.text, textToken(node)),
@@ -638,10 +642,14 @@ export function createUiNodeRegistry(options: UiNodeViewOptions = {}): ViewRegis
 	});
 	registry.register("terminal", {
 		create: (node) =>
-			new TitledView(semantic, new TerminalOutput(semantic, terminalProps(node, fullTerminals)), node.title),
+			new TitledView(
+				semantic,
+				new TerminalOutput(semantic, terminalProps(node, fullTerminals, terminalRowsPerLine)),
+				node.title,
+			),
 		update: (view, node) => {
 			view.setTitle(node.title);
-			view.body.setProps(terminalProps(node, fullTerminals));
+			view.body.setProps(terminalProps(node, fullTerminals, terminalRowsPerLine));
 		},
 	});
 	registry.register("code", {
