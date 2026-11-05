@@ -1,10 +1,10 @@
 # Code mode
 
-- Status: Draft. The runtime layer, the bridge contract, the model-facing result, failure semantics, tool scope, and nested-call scheduling are decided (section 5). The rest of the product surface and integration are open (section 8).
+- Status: Draft. The runtime layer, the bridge contract, the model-facing result, failure semantics, tool scope, nested-call scheduling, and the model-facing contract are decided (section 5). Enablement, observability, state, and tuning are open (section 8).
 - Date: 2026-11-04
 - Audience: Volt maintainers.
 - Scope: A sandboxed script tool that lets the model call Volt tools programmatically, so intermediate results stay out of the model context. This document covers the runtime that executes scripts, how it is supervised, and the constraints Volt places on it.
-- Decision so far: model-written JavaScript runs in [`quickjs-wasi`](https://github.com/vercel-labs/quickjs-wasi) (QuickJS-NG compiled to WebAssembly) on a per-process pool of worker threads, one fresh VM per script, booted by creating the VM and running a trusted prelude. Scripts are bounded by a compute budget and a nested-call budget, not by a default wall-clock deadline. Adding `quickjs-wasi` is a new dependency and needs maintainer approval before implementation. Values cross the bridge through a lossless JSON codec built on native `JSON.parse` `context.source` and `JSON.rawJSON`; nested calls resolve to text or internal per-tool projections, fail with typed `ToolCallError`s, and return images as opaque references that only reach the model when the script shows them (section 5.9). The model reads one plain-text result: an ordered output stream with multi-line items fenced, a 50 KB budget split by priority with structural truncation of the return value, and the full output spilled to a temp file (section 5.10). A failed script keeps its partial output and adds a failure kind, an error block, and a grouped summary of the nested calls that may have changed state (section 5.11). Scripts can call only operations the model could call directly in the same session, excluding user, session, job, and delegation tools (section 5.12). Nested calls run concurrently up to 10 per script; tools that declare `sequential` run alone, and MCP calls are limited per server rather than serialized (section 5.13).
+- Decision so far: model-written JavaScript runs in [`quickjs-wasi`](https://github.com/vercel-labs/quickjs-wasi) (QuickJS-NG compiled to WebAssembly) on a per-process pool of worker threads, one fresh VM per script, booted by creating the VM and running a trusted prelude. Scripts are bounded by a compute budget and a nested-call budget, not by a default wall-clock deadline. Adding `quickjs-wasi` is a new dependency and needs maintainer approval before implementation. Values cross the bridge through a lossless JSON codec built on native `JSON.parse` `context.source` and `JSON.rawJSON`; nested calls resolve to text or internal per-tool projections, fail with typed `ToolCallError`s, and return images as opaque references that only reach the model when the script shows them (section 5.9). The model reads one plain-text result: an ordered output stream with multi-line items fenced, a 50 KB budget split by priority with structural truncation of the return value, and the full output spilled to a temp file (section 5.10). A failed script keeps its partial output and adds a failure kind, an error block, and a grouped summary of the nested calls that may have changed state (section 5.11). Scripts can call only operations the model could call directly in the same session, excluding user, session, job, and delegation tools (section 5.12). Nested calls run concurrently up to 10 per script; tools that declare `sequential` run alone, and MCP calls are limited per server rather than serialized (section 5.13). The tool is `run_code`, taking JSON `{ code, description?, timeoutMs? }` with JavaScript or erasable TypeScript; its description lists bindings and result shapes without repeating native tool declarations, and MCP tools are discovered through the `mcp` tool (section 5.14).
 
 ## 1. Objective
 
@@ -579,7 +579,84 @@ Rejected:
 - Treating MCP tools as exclusive, following their top-level flag. It serializes MCP fan-out without a protocol reason.
 - Per-server limits with strict submission order. A call waiting on one server held back calls to other servers; two servers took 12.1 s instead of 6.2 s at one call per server.
 
-Volt's top-level MCP tools are serialized for the same unrecorded reason. Changing that is outside code mode.
+Volt's top-level MCP tools are serialized for the same unrecorded reason. Changing that is outside code mode and tracked in [#1026](https://github.com/volt-hq/Volt/issues/1026).
+
+### 5.14 Model-facing contract
+
+Decided.
+
+#### Name and input
+
+- The tool is named `run_code`, the name DeepSeek Harness and Pydantic use, in Volt's snake_case style.
+- Its input is JSON:
+
+  ```ts
+  {
+  	code: string; // the script: the body of an async function
+  	description?: string; // a short label of at most 80 characters
+  	timeoutMs?: number; // optional wall-clock limit, at most 1800000 (section 5.6)
+  }
+  ```
+
+- `description` becomes the title of the call's card in the TUI and remote clients; without it, the first non-empty line of the script is used. It is optional because DeepSeek found that models sending only the code lost the whole program to an argument error when the label was required.
+- Raw (non-JSON) input is a non-goal. Volt's AI package supports only JSON-schema tools (`Tool.parameters`, `packages/ai/src/types.ts:484`), and only OpenAI offers grammar-constrained raw tool input; Pi uses JSON `{ code }` and adds a raw grammar variant only on OpenAI. JSON wrapping added 26% to a script's tokens in testing, and models already write code inside JSON strings through `write` and `edit`.
+
+#### Language
+
+Scripts are JavaScript or erasable TypeScript. The host strips TypeScript with `node:module`'s `stripTypeScriptTypes` in strip mode before the script reaches the VM. On Node 22.20 and 24.20 it preserved every line and column, so stack traces still map to the script, and it rejected `enum`, `namespace`, and parameter properties with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`, which the host reports as a syntax error (section 5.11). The API is experimental and emits an `ExperimentalWarning`, which the host suppresses so it never reaches the terminal or a client; if the API changes, `amaro`, the stripper Node bundles, is the replacement DeepSeek also names.
+
+#### Binding names
+
+- Built-in and extension tools: `tools.<name>`, using the tool's own name.
+- MCP tools: `tools.mcp.<server>.<tool>`. Names that are not JavaScript identifiers use brackets: `tools.mcp["my-server"]["get-file"](args)`. Normalized MCP server ids may contain hyphens (`src/core/mcp/config.ts:184`), and both `my-server` and `my_server` are valid ids, so identifier aliases could collide; as in DeepSeek's design, there are none.
+
+#### Presentation
+
+- Natively declared tools are not declared again. Their parameters are already in context, about 3.25k tokens for the built-in tools (section 5.12).
+- The `run_code` description lists the bindings available in the session and the result shapes that differ from plain text: bash's object, `read`'s `string | ImageRef`, and MCP's `{ text, structured?, images }`. The list is generated from the session's bindings. It lives in the one tool description rather than in a line appended to every tool's description, as Pi does, so other tools' descriptions do not change.
+- MCP tools are discovered with the `mcp` tool's `search` and `describe` actions before a script calls them. While `run_code` is active, `describe` also returns the tool's binding path and result type. There are no discovery functions inside scripts: discovery results belong in the model's context, and OpenAI likewise runs tool search only at the top level.
+- The description depends only on the active built-in and extension tools and on whether the `mcp` tool is active, never on which MCP servers are connected, so connecting a server does not change it and does not invalidate the prompt cache.
+
+#### Text
+
+Tool description, with the binding lines generated from the session's bindings:
+
+```
+Run a JavaScript script in a sandbox. The script calls tools and only what it prints or returns comes back to you, so use it to fan out calls, loop, and filter large results instead of making many separate calls.
+
+The script is the body of an async function: top-level await and return work. Erasable TypeScript annotations are allowed. The sandbox has no file system, network, process, timers, or modules; tools are its only way out.
+
+Call tools as `await tools.<name>(args)` with the same arguments as the tool itself:
+- tools.bash(args): Promise<{ output: string; exitCode: number | null; truncated: boolean; fullOutputPath?: string }>, resolving for any exit code
+- tools.read(args): Promise<string | ImageRef>
+- tools.edit(args), tools.write(args), tools.web_search(args), tools.web_fetch(args), tools.image_gen(args): Promise<string>
+- MCP tools: tools.mcp.<server>.<tool>(args): Promise<{ text: string; structured?: unknown; images: ImageRef[] }>. Find them and their arguments with the mcp tool's search and describe actions first. Use brackets for names that are not identifiers: tools.mcp["my-server"]["get-file"](args).
+
+A failed call rejects with ToolCallError { tool; kind: "invalid_arguments" | "blocked" | "failed" | "cancelled"; reason?; message }. Use Promise.allSettled for independent calls so one failure does not lose the others.
+
+Output: text(value), console.log/warn/error(...), image(ref), and the return value appear in order. ImageRef = { type: "image"; ref; mimeType; width?; height?; bytes; path? }; only images passed to image(ref) reach you. Output is limited to 50 KB, with the full output saved to a file you can read.
+
+Limits: 30 s of computation, 200 tool calls, and 64 MiB of memory per script. Tool calls made before a failure are not undone; a failed result lists them. Write shell commands with String.raw`...` and $VAR instead of ${VAR}.
+```
+
+System-prompt snippet: `Run a JavaScript script that calls other tools and returns only what it prints`.
+
+Guidelines:
+
+- Use run_code when a task needs many tool calls, loops over items, or filtering of large results; use direct tool calls for single calls, for steps that need your judgment between calls, and for questions to the user.
+- In run_code scripts, print counts, summaries, and selected fields rather than whole tool results.
+- When a run_code script fails, check which nested calls completed before running it again.
+
+The description measures about 470 tokens; with the snippet, guidelines, and parameter schema, the contract adds about 650 tokens per request, comparable to the roughly 2,600 characters of guidance Pydantic reports.
+
+The description does not mention BigInt or the `context.source` reviver: until [#1024](https://github.com/volt-hq/Volt/issues/1024) lands, no BigInt reaches a script.
+
+Rejected:
+
+- A required `description` (DeepSeek). Models that omit it lose the whole program.
+- In-script discovery functions (Pi, Cloudflare, OpenCode). A second discovery surface whose results land inside the script instead of the model's context.
+- Repeating full declarations for natively declared tools. About 3k more tokens per request for parameters already in context.
+- Identifier aliases for MCP names (Pi, Cloudflare). They can collide.
 
 ## 6. Rejected alternatives
 
@@ -615,11 +692,10 @@ These follow from Volt's architecture and apply whatever the open decisions in s
 
 ## 8. Open decisions
 
-1. **Model-facing contract.** Tool name; input shape (proposed: `{ code, description }` JSON, which every provider supports; JSON input makes the model escape code twice, which compounds the shell-quoting problem of section 5.12, so raw input is worth considering where providers support it); binding names, including MCP namespaces; presenting bindings for natively declared tools without repeating their declarations; TypeScript declarations generated from TypeBox schemas, including `ToolCallError`, `ImageRef`, and the projected script values; in-script discovery (`search`/`describe`) for tools not listed in the description; prompt-cache-stable descriptions; guidance on `Promise.allSettled`, `image(ref)`, and the `context.source` reviver.
-2. **Enablement.** Opt-in setting, per-model routing, and interaction with the MCP gateway and `directTools`.
-3. **Observability.** The `details` shape, and how nested calls appear in the TUI, session records, audit, and remote clients within the iOS constraint (section 7).
-4. **State.** Proposed: no cross-script `store()`/`load()` in v1.
-5. **Tuning.** `memoryLimit` default, pool cap, queue size, idle timeout, grace period, worker stack size, the bridge caps (section 5.9), the output budget split (section 5.10), the summary and error-block bounds (section 5.11), and the scheduling limits (section 5.13).
+1. **Enablement.** Opt-in setting, per-model routing, and interaction with the MCP gateway and `directTools`.
+2. **Observability.** The `details` shape, and how nested calls appear in the TUI, session records, audit, and remote clients within the iOS constraint (section 7).
+3. **State.** Proposed: no cross-script `store()`/`load()` in v1.
+4. **Tuning.** `memoryLimit` default, pool cap, queue size, idle timeout, grace period, worker stack size, the bridge caps (section 5.9), the output budget split (section 5.10), the summary and error-block bounds (section 5.11), and the scheduling limits (section 5.13).
 
 ## 9. Risks
 
@@ -741,6 +817,12 @@ Nested-call scheduling, simulated with tool latencies of 15 ms (`read`), 20 ms (
 
 MCP concurrency with the SDK Volt ships (`@modelcontextprotocol/sdk` 1.32.2), a stdio server whose tool waits 300 ms: 1 call took 320 ms; 10 and 40 concurrent calls took 309 ms each, with the server running 10 and 40 calls at once.
 
+Model-facing contract measurements (o200k tokenizer):
+
+- Script input wrapped as JSON tool arguments: 90 to 113 tokens and 135 to 170 tokens for two sample scripts, 26% more than the raw source in both.
+- Draft `run_code` description: 471 tokens (1,987 characters); system-prompt snippet and guidelines: 96 tokens; parameter schema: 81 tokens.
+- `stripTypeScriptTypes` in strip mode on Node 22.20 and 24.20: a 10-line script kept every line length; `enum`, `namespace`, and parameter properties were rejected with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`; plain JavaScript passed through unchanged.
+
 Gaps:
 
 - Repeat the runtime measurements on Node 22.23.1, the standalone runtime, and on Linux and macOS, including the stack-guard table, which depends on native stack usage. The codec primitives are confirmed on Node 22.20.
@@ -771,6 +853,7 @@ Gaps:
 - DeepSeek Harness run failures: <https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/core/tool-executor-ptc/src/errors.ts>, <https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/core/tool-executor-ptc/src/ptc.ts>
 - OpenCode interrupt discarding finished results: <https://github.com/anomalyco/opencode/issues/54222>
 - Pi nested calls: `runToolCall` in `dist/agent-loop.js` of `@earendil-works/pi-agent-core` 1.5.0 on npm
+- Pi codemode input and per-tool call notes: `codemodeSchema` and `describeScriptCall` in `dist/extensions/codemode/tool.js` of `@earendil-works/pi-coding-agent` 1.5.0 on npm
 - Pi callable tools: `dist/extensions/codemode/tool.js` (`getCodemodeCallableTools`) in `@earendil-works/pi-coding-agent` 1.5.0 on npm; Pi tool exposure: <https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md>
 
-Vendor benchmark figures are as published by each vendor. Figures for Anthropic, Cloudflare, OpenCode, Codex, and Goose come from a research summary that cited their documentation and issues; they were not each re-verified for this document. The Pi output-boundary fix was verified against its release notes, Pi's failure rendering against its published package, DeepSeek's failure text against its source, Pydantic's failure reporting and shell exclusion against its documentation, OpenAI's routing guidance against its guide, and Pi's nested-call scheduling against its published package.
+Vendor benchmark figures are as published by each vendor. Figures for Anthropic, Cloudflare, OpenCode, Codex, and Goose come from a research summary that cited their documentation and issues; they were not each re-verified for this document. The Pi output-boundary fix was verified against its release notes, Pi's failure rendering against its published package, DeepSeek's failure text against its source, Pydantic's failure reporting and shell exclusion against its documentation, OpenAI's routing guidance against its guide, and Pi's nested-call scheduling and codemode input against its published packages.
