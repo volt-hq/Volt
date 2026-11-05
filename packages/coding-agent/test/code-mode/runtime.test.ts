@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { type SpawnSyncReturns, spawnSync } from "node:child_process";
 import { afterAll, describe, expect, it } from "vitest";
 import { type CodeModeWorkerListener, CodeModeWorkerPool } from "../../src/core/code-mode/pool.ts";
 import type { HostToWorkerMessage, WorkerToHostMessage } from "../../src/core/code-mode/protocol.ts";
@@ -79,6 +79,18 @@ function forgingPool(messageFor: (id: number) => WorkerToHostMessage): CodeModeW
 		},
 	};
 	return { acquire: async () => worker, release: () => {}, discard: () => {} } as unknown as CodeModeWorkerPool;
+}
+
+/** Runs `body` in a fresh process with nothing else to keep it alive, after importing the pool and the runtime. */
+function runInFreshProcess(body: string): SpawnSyncReturns<string> {
+	const poolUrl = new URL("../../src/core/code-mode/pool.ts", import.meta.url).href;
+	const runtimeUrl = new URL("../../src/core/code-mode/runtime.ts", import.meta.url).href;
+	const program = `
+		const { CodeModeWorkerPool } = await import(${JSON.stringify(poolUrl)});
+		const { runCodeModeScript } = await import(${JSON.stringify(runtimeUrl)});
+		${body}
+	`;
+	return spawnSync(process.execPath, ["--input-type=module", "-e", program], { encoding: "utf8", timeout: 20_000 });
 }
 
 function never(call: CodeModeCall, honorSignal: boolean): Promise<never> {
@@ -451,26 +463,35 @@ describe("code mode worker pool", () => {
 	});
 
 	it("keeps the process alive while a script runs and lets it exit once its worker is idle", () => {
-		// A fresh process with nothing else to keep it alive: it must wait for the script's result, then exit
-		// on its own while the idle worker is still in the pool.
-		const poolUrl = new URL("../../src/core/code-mode/pool.ts", import.meta.url).href;
-		const runtimeUrl = new URL("../../src/core/code-mode/runtime.ts", import.meta.url).href;
-		const program = `
-			const { CodeModeWorkerPool } = await import(${JSON.stringify(poolUrl)});
-			const { runCodeModeScript } = await import(${JSON.stringify(runtimeUrl)});
+		// The process must wait for the script's result, then exit on its own while the idle worker is still in
+		// the pool.
+		const child = runInFreshProcess(`
 			const result = await runCodeModeScript(new CodeModeWorkerPool(), {
 				code: "const end = Date.now() + 300; while (Date.now() < end) {} return 42;",
 				bindings: [],
 				onCall: async () => null,
 			});
 			console.log(JSON.stringify(result.ok ? result.value : result.failure));
-		`;
-		const child = spawnSync(process.execPath, ["--input-type=module", "-e", program], {
-			encoding: "utf8",
-			timeout: 20_000,
-		});
+		`);
 		expect(child.error).toBeUndefined();
 		expect(child.stdout.trim()).toBe("42");
+		expect(child.status).toBe(0);
+	});
+
+	it("keeps the process alive while it drains calls that outlive the script", () => {
+		// The worker is back in the pool once the VM ends, and the call's handler holds nothing: only the run itself
+		// can keep the process alive until the drain ends and the result is returned.
+		const child = runInFreshProcess(`
+			const result = await runCodeModeScript(new CodeModeWorkerPool(), {
+				code: "tools.call({}); return 1;",
+				bindings: [{ name: "call", path: ["call"] }],
+				onCall: () => new Promise(() => {}),
+				limits: { drainMs: 200 },
+			});
+			console.log(JSON.stringify({ value: result.value, calls: result.calls.map((call) => call.status) }));
+		`);
+		expect(child.error).toBeUndefined();
+		expect(child.stdout.trim()).toBe(JSON.stringify({ value: 1, calls: ["unsettled"] }));
 		expect(child.status).toBe(0);
 	});
 

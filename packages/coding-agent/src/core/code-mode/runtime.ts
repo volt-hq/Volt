@@ -145,6 +145,8 @@ function validateBindings(bindings: readonly CodeModeBinding[]): void {
 }
 
 const WATCHDOG_INTERVAL_MS = 50;
+// The longest timer delay Node accepts; the hold only needs to exist, never to fire.
+const HOLD_INTERVAL_MS = 0x7fffffff;
 // Room for the seq, the binding name escaped in the worst case, and the envelope keys.
 const CALL_ENVELOPE_BYTES = 2048;
 
@@ -251,6 +253,9 @@ class ScriptRun {
 				? undefined
 				: setTimeout(() => this.contain(() => this.terminate({ kind: "timeout", timeoutMs })), timeoutMs);
 		timeout?.unref();
+		// The caller is waiting for this result, so the run keeps the process alive until it returns, whatever the
+		// state of its worker. The pool never does: its workers do not keep the process alive, idle or busy.
+		const hold = setInterval(() => {}, HOLD_INTERVAL_MS);
 		try {
 			let worker: CodeModeWorker;
 			try {
@@ -263,16 +268,17 @@ class ScriptRun {
 							? error.message
 							: `the sandbox failed to start: ${errorMessage(error)}`,
 				};
-				return this.finalize();
+				return await this.finalize();
 			}
 			if (this.failure) {
 				this.pool.release(worker);
-				return this.finalize();
+				return await this.finalize();
 			}
 			this.begin(worker);
 			await this.settled;
 			return await this.finalize();
 		} finally {
+			clearInterval(hold);
 			signal?.removeEventListener("abort", onAbort);
 			if (timeout) clearTimeout(timeout);
 		}

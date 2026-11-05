@@ -55,8 +55,8 @@ export class CodeModeWorker {
 	private rejectReady: (error: Error) => void = () => {};
 
 	/**
-	 * Starts the thread. It keeps the process alive, because its first script is waiting for it; the pool
-	 * releases that hold while the worker is idle (`keepAlive`).
+	 * Starts the thread. It never keeps the process alive: a script waiting for a worker or for its result keeps
+	 * the process alive itself (`runCodeModeScript`).
 	 */
 	constructor(url: URL, data: Omit<CodeModeWorkerData, "control">, stackSizeMb: number, onExit: () => void) {
 		this.worker = new Worker(url, {
@@ -72,7 +72,7 @@ export class CodeModeWorker {
 		// Rejections are handled by whoever awaits `ready`; this keeps an unawaited failure from crashing the host.
 		this.ready.catch(() => {});
 		// One listener for the worker's lifetime: adding or removing a message listener refs or unrefs the
-		// worker's port, which would override `keepAlive`.
+		// worker's port, which would undo the `unref` below.
 		this.worker.on("message", (raw: unknown) => this.onWorkerMessage(raw));
 		this.worker.on("error", (error: Error) => {
 			this.exitReason = `the worker failed: ${error.message}`;
@@ -87,20 +87,11 @@ export class CodeModeWorker {
 			onExit();
 			listener?.onExit(this.exitReason);
 		});
+		this.worker.unref();
 	}
 
 	get alive(): boolean {
 		return !this.exited;
-	}
-
-	/**
-	 * Whether the worker keeps the process alive: while it boots or runs a script, its caller awaits the
-	 * result; while it is idle, it must not stop the process from exiting.
-	 */
-	keepAlive(active: boolean): void {
-		if (this.exited) return;
-		if (active) this.worker.ref();
-		else this.worker.unref();
 	}
 
 	attach(listener: CodeModeWorkerListener): void {
@@ -171,8 +162,8 @@ interface Waiter {
 /**
  * Worker pool of one process (section 5.3 of docs/code-mode-design.md). It starts with no workers, grows
  * on demand up to `maxWorkers`, queues up to `maxQueuedScripts` scripts beyond that, and stops workers
- * that stay idle for `idleTimeoutMs`. Idle workers never keep the process alive; a worker that is booting or
- * running a script does, because its caller is waiting for the result.
+ * that stay idle for `idleTimeoutMs`. Workers never keep the process alive, idle or busy; a script keeps the
+ * process alive itself while its caller waits for the result.
  */
 export class CodeModeWorkerPool {
 	private readonly options: CodeModePoolOptions;
@@ -202,7 +193,6 @@ export class CodeModeWorkerPool {
 		const idle = this.idle.pop();
 		if (idle) {
 			idle.clearIdleTimer();
-			idle.keepAlive(true);
 			return idle;
 		}
 		if (this.hasCapacity()) return this.spawn(signal);
@@ -235,7 +225,6 @@ export class CodeModeWorkerPool {
 			this.hand(waiter, worker);
 			return;
 		}
-		worker.keepAlive(false);
 		this.idle.push(worker);
 		worker.startIdleTimer(this.options.idleTimeoutMs, () => this.discard(worker));
 	}
