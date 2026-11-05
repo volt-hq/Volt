@@ -1,11 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as review from "../../src/core/review.ts";
-import { REMOTE_REVIEW_FAILURE_MESSAGE } from "../../src/core/review.ts";
+import { REMOTE_REVIEW_FAILURE_MESSAGE, type ReviewCheckoutSetup } from "../../src/core/review.ts";
 import {
+	type ReviewEngineCheckout,
 	type ReviewEngineContext,
 	type ReviewEngineDeclaration,
 	ReviewEngineDeclarationError,
@@ -169,6 +170,7 @@ describe("review engines", () => {
 				/** Start it in a conversation with no model, as the host's own verification then has none. */
 				noModel?: boolean;
 				controls?: { includeOptional?: boolean };
+				setup?: ReviewCheckoutSetup;
 			} = {},
 		) => {
 			const { workId } = await startEngineReview({
@@ -178,6 +180,7 @@ describe("review engines", () => {
 				...(options.previousRunId === undefined ? {} : { previousRunId: options.previousRunId }),
 				...(options.followUps === undefined ? {} : { followUps: options.followUps }),
 				...(options.controls === undefined ? {} : { controls: options.controls }),
+				...(options.setup === undefined ? {} : { setup: options.setup }),
 				cwd: harness.tempDir,
 				work: harness.session.work,
 				modelRegistry: harness.session.modelRegistry,
@@ -366,6 +369,7 @@ describe("review engines", () => {
 				expect(ctx.target).toMatchObject({
 					kind: "uncommitted",
 					description: expect.stringContaining("uncommitted"),
+					commonDirectory: realpathSync(join(harness.tempDir, ".git")),
 					// Optional findings are included unless the review leaves them out.
 					controls: { scope: [], effort: "standard", includeOptional: true },
 				});
@@ -503,6 +507,48 @@ describe("review engines", () => {
 			}),
 		);
 		expect(runs.runs[0]).toMatchObject({ status: "completed", result: { coverage: { uncheckedAreas: [] } } });
+	});
+
+	it("hands a released checkout to the next caller reset to the head, without setting it up again", async () => {
+		const { start } = await fixture();
+		let first: ReviewEngineCheckout | undefined;
+		let held: ReviewEngineCheckout | undefined;
+		let reused: { path: string; value: string; leftBehind: boolean; setupRuns: string } | undefined;
+		const { work } = await start(
+			engine(async (ctx) => {
+				first = await ctx.checkout();
+				held = await ctx.checkout();
+				writeFileSync(join(first.path, "src", "value.ts"), "changed\n");
+				writeFileSync(join(first.path, "left-behind"), "untracked\n");
+				await first.release();
+				await first.release();
+				const next = await ctx.checkout();
+				reused = {
+					path: next.path,
+					value: readFileSync(join(next.path, "src", "value.ts"), "utf8"),
+					leftBehind: existsSync(join(next.path, "left-behind")),
+					setupRuns: readFileSync(join(next.path, "installed", "runs"), "utf8"),
+				};
+				await reviewCarefully(ctx);
+			}),
+			{
+				// What it installs is ignored, as installed dependencies are.
+				setup: {
+					command:
+						"mkdir -p installed .git/info && echo installed/ >> .git/info/exclude && echo run >> installed/runs",
+				},
+			},
+		);
+		expect(work?.outcome).toBe("completed");
+		// A checkout someone holds is never handed out again.
+		expect(held?.path).not.toBe(first?.path);
+		// The released one is: its tracked files restored, its untracked ones gone, what the setup installed kept.
+		expect(reused?.path).toBe(first?.path);
+		expect(reused?.value).toContain("if (divisor === 0) return amount;");
+		expect(reused?.leftBehind).toBe(false);
+		expect(reused?.setupRuns.trim()).toBe("run");
+		// Releasing once the review ended does nothing, and never fails.
+		await expect(held!.release()).resolves.toBeUndefined();
 	});
 
 	describe("submitting", () => {

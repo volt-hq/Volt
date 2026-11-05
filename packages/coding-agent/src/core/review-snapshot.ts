@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import type { ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawnProcess } from "../utils/child-process.ts";
@@ -146,10 +146,17 @@ export interface ReviewSnapshot {
 	branchBase?: ReviewBranchBase;
 	changedFiles: ReviewChangedFile[];
 	root: string;
+	/** The repository's Git common directory, its symlinks resolved: the same in every worktree of the repository. */
+	commonDirectory: string;
 	readFile(revision: ReviewSnapshotRevision, path: string): Promise<ReviewSnapshotFile | undefined>;
 	listFiles(options?: ReviewSnapshotListOptions): Promise<ReviewSnapshotTreeEntry[]>;
 	search(options: ReviewSnapshotSearchOptions): Promise<ReviewSnapshotSearchResult>;
 	materializeHead(): Promise<string>;
+	/**
+	 * Return `directory`, a checkout {@link materializeHead} made, to the reviewed head: tracked files restored and
+	 * untracked ones removed, while ignored ones (what a setup installed) stay.
+	 */
+	resetHead(directory: string): Promise<void>;
 	dispose(): Promise<void>;
 }
 
@@ -491,6 +498,22 @@ async function repositoryObjectDirectory(
 	throwIfResolutionCancelled(signal);
 	throwIfOutputLimited("git rev-parse failed", result);
 	return result.ok ? text(result).trim() || undefined : undefined;
+}
+
+async function repositoryCommonDirectory(
+	cwd: string,
+	limits: ReviewSnapshotLimits,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	const result = await runCommand(
+		"git",
+		["rev-parse", "--path-format=absolute", "--git-common-dir"],
+		cwd,
+		commandOptions(limits, signal),
+	);
+	throwIfOutputLimited("git rev-parse failed", result);
+	const directory = result.ok ? text(result).trim() : "";
+	return directory ? await realpath(directory) : undefined;
 }
 
 async function repositoryObjectFormat(
@@ -2392,11 +2415,14 @@ class GitReviewSnapshot implements ReviewSnapshot {
 	readonly identity: ReviewSnapshotIdentity;
 	readonly branchBase?: ReviewBranchBase;
 	readonly root: string;
+	readonly commonDirectory: string;
 	readonly changedFiles: ReviewChangedFile[];
 	private readonly source: GitSource;
 	private readonly limits: ReviewSnapshotLimits;
 	private readonly temporaryDirectories: string[];
 	private readonly materializedDirectories: string[] = [];
+	/** The commit each materialized checkout was made at, by directory: what {@link resetHead} returns it to. */
+	private readonly materializedCommits = new Map<string, string>();
 	private readonly treeEntries = new Map<ReviewSnapshotRevision, Map<string, ReviewSnapshotTreeEntry>>();
 	private readonly pathspecUnsafeEntries = new Map<ReviewSnapshotRevision, ReadonlySet<ReviewSnapshotTreeEntry>>();
 	private readonly searchManifests = new Map<string, Promise<SearchManifest>>();
@@ -2409,6 +2435,7 @@ class GitReviewSnapshot implements ReviewSnapshot {
 
 	private constructor(
 		init: SnapshotInit,
+		commonDirectory: string,
 		changedFiles: ReviewChangedFile[],
 		baseInventory: ParsedReviewSnapshotTree,
 		headInventory: ParsedReviewSnapshotTree,
@@ -2421,6 +2448,7 @@ class GitReviewSnapshot implements ReviewSnapshot {
 		this.identity = init.identity;
 		this.branchBase = init.branchBase;
 		this.root = init.root;
+		this.commonDirectory = commonDirectory;
 		this.source = init.source;
 		this.limits = init.limits;
 		this.temporaryDirectories = init.temporaryDirectories;
@@ -2432,6 +2460,8 @@ class GitReviewSnapshot implements ReviewSnapshot {
 	}
 
 	static async create(init: SnapshotInit): Promise<GitReviewSnapshot> {
+		const commonDirectory = await repositoryCommonDirectory(init.root, init.limits, init.source.signal);
+		if (!commonDirectory) throw new Error("Could not resolve the Git common directory.");
 		const baseTreeResult = await git(init.source, ["ls-tree", "-r", "-z", "-l", init.identity.baseTree]);
 		const headTreeResult = await git(init.source, ["ls-tree", "-r", "-z", "-l", init.identity.headTree]);
 		if (!baseTreeResult.ok || !headTreeResult.ok) {
@@ -2448,7 +2478,7 @@ class GitReviewSnapshot implements ReviewSnapshot {
 			baseInventory.entries,
 			headInventory.entries,
 		);
-		return new GitReviewSnapshot(init, changedFiles, baseInventory, headInventory);
+		return new GitReviewSnapshot(init, commonDirectory, changedFiles, baseInventory, headInventory);
 	}
 
 	async readFile(revision: ReviewSnapshotRevision, path: string): Promise<ReviewSnapshotFile | undefined> {
@@ -2913,7 +2943,19 @@ class GitReviewSnapshot implements ReviewSnapshot {
 			commandOptions(this.limits, this.source.signal),
 		);
 		if (!reset.ok) throw new Error(`Could not materialize review checkout: ${commandError(reset)}`);
+		this.materializedCommits.set(directory, commitOid);
 		return directory;
+	}
+
+	async resetHead(directory: string): Promise<void> {
+		this.assertActive();
+		const commit = this.materializedCommits.get(directory);
+		if (commit === undefined) throw new Error("Not a checkout of this review snapshot.");
+		const options = commandOptions(this.limits, this.source.signal);
+		const reset = await runCommand("git", ["reset", "--hard", "--quiet", commit], directory, options);
+		if (!reset.ok) throw new Error(`Could not reset review checkout: ${commandError(reset)}`);
+		const clean = await runCommand("git", ["clean", "-d", "--force", "--quiet"], directory, options);
+		if (!clean.ok) throw new Error(`Could not clean review checkout: ${commandError(clean)}`);
 	}
 
 	async dispose(): Promise<void> {

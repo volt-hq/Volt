@@ -32,7 +32,7 @@ import {
 	SettingsManager,
 } from "@hansjm10/volt-coding-agent";
 import { clusterWave } from "./cluster.ts";
-import { loadContextFiles } from "./git.ts";
+import { loadContextFiles } from "./context-files.ts";
 import { type Dismissal, loadDismissals, recordDismissals } from "./memory.ts";
 import { buildReport, modelRef, reportSummary, runDetail, workProgress } from "./report.ts";
 import { buildSubmission } from "./submit.ts";
@@ -328,7 +328,7 @@ async function runSwarmReview(engine: ReviewEngineContext, settings: Settings): 
 	if ("error" in verifier) throw new Error(verifier.error);
 	const warnings = [worker.warning, verifier.warning].filter((warning): warning is string => warning !== undefined);
 
-	const target = await buildTarget(engine, engine.signal);
+	const target = await buildTarget(engine);
 	if (typeof target === "string") throw new Error(target);
 	let dismissals: Dismissal[] = [];
 	try {
