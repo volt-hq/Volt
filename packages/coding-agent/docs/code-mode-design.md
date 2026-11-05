@@ -1,6 +1,6 @@
 # Code mode
 
-- Status: Design complete, ready for review. Every decision is recorded in section 5; section 8 lists the approvals implementation needs and the follow-ups, and section 9 the delivery plan. Sections 5.1 to 5.14 were reviewed with the maintainer; sections 5.15 to 5.18 were decided without a separate review round.
+- Status: Design complete, ready for review. Every decision is recorded in section 5; section 8 lists the approvals for implementation, granted on 2026-11-04, and the follow-ups, and section 9 the delivery plan. Sections 5.1 to 5.14 were reviewed with the maintainer; sections 5.15 to 5.18 were decided without a separate review round.
 - Date: 2026-11-04
 - Audience: Volt maintainers.
 - Scope: A sandboxed script tool that lets the model call Volt tools programmatically, so intermediate results stay out of the model context. This document covers the runtime that executes scripts, how it is supervised, and the constraints Volt places on it.
@@ -865,7 +865,7 @@ These follow from Volt's architecture and the decisions of section 5.
 
 ## 8. Approvals and follow-ups
 
-No design decisions remain open. Implementation needs these approvals:
+No design decisions remain open. The maintainer approved these on 2026-11-04, so implementation may proceed with them:
 
 - **Dependency.** `quickjs-wasi`, pinned exactly, with a shrinkwrap update (section 7).
 - **Configuration and settings.** The `codeMode.enabled` host setting (section 5.15) and the per-server MCP `maxConcurrentCalls` field (section 5.13).
