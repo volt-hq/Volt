@@ -412,14 +412,36 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 			defineHidden(globalObject, "tools", root);
 		}
 
-		function truncate(value: string, maxChars: number): string {
+		/**
+		 * Keeps `value` within `maxChars`, including the marker that counts what was left out. The marker is
+		 * sized with the full length as its count, an upper bound on the count it shows.
+		 */
+		function truncateWith(value: string, maxChars: number, separator: string): string {
 			if (value.length <= maxChars) return value;
-			return `${StringPrototypeSlice(value, 0, maxChars)}\n... [${value.length - maxChars} more chars]`;
+			const kept = maxChars - `${separator}... [${value.length} more chars]`.length;
+			return `${StringPrototypeSlice(value, 0, kept)}${separator}... [${value.length - kept} more chars]`;
+		}
+
+		function truncate(value: string, maxChars: number): string {
+			return truncateWith(value, maxChars, "\n");
 		}
 
 		function truncateLine(value: string, maxChars: number): string {
-			if (value.length <= maxChars) return value;
-			return `${StringPrototypeSlice(value, 0, maxChars)}... [${value.length - maxChars} more chars]`;
+			return truncateWith(value, maxChars, "");
+		}
+
+		/** Writes line breaks as `\n`, so text from a message cannot start lines of its own in a result. */
+		function oneLine(value: string): string {
+			let result = "";
+			let start = 0;
+			for (let i = 0; i < value.length; i++) {
+				const code = StringPrototypeCharCodeAt(value, i);
+				if (code !== 0x0a && code !== 0x0d && code !== 0x2028 && code !== 0x2029) continue;
+				result += `${StringPrototypeSlice(value, start, i)}\\n`;
+				if (code === 0x0d && StringPrototypeCharCodeAt(value, i + 1) === 0x0a) i++;
+				start = i + 1;
+			}
+			return start === 0 ? value : result + StringPrototypeSlice(value, start);
 		}
 
 		/** Removes prelude frames and maps columns on the script's first line back to the script. */
@@ -450,10 +472,10 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 
 		/** One bounded line describing a thrown value. */
 		function summarize(value: unknown): string {
-			if (isError(value)) return truncateLine(errorLine(value), MAX_SUMMARY_CHARS);
+			if (isError(value)) return truncateLine(oneLine(errorLine(value)), MAX_SUMMARY_CHARS);
 			if (value === null) return "Thrown null";
 			if (value === undefined) return "Thrown undefined";
-			return truncateLine(`Thrown ${typeof value}: ${formatValue(value)}`, MAX_SUMMARY_CHARS);
+			return truncateLine(oneLine(`Thrown ${typeof value}: ${formatValue(value)}`), MAX_SUMMARY_CHARS);
 		}
 
 		function describeValue(value: unknown): CodeModeErrorDescription {
@@ -488,7 +510,7 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 				cause = isError(cause) ? read(cause, "cause") : undefined;
 			}
 			return {
-				name: typeof name === "string" && name !== "" ? truncateLine(name, MAX_NAME_CHARS) : "Error",
+				name: typeof name === "string" && name !== "" ? truncateLine(oneLine(name), MAX_NAME_CHARS) : "Error",
 				summary,
 				text: truncate(block, config.maxErrorChars),
 				outOfMemory: name === "InternalError" && message === "out of memory",

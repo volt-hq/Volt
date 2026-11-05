@@ -141,7 +141,37 @@ export function createLosslessCodec(maxDepth: number): LosslessCodec {
 		else ArrayPrototypePush(state.parts, JSONStringify(value));
 	}
 
-	/** Throws for an array that is not dense or carries properties besides its elements. */
+	function isElementIndex(name: string, length: number): boolean {
+		const index = NumberCtor(name);
+		return NumberIsInteger(index) && index >= 0 && index < length && StringCtor(index) === name;
+	}
+
+	/**
+	 * Reads a property only while it is still an own enumerable property of `target`. A getter that ran
+	 * earlier in the same encoding may have deleted it, and reading it with [[Get]] alone would then encode
+	 * a value inherited from a prototype. Properties a getter adds during encoding are not part of the value.
+	 */
+	function readOwn(state: EncodeState, target: object, key: string | number, isElement: boolean): unknown {
+		if (!ObjectPrototypePropertyIsEnumerable(target, key)) {
+			if (!ObjectHasOwn(target, key)) {
+				throw encodeError(
+					state,
+					isElement
+						? "an array hole is not JSON; fill the array"
+						: "a property deleted while the value was being encoded is not JSON",
+				);
+			}
+			throw encodeError(
+				state,
+				isElement
+					? "a non-enumerable element is not JSON; define it as an ordinary element"
+					: "a non-enumerable property is not JSON; define it as an ordinary property",
+			);
+		}
+		return (target as Record<string | number, unknown>)[key];
+	}
+
+	/** Throws for an array with a custom prototype or properties besides its elements. Holes are found as elements are read. */
 	function checkArrayShape(state: EncodeState, array: unknown[], length: number): void {
 		const proto = ObjectGetPrototypeOf(array);
 		if (proto !== ArrayPrototype) {
@@ -159,15 +189,10 @@ export function createLosslessCodec(maxDepth: number): LosslessCodec {
 		// Exactly `length` indices followed by `length` means the array is dense with nothing else on it.
 		const names = ObjectGetOwnPropertyNames(array);
 		if (names.length === length + 1 && names[length] === "length") return;
-		for (let i = 0; i < length; i++) {
-			if (!ObjectHasOwn(array, i)) {
-				ArrayPrototypePush(state.path, i);
-				throw encodeError(state, "an array hole is not JSON; fill the array");
-			}
-		}
-		for (let i = length; i < names.length; i++) {
-			if (names[i] !== "length") {
-				ArrayPrototypePush(state.path, names[i]);
+		for (let i = 0; i < names.length; i++) {
+			const name = names[i];
+			if (name !== "length" && !isElementIndex(name, length)) {
+				ArrayPrototypePush(state.path, name);
 				throw encodeError(state, "a property on an array is not JSON; move it into an object");
 			}
 		}
@@ -180,7 +205,7 @@ export function createLosslessCodec(maxDepth: number): LosslessCodec {
 		for (let i = 0; i < length; i++) {
 			if (i > 0) ArrayPrototypePush(state.parts, ",");
 			ArrayPrototypePush(state.path, i);
-			const element = array[i];
+			const element = readOwn(state, array, i, true);
 			if (element === undefined) throw encodeError(state, "undefined in an array is not JSON; use null");
 			write(state, element, depth + 1);
 			ArrayPrototypePop(state.path);
@@ -193,7 +218,6 @@ export function createLosslessCodec(maxDepth: number): LosslessCodec {
 		if (proto !== ObjectPrototype && proto !== null) throw encodeError(state, describeNonPlain(object, proto));
 		if (ObjectGetOwnPropertySymbols(object).length > 0)
 			throw encodeError(state, "symbol-keyed properties are not JSON");
-		const record = object as Record<string, unknown>;
 		const keys = ObjectKeys(object);
 		const names = ObjectGetOwnPropertyNames(object);
 		if (names.length !== keys.length) {
@@ -210,7 +234,7 @@ export function createLosslessCodec(maxDepth: number): LosslessCodec {
 			const key = keys[i];
 			ArrayPrototypePush(state.path, key);
 			if (key === "__proto__") throw encodeError(state, 'a key named "__proto__" is not allowed');
-			const property = record[key];
+			const property = readOwn(state, object, key, false);
 			// Properties holding undefined are omitted: a missing field and undefined mean the same thing.
 			if (property !== undefined) {
 				if (!first) ArrayPrototypePush(state.parts, ",");

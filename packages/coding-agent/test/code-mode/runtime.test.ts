@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, it } from "vitest";
-import { CodeModeWorkerPool } from "../../src/core/code-mode/pool.ts";
+import { type CodeModeWorkerListener, CodeModeWorkerPool } from "../../src/core/code-mode/pool.ts";
+import type { HostToWorkerMessage } from "../../src/core/code-mode/protocol.ts";
 import {
 	type CodeModeCall,
 	CodeModeCallError,
@@ -51,6 +52,32 @@ function deferred<T>() {
 		resolve = settle;
 	});
 	return { promise, resolve };
+}
+
+/**
+ * A pool whose single worker answers `start` with a forged `call` frame, standing in for a compromised worker.
+ * It implements only what the runtime uses.
+ */
+function forgingPool(payload: string): CodeModeWorkerPool {
+	const worker = {
+		control: new SharedArrayBuffer(24),
+		alive: true,
+		listener: undefined as CodeModeWorkerListener | undefined,
+		attach(listener: CodeModeWorkerListener) {
+			this.listener = listener;
+		},
+		detach() {
+			this.listener = undefined;
+		},
+		post(message: HostToWorkerMessage) {
+			if (message.type !== "start") return;
+			queueMicrotask(() => this.listener?.onMessage({ type: "call", id: message.id, payload }));
+		},
+		terminate() {
+			this.alive = false;
+		},
+	};
+	return { acquire: async () => worker, release: () => {}, discard: () => {} } as unknown as CodeModeWorkerPool;
 }
 
 function never(call: CodeModeCall, honorSignal: boolean): Promise<never> {
@@ -245,6 +272,57 @@ describe("code mode runtime", () => {
 		expect(blocking.failure).toStrictEqual({ kind: "compute_budget", budgetMs: 150 });
 		expect(performance.now() - started).toBeLessThan(5_000);
 		expect(await run("return 1 + 1;")).toMatchObject({ ok: true, value: 2 });
+	});
+
+	it("fails with an output limit when one output item is larger than a message frame", async () => {
+		// 600 characters of a two-byte character are 1,200 bytes of UTF-8, over the 1,000-byte frame limit.
+		const result = failed(
+			await run("text('small'); text('\\u00e9'.repeat(600)); return 1;", { limits: { maxFrameBytes: 1_000 } }),
+		);
+		expect(result.failure).toStrictEqual({ kind: "output_limit" });
+		expect(texts(result)).toStrictEqual(["small"]);
+	});
+
+	it("treats call arguments over the argument limit as a protocol violation", async () => {
+		let called = false;
+		// Within the coarse check before parsing (limit plus envelope room), but over the limit itself.
+		const payload = `{"seq":1,"binding":"call","args":${JSON.stringify({ s: "x".repeat(200) })}}`;
+		const result = failed(
+			await runCodeModeScript(forgingPool(payload), {
+				code: "",
+				bindings: [{ name: "call", path: ["call"] }],
+				onCall: async () => {
+					called = true;
+					return null;
+				},
+				timeoutMs: 2_000,
+				limits: { maxArgumentBytes: 100 },
+			}),
+		);
+		expect(result.failure).toStrictEqual({
+			kind: "sandbox",
+			reason: "protocol violation: call arguments exceed the argument limit",
+		});
+		expect(called).toBe(false);
+	});
+
+	it("agrees with the prelude on the argument limit when the binding name needs escaping", async () => {
+		// {"s":"éé..."} with 500 two-byte characters is exactly 1,008 bytes.
+		const result = await run(
+			`
+			const outcomes = [];
+			for (const count of [500, 501]) {
+				try { outcomes.push(await tools.read({ s: "\\u00e9".repeat(count) })); } catch (error) { outcomes.push(error.message); }
+			}
+			return outcomes;
+		`,
+			{
+				bindings: [{ name: 'r\u00ebad"\u0001\u2028x', path: ["read"] }],
+				limits: { maxArgumentBytes: 1_008 },
+				onCall: async () => "sent",
+			},
+		);
+		expect(result).toMatchObject({ ok: true, value: ["sent", "args: 1010 bytes encoded exceeds the limit of 1008"] });
 	});
 
 	it("fails with an output limit and keeps the output retained until then", async () => {

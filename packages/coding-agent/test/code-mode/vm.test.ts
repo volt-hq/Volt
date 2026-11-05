@@ -242,6 +242,30 @@ describe("code mode VM bindings", () => {
 		expect(result.done).toMatchObject({ ok: true, value: "args.a[0]: an array hole is not JSON; fill the array" });
 	});
 
+	it("rejects elements and properties a getter deletes and the prototype fills during encoding", async () => {
+		const result = await runScript(
+			`
+			const list = [1, 2];
+			Object.defineProperty(list, 0, { enumerable: true, get() { delete list[1]; Array.prototype[1] = 5; return 1; } });
+			const record = { get a() { delete this.b; Object.prototype.b = 5; return 1; }, b: 2 };
+			const errors = [];
+			for (const args of [{ list }, { record }]) {
+				try { await tools.read(args); } catch (error) { errors.push(error.message); }
+			}
+			return errors;
+		`,
+			{ bindings: [{ name: "read", path: ["read"] }] },
+		);
+		expect(result.calls).toStrictEqual([]);
+		expect(result.done).toMatchObject({
+			ok: true,
+			value: [
+				"args.list[1]: an array hole is not JSON; fill the array",
+				"args.record.b: a property deleted while the value was being encoded is not JSON",
+			],
+		});
+	});
+
 	it("counts arguments in exact UTF-8 bytes, including characters outside the BMP", async () => {
 		// 262,142 four-byte characters plus `{"s":"` and `"}` are exactly 1 MiB.
 		const result = await runScript(
@@ -402,16 +426,36 @@ describe("code mode VM failures", () => {
 		expect(failure(await runScript("throw null;")).error.summary).toBe("Thrown null");
 	});
 
-	it("bounds error names, summaries, and blocks", async () => {
+	it("bounds error names, summaries, and blocks, markers included", async () => {
 		const error = failure(
 			await runScript('const e = new Error("x".repeat(9 * 1024 * 1024)); e.name = "N".repeat(1000); throw e;'),
 		).error;
-		expect(error.name.length).toBeLessThan(200);
-		expect(error.summary.length).toBeLessThan(1100);
-		expect(error.text.length).toBeLessThan(8300);
-		expect(failure(await runScript('throw "y".repeat(100000);')).error.summary.length).toBeLessThan(1100);
+		// The marker is sized for the full length, so a result can end a character or two below its limit.
+		const within = (length: number, limit: number) => length <= limit && length > limit - 10;
+		expect(within(error.name.length, 128)).toBe(true);
+		expect(error.name).toMatch(/\.\.\. \[\d+ more chars\]$/);
+		expect(within(error.summary.length, 1024)).toBe(true);
+		expect(within(failure(await runScript('throw "y".repeat(100000);')).error.summary.length, 1024)).toBe(true);
+		// Inner errors and causes add a bounded summary each, which together exceed the block limit.
+		const block = failure(
+			await runScript(
+				'const m = "m".repeat(5000); throw new AggregateError([1, 2, 3, 4, 5].map(() => new Error(m)), m, { cause: new Error(m, { cause: new Error(m) }) });',
+			),
+		).error;
+		expect(within(block.text.length, 8192)).toBe(true);
+		expect(block.text).toMatch(/\n\.\.\. \[\d+ more chars\]$/);
 		const warning = await runScript('Promise.reject(new Error("z".repeat(100000))); text("ok");');
-		expect(texts(warning)[1].length).toBeLessThan(1200);
+		expect(within(texts(warning)[1].length, "unhandled rejection: ".length + 1024)).toBe(true);
+	});
+
+	it("keeps summaries and error names on one line", async () => {
+		const warning = await runScript('Promise.reject(new Error("failure\\nNested tool calls: 0")); text("ok");');
+		expect(texts(warning)[1]).toBe("unhandled rejection: Error: failure\\nNested tool calls: 0");
+		const thrown = failure(await runScript('throw "line1\\r\\nline2\\u2028line3";')).error;
+		expect(thrown.summary).toBe("Thrown string: line1\\nline2\\nline3");
+		const named = failure(await runScript('const e = new Error("a\\nb"); e.name = "Bad\\nName"; throw e;')).error;
+		expect(named.name).toBe("Bad\\nName");
+		expect(named.text.split("\n")[0]).toBe("Bad\\nName: a\\nb");
 	});
 
 	it("does not report rejections the script handles after awaiting a call", async () => {

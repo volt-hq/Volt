@@ -74,8 +74,9 @@ describe("code mode bridge codec", () => {
 		const holey: unknown[] = [1];
 		holey[2] = 3;
 		expect(() => encodeBridgeValue(holey, "args")).toThrow("args[1]: an array hole is not JSON; fill the array");
+		// The array's shape is checked before its elements are read, so the extra property is found first.
 		const holeyWithExtra = Object.assign(holey.slice(), { x: 1 });
-		expect(() => encodeBridgeValue(holeyWithExtra, "args")).toThrow("args[1]: an array hole is not JSON");
+		expect(() => encodeBridgeValue(holeyWithExtra, "args")).toThrow("args.x: a property on an array is not JSON");
 		const cycle: Record<string, unknown> = {};
 		cycle.self = cycle;
 		expect(() => encodeBridgeValue(cycle, "args")).toThrow("args.self: a circular reference is not JSON");
@@ -103,8 +104,43 @@ describe("code mode bridge codec", () => {
 		expect(() => encodeBridgeValue({ nested: hidden }, "args")).toThrow(
 			"args.nested.path: a non-enumerable property is not JSON; define it as an ordinary property",
 		);
+		const hiddenElement = [1];
+		Object.defineProperty(hiddenElement, "0", { value: 1, enumerable: false });
+		expect(() => encodeBridgeValue({ list: hiddenElement }, "args")).toThrow(
+			"args.list[0]: a non-enumerable element is not JSON; define it as an ordinary element",
+		);
 		const bigArray = Array.from({ length: 100_000 }, (_, i) => i);
 		expect(decodeBridgeValue(encodeBridgeValue(bigArray, "args"))).toStrictEqual(bigArray);
+	});
+
+	it("reads only properties that are still own and enumerable when a getter changes the value", () => {
+		const deletesLater = {
+			get a() {
+				delete (this as { b?: number }).b;
+				return 1;
+			},
+			b: 2,
+		};
+		expect(() => encodeBridgeValue(deletesLater, "args")).toThrow(
+			"args.b: a property deleted while the value was being encoded is not JSON",
+		);
+		const hidesLater = {
+			get a() {
+				Object.defineProperty(this, "b", { enumerable: false });
+				return 1;
+			},
+			b: 2,
+		};
+		expect(() => encodeBridgeValue(hidesLater, "args")).toThrow("args.b: a non-enumerable property is not JSON");
+		const list = [1, 2];
+		Object.defineProperty(list, 0, {
+			enumerable: true,
+			get() {
+				list.length = 1;
+				return 1;
+			},
+		});
+		expect(() => encodeBridgeValue(list, "args")).toThrow("args[1]: an array hole is not JSON; fill the array");
 	});
 
 	it("never calls toJSON", () => {

@@ -419,6 +419,14 @@ class ScriptRun {
 			this.protocolViolation(errorMessage(error));
 			return;
 		}
+		// The prelude enforces the argument limit on the exact encoded arguments before posting; a frame
+		// beyond it was not produced by the prelude. The envelope around the arguments does not count.
+		const envelopeBytes = Buffer.byteLength(`{"seq":${call.seq},"binding":${JSON.stringify(call.binding)},"args":}`);
+		const argumentBytes = Math.max(0, bytes - envelopeBytes);
+		if (argumentBytes > this.limits.maxArgumentBytes) {
+			this.protocolViolation("call arguments exceed the argument limit");
+			return;
+		}
 		if (call.seq !== this.lastSeq + 1) {
 			this.protocolViolation(`call ${call.seq} after call ${this.lastSeq}`);
 			return;
@@ -433,9 +441,6 @@ class ScriptRun {
 			this.protocolViolation(`unknown binding ${call.binding}`);
 			return;
 		}
-		// The outstanding-argument cap counts the encoded arguments, not the envelope around them.
-		const envelopeBytes = Buffer.byteLength(`{"seq":${call.seq},"binding":${JSON.stringify(call.binding)},"args":}`);
-		const argumentBytes = Math.max(0, bytes - envelopeBytes);
 		const state: CallState = {
 			record: { seq: call.seq, binding: call.binding, status: "completed", durationMs: 0 },
 			startedAt: performance.now(),
@@ -545,6 +550,11 @@ class ScriptRun {
 	private onOutput(payload: string): void {
 		// Output produced before a stop takes effect is kept, except past the output limit or a sandbox failure.
 		if (this.failure?.kind === "output_limit" || this.failure?.kind === "sandbox") return;
+		// One item larger than a message frame fails like output past the retained-output limit.
+		if (Buffer.byteLength(payload) > this.limits.maxFrameBytes) {
+			this.terminate({ kind: "output_limit" });
+			return;
+		}
 		let item: CodeModeOutputItem;
 		try {
 			item = parseOutputPayload(payload);

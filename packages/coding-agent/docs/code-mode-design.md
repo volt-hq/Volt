@@ -195,7 +195,7 @@ Values cross the VM boundary only as JSON text. The prelude encodes and decodes 
 The codec is lossless: a value either round-trips exactly or fails with an error that names its path, for example `args.when: Date is not JSON; use .toISOString()`.
 
 - **Accepted values:** `null`, booleans, finite numbers (including `-0`), BigInt, strings (including lone surrogates), dense arrays, and plain objects whose prototype is `Object.prototype` or `null`.
-- **Rejected values:** `NaN`, `Infinity`, `-Infinity`, `undefined` in arrays, array holes (including holes a script fills through `Array.prototype`), arrays with properties besides their elements, arrays with a prototype other than `Array.prototype`, functions, symbols, symbol-keyed properties, non-enumerable own properties, non-plain objects (`Date`, `Map`, `Set`, `RegExp`, typed arrays, `ArrayBuffer`, errors, boxed primitives, class instances), cycles, keys named `__proto__`, and nesting deeper than 64 levels. `toJSON` is never called, so nothing converts silently.
+- **Rejected values:** `NaN`, `Infinity`, `-Infinity`, `undefined` in arrays, array holes (including holes a script fills through `Array.prototype`), arrays with properties besides their elements, arrays with a prototype other than `Array.prototype`, functions, symbols, symbol-keyed properties, non-enumerable own properties, non-plain objects (`Date`, `Map`, `Set`, `RegExp`, typed arrays, `ArrayBuffer`, errors, boxed primitives, class instances), cycles, keys named `__proto__`, and nesting deeper than 64 levels. `toJSON` is never called, so nothing converts silently. Each element and property is read only while it is still an own enumerable property, so a getter that deletes one during encoding cannot make the codec encode a value inherited from a prototype; properties a getter adds during encoding are not part of the value.
 - **One normalization:** object properties whose value is `undefined` are omitted. A missing field and `undefined` mean the same thing in tool arguments.
 - **Encoding:** numbers are written as exact literals. Integers of 2^53 and above are written with all their digits (the double `2 ** 60` as `1152921504606846976`, not the shortest form `1152921504606847000`), so the literal is the double's exact value. Other numbers use their shortest form. BigInt values are written as their digits and `-0` as `-0`.
 - **Decoding:** an integer literal decodes to a number when a double holds its value exactly, and otherwise to a BigInt. A literal with a fraction or exponent must be the shortest form of the double it decodes to; anything else is a protocol violation. JSON has one number type, so the codec preserves values, not the number/BigInt distinction: a BigInt that a double holds exactly arrives as a number. Decoded numbers must be finite.
@@ -395,7 +395,7 @@ Rejected:
 
 #### Retained output
 
-While the script runs, the host retains at most 16 Mi characters of output text and 100,000 output items, Pi's limits enforced on the host instead of in the guest. Exceeding either terminates the script with an output-limit failure the script cannot catch. Output retained up to that point is kept and spilled.
+While the script runs, the host retains at most 16 Mi characters of output text and 100,000 output items, Pi's limits enforced on the host instead of in the guest. Exceeding either, or a single output item larger than the 8 MiB message frame (section 5.9), terminates the script with an output-limit failure the script cannot catch. Output retained up to that point is kept and spilled.
 
 ### 5.11 Failures
 
@@ -432,7 +432,7 @@ The status line names the kind: `Script failed after 6.4 s (49 tool calls): unca
   - `aborted`: `The script was aborted. Nested calls in flight were cancelled.`
   - `output_limit`: `The script printed more than 16 Mi characters or 100,000 items. Print summaries and return selected fields instead of whole results.`
   - `sandbox`: `The sandbox failed: <reason>. Calls listed below may have taken effect.`
-- The error block is at most 8 KiB. The one-line summary used in status lines and warnings is at most 1,024 characters, and the error's name at most 128.
+- The error block is at most 8 KiB. The one-line summary used in status lines and warnings is at most 1,024 characters, and the error's name at most 128; line breaks in either appear as `\n`, so a message cannot add lines that read as other parts of the result. Each limit includes its truncation marker.
 
 **Nested-call summary:**
 
@@ -464,7 +464,7 @@ May have changed state:
 - mcp__github__create_issue owner="volt-hq" repo="Volt" title="Generated tests fail for widget3" body=<400 chars>: still running when stopped; may have applied
 ```
 
-**Background rejections.** A promise that rejects without the script handling it is reported as a `warn: unhandled rejection: <description>` line in the output, on success and failure alike, at most 10 per script. A rejection counts only if it is still unhandled when the script can no longer resume, because it finished or stalled; a script that attaches a handler after awaiting a call, such as `const a = tools.x(); const b = tools.y(); await a; await b;` when `b` fails first, gets no warning. The warnings therefore follow the script's other output. QuickJS's rejection callback also fires for the script's own promise when the script fails; the host excludes that one.
+**Background rejections.** A promise that rejects without the script handling it is reported as a `warn: unhandled rejection: <description>` line in the output when the script completes, fails with an error, or stalls, at most 10 per script. A script the host stops (a budget, the timeout, an abort, or the output limit) reports none, because describing a rejection would run script code after the stop. A rejection counts only if it is still unhandled when the script can no longer resume, because it finished or stalled; a script that attaches a handler after awaiting a call, such as `const a = tools.x(); const b = tools.y(); await a; await b;` when `b` fails first, gets no warning. The warnings therefore follow the script's other output. QuickJS's rejection callback also fires for the script's own promise when the script fails; the host excludes that one.
 
 **Truncation priority.** Under the budget of section 5.10, a failed result keeps, in order: the status line, the error block, the nested-call summary, and then the output stream, head and tail.
 
