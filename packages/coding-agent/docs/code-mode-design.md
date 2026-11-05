@@ -1,10 +1,10 @@
 # Code mode
 
-- Status: Draft. The runtime layer, the bridge contract, the model-facing result, failure semantics, tool scope, nested-call scheduling, and the model-facing contract are decided (section 5). Enablement, observability, state, and tuning are open (section 8).
+- Status: Draft. The runtime layer, the bridge contract, the model-facing result, failure semantics, tool scope, nested-call scheduling, the model-facing contract, and enablement are decided (section 5). Observability, state, and tuning are open (section 8). Sections 5.1 to 5.14 were reviewed with the maintainer; sections 5.15 onward were decided without a separate review round.
 - Date: 2026-11-04
 - Audience: Volt maintainers.
 - Scope: A sandboxed script tool that lets the model call Volt tools programmatically, so intermediate results stay out of the model context. This document covers the runtime that executes scripts, how it is supervised, and the constraints Volt places on it.
-- Decision so far: model-written JavaScript runs in [`quickjs-wasi`](https://github.com/vercel-labs/quickjs-wasi) (QuickJS-NG compiled to WebAssembly) on a per-process pool of worker threads, one fresh VM per script, booted by creating the VM and running a trusted prelude. Scripts are bounded by a compute budget and a nested-call budget, not by a default wall-clock deadline. Adding `quickjs-wasi` is a new dependency and needs maintainer approval before implementation. Values cross the bridge through a lossless JSON codec built on native `JSON.parse` `context.source` and `JSON.rawJSON`; nested calls resolve to text or internal per-tool projections, fail with typed `ToolCallError`s, and return images as opaque references that only reach the model when the script shows them (section 5.9). The model reads one plain-text result: an ordered output stream with multi-line items fenced, a 50 KB budget split by priority with structural truncation of the return value, and the full output spilled to a temp file (section 5.10). A failed script keeps its partial output and adds a failure kind, an error block, and a grouped summary of the nested calls that may have changed state (section 5.11). Scripts can call only operations the model could call directly in the same session, excluding user, session, job, and delegation tools (section 5.12). Nested calls run concurrently up to 10 per script; tools that declare `sequential` run alone, and MCP calls are limited per server rather than serialized (section 5.13). The tool is `run_code`, taking JSON `{ code, description?, timeoutMs? }` with JavaScript or erasable TypeScript; its description lists bindings and result shapes without repeating native tool declarations, and MCP tools are discovered through the `mcp` tool (section 5.14).
+- Decision so far: model-written JavaScript runs in [`quickjs-wasi`](https://github.com/vercel-labs/quickjs-wasi) (QuickJS-NG compiled to WebAssembly) on a per-process pool of worker threads, one fresh VM per script, booted by creating the VM and running a trusted prelude. Scripts are bounded by a compute budget and a nested-call budget, not by a default wall-clock deadline. Adding `quickjs-wasi` is a new dependency and needs maintainer approval before implementation. Values cross the bridge through a lossless JSON codec built on native `JSON.parse` `context.source` and `JSON.rawJSON`; nested calls resolve to text or internal per-tool projections, fail with typed `ToolCallError`s, and return images as opaque references that only reach the model when the script shows them (section 5.9). The model reads one plain-text result: an ordered output stream with multi-line items fenced, a 50 KB budget split by priority with structural truncation of the return value, and the full output spilled to a temp file (section 5.10). A failed script keeps its partial output and adds a failure kind, an error block, and a grouped summary of the nested calls that may have changed state (section 5.11). Scripts can call only operations the model could call directly in the same session, excluding user, session, job, and delegation tools (section 5.12). Nested calls run concurrently up to 10 per script; tools that declare `sequential` run alone, and MCP calls are limited per server rather than serialized (section 5.13). The tool is `run_code`, taking JSON `{ code, description?, timeoutMs? }` with JavaScript or erasable TypeScript; its description lists bindings and result shapes without repeating native tool declarations, and MCP tools are discovered through the `mcp` tool (section 5.14). Code mode is off by default and enabled with the `codeMode.enabled` setting (section 5.15).
 
 ## 1. Objective
 
@@ -53,7 +53,7 @@ Checked against `4e9366efa`.
 - **Tool results.** A tool's `AgentToolResult.content` (`packages/agent/src/types.ts:373`) is what the model reads; `createToolResultMessage` (`packages/agent/src/agent-loop.ts:950`) adds it to the conversation. The OpenAI Completions and Responses providers join a result's text blocks with newlines (`packages/ai/src/providers/openai-completions.ts:908`, `openai-responses-shared.ts:258`), so separate text blocks do not preserve boundaries on every provider.
 - **Output spill.** `OutputAccumulator` (`src/core/tools/output-accumulator.ts`) writes over-limit output to `os.tmpdir()` with a random name and mode 0600 and does not delete it. The `read` tool is authorized by tool (`workspace.read`, `src/core/operation-authorization.ts:74`), not by path.
 - **Operation classification.** `getTrustedToolOperationResolver` (`src/core/operation-authorization.ts:220`) resolves a tool call to operation capabilities such as `workspace.read`, `workspace.write`, or `process.execute` (bash). `jobs`, `image_gen`, `subagent_registry`, direct MCP tools, and extension tools have no trusted resolver.
-- **Active tools.** The default active tools are `request_user_input`, `jobs`, `read`, `bash`, `edit`, `write`, `image_gen`, `web_search`, and `web_fetch`; `grep`, `find`, `ls`, `inspect`, and `lsp` are available but inactive by default (`src/core/tools/index.ts:249`). The `background` option that bash and subagent accept comes from `withBackgroundJobs` (`src/core/tools/background.ts`).
+- **Active tools.** The default active tools are `request_user_input`, `jobs`, `read`, `bash`, `edit`, `write`, `image_gen`, `web_search`, `web_fetch`, and `lsp`, plus `subagent` when a subagent manager exists and `mcp` and promoted direct MCP tools when MCP is enabled; `grep`, `find`, `ls`, and `inspect` are available but inactive by default (`src/core/tools/index.ts:249`, `src/core/sdk.ts:561-576`). Tools are switched on and off only with `--tools`, `--no-tools`, `--no-builtin-tools`, `--exclude-tools`, SDK options, and, for conversations a paired phone opens, the `remote.allowTools` ceiling; no setting adds a tool to the default set. The `background` option that bash and subagent accept comes from `withBackgroundJobs` (`src/core/tools/background.ts`).
 - **Plan research evidence.** The tool-result policy records Plan research evidence for a successful call whose authorized operation provides it, keyed by tool call ID (`src/core/session/turn-policy.ts:466-474`).
 
 ## 3. Goals and non-goals
@@ -476,7 +476,7 @@ Decided. The binding set is computed once, when a script starts (section 5.9), f
 
 A binding exists only for an operation the model could call directly in the same session at that moment:
 
-- Built-in and extension tools must be active after tool policy: `--tools`, `--exclude-tools`, and a subagent's own tool policy. Available but inactive tools get no binding; by default that includes `grep`, `find`, `ls`, `inspect`, and `lsp`.
+- Built-in and extension tools must be active after tool policy: `--tools`, `--exclude-tools`, and a subagent's own tool policy. Available but inactive tools get no binding; by default that includes `grep`, `find`, `ls`, and `inspect`.
 - MCP tools require the `mcp` tool to be active and the tool to pass its server's `includeTools`/`excludeTools` filters and project trust.
 
 Code mode therefore never grants a capability the session lacks. A subagent's scripts get bindings from the subagent's own tool policy.
@@ -658,6 +658,25 @@ Rejected:
 - Repeating full declarations for natively declared tools. About 3k more tokens per request for parameters already in context.
 - Identifier aliases for MCP names (Pi, Cloudflare). They can collide.
 
+### 5.15 Enablement
+
+Decided without a separate review round.
+
+- Code mode is off by default. A new host setting, `codeMode.enabled` (boolean, default `false`), adds `run_code` to a conversation's default active tools. Like other host settings it can be set globally, in a profile, or in a trusted project's `.volt/settings.json`, and it is read when a conversation's tools are created.
+- `run_code` is otherwise an ordinary tool name: `--tools` must list it to keep it, `--exclude-tools run_code` removes it, `--no-tools` removes it, and SDK callers pass it in `tools`. A conversation a paired phone opens needs it in `remote.allowTools` when that ceiling is set. Enabling code mode never widens what a session may do (section 5.12).
+- Subagents inherit `run_code` with the parent's active tools unless their own tool policy leaves it out, and their scripts get bindings from their own tool policy.
+- In Plan mode, an enabled `run_code` is available with read-only bindings (section 5.12).
+- There is no per-model routing: code mode is not switched on or off by model. The evidence varies by model and task. Pydantic measured the largest gains for the weakest model and lower accuracy for one model; DeepSeek measured no gain on coding benchmarks with its own model; Codex reportedly enables its code mode for one model only (secondary source). Volt has no measurements of its own yet, so the choice stays with the user.
+- Code mode complements the `mcp` tool and `directTools` and changes neither, apart from the binding path `describe` adds while `run_code` is active (section 5.14).
+
+Why off by default: `run_code` adds about 650 tokens to every request, 11% of a default session's fixed overhead (5,739 tokens of system prompt and default tool declarations, before project context, skills, and MCP). Code mode costs more than direct calls on small tasks (Pydantic: 21% to 38% more at five items) and did not improve coding benchmarks (DeepSeek). It pays off on long, tool-heavy work, which the user can opt into.
+
+Rejected:
+
+- On by default. Every session pays the overhead and the small-task cost.
+- On by default only when MCP servers are configured (OpenCode routes MCP through its code mode by default). Volt's MCP gateway already keeps MCP declarations out of the prompt, so the gain would come only from fan-out, which the user can opt into.
+- An additive `defaultTools` setting with `+name` entries (Pi). More general than code mode needs; a dedicated setting is enough.
+
 ## 6. Rejected alternatives
 
 | Alternative | Reason |
@@ -688,14 +707,14 @@ These follow from Volt's architecture and apply whatever the open decisions in s
 - **Licensing.** The `quickjs-wasi` package license covers only Vercel's wrapper. The WASM binary also contains QuickJS-NG (MIT) and components linked by the wasi-sdk build, whose notices are not in the npm package and must be added to the standalone license files. The exact component list must be derived from the `quickjs-wasi` build.
 - **Dependency approval.** `quickjs-wasi` is a new direct dependency, pinned exactly, and requires maintainer approval and a shrinkwrap update.
 - **MCP configuration.** Per-server `maxConcurrentCalls` (section 5.13) is a new optional field in MCP server configuration.
+- **Settings.** `codeMode.enabled` (section 5.15) is a new host setting, documented in `docs/settings.md`.
 - **Engine updates.** QuickJS-NG states that it no longer accepts private security reports or issues CVEs, and that untrusted bytecode is out of scope ([SECURITY.md](https://github.com/quickjs-ng/quickjs/blob/master/SECURITY.md)). Volt tracks QuickJS-NG releases through `quickjs-wasi` and never loads bytecode or snapshots from untrusted sources.
 
 ## 8. Open decisions
 
-1. **Enablement.** Opt-in setting, per-model routing, and interaction with the MCP gateway and `directTools`.
-2. **Observability.** The `details` shape, and how nested calls appear in the TUI, session records, audit, and remote clients within the iOS constraint (section 7).
-3. **State.** Proposed: no cross-script `store()`/`load()` in v1.
-4. **Tuning.** `memoryLimit` default, pool cap, queue size, idle timeout, grace period, worker stack size, the bridge caps (section 5.9), the output budget split (section 5.10), the summary and error-block bounds (section 5.11), and the scheduling limits (section 5.13).
+1. **Observability.** The `details` shape, and how nested calls appear in the TUI, session records, audit, and remote clients within the iOS constraint (section 7).
+2. **State.** Proposed: no cross-script `store()`/`load()` in v1.
+3. **Tuning.** `memoryLimit` default, pool cap, queue size, idle timeout, grace period, worker stack size, the bridge caps (section 5.9), the output budget split (section 5.10), the summary and error-block bounds (section 5.11), and the scheduling limits (section 5.13).
 
 ## 9. Risks
 
@@ -822,6 +841,8 @@ Model-facing contract measurements (o200k tokenizer):
 - Script input wrapped as JSON tool arguments: 90 to 113 tokens and 135 to 170 tokens for two sample scripts, 26% more than the raw source in both.
 - Draft `run_code` description: 471 tokens (1,987 characters); system-prompt snippet and guidelines: 96 tokens; parameter schema: 81 tokens.
 - `stripTypeScriptTypes` in strip mode on Node 22.20 and 24.20: a 10-line script kept every line length; `enum`, `namespace`, and parameter properties were rejected with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`; plain JavaScript passed through unchanged.
+
+Fixed per-request overhead of a default session, from the built system prompt and tool definitions (o200k tokenizer): 3,175 tokens of system prompt without project context or skills, and 2,564 tokens of declarations for the 10 default tools without `mcp`; 5,739 tokens in total, to which `run_code` adds about 650 (11%).
 
 Gaps:
 
