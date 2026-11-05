@@ -1,10 +1,10 @@
 # Code mode
 
-- Status: Draft. The runtime layer, the bridge contract, the model-facing result, failure semantics, tool scope, nested-call scheduling, the model-facing contract, enablement, observability, and state are decided (section 5). Tuning is open (section 8). Sections 5.1 to 5.14 were reviewed with the maintainer; sections 5.15 onward were decided without a separate review round.
+- Status: Design complete, ready for review. Every decision is recorded in section 5; section 8 lists the approvals implementation needs and the follow-ups, and section 9 the delivery plan. Sections 5.1 to 5.14 were reviewed with the maintainer; sections 5.15 to 5.18 were decided without a separate review round.
 - Date: 2026-11-04
 - Audience: Volt maintainers.
 - Scope: A sandboxed script tool that lets the model call Volt tools programmatically, so intermediate results stay out of the model context. This document covers the runtime that executes scripts, how it is supervised, and the constraints Volt places on it.
-- Decision so far: model-written JavaScript runs in [`quickjs-wasi`](https://github.com/vercel-labs/quickjs-wasi) (QuickJS-NG compiled to WebAssembly) on a per-process pool of worker threads, one fresh VM per script, booted by creating the VM and running a trusted prelude. Scripts are bounded by a compute budget and a nested-call budget, not by a default wall-clock deadline. Adding `quickjs-wasi` is a new dependency and needs maintainer approval before implementation. Values cross the bridge through a lossless JSON codec built on native `JSON.parse` `context.source` and `JSON.rawJSON`; nested calls resolve to text or internal per-tool projections, fail with typed `ToolCallError`s, and return images as opaque references that only reach the model when the script shows them (section 5.9). The model reads one plain-text result: an ordered output stream with multi-line items fenced, a 50 KB budget split by priority with structural truncation of the return value, and the full output spilled to a temp file (section 5.10). A failed script keeps its partial output and adds a failure kind, an error block, and a grouped summary of the nested calls that may have changed state (section 5.11). Scripts can call only operations the model could call directly in the same session, excluding user, session, job, and delegation tools (section 5.12). Nested calls run concurrently up to 10 per script; tools that declare `sequential` run alone, and MCP calls are limited per server rather than serialized (section 5.13). The tool is `run_code`, taking JSON `{ code, description?, timeoutMs? }` with JavaScript or erasable TypeScript; its description lists bindings and result shapes without repeating native tool declarations, and MCP tools are discovered through the `mcp` tool (section 5.14). Code mode is off by default and enabled with the `codeMode.enabled` setting (section 5.15). Nested calls appear inside the `run_code` card and its `details`, not as separate tool calls (section 5.16). Scripts keep small JSON values across runs with `store()` and `load()`, recorded as session entries (section 5.17).
+- Decision so far: model-written JavaScript runs in [`quickjs-wasi`](https://github.com/vercel-labs/quickjs-wasi) (QuickJS-NG compiled to WebAssembly) on a per-process pool of worker threads, one fresh VM per script, booted by creating the VM and running a trusted prelude. Scripts are bounded by a compute budget and a nested-call budget, not by a default wall-clock deadline. Adding `quickjs-wasi` is a new dependency and needs maintainer approval before implementation. Values cross the bridge through a lossless JSON codec built on native `JSON.parse` `context.source` and `JSON.rawJSON`; nested calls resolve to text or internal per-tool projections, fail with typed `ToolCallError`s, and return images as opaque references that only reach the model when the script shows them (section 5.9). The model reads one plain-text result: an ordered output stream with multi-line items fenced, a 50 KB budget split by priority with structural truncation of the return value, and the full output spilled to a temp file (section 5.10). A failed script keeps its partial output and adds a failure kind, an error block, and a grouped summary of the nested calls that may have changed state (section 5.11). Scripts can call only operations the model could call directly in the same session, excluding user, session, job, and delegation tools (section 5.12). Nested calls run concurrently up to 10 per script; tools that declare `sequential` run alone, and MCP calls are limited per server rather than serialized (section 5.13). The tool is `run_code`, taking JSON `{ code, description?, timeoutMs? }` with JavaScript or erasable TypeScript; its description lists bindings and result shapes without repeating native tool declarations, and MCP tools are discovered through the `mcp` tool (section 5.14). Code mode is off by default and enabled with the `codeMode.enabled` setting (section 5.15). Nested calls appear inside the `run_code` card and its `details`, not as separate tool calls (section 5.16). Scripts keep small JSON values across runs with `store()` and `load()`, recorded as session entries (section 5.17). Section 5.18 collects every default, including a 64 MiB memory limit per VM.
 
 ## 1. Objective
 
@@ -85,7 +85,7 @@ Checked against `4e9366efa`.
 - **Host:** the conversation process thread that owns the tool pipeline, policy, call records, and supervision.
 - **Worker:** a worker thread that hosts at most one VM at a time.
 
-## 5. Runtime and bridge decisions
+## 5. Decisions
 
 ### 5.1 Engine
 
@@ -121,7 +121,7 @@ Decided:
 - **No nesting:** scripts cannot call `subagent` or the code-mode tool. Without nested waits on the pool, deadlock is impossible at any cap.
 - **Prepared VMs:** after code mode is first used in a process, an idle worker boots the next VM in advance so boot time is off the critical path. Processes that never use code mode pay nothing.
 
-Initial defaults, to be tuned: a cap of 4 workers per process (the maximum width of one parallel subagent spawn), a queue of 4 waiting scripts, and an idle timeout on the order of minutes.
+Defaults (section 5.18): a cap of 4 workers per process (the maximum width of one parallel subagent spawn), a queue of 4 waiting scripts, and an idle timeout of 5 minutes.
 
 Subagents share their parent's pool because they run in the same process. With a cap of 4, four parallel subagents can each run a script concurrently; further scripts queue.
 
@@ -165,7 +165,7 @@ Decided: a compute budget and a nested-call budget, with no default wall-clock d
 - **Cancellation.** A user abort (Esc, or cancelling from a remote client) aborts in-flight nested calls through their signals, sets the interrupt flag, and terminates the worker if the VM has not stopped within the grace period.
 - **Stop sequence.** Interrupt flag, then a grace period (initially 250 ms; honored interrupts stopped within about 70 ms in testing), then `worker.terminate()` and a background respawn.
 - **Excluded time.** VM boot and waiting in the pool queue count toward no budget.
-- **Memory.** `memoryLimit` is set on every VM. A 32 MiB limit held in testing: a string bomb and `new ArrayBuffer(1e9)` both failed with a catchable out-of-memory error, linear memory stayed at 32.3 MiB, and the VM remained usable. The default is open; 64 MiB is the working assumption.
+- **Memory.** `memoryLimit` is set on every VM. A 32 MiB limit held in testing: a string bomb and `new ArrayBuffer(1e9)` both failed with a catchable out-of-memory error, linear memory stayed at 32.3 MiB, and the VM remained usable. The default is 64 MiB (section 5.18).
 - **Bash stall move.** Bash calls made from a script run without the stall-move context, because a script needs the command's result, not a background job handle.
 
 Rejected: a single elapsed deadline covering tool and approval waits (Pi, DeepSeek). Approvals answered from a phone would count against it, the model would have to guess a timeout, and legitimate long work would fail. An overall cap that pauses while a nested call waits on the user may be added later if needed. Codex-style yield-and-poll is rejected; an opt-in background mode that reuses Volt's existing jobs and completion-wake mechanism is the preferred direction for long scripts, outside v1.
@@ -301,7 +301,7 @@ When the script finishes, fails, or is terminated, the host aborts in-flight nes
 
 #### Caps
 
-Initial defaults, to be tuned:
+Defaults (section 5.18):
 
 | Limit | Default |
 |---|---|
@@ -319,7 +319,7 @@ The call budget (section 5.6) bounds how many calls can be outstanding. Caps on 
 
 ### 5.10 Model-facing result
 
-Decided. While the script runs, its output items arrive at the host as `output` messages, and the host accumulates them. After the end-of-script drain (section 5.9), the host assembles the code-mode tool's `AgentToolResult`. Its `content`, made of text and image blocks, is the only part of a code-mode call the model reads; `details` carries records for the TUI, session records, and remote clients (section 8). This section describes a successful script; failures reuse the same rendering (section 5.11).
+Decided. While the script runs, its output items arrive at the host as `output` messages, and the host accumulates them. After the end-of-script drain (section 5.9), the host assembles the code-mode tool's `AgentToolResult`. Its `content`, made of text and image blocks, is the only part of a code-mode call the model reads; `details` carries records for the TUI, session records, and remote clients (section 5.16). This section describes a successful script; failures reuse the same rendering (section 5.11).
 
 #### Output channels
 
@@ -520,7 +520,7 @@ Shell commands written inside JavaScript are fragile. In testing, 6 of 12 realis
 - A lazy server connects on its first call. A server that needs authentication fails the call with `failed` (`unavailable`) and a message naming the sign-in command.
 - A tool promoted with `directTools` gets no second binding.
 - For failure summaries (section 5.11), an MCP call counts as read-only only when the MCP resolver authorizes it as a trusted read.
-- Binding names and discovery are part of the model-facing contract (section 8).
+- Binding names and discovery are part of the model-facing contract (section 5.14).
 
 #### Restricted profiles
 
@@ -530,7 +530,7 @@ Shell commands written inside JavaScript are fragile. In testing, 6 of 12 realis
 
 #### Declarations
 
-Volt's 14 built-in tools measure about 3.25k tokens as native JSON Schema declarations and about 3.0k as TypeScript declarations. In complement mode the native declarations are already in context, so the size of the binding set matters mainly through how bindings are presented, which is part of the model-facing contract (section 8).
+Volt's 14 built-in tools measure about 3.25k tokens as native JSON Schema declarations and about 3.0k as TypeScript declarations. In complement mode the native declarations are already in context, so the size of the binding set matters mainly through how bindings are presented, which is part of the model-facing contract (section 5.14).
 
 Rejected:
 
@@ -777,7 +777,7 @@ Writes made before a failure are kept, and the failed result lists the keys writ
 
 - Values pass through the bridge codec (section 5.9).
 - A key is at most 256 characters. A value is at most 256 KiB of encoded JSON, and all values together at most 1 MiB, Pi's limits. A write past either limit throws a `RangeError` in the script.
-- Passing a full 1 MiB of values into a VM costs about 14 to 42 ms with the codec's fast and slow paths (section 10).
+- Passing a full 1 MiB of values into a VM costs about 14 to 42 ms with the codec's fast and slow paths (section 11).
 
 #### What the model sees
 
@@ -790,6 +790,43 @@ Rejected:
 - No state (DeepSeek). Later scripts would fetch data again or route it through the model's context.
 - Files in the workspace as state. They pollute the workspace and do not follow branches.
 - Keeping writes only when the script succeeds (Pi). A script that fails after recording progress would lose it, while its side effects remain.
+
+### 5.18 Defaults
+
+Decided without a separate review round. Every limit in one place; only the last three rows are user-configurable.
+
+| Limit | Default | Section | Basis |
+|---|---|---|---|
+| Workers per conversation process | 4 | 5.3 | Width of one parallel subagent spawn |
+| Scripts waiting for a worker | 4 | 5.3 | Fail fast instead of hanging a turn |
+| Worker idle timeout | 5 minutes | 5.3 | Keeps a worker warm during active work; a cold start costs about 44 ms |
+| Worker native stack | 8 MB | 5.4 | Smallest tested size at which every stack probe ended in a guest `RangeError` |
+| QuickJS `maxStackSize` | 512 KiB | 5.4 | `MAX_STACK_SIZE` |
+| VM memory limit | 64 MiB | 5.6 | Holds 18 parsed 1 MiB results at once (32 MiB holds 9, 128 MiB holds 38); 4 VMs make 256 MiB per process at most. Pi and Pydantic use 256 MiB, Cloudflare 32 MiB |
+| Compute budget | 30 s | 5.6 | Pydantic's per-snippet limit |
+| Nested calls per script | 200 | 5.6 | Pydantic uses 100; scripts that fan out over pages of results need more |
+| Grace before hard kill | 250 ms | 5.6 | Honored interrupts stopped within about 70 ms |
+| Arguments per call / outstanding | 1 MiB / 16 MiB | 5.9 | Bounds host memory per script |
+| Script value per nested call | 1 MiB | 5.9 | Pi's bash value size |
+| `ToolCallError` message | 8 KiB | 5.9 | Bounded error text |
+| Message frame | 8 MiB | 5.9 | Argument cap plus overhead |
+| JSON nesting depth | 64 | 5.9 | Codec bound |
+| Binding name | 256 characters | 5.9 | Codec bound |
+| Images shown / retained per script | 10 / 64 MiB | 5.9 | Bounded model and session cost |
+| Model-facing output | 50 KB, 2,000 lines | 5.10 | Volt's standard tool output limit |
+| Retained output | 16 Mi characters, 100,000 items | 5.10 | Pi's limits |
+| Error block | 8 KiB | 5.11 | Bounded failure text |
+| Nested-call summary | 20 entries, 120 characters each | 5.11 | 231 tokens for a 49-call failure |
+| Background rejections reported | 10 | 5.11 | Bounded warnings |
+| Concurrent nested calls per script | 10 | 5.13 | DeepSeek's default |
+| Card | 50 newest calls, 100 output lines | 5.16 | About 13.7 KB, within the 16 KB bound for paired devices |
+| `details` | 64 KB | 5.16 | Bounded session record |
+| Stored values | 256 KiB per value, 1 MiB total | 5.17 | Pi's limits |
+| Script timeout (`timeoutMs`) | None; at most 30 minutes when set | 5.6 | Per-call model choice |
+| `codeMode.enabled` | `false` | 5.15 | Host setting |
+| MCP `maxConcurrentCalls` | 4 per server | 5.13 | MCP server configuration |
+
+The other limits are fixed in code. They are maintainer tuning, revisited with measurements from real use, not settings.
 
 ## 6. Rejected alternatives
 
@@ -808,7 +845,7 @@ Rejected:
 
 ## 7. Integration requirements
 
-These follow from Volt's architecture and apply whatever the open decisions in section 8 settle.
+These follow from Volt's architecture and the decisions of section 5.
 
 - **Policy.** Every nested call passes argument validation and the session's tool-call and tool-result gates, as extension services already do. The host never calls `ToolDefinition.execute` directly for a nested call.
 - **Attribution.** Nested calls need a parent-call origin so hooks, audit, and policy can tell them apart from model-issued calls. `ExtensionOperationOrigin` gains a `code_mode` variant, and MCP audit entries an optional `parentToolCallId` (section 5.16).
@@ -826,11 +863,40 @@ These follow from Volt's architecture and apply whatever the open decisions in s
 - **Settings.** `codeMode.enabled` (section 5.15) is a new host setting, documented in `docs/settings.md`.
 - **Engine updates.** QuickJS-NG states that it no longer accepts private security reports or issues CVEs, and that untrusted bytecode is out of scope ([SECURITY.md](https://github.com/quickjs-ng/quickjs/blob/master/SECURITY.md)). Volt tracks QuickJS-NG releases through `quickjs-wasi` and never loads bytecode or snapshots from untrusted sources.
 
-## 8. Open decisions
+## 8. Approvals and follow-ups
 
-1. **Tuning.** `memoryLimit` default, pool cap, queue size, idle timeout, grace period, worker stack size, the bridge caps (section 5.9), the output budget split (section 5.10), the summary and error-block bounds (section 5.11), and the scheduling limits (section 5.13).
+No design decisions remain open. Implementation needs these approvals:
 
-## 9. Risks
+- **Dependency.** `quickjs-wasi`, pinned exactly, with a shrinkwrap update (section 7).
+- **Configuration and settings.** The `codeMode.enabled` host setting (section 5.15) and the per-server MCP `maxConcurrentCalls` field (section 5.13).
+- **Extension API.** The `code_mode` variant of `ExtensionOperationOrigin` (section 5.16).
+- **MCP surfaces.** The binding path and result type in the gateway's `describe` output while `run_code` is active (section 5.14), and the optional `parentToolCallId` in MCP audit entries (section 5.16).
+
+Follow-ups tracked outside this design:
+
+- Exact numbers from MCP servers: [#1024](https://github.com/volt-hq/Volt/issues/1024), with the upstream request [modelcontextprotocol/typescript-sdk#3150](https://github.com/modelcontextprotocol/typescript-sdk/issues/3150). The codec gains a type for exact decimals when it lands (section 5.9).
+- Concurrent top-level MCP calls: [#1026](https://github.com/volt-hq/Volt/issues/1026).
+- Measurement gaps listed in section 11.
+
+## 9. Delivery plan
+
+Each step is its own pull request. None changes the protocol contract, so none should need the `breaks-ios-app` label; each still runs the iOS compatibility workflow.
+
+1. **Runtime.** The `quickjs-wasi` dependency and license notices; the worker pool, VM boot, prelude, codec, and host–worker messages; supervision (compute budget, watchdog, interrupt, grace, memory and stack limits). Unit tests drive scripts against fake bindings. Nothing is exposed to the model yet.
+2. **Bridge and scheduling.** Binding-set computation (no escalation, eligibility, grant profiles), the host checks with tool-call and tool-result policy and the `code_mode` origin, script-value projections, `ToolCallError`, image references, the scheduler, and per-server MCP limits with `maxConcurrentCalls`.
+3. **The `run_code` tool.** Input and TypeScript stripping, result rendering, truncation and spill, failure rendering, `store()`/`load()` session entries, the generated description, snippet, and guidelines, the presenter and `details`, compaction file tracking, the gateway `describe` addition, MCP audit attribution, the `codeMode.enabled` setting, user documentation (a code-mode page in `docs.json` and `docs/settings.md`), and the changeset.
+4. **Standalone packaging.** Ship `quickjs.wasm` and the worker entry in the standalone binary, add the WASM's third-party notices, and verify on all six targets.
+
+### Verification
+
+- **Codec:** property-based tests (fast-check) that accepted values round-trip exactly and rejected values fail with their path, on Node and in QuickJS.
+- **Runtime:** interrupts, the watchdog's hard kill on non-polling built-ins, out-of-memory, stack overflow with the 8 MB worker stack, stalled promises, and cancellation, as measured in section 11.
+- **Bridge:** hostile and malformed frames from a test worker, every host check in order, and bounded outstanding arguments.
+- **Scheduling:** ordering guarantees, exclusive barriers, and per-server limits, with a fake MCP server that records overlapping requests.
+- **Integration:** `packages/coding-agent/test/suite/` scenarios with the faux provider: policy and hooks on nested calls, Plan mode bindings and research evidence, failure summaries, spill files, state across branches, and compaction file lists.
+- **Measurements:** repeat the runtime and stack measurements on the standalone Node 22.23.1 runtime and on Linux and macOS before step 4 ships.
+
+## 10. Risks
 
 - **Engine vulnerabilities without CVEs.** Mitigated by WebAssembly containment, the single-bridge rule, host-side validation of every call, exact pinning, and tracking QuickJS-NG releases.
 - **Maintainer concentration.** `quickjs-wasi` has two maintainers. It is MIT-licensed with a documented wasi-sdk build, so Volt can rebuild or fork it.
@@ -842,7 +908,7 @@ These follow from Volt's architecture and apply whatever the open decisions in s
 - **Forgotten images.** A script that never calls `image(ref)` shows no images. Mitigated by listing unshown images in the result.
 - **Models printing whole tool results.** Models often print entire results back into the output; in one Codex dataset, 748 of about 2,340 cells printed a whole `exec_command` result. Mitigated by compact script values (section 5.9), the output budget with structural truncation and spill (section 5.10), and guidance.
 
-## 10. Validation so far
+## 11. Validation so far
 
 Measured on Windows with Node 24.20.0 and `quickjs-wasi` 3.6.3 (QuickJS-NG 0.17.0), using throwaway scripts outside the repository.
 
@@ -960,13 +1026,25 @@ Fixed per-request overhead of a default session, from the built system prompt an
 
 `run_code` card sizes (UTF-8 JSON of the presentation, with a 3.4 KB script and nested-call steps of about 142 bytes each): 7.6 KB with 20 calls and 30 output lines, 9.3 KB with 30 and 40, 13.7 KB with 50 and 100, and 38.9 KB with 200 and 200.
 
+QuickJS heap for nested-call results (`getMemoryUsage().memoryUsedSize`, results of 1 MiB of JSON rows):
+
+| State | Heap |
+|---|---|
+| Baseline VM | 0.1 MiB |
+| One result held as a string | 0.6 MiB |
+| Plus parsed into objects | 2.6 MiB |
+| 5, 10, and 20 parsed results kept | 10.7, 20.9, and 41.3 MiB |
+| 20 results reduced to the IDs of open rows | 0.6 MiB |
+
+Parsed 1 MiB results held before out-of-memory: 9 with a 32 MiB limit, 18 with 64 MiB, and 38 with 128 MiB.
+
 Gaps:
 
 - Repeat the runtime measurements on Node 22.23.1, the standalone runtime, and on Linux and macOS, including the stack-guard table, which depends on native stack usage. The codec primitives are confirmed on Node 22.20.
 - Verify loading `quickjs.wasm` and the worker entry from the standalone binary.
 - Derive the license notices embedded in the WASM binary.
 
-## 11. References
+## 12. References
 
 - Pi codemode: <https://pi.dev/docs/latest/codemode>; release notes: <https://github.com/earendil-works/pi/releases/tag/v0.99.0>
 - DeepSeek Harness PTC note: <https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/feature/2026-06-15-ptc.md>
