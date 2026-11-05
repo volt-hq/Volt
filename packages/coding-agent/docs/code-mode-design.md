@@ -1,10 +1,10 @@
 # Code mode
 
-- Status: Draft. The runtime layer, the bridge contract, the model-facing result, failure semantics, tool scope, nested-call scheduling, the model-facing contract, and enablement are decided (section 5). Observability, state, and tuning are open (section 8). Sections 5.1 to 5.14 were reviewed with the maintainer; sections 5.15 onward were decided without a separate review round.
+- Status: Draft. The runtime layer, the bridge contract, the model-facing result, failure semantics, tool scope, nested-call scheduling, the model-facing contract, enablement, and observability are decided (section 5). State and tuning are open (section 8). Sections 5.1 to 5.14 were reviewed with the maintainer; sections 5.15 onward were decided without a separate review round.
 - Date: 2026-11-04
 - Audience: Volt maintainers.
 - Scope: A sandboxed script tool that lets the model call Volt tools programmatically, so intermediate results stay out of the model context. This document covers the runtime that executes scripts, how it is supervised, and the constraints Volt places on it.
-- Decision so far: model-written JavaScript runs in [`quickjs-wasi`](https://github.com/vercel-labs/quickjs-wasi) (QuickJS-NG compiled to WebAssembly) on a per-process pool of worker threads, one fresh VM per script, booted by creating the VM and running a trusted prelude. Scripts are bounded by a compute budget and a nested-call budget, not by a default wall-clock deadline. Adding `quickjs-wasi` is a new dependency and needs maintainer approval before implementation. Values cross the bridge through a lossless JSON codec built on native `JSON.parse` `context.source` and `JSON.rawJSON`; nested calls resolve to text or internal per-tool projections, fail with typed `ToolCallError`s, and return images as opaque references that only reach the model when the script shows them (section 5.9). The model reads one plain-text result: an ordered output stream with multi-line items fenced, a 50 KB budget split by priority with structural truncation of the return value, and the full output spilled to a temp file (section 5.10). A failed script keeps its partial output and adds a failure kind, an error block, and a grouped summary of the nested calls that may have changed state (section 5.11). Scripts can call only operations the model could call directly in the same session, excluding user, session, job, and delegation tools (section 5.12). Nested calls run concurrently up to 10 per script; tools that declare `sequential` run alone, and MCP calls are limited per server rather than serialized (section 5.13). The tool is `run_code`, taking JSON `{ code, description?, timeoutMs? }` with JavaScript or erasable TypeScript; its description lists bindings and result shapes without repeating native tool declarations, and MCP tools are discovered through the `mcp` tool (section 5.14). Code mode is off by default and enabled with the `codeMode.enabled` setting (section 5.15).
+- Decision so far: model-written JavaScript runs in [`quickjs-wasi`](https://github.com/vercel-labs/quickjs-wasi) (QuickJS-NG compiled to WebAssembly) on a per-process pool of worker threads, one fresh VM per script, booted by creating the VM and running a trusted prelude. Scripts are bounded by a compute budget and a nested-call budget, not by a default wall-clock deadline. Adding `quickjs-wasi` is a new dependency and needs maintainer approval before implementation. Values cross the bridge through a lossless JSON codec built on native `JSON.parse` `context.source` and `JSON.rawJSON`; nested calls resolve to text or internal per-tool projections, fail with typed `ToolCallError`s, and return images as opaque references that only reach the model when the script shows them (section 5.9). The model reads one plain-text result: an ordered output stream with multi-line items fenced, a 50 KB budget split by priority with structural truncation of the return value, and the full output spilled to a temp file (section 5.10). A failed script keeps its partial output and adds a failure kind, an error block, and a grouped summary of the nested calls that may have changed state (section 5.11). Scripts can call only operations the model could call directly in the same session, excluding user, session, job, and delegation tools (section 5.12). Nested calls run concurrently up to 10 per script; tools that declare `sequential` run alone, and MCP calls are limited per server rather than serialized (section 5.13). The tool is `run_code`, taking JSON `{ code, description?, timeoutMs? }` with JavaScript or erasable TypeScript; its description lists bindings and result shapes without repeating native tool declarations, and MCP tools are discovered through the `mcp` tool (section 5.14). Code mode is off by default and enabled with the `codeMode.enabled` setting (section 5.15). Nested calls appear inside the `run_code` card and its `details`, not as separate tool calls (section 5.16).
 
 ## 1. Objective
 
@@ -677,6 +677,74 @@ Rejected:
 - On by default only when MCP servers are configured (OpenCode routes MCP through its code mode by default). Volt's MCP gateway already keeps MCP declarations out of the prompt, so the gain would come only from fan-out, which the user can opt into.
 - An additive `defaultTools` setting with `+name` entries (Pi). More general than code mode needs; a dedicated setting is enough.
 
+### 5.16 Observability
+
+Decided without a separate review round.
+
+#### Nested calls are not separate tool calls
+
+Nested calls produce no agent tool events, no live `tool` items, and no transcript entries of their own. They appear inside the `run_code` call: its card while it runs, and its result's `details` afterwards. Pi, DeepSeek, and Codex likewise keep nested calls out of the transcript. Separate items would show each nested call as a top-level card, with no link to its script, and would add host-frame variants the iOS app cannot decode yet (section 7).
+
+Extension `tool_call` and `tool_result` hooks still run for every nested call (section 5.9). `ExtensionOperationOrigin` (`src/core/extensions/services-types.ts:202`) gains a variant, `{ kind: "code_mode"; parentToolCallId: string; seq: number }`, so hooks can tell nested calls from model-issued ones. Hooks run in process, so this changes the extension API but not the protocol.
+
+#### The card
+
+`run_code` has a presenter ([presentations](ui-nodes.md#presentations)) built only from existing node types, so every client renders it, the iOS app included:
+
+- `title`: the call's `description`, or the first non-empty line of the script.
+- `activity` while running: `Running script: 14 calls, 2 running`.
+- `summary`: the status line of section 5.10 or 5.11, for example `200 tool calls, 15 failed, 6.4 s`.
+- `body`: a `code` node with the script, a `progress` node of kind `steps` with the 50 newest nested calls (label: tool name and argument preview; status; start and end times) titled with the total, and a `terminal` node with the newest 100 output lines.
+- Images the script showed reach the card as the result's images, which clients already draw.
+
+Updates go through `onUpdate` as presentation patches, at most every 250 ms. A card with the script, 50 calls, and 100 output lines measured about 13.7 KB, within the 16 KB presentation bound for paired devices (the bound for local clients is 64 KB); a presentation over its bound loses its oldest terminal lines and the ends of its code node first.
+
+#### Details
+
+The result's `details`, which the session stores and which the protocol treats as opaque producer data, records the run:
+
+```ts
+interface RunCodeDetails {
+	status: "completed" | "failed";
+	failureKind?: "script_error" | "compute_budget" | "call_budget" | "timeout" | "aborted" | "output_limit" | "sandbox";
+	language: "javascript" | "typescript";
+	wallMs: number;
+	computeMs: number;
+	calls: Array<{
+		seq: number;
+		tool: string;
+		argsPreview: string; // at most 160 characters (section 5.11 preview rules)
+		path?: string; // exact `path` argument of read, write, and edit calls
+		status: "completed" | "failed" | "cancelled" | "unsettled";
+		readOnly: boolean;
+		startedAt?: number;
+		durationMs?: number;
+		error?: string; // at most 256 characters
+	}>;
+	callTotals: { completed: number; failed: number; cancelled: number; unsettled: number };
+	complete: boolean; // false when records were dropped to fit the bound
+	output: { truncated: boolean; fullOutputPath?: string; items: number; characters: number };
+	images: { shown: ImageRef[]; unshown: ImageRef[] };
+}
+```
+
+- Nested results are never stored in `details`; what the model saw is in the result's content, and the full output is in the spill file.
+- `details` is at most 64 KB. The call budget (200) bounds the records; if they still do not fit, argument previews of read-only calls are dropped first, then the oldest read-only records, and `complete` becomes `false`. State-changing records are kept.
+
+#### Session records, compaction, and audit
+
+- The session stores the `run_code` call (with the script in its arguments) and its result like any tool call.
+- Compaction counts files that nested `read`, `write`, and `edit` calls touched, from `details.calls[].path`. Today it extracts files only from assistant tool calls with those names (`src/core/compaction/utils.ts:30-57`), so edits made in scripts would otherwise be missing from its file lists; Pi uses its nested-call records the same way.
+- Nested MCP calls write MCP audit entries as gateway calls do, with caller surface `model` and a new optional `parentToolCallId`.
+- The HTML export renders the card from its presentation.
+- Code mode adds no telemetry.
+
+Rejected:
+
+- Emitting nested calls as live `tool` items or transcript entries. Top-level cards without their script, and new host-frame content the current iOS app rejects.
+- Storing nested results in `details`. Up to 200 MiB per run at the 1 MiB script-value cap.
+- One presentation per client size. Presenters are pure and shared by every client; the host already trims a presentation that exceeds a client's bound.
+
 ## 6. Rejected alternatives
 
 | Alternative | Reason |
@@ -697,7 +765,8 @@ Rejected:
 These follow from Volt's architecture and apply whatever the open decisions in section 8 settle.
 
 - **Policy.** Every nested call passes argument validation and the session's tool-call and tool-result gates, as extension services already do. The host never calls `ToolDefinition.execute` directly for a nested call.
-- **Attribution.** Nested calls need a parent-call origin so hooks, audit, and policy can tell them apart from model-issued calls. `ExtensionOperationOrigin` is the existing attribution type to extend.
+- **Attribution.** Nested calls need a parent-call origin so hooks, audit, and policy can tell them apart from model-issued calls. `ExtensionOperationOrigin` gains a `code_mode` variant, and MCP audit entries an optional `parentToolCallId` (section 5.16).
+- **Compaction.** Compaction's file lists read nested `read`, `write`, and `edit` paths from `run_code` details (section 5.16).
 - **Restricted profiles.** In restricted profiles such as Plan mode, a script must not reach operations the profile does not authorize, including MCP tools outside `trustedReads` (section 5.12).
 - **Bash.** Nested bash calls run without the stall-move context (section 5.6).
 - **Public tool API.** Script-value projections are internal to built-in tools and MCP in v1, so `ToolDefinition` does not change.
@@ -712,9 +781,8 @@ These follow from Volt's architecture and apply whatever the open decisions in s
 
 ## 8. Open decisions
 
-1. **Observability.** The `details` shape, and how nested calls appear in the TUI, session records, audit, and remote clients within the iOS constraint (section 7).
-2. **State.** Proposed: no cross-script `store()`/`load()` in v1.
-3. **Tuning.** `memoryLimit` default, pool cap, queue size, idle timeout, grace period, worker stack size, the bridge caps (section 5.9), the output budget split (section 5.10), the summary and error-block bounds (section 5.11), and the scheduling limits (section 5.13).
+1. **State.** Proposed: no cross-script `store()`/`load()` in v1.
+2. **Tuning.** `memoryLimit` default, pool cap, queue size, idle timeout, grace period, worker stack size, the bridge caps (section 5.9), the output budget split (section 5.10), the summary and error-block bounds (section 5.11), and the scheduling limits (section 5.13).
 
 ## 9. Risks
 
@@ -843,6 +911,8 @@ Model-facing contract measurements (o200k tokenizer):
 - `stripTypeScriptTypes` in strip mode on Node 22.20 and 24.20: a 10-line script kept every line length; `enum`, `namespace`, and parameter properties were rejected with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`; plain JavaScript passed through unchanged.
 
 Fixed per-request overhead of a default session, from the built system prompt and tool definitions (o200k tokenizer): 3,175 tokens of system prompt without project context or skills, and 2,564 tokens of declarations for the 10 default tools without `mcp`; 5,739 tokens in total, to which `run_code` adds about 650 (11%).
+
+`run_code` card sizes (UTF-8 JSON of the presentation, with a 3.4 KB script and nested-call steps of about 142 bytes each): 7.6 KB with 20 calls and 30 output lines, 9.3 KB with 30 and 40, 13.7 KB with 50 and 100, and 38.9 KB with 200 and 200.
 
 Gaps:
 
