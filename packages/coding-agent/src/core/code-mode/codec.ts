@@ -29,11 +29,16 @@ export function createLosslessCodec(maxDepth: number): LosslessCodec {
 	const ObjectGetPrototypeOf = Object.getPrototypeOf;
 	const ObjectGetOwnPropertySymbols = Object.getOwnPropertySymbols;
 	const ObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+	const ObjectGetOwnPropertyNames = Object.getOwnPropertyNames;
+	const ObjectHasOwn = Object.hasOwn;
 	const ObjectKeys = Object.keys;
 	const ObjectIs = Object.is;
+	const ObjectSetPrototypeOf = Object.setPrototypeOf;
 	const ObjectPrototype = Object.prototype;
 	const ObjectPrototypeToString = uncurry(Object.prototype.toString);
+	const ObjectPrototypePropertyIsEnumerable = uncurry(Object.prototype.propertyIsEnumerable);
 	const ArrayIsArray = Array.isArray;
+	const ArrayPrototype = Array.prototype;
 	const ArrayPrototypePush = uncurry(Array.prototype.push);
 	const ArrayPrototypePop = uncurry(Array.prototype.pop);
 	const ArrayPrototypeJoin = uncurry(Array.prototype.join);
@@ -56,6 +61,14 @@ export function createLosslessCodec(maxDepth: number): LosslessCodec {
 	const NEEDS_REVIVER = /\d[\d.]{15}|[eE][+-]?\d{3}/;
 	const NUMBER_LITERAL = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/;
 	const MAX_SAFE = 2 ** 53;
+
+	/**
+	 * An array without a prototype. Pushing onto an ordinary array performs [[Set]], which runs setters a
+	 * script may define on `Array.prototype` or `Object.prototype` indices; these lists have no prototype.
+	 */
+	function newList<T>(): T[] {
+		return ObjectSetPrototypeOf([], null) as T[];
+	}
 
 	interface EncodeState {
 		label: string;
@@ -128,13 +141,45 @@ export function createLosslessCodec(maxDepth: number): LosslessCodec {
 		else ArrayPrototypePush(state.parts, JSONStringify(value));
 	}
 
+	/** Throws for an array that is not dense or carries properties besides its elements. */
+	function checkArrayShape(state: EncodeState, array: unknown[], length: number): void {
+		const proto = ObjectGetPrototypeOf(array);
+		if (proto !== ArrayPrototype) {
+			const name = proto === null ? undefined : constructorName(proto);
+			throw encodeError(
+				state,
+				name === undefined
+					? "an array with a custom prototype is not JSON; use Array.from(value)"
+					: `a ${name} array is not JSON; use Array.from(value)`,
+			);
+		}
+		if (ObjectGetOwnPropertySymbols(array).length > 0)
+			throw encodeError(state, "symbol-keyed properties are not JSON");
+		// Own string keys list integer indices first, in ascending order, then other keys such as `length`.
+		// Exactly `length` indices followed by `length` means the array is dense with nothing else on it.
+		const names = ObjectGetOwnPropertyNames(array);
+		if (names.length === length + 1 && names[length] === "length") return;
+		for (let i = 0; i < length; i++) {
+			if (!ObjectHasOwn(array, i)) {
+				ArrayPrototypePush(state.path, i);
+				throw encodeError(state, "an array hole is not JSON; fill the array");
+			}
+		}
+		for (let i = length; i < names.length; i++) {
+			if (names[i] !== "length") {
+				ArrayPrototypePush(state.path, names[i]);
+				throw encodeError(state, "a property on an array is not JSON; move it into an object");
+			}
+		}
+	}
+
 	function writeArray(state: EncodeState, array: unknown[], depth: number): void {
 		const length = array.length;
+		checkArrayShape(state, array, length);
 		ArrayPrototypePush(state.parts, "[");
 		for (let i = 0; i < length; i++) {
 			if (i > 0) ArrayPrototypePush(state.parts, ",");
 			ArrayPrototypePush(state.path, i);
-			if (!(i in array)) throw encodeError(state, "an array hole is not JSON; fill the array");
 			const element = array[i];
 			if (element === undefined) throw encodeError(state, "undefined in an array is not JSON; use null");
 			write(state, element, depth + 1);
@@ -150,6 +195,15 @@ export function createLosslessCodec(maxDepth: number): LosslessCodec {
 			throw encodeError(state, "symbol-keyed properties are not JSON");
 		const record = object as Record<string, unknown>;
 		const keys = ObjectKeys(object);
+		const names = ObjectGetOwnPropertyNames(object);
+		if (names.length !== keys.length) {
+			for (let i = 0; i < names.length; i++) {
+				if (!ObjectPrototypePropertyIsEnumerable(object, names[i])) {
+					ArrayPrototypePush(state.path, names[i]);
+					throw encodeError(state, "a non-enumerable property is not JSON; define it as an ordinary property");
+				}
+			}
+		}
 		ArrayPrototypePush(state.parts, "{");
 		let first = true;
 		for (let i = 0; i < keys.length; i++) {
@@ -206,7 +260,7 @@ export function createLosslessCodec(maxDepth: number): LosslessCodec {
 
 	function encode(value: unknown, label: string): string {
 		// State is per call: a getter may call a binding, which encodes while this encoding is in progress.
-		const state: EncodeState = { label, parts: [], path: [], ancestors: [] };
+		const state: EncodeState = { label, parts: newList(), path: newList(), ancestors: newList() };
 		write(state, value, 0);
 		return ArrayPrototypeJoin(state.parts, "");
 	}
@@ -271,7 +325,12 @@ export function createLosslessCodec(maxDepth: number): LosslessCodec {
 	}
 
 	function decode(text: string): unknown {
-		if (RegExpPrototypeExec(NEEDS_REVIVER, text) === null && StringPrototypeIndexOf(text, '"__proto__"') === -1) {
+		// The reviver also rejects `__proto__` keys, which JSON can spell with escapes such as `\u005f`.
+		if (
+			RegExpPrototypeExec(NEEDS_REVIVER, text) === null &&
+			StringPrototypeIndexOf(text, '"__proto__"') === -1 &&
+			StringPrototypeIndexOf(text, "\\u") === -1
+		) {
 			return JSONParse(text);
 		}
 		return JSONParse(text, revive);

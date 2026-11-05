@@ -110,9 +110,10 @@ export class CodeModeWorker {
 		if (!this.exited) this.worker.postMessage(message);
 	}
 
-	terminate(): void {
+	/** Terminates the thread. An attached listener receives `onExit` with `reason`. */
+	terminate(reason = "the worker was terminated"): void {
 		if (this.exited) return;
-		this.exitReason = "the worker was terminated";
+		this.exitReason = reason;
 		void this.worker.terminate();
 	}
 
@@ -224,7 +225,8 @@ export class CodeModeWorkerPool {
 			if (waiter.onAbort) waiter.signal?.removeEventListener("abort", waiter.onAbort);
 			waiter.reject(new Error("The code mode worker pool is closed"));
 		}
-		for (const worker of [...this.workers]) this.discard(worker);
+		// Listeners stay attached, so scripts running on these workers end with a sandbox failure.
+		for (const worker of [...this.workers]) worker.terminate("the code mode worker pool was closed");
 	}
 
 	private hasCapacity(): boolean {
@@ -258,7 +260,7 @@ export class CodeModeWorkerPool {
 		this.spawning++;
 		let worker: CodeModeWorker;
 		try {
-			const wasm = await this.loadWasm();
+			const wasm = await untilAborted(this.loadWasm(), signal);
 			if (this.closed) throw new Error("The code mode worker pool is closed");
 			const prelude: PreludeConfig = {
 				maxJsonDepth: MAX_BRIDGE_JSON_DEPTH,
@@ -278,25 +280,18 @@ export class CodeModeWorkerPool {
 		} catch (error) {
 			this.spawning--;
 			this.refill();
+			if (signal?.aborted) throw signal.reason;
 			throw new Error(
 				`The code mode engine failed to load: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
 		this.spawning--;
-		if (!signal) {
-			await worker.ready;
-			return worker;
-		}
-		const aborted = new Promise<never>((_resolve, reject) => {
-			signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-		});
-		aborted.catch(() => {});
 		try {
-			await Promise.race([worker.ready, aborted]);
+			await untilAborted(worker.ready, signal);
 			return worker;
 		} catch (error) {
 			// A worker that boots after its script gave up waiting serves the next script.
-			if (signal.aborted)
+			if (signal?.aborted)
 				worker.ready.then(
 					() => this.release(worker),
 					() => this.discard(worker),
@@ -318,6 +313,29 @@ export class CodeModeWorkerPool {
 		}
 		return this.wasm;
 	}
+}
+
+/**
+ * Settles like `promise`, or rejects with the signal's reason once the signal aborts. Checks the signal first:
+ * an abort event is not replayed to listeners added after it fired.
+ */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+	if (!signal) return promise;
+	if (signal.aborted) return Promise.reject(signal.reason);
+	return new Promise<T>((resolve, reject) => {
+		const onAbort = () => reject(signal.reason);
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(
+			(value) => {
+				signal.removeEventListener("abort", onAbort);
+				resolve(value);
+			},
+			(error: unknown) => {
+				signal.removeEventListener("abort", onAbort);
+				reject(error);
+			},
+		);
+	});
 }
 
 function workerUrl(): URL {

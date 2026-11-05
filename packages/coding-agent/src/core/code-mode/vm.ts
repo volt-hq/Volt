@@ -353,9 +353,12 @@ export class ScriptVm {
 				this.finish({ type: "done", payload: this.pendingDone ?? '{"ok":true}' });
 				return;
 		}
-		this.reportRejections();
-		// No timers exist in the VM, so with no call in flight nothing can resume the script.
-		if (this.outstandingCalls === 0) this.finish({ type: "stalled" });
+		// No timers exist in the VM, so with no call in flight nothing can resume the script. Rejections are
+		// reported only once the script cannot resume; until then it may still attach a handler.
+		if (this.outstandingCalls === 0) {
+			this.reportRejections();
+			this.finish({ type: "stalled" });
+		}
 	}
 
 	private finish(message: ScriptVmMessage): void {

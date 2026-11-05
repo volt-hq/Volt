@@ -38,7 +38,7 @@ function boot(): Promise<ScriptVm> {
 		isStopRequested: () => current !== undefined && Atomics.load(stopFlags, CONTROL_STOP_INDEX) === current.id,
 		onComputeStart: (usedMs) => {
 			Atomics.store(clock, CONTROL_COMPUTE_USED_INDEX, BigInt(Math.round(usedMs)));
-			Atomics.store(clock, CONTROL_COMPUTING_SINCE_INDEX, BigInt(Date.now()));
+			Atomics.store(clock, CONTROL_COMPUTING_SINCE_INDEX, process.hrtime.bigint());
 		},
 		onComputeEnd: () => {
 			Atomics.store(clock, CONTROL_COMPUTING_SINCE_INDEX, 0n);

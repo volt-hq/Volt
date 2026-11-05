@@ -19,7 +19,10 @@ export const CODE_MODE_PROTOCOL_VERSION = 1;
 export const CONTROL_BUFFER_BYTES = 24;
 /** Int32 index: id of the script the host asked to stop. */
 export const CONTROL_STOP_INDEX = 0;
-/** BigInt64 index: epoch milliseconds when the VM started executing, or 0 while it is idle. */
+/**
+ * BigInt64 index: `process.hrtime.bigint()` when the VM started executing, or 0 while it is idle. The
+ * clock is monotonic and shared by every thread of the process, unlike `Date.now()`.
+ */
 export const CONTROL_COMPUTING_SINCE_INDEX = 1;
 /** BigInt64 index: milliseconds of compute the current script used before the current execution. */
 export const CONTROL_COMPUTE_USED_INDEX = 2;

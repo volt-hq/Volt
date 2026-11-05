@@ -41,7 +41,9 @@ describe("code mode bridge codec", () => {
 		expect(() => decodeBridgeValue("0.1000000000000000055511151231257827")).toThrow(SyntaxError);
 		expect(() => decodeBridgeValue("1e400")).toThrow(SyntaxError);
 		expect(() => decodeBridgeValue('{"__proto__":{"polluted":true}}')).toThrow(/__proto__/);
+		expect(() => decodeBridgeValue(String.raw`{"\u005f_proto__":{"polluted":true}}`)).toThrow(/__proto__/);
 		expect(decodeBridgeValue('["__proto__"]')).toStrictEqual(["__proto__"]);
+		expect(decodeBridgeValue(String.raw`{"\u0061":"\u0062"}`)).toStrictEqual({ a: "b" });
 	});
 
 	it("bounds nesting before parsing", () => {
@@ -72,12 +74,37 @@ describe("code mode bridge codec", () => {
 		const holey: unknown[] = [1];
 		holey[2] = 3;
 		expect(() => encodeBridgeValue(holey, "args")).toThrow("args[1]: an array hole is not JSON; fill the array");
+		const holeyWithExtra = Object.assign(holey.slice(), { x: 1 });
+		expect(() => encodeBridgeValue(holeyWithExtra, "args")).toThrow("args[1]: an array hole is not JSON");
 		const cycle: Record<string, unknown> = {};
 		cycle.self = cycle;
 		expect(() => encodeBridgeValue(cycle, "args")).toThrow("args.self: a circular reference is not JSON");
 		let nested: unknown = 1;
 		for (let i = 0; i < 65; i++) nested = [nested];
 		expect(() => encodeBridgeValue(nested, "args")).toThrow(/nesting is deeper than 64 levels/);
+	});
+
+	it("rejects array properties, array prototypes, and non-enumerable properties instead of dropping them", () => {
+		expect(() => encodeBridgeValue({ list: Object.assign([1], { tag: 2 }) }, "args")).toThrow(
+			"args.list.tag: a property on an array is not JSON; move it into an object",
+		);
+		expect(() => encodeBridgeValue(Object.assign([1], { [Symbol("x")]: 3 }), "args")).toThrow(
+			"args: symbol-keyed properties are not JSON",
+		);
+		class Tagged extends Array {}
+		expect(() => encodeBridgeValue({ list: Tagged.from([1, 2]) }, "args")).toThrow(
+			"args.list: a Tagged array is not JSON; use Array.from(value)",
+		);
+		expect(() => encodeBridgeValue(Object.setPrototypeOf([1], null), "args")).toThrow(
+			"args: an array with a custom prototype is not JSON; use Array.from(value)",
+		);
+		const hidden = { visible: 1 };
+		Object.defineProperty(hidden, "path", { value: "file.ts" });
+		expect(() => encodeBridgeValue({ nested: hidden }, "args")).toThrow(
+			"args.nested.path: a non-enumerable property is not JSON; define it as an ordinary property",
+		);
+		const bigArray = Array.from({ length: 100_000 }, (_, i) => i);
+		expect(decodeBridgeValue(encodeBridgeValue(bigArray, "args"))).toStrictEqual(bigArray);
 	});
 
 	it("never calls toJSON", () => {
@@ -124,6 +151,7 @@ describe("code mode protocol parsing", () => {
 			'{"seq":1,"binding":"","args":{}}',
 			`{"seq":1,"binding":"${"x".repeat(257)}","args":{}}`,
 			`{"seq":1,"binding":"read","args":${"[".repeat(65)}${"]".repeat(65)}}`,
+			String.raw`{"seq":1,"binding":"read","args":{"\u005f_proto__":{"p":1}}}`,
 		]) {
 			expect(() => parseCallPayload(payload)).toThrow(CodeModeProtocolError);
 		}

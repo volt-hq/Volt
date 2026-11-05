@@ -170,8 +170,22 @@ const STALLED_ERROR: CodeModeErrorDescription = {
 	outOfMemory: false,
 };
 
+/** The message of any thrown value. Never throws, whatever the value's getters or conversions do. */
 function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
+	try {
+		const message = error instanceof Error ? error.message : error;
+		return typeof message === "string" ? message : String(message);
+	} catch {
+		return "unknown error";
+	}
+}
+
+function asCallError(error: unknown): CodeModeCallError | undefined {
+	try {
+		return error instanceof CodeModeCallError ? error : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function truncateUtf8(text: string, maxBytes: number): string {
@@ -353,7 +367,8 @@ class ScriptRun {
 		const since = Atomics.load(this.clock, CONTROL_COMPUTING_SINCE_INDEX);
 		if (since === 0n) return;
 		const used = Number(Atomics.load(this.clock, CONTROL_COMPUTE_USED_INDEX));
-		if (used + (Date.now() - Number(since)) <= this.limits.computeBudgetMs + this.limits.graceMs) return;
+		const computingMs = Number(process.hrtime.bigint() - since) / 1e6;
+		if (used + computingMs <= this.limits.computeBudgetMs + this.limits.graceMs) return;
 		this.failure ??= { kind: "compute_budget", budgetMs: this.limits.computeBudgetMs };
 		this.kill();
 	}
@@ -418,15 +433,18 @@ class ScriptRun {
 			this.protocolViolation(`unknown binding ${call.binding}`);
 			return;
 		}
+		// The outstanding-argument cap counts the encoded arguments, not the envelope around them.
+		const envelopeBytes = Buffer.byteLength(`{"seq":${call.seq},"binding":${JSON.stringify(call.binding)},"args":}`);
+		const argumentBytes = Math.max(0, bytes - envelopeBytes);
 		const state: CallState = {
 			record: { seq: call.seq, binding: call.binding, status: "completed", durationMs: 0 },
 			startedAt: performance.now(),
-			bytes,
+			bytes: argumentBytes,
 			settled: Promise.resolve(),
 			done: false,
 		};
 		this.calls.push(state);
-		if (this.outstandingArgumentBytes + bytes > this.limits.maxOutstandingArgumentBytes) {
+		if (this.outstandingArgumentBytes + argumentBytes > this.limits.maxOutstandingArgumentBytes) {
 			this.reply(
 				state,
 				this.failurePayload(
@@ -447,13 +465,14 @@ class ScriptRun {
 			);
 			return;
 		}
-		this.outstandingArgumentBytes += bytes;
+		this.outstandingArgumentBytes += argumentBytes;
 		this.inFlight.add(state);
 		state.settled = this.execute(state, call.args);
 	}
 
+	/** Runs one nested call and answers it. The returned promise never rejects. */
 	private async execute(state: CallState, args: Record<string, unknown>): Promise<void> {
-		let reply: { ok: boolean; payload: string };
+		let outcome: { ok: true; value: unknown } | { ok: false; error: unknown };
 		try {
 			const value = await this.request.onCall({
 				seq: state.record.seq,
@@ -461,14 +480,22 @@ class ScriptRun {
 				args,
 				signal: this.callController.signal,
 			});
-			reply = this.valuePayload(state, value);
+			outcome = { ok: true, value };
 		} catch (error) {
-			reply = this.failurePayload(state, error);
+			outcome = { ok: false, error };
 		}
-		// A call recorded as unsettled at the end of the script keeps that status.
+		// A call recorded as unsettled at the end of the script keeps that record; its late result is dropped.
 		if (state.done) return;
 		this.inFlight.delete(state);
 		this.outstandingArgumentBytes -= state.bytes;
+		let reply: { ok: boolean; payload: string };
+		try {
+			reply = outcome.ok ? this.valuePayload(state, outcome.value) : this.failurePayload(state, outcome.error);
+		} catch {
+			state.record.status = "failed";
+			state.record.error = { kind: "failed", message: "the result could not be prepared" };
+			reply = { ok: false, payload: JSON.stringify(state.record.error) };
+		}
 		this.reply(state, reply);
 	}
 
@@ -498,10 +525,9 @@ class ScriptRun {
 	}
 
 	private failurePayload(state: CallState, error: unknown): { ok: boolean; payload: string } {
-		const cancelled = !(error instanceof CodeModeCallError) && this.callController.signal.aborted;
-		const kind: CodeModeCallErrorKind =
-			error instanceof CodeModeCallError ? error.kind : cancelled ? "cancelled" : "failed";
-		const reason = error instanceof CodeModeCallError ? error.reason : undefined;
+		const typed = asCallError(error);
+		const kind: CodeModeCallErrorKind = typed?.kind ?? (this.callController.signal.aborted ? "cancelled" : "failed");
+		const reason = typed?.reason;
 		const message = truncateUtf8(errorMessage(error), this.limits.maxErrorMessageBytes);
 		state.record.status = kind === "cancelled" ? "cancelled" : "failed";
 		state.record.error = reason === undefined ? { kind, message } : { kind, reason, message };
@@ -536,7 +562,12 @@ class ScriptRun {
 		}
 		this.output.push(item);
 		this.retainedChars += chars;
-		this.request.onOutput?.(item);
+		// This runs inside the worker's message listener, where a throw would be an uncaught exception.
+		try {
+			this.request.onOutput?.(item);
+		} catch (error) {
+			this.terminate({ kind: "sandbox", reason: `the output handler failed: ${errorMessage(error)}` });
+		}
 	}
 
 	private onDone(payload: string): void {

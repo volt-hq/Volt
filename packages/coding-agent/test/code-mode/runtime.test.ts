@@ -123,6 +123,59 @@ describe("code mode runtime", () => {
 		expect(result.calls.map((call) => call.status)).toStrictEqual(["failed", "failed"]);
 	});
 
+	it("answers calls whose handler throws values that cannot be converted to a message", async () => {
+		const result = await run(
+			`
+			const messages = [];
+			for (const name of ["null-prototype", "throwing-getter"]) {
+				try { await tools.call({ name }); } catch (error) { messages.push(error.kind + ": " + error.message); }
+			}
+			return messages;
+		`,
+			{
+				onCall: async (call) => {
+					if (call.args.name === "null-prototype") throw Object.create(null);
+					const error = new Error("hidden");
+					Object.defineProperty(error, "message", {
+						get() {
+							throw new Error("getter");
+						},
+					});
+					throw error;
+				},
+			},
+		);
+		expect(result).toMatchObject({ ok: true, value: ["failed: unknown error", "failed: unknown error"] });
+	});
+
+	it("counts only encoded arguments toward the outstanding-argument limit", async () => {
+		// Each call's arguments, {"s":"x..."}, are exactly 1,000 bytes; the limit admits both at once.
+		const result = await run(
+			"return await Promise.all([tools.call({ s: 'x'.repeat(992) }), tools.call({ s: 'x'.repeat(992) })]);",
+			{
+				limits: { maxOutstandingArgumentBytes: 2_000 },
+				onCall: async () => {
+					await new Promise((resolve) => setTimeout(resolve, 20));
+					return "ok";
+				},
+			},
+		);
+		expect(result).toMatchObject({ ok: true, value: ["ok", "ok"] });
+		expect(result.calls.map((call) => call.status)).toStrictEqual(["completed", "completed"]);
+	});
+
+	it("fails the script instead of the process when the output handler throws", async () => {
+		const result = failed(
+			await run("text('a'); text('b'); return 1;", {
+				onOutput: () => {
+					throw new Error("sink closed");
+				},
+			}),
+		);
+		expect(result.failure).toStrictEqual({ kind: "sandbox", reason: "the output handler failed: sink closed" });
+		expect(texts(result)[0]).toBe("a");
+	});
+
 	it("terminates a script when its call budget runs out", async () => {
 		const result = failed(
 			await run("try { for (let i = 0; i < 10; i++) await tools.call({ i }); } catch { text('caught'); }", {
@@ -146,6 +199,18 @@ describe("code mode runtime", () => {
 		expect(result.started).toBe(true);
 		expect(texts(result)).toStrictEqual(["before"]);
 		expect(result.calls.map((call) => call.status)).toStrictEqual(["unsettled"]);
+	});
+
+	it("keeps an unsettled record unchanged when the call completes after the script returned", async () => {
+		const late = deferred<string>();
+		const result = failed(
+			await run("await tools.call({});", { timeoutMs: 100, limits: { drainMs: 50 }, onCall: () => late.promise }),
+		);
+		expect(result.calls[0]).toMatchObject({ status: "unsettled" });
+		late.resolve("late");
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(result.calls[0]).toMatchObject({ status: "unsettled" });
+		expect(result.calls[0].error).toBeUndefined();
 	});
 
 	it("aborts in-flight calls through their signal", async () => {
@@ -229,6 +294,27 @@ describe("code mode worker pool", () => {
 		expect(failed(await queued)).toMatchObject({ started: false, failure: { kind: "aborted" }, output: [] });
 		release.resolve(null);
 		expect((await first).ok).toBe(true);
+	});
+
+	it("gives up without booting a worker when a script is aborted while the engine loads", async () => {
+		const cold = newPool({});
+		const controller = new AbortController();
+		const pending = run("return 1;", { signal: controller.signal }, cold);
+		controller.abort();
+		expect(failed(await pending)).toMatchObject({ started: false, failure: { kind: "aborted" } });
+		// The worker would otherwise boot and be returned to the pool before the result arrived.
+		expect(cold.stats).toStrictEqual({ workers: 0, idle: 0, queued: 0 });
+	});
+
+	it("ends running scripts when the pool closes", async () => {
+		const closing = newPool({});
+		const running = run("await tools.call({});", { onCall: () => new Promise(() => {}) }, closing);
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		closing.close();
+		expect(failed(await running).failure).toStrictEqual({
+			kind: "sandbox",
+			reason: "the code mode worker pool was closed",
+		});
 	});
 
 	it("stops idle workers after the idle timeout", async () => {

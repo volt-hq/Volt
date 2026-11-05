@@ -46,6 +46,8 @@ interface RunOptions {
 	computeBudgetMs?: number;
 	memoryLimitBytes?: number;
 	maxArgumentBytes?: number;
+	/** Answers the most recent call first instead of the oldest. */
+	lastInFirstOut?: boolean;
 }
 
 interface RunResult {
@@ -77,7 +79,7 @@ async function runScript(code: string, options: RunOptions = {}): Promise<RunRes
 			},
 		);
 		while (!vm.finished) {
-			const payload = queue.shift();
+			const payload = options.lastInFirstOut ? queue.pop() : queue.shift();
 			if (payload === undefined) throw new Error("The VM is idle without calls but has not finished");
 			const call = parseCallPayload(payload);
 			calls.push(call);
@@ -228,6 +230,38 @@ describe("code mode VM bindings", () => {
 		});
 	});
 
+	it("rejects holes that a script fills through Array.prototype", async () => {
+		const result = await runScript(
+			`
+			Array.prototype[0] = "inherited";
+			try { await tools.read({ a: new Array(1) }); } catch (error) { return error.message; }
+		`,
+			{ bindings: [{ name: "read", path: ["read"] }] },
+		);
+		expect(result.calls).toStrictEqual([]);
+		expect(result.done).toMatchObject({ ok: true, value: "args.a[0]: an array hole is not JSON; fill the array" });
+	});
+
+	it("counts arguments in exact UTF-8 bytes, including characters outside the BMP", async () => {
+		// 262,142 four-byte characters plus `{"s":"` and `"}` are exactly 1 MiB.
+		const result = await runScript(
+			`
+			const outcomes = [];
+			for (const count of [262142, 262143]) {
+				try { await tools.read({ s: "\\u{1F4A9}".repeat(count) }); outcomes.push("sent"); }
+				catch (error) { outcomes.push(error.message); }
+			}
+			return outcomes;
+		`,
+			{ bindings: [{ name: "read", path: ["read"] }] },
+		);
+		expect(result.calls).toHaveLength(1);
+		expect(result.done).toMatchObject({
+			ok: true,
+			value: ["sent", `args: ${MIB + 4} bytes encoded exceeds the limit of ${MIB}`],
+		});
+	});
+
 	it("rejects failed calls with a typed ToolCallError", async () => {
 		const result = await runScript(
 			`
@@ -289,6 +323,46 @@ describe("code mode VM bindings", () => {
 		expect(texts(result)).toStrictEqual(['still {"a":[1,2],"b":"x"}']);
 		expect(result.done).toStrictEqual({ ok: true, hasValue: true, value: { a: [1, 2], b: "x" } });
 	});
+
+	it("keeps the bridge working when a script defines index setters on Array.prototype", async () => {
+		const throwing = await runScript(
+			`
+			Object.defineProperty(Array.prototype, 0, { configurable: true, set() { throw new Error("setter ran"); } });
+			text([1, { b: 2 }]);
+			console.log("value", new Map([["k", [1]]]));
+			const value = await tools.echo({ a: [1, 2] });
+			throw new Error("after " + value.a.length);
+		`,
+			{ bindings: [{ name: "echo", path: ["echo"] }], onCall: (_binding, args) => args },
+		);
+		expect(texts(throwing)).toStrictEqual(['[1,{"b":2}]', 'value Map(1) {"k" => [1]}']);
+		expect(throwing.calls.map((call) => call.args)).toStrictEqual([{ a: [1, 2] }]);
+		expect(failure(throwing).error.summary).toBe("Error: after 2");
+		const injecting = await runScript(
+			`
+			Object.defineProperty(Array.prototype, 3, {
+				configurable: true,
+				set(value) { Object.defineProperty(this, 3, { value: value + ',"injected":2', writable: true, enumerable: true, configurable: true }); },
+			});
+			return await tools.echo({ a: 1 });
+		`,
+			{ bindings: [{ name: "echo", path: ["echo"] }], onCall: (_binding, args) => args },
+		);
+		expect(injecting.calls.map((call) => call.args)).toStrictEqual([{ a: 1 }]);
+		expect(injecting.done).toStrictEqual({ ok: true, hasValue: true, value: { a: 1 } });
+	});
+
+	it("completes when a script patches the Promise species or constructor", async () => {
+		for (const patch of [
+			"Promise.prototype.constructor = 1;",
+			"Object.defineProperty(Promise, Symbol.species, { value: 1 });",
+			"Object.defineProperty(Promise, Symbol.species, { value: function Species(executor) { text('species ran'); return new Promise(executor); } });",
+		]) {
+			const result = await runScript(`${patch} return 5;`);
+			expect(result.done).toStrictEqual({ ok: true, hasValue: true, value: 5 });
+			expect(texts(result)).toStrictEqual([]);
+		}
+	});
 });
 
 describe("code mode VM failures", () => {
@@ -326,6 +400,42 @@ describe("code mode VM failures", () => {
 		});
 		expect(failure(await runScript("throw { code: 1 };")).error.summary).toBe('Thrown object: {"code":1}');
 		expect(failure(await runScript("throw null;")).error.summary).toBe("Thrown null");
+	});
+
+	it("bounds error names, summaries, and blocks", async () => {
+		const error = failure(
+			await runScript('const e = new Error("x".repeat(9 * 1024 * 1024)); e.name = "N".repeat(1000); throw e;'),
+		).error;
+		expect(error.name.length).toBeLessThan(200);
+		expect(error.summary.length).toBeLessThan(1100);
+		expect(error.text.length).toBeLessThan(8300);
+		expect(failure(await runScript('throw "y".repeat(100000);')).error.summary.length).toBeLessThan(1100);
+		const warning = await runScript('Promise.reject(new Error("z".repeat(100000))); text("ok");');
+		expect(texts(warning)[1].length).toBeLessThan(1200);
+	});
+
+	it("does not report rejections the script handles after awaiting a call", async () => {
+		const later = await runScript(
+			'const p = Promise.reject(new Error("x")); await tools.echo({}); p.catch(() => {}); text("done");',
+			{ bindings: [{ name: "echo", path: ["echo"] }] },
+		);
+		expect(texts(later)).toStrictEqual(["done"]);
+		// Calls started together and awaited in order, where the second fails before the first completes.
+		const ordered = await runScript(
+			'const a = tools.x({}); const b = tools.y({}); try { await a; await b; } catch (error) { text("caught " + error.message); }',
+			{
+				bindings: [
+					{ name: "x", path: ["x"] },
+					{ name: "y", path: ["y"] },
+				],
+				onCall: (binding) => {
+					if (binding === "y") throw new Error("y failed");
+					return 1;
+				},
+				lastInFirstOut: true,
+			},
+		);
+		expect(texts(ordered)).toStrictEqual(["caught y failed"]);
 	});
 
 	it("reports unhandled rejections as warnings and ignores ones handled later", async () => {

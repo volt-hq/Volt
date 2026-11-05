@@ -86,6 +86,7 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 	const ObjectGetPrototypeOf = Object.getPrototypeOf;
 	const ObjectKeys = Object.keys;
 	const ObjectIs = Object.is;
+	const ObjectSetPrototypeOf = Object.setPrototypeOf;
 	const ObjectPrototype = Object.prototype;
 	const ObjectPrototypeToString = uncurry(Object.prototype.toString);
 	const ObjectPrototypeIsPrototypeOf = uncurry(Object.prototype.isPrototypeOf);
@@ -128,6 +129,16 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 	const MAX_FORMAT_DEPTH = 16;
 	const MAX_INNER_ERRORS = 5;
 	const MAX_CAUSES = 3;
+	const MAX_NAME_CHARS = 128;
+	const MAX_SUMMARY_CHARS = 1024;
+
+	/**
+	 * An array without a prototype. Pushing onto an ordinary array performs [[Set]], which runs setters a
+	 * script may define on `Array.prototype` or `Object.prototype` indices; these lists have no prototype.
+	 */
+	function newList<T>(): T[] {
+		return ObjectSetPrototypeOf([], null) as T[];
+	}
 
 	return function bootPrelude(bridge: Bridge, configText: string): PreludeApi {
 		const config = JSONParse(configText) as PreludeConfig;
@@ -185,7 +196,7 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 		}
 
 		function formatList(list: ArrayLike<unknown>, length: number, depth: number, seen: object[]): string {
-			const parts: string[] = [];
+			const parts = newList<string>();
 			for (let i = 0; i < length; i++) {
 				ArrayPrototypePush(parts, i in list ? formatNested(list[i], depth + 1, seen) : "<empty>");
 			}
@@ -203,7 +214,7 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 						: DatePrototypeToISOString(object as Date);
 				}
 				case "Map": {
-					const parts: string[] = [];
+					const parts = newList<string>();
 					MapPrototypeForEach(object as Map<unknown, unknown>, (value: unknown, key: unknown) => {
 						ArrayPrototypePush(
 							parts,
@@ -213,7 +224,7 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 					return `Map(${MapSize(object)}) {${join(parts, ", ")}}`;
 				}
 				case "Set": {
-					const parts: string[] = [];
+					const parts = newList<string>();
 					SetPrototypeForEach(object as Set<unknown>, (value: unknown) => {
 						ArrayPrototypePush(parts, formatNested(value, depth + 1, seen));
 					});
@@ -237,7 +248,7 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 				return `${tag}(${length}) [${formatList(object as unknown as ArrayLike<unknown>, length, depth, seen)}]`;
 			}
 			const keys = ObjectKeys(object);
-			const parts: string[] = [];
+			const parts = newList<string>();
 			for (let i = 0; i < keys.length; i++) {
 				const key = keys[i];
 				ArrayPrototypePush(parts, `${JSONStringify(key)}:${formatNested(read(object, key), depth + 1, seen)}`);
@@ -281,7 +292,7 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 		function formatValue(value: unknown): string {
 			if (typeof value === "string") return value;
 			try {
-				return formatNested(value, 0, []);
+				return formatNested(value, 0, newList<object>());
 			} catch {
 				return "[unprintable value]";
 			}
@@ -293,7 +304,7 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 
 		function consoleMethod(level: string) {
 			return (...values: unknown[]): void => {
-				const parts: string[] = [];
+				const parts = newList<string>();
 				for (let i = 0; i < values.length; i++) ArrayPrototypePush(parts, formatValue(values[i]));
 				emit(`{"type":"console","level":"${level}","text":${JSONStringify(join(parts, " "))}}`);
 			};
@@ -326,11 +337,16 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 		}
 		defineHidden(ToolCallError.prototype, "name", "ToolCallError");
 
+		/**
+		 * UTF-8 length of codec output. A surrogate pair is 4 bytes, 2 per code unit; codec output holds no
+		 * lone surrogates, because JSON.stringify escapes them to ASCII.
+		 */
 		function utf8Length(value: string): number {
 			let bytes = value.length;
 			for (let i = 0; i < value.length; i++) {
 				const code = StringPrototypeCharCodeAt(value, i);
-				if (code >= 0x800) bytes += 2;
+				if (code >= 0xd800 && code <= 0xdfff) bytes += 1;
+				else if (code >= 0x800) bytes += 2;
 				else if (code >= 0x80) bytes += 1;
 			}
 			return bytes;
@@ -349,7 +365,7 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 					reject(error);
 					return;
 				}
-				// A surrogate pair counts as 6 bytes here, which can only overestimate the size.
+				// A UTF-16 code unit is at most 3 bytes of UTF-8, so shorter text needs no exact count.
 				if (encoded.length * 3 > maxArgumentBytes) {
 					const bytes = utf8Length(encoded);
 					if (bytes > maxArgumentBytes) {
@@ -357,10 +373,14 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 						return;
 					}
 				}
-				// The seq is assigned after encoding: a getter that calls a binding during encoding posts its call first.
-				lastSeq += 1;
-				MapPrototypeSet(pending, lastSeq, { name, resolve, reject });
-				bridge("call", `{"seq":${lastSeq},"binding":${JSONStringify(name)},"args":${encoded}}`);
+				// The seq is taken after encoding, so a getter that calls a binding during encoding posts its call
+				// first. It is committed only once the call is posted: an allocation failing before then (a
+				// catchable out-of-memory error) must not leave a gap the host would treat as a protocol violation.
+				const seq = lastSeq + 1;
+				const payload = `{"seq":${seq},"binding":${JSONStringify(name)},"args":${encoded}}`;
+				MapPrototypeSet(pending, seq, { name, resolve, reject });
+				bridge("call", payload);
+				lastSeq = seq;
 			});
 		}
 
@@ -397,10 +417,15 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 			return `${StringPrototypeSlice(value, 0, maxChars)}\n... [${value.length - maxChars} more chars]`;
 		}
 
+		function truncateLine(value: string, maxChars: number): string {
+			if (value.length <= maxChars) return value;
+			return `${StringPrototypeSlice(value, 0, maxChars)}... [${value.length - maxChars} more chars]`;
+		}
+
 		/** Removes prelude frames and maps columns on the script's first line back to the script. */
 		function cleanStack(stack: string): string {
 			const lines = StringPrototypeSplit(stack, "\n");
-			const kept: string[] = [];
+			const kept = newList<string>();
 			const marker = `${config.scriptFilename}:1:`;
 			for (let i = 0; i < lines.length; i++) {
 				let line = lines[i];
@@ -423,11 +448,12 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 			return join(kept, "\n");
 		}
 
+		/** One bounded line describing a thrown value. */
 		function summarize(value: unknown): string {
-			if (isError(value)) return errorLine(value);
+			if (isError(value)) return truncateLine(errorLine(value), MAX_SUMMARY_CHARS);
 			if (value === null) return "Thrown null";
 			if (value === undefined) return "Thrown undefined";
-			return `Thrown ${typeof value}: ${formatValue(value)}`;
+			return truncateLine(`Thrown ${typeof value}: ${formatValue(value)}`, MAX_SUMMARY_CHARS);
 		}
 
 		function describeValue(value: unknown): CodeModeErrorDescription {
@@ -443,7 +469,7 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 			}
 			const name = read(value, "name");
 			const message = read(value, "message");
-			const summary = errorLine(value);
+			const summary = summarize(value);
 			let block = summary;
 			const stack = read(value, "stack");
 			if (typeof stack === "string") {
@@ -462,19 +488,24 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 				cause = isError(cause) ? read(cause, "cause") : undefined;
 			}
 			return {
-				name: typeof name === "string" && name !== "" ? name : "Error",
+				name: typeof name === "string" && name !== "" ? truncateLine(name, MAX_NAME_CHARS) : "Error",
 				summary,
 				text: truncate(block, config.maxErrorChars),
 				outOfMemory: name === "InternalError" && message === "out of memory",
 			};
 		}
 
+		// Serialized by hand: QuickJS's JSON.stringify of an object keeps its own stack in an ordinary array,
+		// so a setter a script defines on an Array.prototype index would run inside it.
+		function serializeDescription(description: CodeModeErrorDescription): string {
+			return `{"name":${JSONStringify(description.name)},"summary":${JSONStringify(description.summary)},"text":${JSONStringify(description.text)},"outOfMemory":${description.outOfMemory ? "true" : "false"}}`;
+		}
+
 		function describe(value: unknown): string {
 			try {
-				return JSONStringify(describeValue(value));
+				return serializeDescription(describeValue(value));
 			} catch {
-				const summary = "Error: the thrown value could not be described";
-				return JSONStringify({ name: "Error", summary, text: summary, outOfMemory: false });
+				return '{"name":"Error","summary":"Error: the thrown value could not be described","text":"Error: the thrown value could not be described","outOfMemory":false}';
 			}
 		}
 
@@ -505,7 +536,14 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 				finishError(error);
 				return;
 			}
-			PromisePrototypeThen(completion as Promise<unknown>, finishValue, finishError);
+			try {
+				// `then` looks up a species constructor through `constructor`, which a script can patch on
+				// Promise.prototype. An own undefined `constructor` makes it use the intrinsic Promise.
+				ObjectDefineProperty(completion as object, "constructor", { value: undefined });
+				PromisePrototypeThen(completion as Promise<unknown>, finishValue, finishError);
+			} catch (error) {
+				finishError(error);
+			}
 		}
 
 		function settle(seqText: string, status: string, payload: string): string {
