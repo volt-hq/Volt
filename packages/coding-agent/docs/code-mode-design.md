@@ -1,10 +1,10 @@
 # Code mode
 
-- Status: Draft. The runtime layer, the bridge contract, the model-facing result, failure semantics, tool scope, nested-call scheduling, the model-facing contract, enablement, and observability are decided (section 5). State and tuning are open (section 8). Sections 5.1 to 5.14 were reviewed with the maintainer; sections 5.15 onward were decided without a separate review round.
+- Status: Draft. The runtime layer, the bridge contract, the model-facing result, failure semantics, tool scope, nested-call scheduling, the model-facing contract, enablement, observability, and state are decided (section 5). Tuning is open (section 8). Sections 5.1 to 5.14 were reviewed with the maintainer; sections 5.15 onward were decided without a separate review round.
 - Date: 2026-11-04
 - Audience: Volt maintainers.
 - Scope: A sandboxed script tool that lets the model call Volt tools programmatically, so intermediate results stay out of the model context. This document covers the runtime that executes scripts, how it is supervised, and the constraints Volt places on it.
-- Decision so far: model-written JavaScript runs in [`quickjs-wasi`](https://github.com/vercel-labs/quickjs-wasi) (QuickJS-NG compiled to WebAssembly) on a per-process pool of worker threads, one fresh VM per script, booted by creating the VM and running a trusted prelude. Scripts are bounded by a compute budget and a nested-call budget, not by a default wall-clock deadline. Adding `quickjs-wasi` is a new dependency and needs maintainer approval before implementation. Values cross the bridge through a lossless JSON codec built on native `JSON.parse` `context.source` and `JSON.rawJSON`; nested calls resolve to text or internal per-tool projections, fail with typed `ToolCallError`s, and return images as opaque references that only reach the model when the script shows them (section 5.9). The model reads one plain-text result: an ordered output stream with multi-line items fenced, a 50 KB budget split by priority with structural truncation of the return value, and the full output spilled to a temp file (section 5.10). A failed script keeps its partial output and adds a failure kind, an error block, and a grouped summary of the nested calls that may have changed state (section 5.11). Scripts can call only operations the model could call directly in the same session, excluding user, session, job, and delegation tools (section 5.12). Nested calls run concurrently up to 10 per script; tools that declare `sequential` run alone, and MCP calls are limited per server rather than serialized (section 5.13). The tool is `run_code`, taking JSON `{ code, description?, timeoutMs? }` with JavaScript or erasable TypeScript; its description lists bindings and result shapes without repeating native tool declarations, and MCP tools are discovered through the `mcp` tool (section 5.14). Code mode is off by default and enabled with the `codeMode.enabled` setting (section 5.15). Nested calls appear inside the `run_code` card and its `details`, not as separate tool calls (section 5.16).
+- Decision so far: model-written JavaScript runs in [`quickjs-wasi`](https://github.com/vercel-labs/quickjs-wasi) (QuickJS-NG compiled to WebAssembly) on a per-process pool of worker threads, one fresh VM per script, booted by creating the VM and running a trusted prelude. Scripts are bounded by a compute budget and a nested-call budget, not by a default wall-clock deadline. Adding `quickjs-wasi` is a new dependency and needs maintainer approval before implementation. Values cross the bridge through a lossless JSON codec built on native `JSON.parse` `context.source` and `JSON.rawJSON`; nested calls resolve to text or internal per-tool projections, fail with typed `ToolCallError`s, and return images as opaque references that only reach the model when the script shows them (section 5.9). The model reads one plain-text result: an ordered output stream with multi-line items fenced, a 50 KB budget split by priority with structural truncation of the return value, and the full output spilled to a temp file (section 5.10). A failed script keeps its partial output and adds a failure kind, an error block, and a grouped summary of the nested calls that may have changed state (section 5.11). Scripts can call only operations the model could call directly in the same session, excluding user, session, job, and delegation tools (section 5.12). Nested calls run concurrently up to 10 per script; tools that declare `sequential` run alone, and MCP calls are limited per server rather than serialized (section 5.13). The tool is `run_code`, taking JSON `{ code, description?, timeoutMs? }` with JavaScript or erasable TypeScript; its description lists bindings and result shapes without repeating native tool declarations, and MCP tools are discovered through the `mcp` tool (section 5.14). Code mode is off by default and enabled with the `codeMode.enabled` setting (section 5.15). Nested calls appear inside the `run_code` card and its `details`, not as separate tool calls (section 5.16). Scripts keep small JSON values across runs with `store()` and `load()`, recorded as session entries (section 5.17).
 
 ## 1. Objective
 
@@ -71,7 +71,7 @@ Checked against `4e9366efa`.
 
 - Replacing direct tool calls or making code mode the default calling convention.
 - Heavy computation inside scripts. The engine is an interpreter; scripts are glue code.
-- Persistent interpreter state across scripts in v1.
+- Persistent interpreter state across scripts in v1. Scripts keep explicit JSON values with `store()` and `load()` instead (section 5.17).
 - Durable replay or suspend/resume of a running script across process restarts in v1.
 - Speculative execution of tool calls while the model is still streaming.
 - An OS sandbox. A future one could host a different backend, but code mode does not depend on it.
@@ -637,6 +637,8 @@ A failed call rejects with ToolCallError { tool; kind: "invalid_arguments" | "bl
 Output: text(value), console.log/warn/error(...), image(ref), and the return value appear in order. ImageRef = { type: "image"; ref; mimeType; width?; height?; bytes; path? }; only images passed to image(ref) reach you. Output is limited to 50 KB, with the full output saved to a file you can read.
 
 Limits: 30 s of computation, 200 tool calls, and 64 MiB of memory per script. Tool calls made before a failure are not undone; a failed result lists them. Write shell commands with String.raw`...` and $VAR instead of ${VAR}.
+
+store(key, value) and load(key) keep small JSON values across scripts in this conversation; up to 1 MiB in total.
 ```
 
 System-prompt snippet: `Run a JavaScript script that calls other tools and returns only what it prints`.
@@ -647,7 +649,7 @@ Guidelines:
 - In run_code scripts, print counts, summaries, and selected fields rather than whole tool results.
 - When a run_code script fails, check which nested calls completed before running it again.
 
-The description measures about 470 tokens; with the snippet, guidelines, and parameter schema, the contract adds about 650 tokens per request, comparable to the roughly 2,600 characters of guidance Pydantic reports.
+The description measures about 470 tokens, plus about 20 for the store line that section 5.17 added; with the snippet, guidelines, and parameter schema, the contract adds about 650 tokens per request, comparable to the roughly 2,600 characters of guidance Pydantic reports.
 
 The description does not mention BigInt or the `context.source` reviver: until [#1024](https://github.com/volt-hq/Volt/issues/1024) lands, no BigInt reaches a script.
 
@@ -745,6 +747,50 @@ Rejected:
 - Storing nested results in `details`. Up to 200 MiB per run at the 1 MiB script-value cap.
 - One presentation per client size. Presenters are pure and shared by every client; the host already trims a presentation that exceeds a client's bound.
 
+### 5.17 State
+
+Decided without a separate review round.
+
+Each VM is fresh (section 5.4), but scripts in one conversation can keep small JSON values with two globals:
+
+- `store(key, value)` keeps `value` under `key`; storing `undefined` deletes the key.
+- `load(key)` returns a copy of the value, or `undefined`.
+
+Both are synchronous. The host passes the conversation's current values to the VM when the script starts, and the prelude sends each write to the host as it happens.
+
+#### Why keep state
+
+Models split work across several scripts and read each result before writing the next: in Pydantic's benchmark they wrote about five snippets per run, and its REPL kept variables between them. Without state, a later script must fetch its data again or the model must carry it through its own context, which is what code mode exists to avoid. Pi (`store`/`load`) and Codex (a session key-value store, per secondary sources) keep values between scripts for the same reason; DeepSeek keeps none, because state outside the session log would break reconstructing a session from its log.
+
+#### Storage
+
+- Writes are recorded as `custom` session entries (`customType: "volt-run-code-store"`, data `{ set, delete }`), one entry per script that wrote anything, appended when the script ends. `custom` is an existing public log-entry type (`packages/protocol/src/entries.ts:560`), so no protocol change is needed, and extensions already append such entries.
+- A conversation's values are the fold of those entries along the current branch, so a branch or fork sees the values written on its own path, and the state survives restarts and resumption. Compaction does not remove log entries, so it does not affect the values.
+- This keeps the state in the session log, which answers DeepSeek's objection.
+- Each conversation has its own values; a subagent's scripts use the subagent's conversation.
+
+#### Failures
+
+Writes made before a failure are kept, and the failed result lists the keys written. Nested calls made before a failure are not undone either (section 5.11), so the values stay consistent with the side effects; a script that records progress, such as processed IDs or a cursor, can resume from it. Pi instead keeps writes only when the script succeeds.
+
+#### Limits
+
+- Values pass through the bridge codec (section 5.9).
+- A key is at most 256 characters. A value is at most 256 KiB of encoded JSON, and all values together at most 1 MiB, Pi's limits. A write past either limit throws a `RangeError` in the script.
+- Passing a full 1 MiB of values into a VM costs about 14 to 42 ms with the codec's fast and slow paths (section 10).
+
+#### What the model sees
+
+- The `run_code` description (section 5.14) gains one line: `store(key, value) and load(key) keep small JSON values across scripts in this conversation; up to 1 MiB in total.`
+- When a script writes values, its result ends with `Stored keys: cursor, done_ids` (deleted keys are listed as such), so the model knows the values exist when it writes the next script.
+
+Rejected:
+
+- A persistent VM or REPL per conversation (Pydantic). It contradicts a fresh VM per script (section 5.4), grows memory, pins a conversation to one worker, and keeps state outside the session log.
+- No state (DeepSeek). Later scripts would fetch data again or route it through the model's context.
+- Files in the workspace as state. They pollute the workspace and do not follow branches.
+- Keeping writes only when the script succeeds (Pi). A script that fails after recording progress would lose it, while its side effects remain.
+
 ## 6. Rejected alternatives
 
 | Alternative | Reason |
@@ -767,6 +813,7 @@ These follow from Volt's architecture and apply whatever the open decisions in s
 - **Policy.** Every nested call passes argument validation and the session's tool-call and tool-result gates, as extension services already do. The host never calls `ToolDefinition.execute` directly for a nested call.
 - **Attribution.** Nested calls need a parent-call origin so hooks, audit, and policy can tell them apart from model-issued calls. `ExtensionOperationOrigin` gains a `code_mode` variant, and MCP audit entries an optional `parentToolCallId` (section 5.16).
 - **Compaction.** Compaction's file lists read nested `read`, `write`, and `edit` paths from `run_code` details (section 5.16).
+- **Session entries.** Script state is stored in `custom` entries with `customType: "volt-run-code-store"` (section 5.17).
 - **Restricted profiles.** In restricted profiles such as Plan mode, a script must not reach operations the profile does not authorize, including MCP tools outside `trustedReads` (section 5.12).
 - **Bash.** Nested bash calls run without the stall-move context (section 5.6).
 - **Public tool API.** Script-value projections are internal to built-in tools and MCP in v1, so `ToolDefinition` does not change.
@@ -781,8 +828,7 @@ These follow from Volt's architecture and apply whatever the open decisions in s
 
 ## 8. Open decisions
 
-1. **State.** Proposed: no cross-script `store()`/`load()` in v1.
-2. **Tuning.** `memoryLimit` default, pool cap, queue size, idle timeout, grace period, worker stack size, the bridge caps (section 5.9), the output budget split (section 5.10), the summary and error-block bounds (section 5.11), and the scheduling limits (section 5.13).
+1. **Tuning.** `memoryLimit` default, pool cap, queue size, idle timeout, grace period, worker stack size, the bridge caps (section 5.9), the output budget split (section 5.10), the summary and error-block bounds (section 5.11), and the scheduling limits (section 5.13).
 
 ## 9. Risks
 
