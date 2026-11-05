@@ -244,12 +244,12 @@ class ScriptRun {
 	async run(): Promise<CodeModeScriptResult> {
 		const { signal, timeoutMs } = this.request;
 		if (signal?.aborted) return this.fail({ kind: "aborted" });
-		const onAbort = () => this.terminate({ kind: "aborted" });
+		const onAbort = () => this.contain(() => this.terminate({ kind: "aborted" }));
 		signal?.addEventListener("abort", onAbort, { once: true });
 		const timeout =
 			timeoutMs === undefined
 				? undefined
-				: setTimeout(() => this.terminate({ kind: "timeout", timeoutMs }), timeoutMs);
+				: setTimeout(() => this.contain(() => this.terminate({ kind: "timeout", timeoutMs })), timeoutMs);
 		timeout?.unref();
 		try {
 			let worker: CodeModeWorker;
@@ -294,9 +294,9 @@ class ScriptRun {
 			return;
 		}
 		worker.attach({
-			onMessage: (message) => this.onMessage(message),
-			onMalformed: () => this.protocolViolation("malformed message"),
-			onExit: (reason) => this.onWorkerExit(reason),
+			onMessage: (message) => this.contain(() => this.onMessage(message)),
+			onMalformed: () => this.contain(() => this.protocolViolation("malformed message")),
+			onExit: (reason) => this.contain(() => this.onWorkerExit(reason)),
 		});
 		this.started = true;
 		worker.post({
@@ -308,7 +308,7 @@ class ScriptRun {
 			maxReportedRejections: this.limits.maxReportedRejections,
 			maxArgumentBytes: this.limits.maxArgumentBytes,
 		});
-		this.watchdog = setInterval(() => this.checkWatchdog(), WATCHDOG_INTERVAL_MS);
+		this.watchdog = setInterval(() => this.contain(() => this.checkWatchdog()), WATCHDOG_INTERVAL_MS);
 		this.watchdog.unref();
 	}
 
@@ -326,7 +326,7 @@ class ScriptRun {
 		this.stopRequested = true;
 		Atomics.store(this.stopFlags, CONTROL_STOP_INDEX, this.id);
 		this.worker.post({ type: "stop", id: this.id });
-		this.graceTimer = setTimeout(() => this.kill(), this.limits.graceMs);
+		this.graceTimer = setTimeout(() => this.contain(() => this.kill()), this.limits.graceMs);
 		this.graceTimer.unref();
 	}
 
@@ -334,6 +334,27 @@ class ScriptRun {
 		if (this.workerSettled) return;
 		this.workerReusable = false;
 		this.settleWorker();
+	}
+
+	/**
+	 * Runs a handler for a worker event, a timer, or an abort. These run outside any promise chain, where a
+	 * throw would be an uncaught exception in the host process; instead it fails this script.
+	 */
+	private contain(handler: () => void): void {
+		try {
+			handler();
+		} catch (error) {
+			this.failure ??= {
+				kind: "sandbox",
+				reason: `the host failed while supervising the script: ${errorMessage(error)}`,
+			};
+			this.workerReusable = false;
+			try {
+				this.settleWorker();
+			} catch {
+				this.resolveSettled();
+			}
+		}
 	}
 
 	/** The VM has ended or the worker is gone; the worker goes back to the pool or is discarded. */

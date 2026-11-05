@@ -376,6 +376,90 @@ describe("code mode VM bindings", () => {
 		expect(injecting.done).toStrictEqual({ ok: true, hasValue: true, value: { a: 1 } });
 	});
 
+	it("keeps the whole bridge working in a realm the script has made hostile", async () => {
+		// The script patches what the prelude and codec could touch, then uses every part of the bridge.
+		// Values that need iteration or patched statics to build are created before the patches.
+		// Object.prototype.then is left alone: resolving a promise with a thenable adopts it in any engine.
+		const result = await runScript(
+			`
+			const map = new Map([["k", [1, 2]]]);
+			const set = new Set([1]);
+			const date = new Date(0);
+			const bytes = new Uint8Array([1, 2]);
+			const cause = new Error("root");
+			const define = Object.defineProperty;
+			const broken = function () { throw new Error("hostile patch ran"); };
+			const replace = (target, key) => define(target, key, { __proto__: null, configurable: true, writable: true, value: broken });
+			const trap = { __proto__: null, configurable: true, get() { return "inherited"; }, set() { throw new Error("hostile setter ran"); } };
+			for (let i = 0; i < 16; i++) { define(Array.prototype, i, trap); define(Object.prototype, i, trap); }
+			const patches = [
+				[JSON, ["parse", "stringify"]],
+				[Object, ["keys", "getOwnPropertyNames", "getOwnPropertyDescriptor", "getOwnPropertySymbols", "getPrototypeOf", "setPrototypeOf", "create", "hasOwn", "is", "assign"]],
+				[Object.prototype, ["toString", "hasOwnProperty", "propertyIsEnumerable", "isPrototypeOf", "valueOf"]],
+				[Array, ["isArray", "from"]],
+				[Array.prototype, ["push", "pop", "join", "includes", "map", "slice", "indexOf", "forEach", Symbol.iterator]],
+				[String.prototype, ["slice", "split", "indexOf", "charCodeAt", "replace", "replaceAll", "repeat", Symbol.iterator]],
+				[RegExp.prototype, ["exec", "test", Symbol.replace, Symbol.split]],
+				[Promise.prototype, ["then", "catch", "finally"]],
+				[Map.prototype, ["get", "set", "delete", "forEach"]],
+				[Set.prototype, ["forEach"]],
+				[Function.prototype, ["call", "apply", "bind", "toString"]],
+				[Error.prototype, ["toString"]],
+				[Symbol.prototype, ["toString"]],
+				[Date.prototype, ["toISOString", "getTime"]],
+				[Number.prototype, ["toString"]],
+				[BigInt.prototype, ["toString"]],
+				[Number, ["isFinite", "isInteger", "isNaN"]],
+			];
+			for (let i = 0; i < patches.length; i++) {
+				const target = patches[i][0];
+				const names = patches[i][1];
+				for (let j = 0; j < names.length; j++) replace(target, names[j]);
+			}
+			// Promise.prototype.constructor stays: \`await\` reads it, so patching it breaks the script's own awaits.
+			define(Promise, Symbol.species, { __proto__: null, configurable: true, get: broken });
+			// Inherited descriptor fields would make an ordinary descriptor literal invalid.
+			const descriptorKeys = ["get", "set", "value", "writable", "enumerable", "configurable"];
+			for (let i = 0; i < descriptorKeys.length; i++) replace(Object.prototype, descriptorKeys[i]);
+
+			text({ list: [1, "two", 3n], map, set, date, bytes });
+			console.warn("warned", map);
+			const echoed = await tools.echo({ list: [1, { deep: [true, null] }], big: 2n ** 70n + 1n, text: "line" });
+			text(echoed);
+			let outcome = "no error";
+			try { await tools.fail({}); } catch (error) { outcome = error instanceof ToolCallError ? error.kind + ": " + error.message : "wrong error"; }
+			text(outcome);
+			Promise.reject(new Error("unhandled in a hostile realm"));
+			throw new Error("hostile done", { cause });
+		`,
+			{
+				bindings: [
+					{ name: "echo", path: ["echo"] },
+					{ name: "fail", path: ["fail"] },
+				],
+				onCall: (binding, args) => {
+					if (binding === "fail") throw new Error("nope");
+					return args;
+				},
+			},
+		);
+		expect(result.calls.map((call) => call.args)).toStrictEqual([
+			{ list: [1, { deep: [true, null] }], big: 2n ** 70n + 1n, text: "line" },
+			{},
+		]);
+		expect(texts(result)).toStrictEqual([
+			'{"list":[1,"two",3n],"map":Map(1) {"k" => [1,2]},"set":Set(1) {1},"date":1970-01-01T00:00:00.000Z,"bytes":Uint8Array(2) [1,2]}',
+			'warned Map(1) {"k" => [1,2]}',
+			'{"list":[1,{"deep":[true,null]}],"big":1180591620717411303425n,"text":"line"}',
+			"failed: nope",
+			"unhandled rejection: Error: unhandled in a hostile realm",
+		]);
+		const error = failure(result).error;
+		expect(error.summary).toBe("Error: hostile done");
+		expect(error.text).toContain("(script.js:");
+		expect(error.text).toContain("Caused by: Error: root");
+	});
+
 	it("completes when a script patches the Promise species or constructor", async () => {
 		for (const patch of [
 			"Promise.prototype.constructor = 1;",

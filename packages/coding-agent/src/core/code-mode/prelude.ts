@@ -150,12 +150,25 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 		let lastSeq = 0;
 		let maxArgumentBytes = 0;
 
+		/**
+		 * A data property descriptor without a prototype. defineProperty reads descriptor fields with [[Get]], so
+		 * a field a script defines on Object.prototype (such as `get`) would otherwise change the descriptor.
+		 */
+		function dataDescriptor(value: unknown, writable: boolean, enumerable: boolean): PropertyDescriptor {
+			const descriptor = ObjectCreate(null) as PropertyDescriptor;
+			descriptor.value = value;
+			descriptor.writable = writable;
+			descriptor.enumerable = enumerable;
+			descriptor.configurable = true;
+			return descriptor;
+		}
+
 		function defineHidden(target: object, key: string, value: unknown): void {
-			ObjectDefineProperty(target, key, { value, writable: true, enumerable: false, configurable: true });
+			ObjectDefineProperty(target, key, dataDescriptor(value, true, false));
 		}
 
 		function defineVisible(target: object, key: string, value: unknown): void {
-			ObjectDefineProperty(target, key, { value, writable: true, enumerable: true, configurable: true });
+			ObjectDefineProperty(target, key, dataDescriptor(value, true, true));
 		}
 
 		function read(target: object, key: string): unknown {
@@ -386,7 +399,7 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 
 		function makeBinding(name: string, displayName: string) {
 			const binding = (args?: unknown): Promise<unknown> => callTool(name, args);
-			ObjectDefineProperty(binding, "name", { value: displayName, configurable: true });
+			ObjectDefineProperty(binding, "name", dataDescriptor(displayName, false, false));
 			return binding;
 		}
 
@@ -561,7 +574,7 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 			try {
 				// `then` looks up a species constructor through `constructor`, which a script can patch on
 				// Promise.prototype. An own undefined `constructor` makes it use the intrinsic Promise.
-				ObjectDefineProperty(completion as object, "constructor", { value: undefined });
+				ObjectDefineProperty(completion as object, "constructor", dataDescriptor(undefined, false, false));
 				PromisePrototypeThen(completion as Promise<unknown>, finishValue, finishError);
 			} catch (error) {
 				finishError(error);

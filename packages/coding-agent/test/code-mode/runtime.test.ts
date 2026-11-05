@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { type CodeModeWorkerListener, CodeModeWorkerPool } from "../../src/core/code-mode/pool.ts";
-import type { HostToWorkerMessage } from "../../src/core/code-mode/protocol.ts";
+import type { HostToWorkerMessage, WorkerToHostMessage } from "../../src/core/code-mode/protocol.ts";
 import {
 	type CodeModeCall,
 	CodeModeCallError,
@@ -55,10 +55,10 @@ function deferred<T>() {
 }
 
 /**
- * A pool whose single worker answers `start` with a forged `call` frame, standing in for a compromised worker.
+ * A pool whose single worker answers `start` with one forged message, standing in for a compromised worker.
  * It implements only what the runtime uses.
  */
-function forgingPool(payload: string): CodeModeWorkerPool {
+function forgingPool(messageFor: (id: number) => WorkerToHostMessage): CodeModeWorkerPool {
 	const worker = {
 		control: new SharedArrayBuffer(24),
 		alive: true,
@@ -71,7 +71,7 @@ function forgingPool(payload: string): CodeModeWorkerPool {
 		},
 		post(message: HostToWorkerMessage) {
 			if (message.type !== "start") return;
-			queueMicrotask(() => this.listener?.onMessage({ type: "call", id: message.id, payload }));
+			queueMicrotask(() => this.listener?.onMessage(messageFor(message.id)));
 		},
 		terminate() {
 			this.alive = false;
@@ -288,22 +288,48 @@ describe("code mode runtime", () => {
 		// Within the coarse check before parsing (limit plus envelope room), but over the limit itself.
 		const payload = `{"seq":1,"binding":"call","args":${JSON.stringify({ s: "x".repeat(200) })}}`;
 		const result = failed(
-			await runCodeModeScript(forgingPool(payload), {
-				code: "",
-				bindings: [{ name: "call", path: ["call"] }],
-				onCall: async () => {
-					called = true;
-					return null;
+			await runCodeModeScript(
+				forgingPool((id) => ({ type: "call", id, payload })),
+				{
+					code: "",
+					bindings: [{ name: "call", path: ["call"] }],
+					onCall: async () => {
+						called = true;
+						return null;
+					},
+					timeoutMs: 2_000,
+					limits: { maxArgumentBytes: 100 },
 				},
-				timeoutMs: 2_000,
-				limits: { maxArgumentBytes: 100 },
-			}),
+			),
 		);
 		expect(result.failure).toStrictEqual({
 			kind: "sandbox",
 			reason: "protocol violation: call arguments exceed the argument limit",
 		});
 		expect(called).toBe(false);
+	});
+
+	it("fails the script instead of the process when handling a worker message throws", async () => {
+		// A payload getter that throws stands in for any bug on the path that handles worker messages.
+		const throwing = (id: number): WorkerToHostMessage => ({
+			type: "call",
+			id,
+			get payload(): string {
+				throw new Error("handler bug");
+			},
+		});
+		const result = failed(
+			await runCodeModeScript(forgingPool(throwing), {
+				code: "",
+				bindings: [{ name: "call", path: ["call"] }],
+				onCall: async () => null,
+				timeoutMs: 2_000,
+			}),
+		);
+		expect(result.failure).toStrictEqual({
+			kind: "sandbox",
+			reason: "the host failed while supervising the script: handler bug",
+		});
 	});
 
 	it("agrees with the prelude on the argument limit when the binding name needs escaping", async () => {

@@ -8,7 +8,7 @@ import {
 	parseOutputPayload,
 	parseWorkerMessage,
 } from "../../src/core/code-mode/protocol.ts";
-import { bridgeValue, expectedAfterRoundTrip } from "./values.ts";
+import { bridgeValue, expectedAfterRoundTrip, rejectedValue } from "./values.ts";
 
 describe("code mode bridge codec", () => {
 	it("writes the expected wire text", () => {
@@ -146,6 +146,22 @@ describe("code mode bridge codec", () => {
 	it("never calls toJSON", () => {
 		expect(() => encodeBridgeValue({ toJSON: () => "converted" }, "args")).toThrow(
 			"args.toJSON: a function is not JSON",
+		);
+	});
+
+	it("rejects every value with one unrepresentable part, naming the path of that part", () => {
+		fc.assert(
+			fc.property(rejectedValue, ({ make, path }) => {
+				let thrown: unknown;
+				try {
+					encodeBridgeValue(make(), "args");
+				} catch (error) {
+					thrown = error;
+				}
+				expect(thrown).toBeInstanceOf(TypeError);
+				expect((thrown as TypeError).message.startsWith(`${path}: `)).toBe(true);
+			}),
+			{ numRuns: 500 },
 		);
 	});
 
