@@ -254,6 +254,34 @@ describe("code mode runtime", () => {
 		expect(result.calls.map((call) => call.status)).toStrictEqual(["cancelled"]);
 	});
 
+	it("cancels in-flight calls at once, even while the VM is stuck in a built-in", async () => {
+		const controller = new AbortController();
+		let abortedAt = 0;
+		let cancelledAt = 0;
+		const result = failed(
+			await run("tools.call({}); const s = 'a'.repeat(1e6); s.indexOf('a'.repeat(1e4) + 'b');", {
+				signal: controller.signal,
+				// indexOf does not poll the interrupt handler, so the VM stops only when the grace period ends.
+				limits: { graceMs: 1_000 },
+				onCall: (call) => {
+					setTimeout(() => {
+						abortedAt = performance.now();
+						controller.abort();
+					}, 20);
+					return new Promise((_resolve, reject) => {
+						call.signal.addEventListener("abort", () => {
+							cancelledAt = performance.now();
+							reject(call.signal.reason);
+						});
+					});
+				},
+			}),
+		);
+		expect(result.failure).toStrictEqual({ kind: "aborted" });
+		expect(cancelledAt - abortedAt).toBeLessThan(300);
+		expect(result.calls.map((call) => call.status)).toStrictEqual(["cancelled"]);
+	});
+
 	it("does not start a script that was aborted before it ran", async () => {
 		const result = failed(await run("text('never');", { signal: AbortSignal.abort() }));
 		expect(result).toMatchObject({ failure: { kind: "aborted" }, started: false, output: [] });

@@ -316,6 +316,9 @@ class ScriptRun {
 	private terminate(failure: CodeModeFailure): void {
 		if (this.failure || this.completion) return;
 		this.failure = failure;
+		// Nested calls are cancelled at once. The VM may take until the grace period ends to stop, for
+		// example inside a built-in that does not poll the interrupt handler.
+		this.callController.abort(new Error("The script was stopped"));
 		if (!this.started) this.waitController.abort(new Error("The script did not start"));
 		else this.requestStop();
 	}

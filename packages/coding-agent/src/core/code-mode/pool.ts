@@ -6,6 +6,8 @@ import {
 	DEFAULT_CODE_MODE_POOL_OPTIONS,
 	MAX_BRIDGE_JSON_DEPTH,
 	MAX_SCRIPT_ERROR_CHARS,
+	MAX_SCRIPT_ERROR_NAME_CHARS,
+	MAX_SCRIPT_ERROR_SUMMARY_CHARS,
 } from "./limits.ts";
 import { PRELUDE_FILENAME, type PreludeConfig, SCRIPT_FILENAME, SCRIPT_PREFIX } from "./prelude.ts";
 import {
@@ -265,6 +267,8 @@ export class CodeModeWorkerPool {
 			const prelude: PreludeConfig = {
 				maxJsonDepth: MAX_BRIDGE_JSON_DEPTH,
 				maxErrorChars: MAX_SCRIPT_ERROR_CHARS,
+				maxErrorNameChars: MAX_SCRIPT_ERROR_NAME_CHARS,
+				maxErrorSummaryChars: MAX_SCRIPT_ERROR_SUMMARY_CHARS,
 				scriptFilename: SCRIPT_FILENAME,
 				scriptPrefixLength: SCRIPT_PREFIX.length,
 				preludeFilename: PRELUDE_FILENAME,

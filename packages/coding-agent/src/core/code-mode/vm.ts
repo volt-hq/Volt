@@ -92,6 +92,8 @@ export class ScriptVm {
 	private outstandingCalls = 0;
 	private rejections: TrackedRejection[] = [];
 	private reportedRejections = 0;
+	/** Unhandled rejections not tracked because the list was full; QuickJS still reports them when handled. */
+	private untrackedRejections = 0;
 
 	private constructor(options: ScriptVmOptions) {
 		this.options = options;
@@ -128,8 +130,10 @@ export class ScriptVm {
 	}
 
 	private async initialize(): Promise<void> {
-		// QuickJS seeds Math.random from the first clock reading while it creates the context. A coarse
-		// clock gives VMs created back to back the same sequence, so the seed comes from crypto instead.
+		// While it creates the context, QuickJS seeds Math.random from the realtime clock and sets
+		// performance.timeOrigin from the monotonic clock. A coarse realtime clock gives VMs created back to
+		// back the same sequence, so during creation the realtime clock returns a seed from crypto instead. The
+		// monotonic clock is always process.hrtime, so performance.now() never follows wall-clock steps.
 		let seeding = true;
 		const seedNs = BigInt(randomInt(1, 2 ** 47)) * 1_000n;
 		const options: QuickJSOptions = {
@@ -142,8 +146,10 @@ export class ScriptVm {
 			onUnhandledRejection: (promise, reason, isHandled) => this.trackRejection(promise, reason, isHandled),
 			wasi: (memory) => ({
 				clock_time_get: (clockId: number, _precision: bigint, resultPtr: number): number => {
-					if (clockId !== WASI_CLOCK_REALTIME && clockId !== WASI_CLOCK_MONOTONIC) return WASI_ERRNO_NOSYS;
-					const time = seeding ? seedNs : BigInt(Date.now()) * 1_000_000n;
+					let time: bigint;
+					if (clockId === WASI_CLOCK_REALTIME) time = seeding ? seedNs : BigInt(Date.now()) * 1_000_000n;
+					else if (clockId === WASI_CLOCK_MONOTONIC) time = process.hrtime.bigint();
+					else return WASI_ERRNO_NOSYS;
 					new DataView(memory.buffer).setBigUint64(resultPtr, time, true);
 					return WASI_ERRNO_SUCCESS;
 				},
@@ -411,11 +417,16 @@ export class ScriptVm {
 				const [rejection] = this.rejections.splice(index, 1);
 				rejection.promise.dispose();
 				rejection.reason.dispose();
+			} else if (this.untrackedRejections > 0) {
+				// QuickJS reports a handler only for a promise it reported unhandled, so this one was untracked.
+				this.untrackedRejections--;
 			}
 			return;
 		}
 		if (this.rejections.length < MAX_TRACKED_REJECTIONS) {
 			this.rejections.push({ promise: promise.dup(), reason: reason.dup() });
+		} else {
+			this.untrackedRejections++;
 		}
 	}
 
@@ -423,16 +434,25 @@ export class ScriptVm {
 	private reportRejections(): void {
 		const rejections = this.rejections;
 		this.rejections = [];
+		// Untracked rejections and any beyond the reporting limit are counted in one closing line.
+		let notShown = this.untrackedRejections;
+		this.untrackedRejections = 0;
 		for (const rejection of rejections) {
 			if (this.reportedRejections < this.maxReportedRejections) {
 				this.reportedRejections++;
 				const summary = summaryOf(this.describe(rejection.reason));
-				const text = `unhandled rejection: ${summary}`;
-				this.emit({ type: "output", payload: JSON.stringify({ type: "console", level: "warn", text }) });
+				this.emitWarning(`unhandled rejection: ${summary}`);
+			} else {
+				notShown++;
 			}
 			rejection.promise.dispose();
 			rejection.reason.dispose();
 		}
+		if (notShown > 0) this.emitWarning(`${notShown} more unhandled rejection${notShown === 1 ? "" : "s"} not shown`);
+	}
+
+	private emitWarning(text: string): void {
+		this.emit({ type: "output", payload: JSON.stringify({ type: "console", level: "warn", text }) });
 	}
 
 	/** Describes a thrown value with the prelude, which runs before the value leaves the VM. */

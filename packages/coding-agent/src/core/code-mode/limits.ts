@@ -80,5 +80,11 @@ export const MAX_BRIDGE_JSON_DEPTH = 64;
 /** Length of a binding name, in characters. */
 export const MAX_BINDING_NAME_LENGTH = 256;
 
-/** Length of the error block a script failure reports, in characters. */
+/** Length of the error block a script failure reports, in characters, truncation marker included. */
 export const MAX_SCRIPT_ERROR_CHARS = 8 * KIB;
+
+/** Length of a thrown error's one-line name, in characters, truncation marker included. */
+export const MAX_SCRIPT_ERROR_NAME_CHARS = 128;
+
+/** Length of a thrown error's one-line summary, in characters, truncation marker included. */
+export const MAX_SCRIPT_ERROR_SUMMARY_CHARS = 1024;

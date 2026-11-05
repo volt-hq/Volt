@@ -171,7 +171,11 @@ export function createLosslessCodec(maxDepth: number): LosslessCodec {
 		return (target as Record<string | number, unknown>)[key];
 	}
 
-	/** Throws for an array with a custom prototype or properties besides its elements. Holes are found as elements are read. */
+	/**
+	 * Throws for an array with a custom prototype, properties besides its elements, or holes, judged before any
+	 * of its elements is read: a getter cannot fill a hole that existed when encoding started. `readOwn` catches
+	 * holes a getter creates later.
+	 */
 	function checkArrayShape(state: EncodeState, array: unknown[], length: number): void {
 		const proto = ObjectGetPrototypeOf(array);
 		if (proto !== ArrayPrototype) {
@@ -189,11 +193,22 @@ export function createLosslessCodec(maxDepth: number): LosslessCodec {
 		// Exactly `length` indices followed by `length` means the array is dense with nothing else on it.
 		const names = ObjectGetOwnPropertyNames(array);
 		if (names.length === length + 1 && names[length] === "length") return;
+		let elements = 0;
 		for (let i = 0; i < names.length; i++) {
 			const name = names[i];
-			if (name !== "length" && !isElementIndex(name, length)) {
-				ArrayPrototypePush(state.path, name);
-				throw encodeError(state, "a property on an array is not JSON; move it into an object");
+			if (name === "length") continue;
+			if (isElementIndex(name, length)) {
+				elements++;
+				continue;
+			}
+			ArrayPrototypePush(state.path, name);
+			throw encodeError(state, "a property on an array is not JSON; move it into an object");
+		}
+		if (elements === length) return;
+		for (let i = 0; i < length; i++) {
+			if (!ObjectHasOwn(array, i)) {
+				ArrayPrototypePush(state.path, i);
+				throw encodeError(state, "an array hole is not JSON; fill the array");
 			}
 		}
 	}

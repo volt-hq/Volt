@@ -12,6 +12,8 @@ export const SCRIPT_SUFFIX = "\n})";
 export interface PreludeConfig {
 	maxJsonDepth: number;
 	maxErrorChars: number;
+	maxErrorNameChars: number;
+	maxErrorSummaryChars: number;
 	scriptFilename: string;
 	scriptPrefixLength: number;
 	preludeFilename: string;
@@ -129,8 +131,6 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 	const MAX_FORMAT_DEPTH = 16;
 	const MAX_INNER_ERRORS = 5;
 	const MAX_CAUSES = 3;
-	const MAX_NAME_CHARS = 128;
-	const MAX_SUMMARY_CHARS = 1024;
 
 	/**
 	 * An array without a prototype. Pushing onto an ordinary array performs [[Set]], which runs setters a
@@ -485,10 +485,10 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 
 		/** One bounded line describing a thrown value. */
 		function summarize(value: unknown): string {
-			if (isError(value)) return truncateLine(oneLine(errorLine(value)), MAX_SUMMARY_CHARS);
+			if (isError(value)) return truncateLine(oneLine(errorLine(value)), config.maxErrorSummaryChars);
 			if (value === null) return "Thrown null";
 			if (value === undefined) return "Thrown undefined";
-			return truncateLine(oneLine(`Thrown ${typeof value}: ${formatValue(value)}`), MAX_SUMMARY_CHARS);
+			return truncateLine(oneLine(`Thrown ${typeof value}: ${formatValue(value)}`), config.maxErrorSummaryChars);
 		}
 
 		function describeValue(value: unknown): CodeModeErrorDescription {
@@ -523,7 +523,10 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 				cause = isError(cause) ? read(cause, "cause") : undefined;
 			}
 			return {
-				name: typeof name === "string" && name !== "" ? truncateLine(oneLine(name), MAX_NAME_CHARS) : "Error",
+				name:
+					typeof name === "string" && name !== ""
+						? truncateLine(oneLine(name), config.maxErrorNameChars)
+						: "Error",
 				summary,
 				text: truncate(block, config.maxErrorChars),
 				outOfMemory: name === "InternalError" && message === "out of memory",

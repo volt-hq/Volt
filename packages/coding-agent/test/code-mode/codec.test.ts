@@ -141,6 +141,16 @@ describe("code mode bridge codec", () => {
 			},
 		});
 		expect(() => encodeBridgeValue(list, "args")).toThrow("args[1]: an array hole is not JSON; fill the array");
+		// A hole present when encoding starts stays a hole, even if a getter fills it before it is read.
+		const sparse: unknown[] = new Array(2);
+		Object.defineProperty(sparse, 0, {
+			enumerable: true,
+			get() {
+				sparse[1] = 42;
+				return 1;
+			},
+		});
+		expect(() => encodeBridgeValue(sparse, "args")).toThrow("args[1]: an array hole is not JSON; fill the array");
 	});
 
 	it("never calls toJSON", () => {
@@ -220,5 +230,22 @@ describe("code mode protocol parsing", () => {
 		expect(parseDonePayload('{"ok":true}')).toStrictEqual({ ok: true, hasValue: false });
 		expect(parseDonePayload('{"ok":true,"value":null}')).toStrictEqual({ ok: true, hasValue: true, value: null });
 		expect(() => parseDonePayload('{"ok":false,"phase":"run","error":{"name":"E"}}')).toThrow(CodeModeProtocolError);
+		const done = (error: Record<string, unknown>) =>
+			JSON.stringify({
+				ok: false,
+				phase: "run",
+				error: { name: "Error", summary: "Error: x", text: "Error: x", outOfMemory: false, ...error },
+			});
+		expect(parseDonePayload(done({ text: "Error: x\n    at f (script.js:1:1)" }))).toMatchObject({ ok: false });
+		for (const forged of [
+			{ name: "N".repeat(129) },
+			{ name: "Bad\nName" },
+			{ summary: "s".repeat(1025) },
+			{ summary: "Error: line\nNested tool calls: 0" },
+			{ summary: "Error: line\u2028more" },
+			{ text: "t".repeat(8193) },
+		]) {
+			expect(() => parseDonePayload(done(forged))).toThrow("error description exceeds its limits");
+		}
 	});
 });

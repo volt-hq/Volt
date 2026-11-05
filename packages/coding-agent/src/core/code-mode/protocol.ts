@@ -1,5 +1,11 @@
 import { decodeBridgeValue } from "./codec.ts";
-import { MAX_BINDING_NAME_LENGTH, MAX_BRIDGE_JSON_DEPTH } from "./limits.ts";
+import {
+	MAX_BINDING_NAME_LENGTH,
+	MAX_BRIDGE_JSON_DEPTH,
+	MAX_SCRIPT_ERROR_CHARS,
+	MAX_SCRIPT_ERROR_NAME_CHARS,
+	MAX_SCRIPT_ERROR_SUMMARY_CHARS,
+} from "./limits.ts";
 import type { CodeModeBinding, CodeModeErrorDescription, PreludeConfig } from "./prelude.ts";
 
 /**
@@ -179,7 +185,13 @@ export type ParsedDone =
 	| { ok: true; hasValue: boolean; value?: unknown }
 	| { ok: false; phase: "evaluate" | "run"; error: CodeModeErrorDescription };
 
-/** Parses an error description produced by the prelude's describe step. */
+const LINE_TERMINATOR = /[\n\r\u2028\u2029]/;
+
+/**
+ * Parses an error description produced by the prelude's describe step. The prelude bounds and escapes these
+ * fields; the host enforces the same rules, because a forged description could otherwise inject lines into
+ * status text and results.
+ */
 export function parseErrorDescription(value: unknown): CodeModeErrorDescription {
 	if (
 		!isRecord(value) ||
@@ -189,6 +201,15 @@ export function parseErrorDescription(value: unknown): CodeModeErrorDescription 
 		typeof value.outOfMemory !== "boolean"
 	) {
 		throw new CodeModeProtocolError("invalid error description");
+	}
+	if (
+		value.name.length > MAX_SCRIPT_ERROR_NAME_CHARS ||
+		value.summary.length > MAX_SCRIPT_ERROR_SUMMARY_CHARS ||
+		value.text.length > MAX_SCRIPT_ERROR_CHARS ||
+		LINE_TERMINATOR.test(value.name) ||
+		LINE_TERMINATOR.test(value.summary)
+	) {
+		throw new CodeModeProtocolError("error description exceeds its limits");
 	}
 	return { name: value.name, summary: value.summary, text: value.text, outOfMemory: value.outOfMemory };
 }

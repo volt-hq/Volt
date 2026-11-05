@@ -4,6 +4,11 @@ import fc from "fast-check";
 import { beforeAll, describe, expect, it } from "vitest";
 import { decodeBridgeValue, encodeBridgeValue } from "../../src/core/code-mode/codec.ts";
 import {
+	MAX_SCRIPT_ERROR_CHARS,
+	MAX_SCRIPT_ERROR_NAME_CHARS,
+	MAX_SCRIPT_ERROR_SUMMARY_CHARS,
+} from "../../src/core/code-mode/limits.ts";
+import {
 	type CodeModeBinding,
 	PRELUDE_FILENAME,
 	type PreludeConfig,
@@ -24,7 +29,9 @@ import { bridgeValue, expectedAfterRoundTrip } from "./values.ts";
 const MIB = 1024 * 1024;
 const PRELUDE: PreludeConfig = {
 	maxJsonDepth: 64,
-	maxErrorChars: 8192,
+	maxErrorChars: MAX_SCRIPT_ERROR_CHARS,
+	maxErrorNameChars: MAX_SCRIPT_ERROR_NAME_CHARS,
+	maxErrorSummaryChars: MAX_SCRIPT_ERROR_SUMMARY_CHARS,
 	scriptFilename: SCRIPT_FILENAME,
 	scriptPrefixLength: SCRIPT_PREFIX.length,
 	preludeFilename: PRELUDE_FILENAME,
@@ -566,6 +573,23 @@ describe("code mode VM failures", () => {
 		expect(texts(ordered)).toStrictEqual(["caught y failed"]);
 	});
 
+	it("counts unhandled rejections it does not describe, including untracked ones", async () => {
+		// The first 100 rejections fill the tracking list and are handled later; the 101st was never tracked.
+		const untracked = await runScript(`
+			const early = [];
+			for (let i = 0; i < 100; i++) early.push(Promise.reject(new Error("early " + i)));
+			Promise.reject(new Error("late"));
+			for (let i = 0; i < early.length; i++) early[i].catch(() => {});
+			text("done");
+		`);
+		expect(texts(untracked)).toStrictEqual(["done", "1 more unhandled rejection not shown"]);
+		const many = await runScript('for (let i = 0; i < 13; i++) Promise.reject(new Error("r" + i)); text("done");');
+		const warnings = texts(many).slice(1);
+		expect(warnings).toHaveLength(11);
+		expect(warnings[0]).toBe("unhandled rejection: Error: r0");
+		expect(warnings[10]).toBe("3 more unhandled rejections not shown");
+	});
+
 	it("reports unhandled rejections as warnings and ignores ones handled later", async () => {
 		const result = await runScript(`
 			Promise.reject(new Error("lost"));
@@ -616,6 +640,21 @@ describe("code mode VM engine configuration", () => {
 		const value = result.done?.ok ? (result.done.value as string[]) : [];
 		expect(value.slice(0, 5)).toStrictEqual(["undefined", "undefined", "undefined", "undefined", "undefined"]);
 		expect(value[5]).not.toBe("loaded");
+	});
+
+	it("measures performance.now() from VM start with the monotonic clock", async () => {
+		const result = await runScript(`
+			const start = performance.now();
+			let spin = 0;
+			for (let i = 0; i < 100000; i++) spin += i;
+			return [start, performance.now() - start, performance.timeOrigin > 0];
+		`);
+		const [start, elapsed, hasOrigin] = result.done?.ok ? (result.done.value as [number, number, boolean]) : [];
+		// The VM boots moments before the script runs, so time since its start is small.
+		expect(start).toBeGreaterThanOrEqual(0);
+		expect(start).toBeLessThan(60_000);
+		expect(elapsed).toBeGreaterThanOrEqual(0);
+		expect(hasOrigin).toBe(true);
 	});
 
 	it("seeds Math.random differently in every VM", async () => {
