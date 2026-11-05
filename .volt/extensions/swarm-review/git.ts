@@ -28,6 +28,7 @@ export function runCommand(
 			cwd: options.cwd,
 			env: options.env ?? process.env,
 			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
 		});
 		const chunks: Buffer[] = [];
 		let size = 0;
