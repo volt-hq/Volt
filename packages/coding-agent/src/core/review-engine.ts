@@ -379,7 +379,8 @@ export interface ReviewEngineCheckout {
 	/**
 	 * Hand the checkout back once done with it. The host resets it to the reviewed head (tracked files restored,
 	 * untracked ones removed, ignored ones such as what the setup installed kept) and gives it to a later
-	 * {@link ReviewEngineContext.checkout}. Do not use it afterwards. Never rejects; releasing again does nothing.
+	 * {@link ReviewEngineContext.checkout}. Once the review is cancelled, it leaves the checkout as it is, to be
+	 * removed. Do not use it afterwards. Never rejects; releasing again does nothing.
 	 */
 	release(): Promise<void>;
 }
@@ -766,10 +767,13 @@ export class ReviewEngineRun {
 			release: async () => {
 				if (released || this.ended) return;
 				released = true;
+				// A cancelled review is ending: its checkouts are removed, not reset for reuse.
+				if (signal.aborted) return;
 				try {
-					await this.snapshot.resetHead(path);
+					await this.snapshot.resetHead(path, signal);
 				} catch {
-					// One that cannot be reset is not handed out again; it is removed with the others.
+					// One that cannot be reset, or whose reset was cancelled, is not handed out again; it is removed with
+					// the others.
 					return;
 				}
 				if (!this.ended) this.idleCheckouts.push(path);

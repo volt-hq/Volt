@@ -513,13 +513,19 @@ describe("review engines", () => {
 		const { start } = await fixture();
 		let first: ReviewEngineCheckout | undefined;
 		let held: ReviewEngineCheckout | undefined;
-		let reused: { path: string; value: string; leftBehind: boolean; setupRuns: string } | undefined;
+		let reused:
+			| { path: string; value: string; leftBehind: boolean; nestedLeftBehind: boolean; setupRuns: string }
+			| undefined;
 		const { work } = await start(
 			engine(async (ctx) => {
 				first = await ctx.checkout();
 				held = await ctx.checkout();
 				writeFileSync(join(first.path, "src", "value.ts"), "changed\n");
 				writeFileSync(join(first.path, "left-behind"), "untracked\n");
+				// An untracked repository of its own, as a test fixture running `git init` leaves.
+				mkdirSync(join(first.path, "nested"));
+				git(join(first.path, "nested"), "init");
+				writeFileSync(join(first.path, "nested", "file"), "untracked\n");
 				await first.release();
 				await first.release();
 				const next = await ctx.checkout();
@@ -527,6 +533,7 @@ describe("review engines", () => {
 					path: next.path,
 					value: readFileSync(join(next.path, "src", "value.ts"), "utf8"),
 					leftBehind: existsSync(join(next.path, "left-behind")),
+					nestedLeftBehind: existsSync(join(next.path, "nested")),
 					setupRuns: readFileSync(join(next.path, "installed", "runs"), "utf8"),
 				};
 				await reviewCarefully(ctx);
@@ -546,9 +553,46 @@ describe("review engines", () => {
 		expect(reused?.path).toBe(first?.path);
 		expect(reused?.value).toContain("if (divisor === 0) return amount;");
 		expect(reused?.leftBehind).toBe(false);
+		expect(reused?.nestedLeftBehind).toBe(false);
 		expect(reused?.setupRuns.trim()).toBe("run");
 		// Releasing once the review ended does nothing, and never fails.
 		await expect(held!.release()).resolves.toBeUndefined();
+	});
+
+	it("leaves a checkout released after cancellation as it is, never handing it out again", async () => {
+		const { harness } = await fixture();
+		const started = Promise.withResolvers<void>();
+		let first: ReviewEngineCheckout | undefined;
+		let afterRelease: { leftBehind: boolean; nextPath: string } | undefined;
+		const { workId } = await startEngineReview({
+			engine: engine(async (ctx) => {
+				first = await ctx.checkout();
+				writeFileSync(join(first.path, "left-behind"), "untracked\n");
+				started.resolve();
+				await new Promise<void>((resolve) => ctx.signal.addEventListener("abort", () => resolve(), { once: true }));
+				await first.release();
+				const next = await ctx.checkout();
+				afterRelease = { leftBehind: existsSync(join(first.path, "left-behind")), nextPath: next.path };
+			}),
+			target: { kind: "uncommitted" },
+			remote: false,
+			cwd: harness.tempDir,
+			work: harness.session.work,
+			modelRegistry: harness.session.modelRegistry,
+			model: harness.session.model,
+			agentDir: harness.tempDir,
+			settingsManager: harness.settingsManager,
+			sessionManager: harness.session.sessionManager!,
+			sessionWriter: harness.session.sessionWriter,
+		});
+		await started.promise;
+		await harness.session.work.cancel(workId);
+		await harness.session.work.settled(workId);
+		expect(harness.session.work.get(workId)).toMatchObject({ outcome: "cancelled" });
+		// Not reset, and not reused: it is removed with the others when the review ends.
+		expect(afterRelease?.leftBehind).toBe(true);
+		expect(afterRelease?.nextPath).not.toBe(first?.path);
+		expect(existsSync(first!.path)).toBe(false);
 	});
 
 	describe("submitting", () => {

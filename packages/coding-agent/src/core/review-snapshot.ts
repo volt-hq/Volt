@@ -154,9 +154,10 @@ export interface ReviewSnapshot {
 	materializeHead(): Promise<string>;
 	/**
 	 * Return `directory`, a checkout {@link materializeHead} made, to the reviewed head: tracked files restored and
-	 * untracked ones removed, while ignored ones (what a setup installed) stay.
+	 * untracked ones removed, nested repositories included, while ignored ones (what a setup installed) stay. Aborting
+	 * `signal` stops it and rejects, leaving the checkout only partly reset.
 	 */
-	resetHead(directory: string): Promise<void>;
+	resetHead(directory: string, signal?: AbortSignal): Promise<void>;
 	dispose(): Promise<void>;
 }
 
@@ -2947,14 +2948,19 @@ class GitReviewSnapshot implements ReviewSnapshot {
 		return directory;
 	}
 
-	async resetHead(directory: string): Promise<void> {
+	async resetHead(directory: string, signal?: AbortSignal): Promise<void> {
 		this.assertActive();
 		const commit = this.materializedCommits.get(directory);
 		if (commit === undefined) throw new Error("Not a checkout of this review snapshot.");
-		const options = commandOptions(this.limits, this.source.signal);
+		const sourceSignal = this.source.signal;
+		const options = commandOptions(
+			this.limits,
+			sourceSignal && signal ? AbortSignal.any([sourceSignal, signal]) : (sourceSignal ?? signal),
+		);
 		const reset = await runCommand("git", ["reset", "--hard", "--quiet", commit], directory, options);
 		if (!reset.ok) throw new Error(`Could not reset review checkout: ${commandError(reset)}`);
-		const clean = await runCommand("git", ["clean", "-d", "--force", "--quiet"], directory, options);
+		// Forced twice, so it also removes untracked directories that hold a repository of their own.
+		const clean = await runCommand("git", ["clean", "-d", "--force", "--force", "--quiet"], directory, options);
 		if (!clean.ok) throw new Error(`Could not clean review checkout: ${commandError(clean)}`);
 	}
 
