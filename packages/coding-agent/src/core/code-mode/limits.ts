@@ -80,6 +80,9 @@ export const MAX_BRIDGE_JSON_DEPTH = 64;
 /** Length of a binding name, in characters. */
 export const MAX_BINDING_NAME_LENGTH = 256;
 
+/** Length of an image reference a script passes to `image()`, in characters. */
+export const MAX_IMAGE_REF_LENGTH = 64;
+
 /** Length of the error block a script failure reports, in characters, truncation marker included. */
 export const MAX_SCRIPT_ERROR_CHARS = 8 * KIB;
 

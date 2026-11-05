@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { afterAll, describe, expect, it } from "vitest";
 import { type CodeModeWorkerListener, CodeModeWorkerPool } from "../../src/core/code-mode/pool.ts";
 import type { HostToWorkerMessage, WorkerToHostMessage } from "../../src/core/code-mode/protocol.ts";
@@ -447,6 +448,30 @@ describe("code mode worker pool", () => {
 			kind: "sandbox",
 			reason: "the code mode worker pool was closed",
 		});
+	});
+
+	it("keeps the process alive while a script runs and lets it exit once its worker is idle", () => {
+		// A fresh process with nothing else to keep it alive: it must wait for the script's result, then exit
+		// on its own while the idle worker is still in the pool.
+		const poolUrl = new URL("../../src/core/code-mode/pool.ts", import.meta.url).href;
+		const runtimeUrl = new URL("../../src/core/code-mode/runtime.ts", import.meta.url).href;
+		const program = `
+			const { CodeModeWorkerPool } = await import(${JSON.stringify(poolUrl)});
+			const { runCodeModeScript } = await import(${JSON.stringify(runtimeUrl)});
+			const result = await runCodeModeScript(new CodeModeWorkerPool(), {
+				code: "const end = Date.now() + 300; while (Date.now() < end) {} return 42;",
+				bindings: [],
+				onCall: async () => null,
+			});
+			console.log(JSON.stringify(result.ok ? result.value : result.failure));
+		`;
+		const child = spawnSync(process.execPath, ["--input-type=module", "-e", program], {
+			encoding: "utf8",
+			timeout: 20_000,
+		});
+		expect(child.error).toBeUndefined();
+		expect(child.stdout.trim()).toBe("42");
+		expect(child.status).toBe(0);
 	});
 
 	it("stops idle workers after the idle timeout", async () => {

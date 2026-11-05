@@ -4,6 +4,7 @@ import fc from "fast-check";
 import { beforeAll, describe, expect, it } from "vitest";
 import { decodeBridgeValue, encodeBridgeValue } from "../../src/core/code-mode/codec.ts";
 import {
+	MAX_IMAGE_REF_LENGTH,
 	MAX_SCRIPT_ERROR_CHARS,
 	MAX_SCRIPT_ERROR_NAME_CHARS,
 	MAX_SCRIPT_ERROR_SUMMARY_CHARS,
@@ -32,6 +33,7 @@ const PRELUDE: PreludeConfig = {
 	maxErrorChars: MAX_SCRIPT_ERROR_CHARS,
 	maxErrorNameChars: MAX_SCRIPT_ERROR_NAME_CHARS,
 	maxErrorSummaryChars: MAX_SCRIPT_ERROR_SUMMARY_CHARS,
+	maxImageRefLength: MAX_IMAGE_REF_LENGTH,
 	scriptFilename: SCRIPT_FILENAME,
 	scriptPrefixLength: SCRIPT_PREFIX.length,
 	preludeFilename: PRELUDE_FILENAME,
@@ -161,6 +163,26 @@ describe("code mode VM output", () => {
 			"warn",
 			"error",
 		]);
+	});
+
+	it("rejects image references the host would not accept with a catchable TypeError", async () => {
+		const result = await runScript(`
+			image({ type: "image", ref: "r".repeat(64) });
+			const errors = [];
+			for (const reference of [{ type: "image", ref: "r".repeat(65) }, { type: "image", ref: 1 }, "img_1"]) {
+				try { image(reference); } catch (error) { errors.push(error.name + ": " + error.message); }
+			}
+			return errors;
+		`);
+		expect(result.output).toStrictEqual([{ type: "image", ref: "r".repeat(64) }]);
+		expect(result.done).toMatchObject({
+			ok: true,
+			value: [
+				"TypeError: image() takes an image reference returned by a tool",
+				"TypeError: image() takes an image reference returned by a tool",
+				"TypeError: image() takes an image reference returned by a tool",
+			],
+		});
 	});
 
 	it("returns values through the codec and reports values it cannot represent", async () => {

@@ -116,6 +116,7 @@ Decided:
 - **Scope:** one pool per conversation process. Separate conversations never share or contend for workers. No cross-process limit through voltd.
 - **One VM per worker.** A worker hosts at most one VM at a time. Sharing a worker among VMs would let one computing script block the others, and a hard kill would fail every co-tenant script after its side effects had already happened.
 - **Elastic size:** the pool starts with no workers, grows on demand up to a per-process cap, and stops idle workers after an idle timeout.
+- **Process lifetime:** a worker that is booting or running a script keeps the process alive, because its caller is waiting for the result; an idle worker does not, so a short-lived process exits when its work is done instead of when the idle timeout ends. A test runs a script in a fresh process and checks both.
 - **Concurrency:** each conversation (a root conversation or a subagent) runs at most one script at a time.
 - **Bounded queue:** when the cap is reached, scripts wait in a bounded queue; beyond it, the code-mode call fails immediately with a clear error instead of hanging the turn.
 - **No nesting:** scripts cannot call `subagent` or the code-mode tool. Without nested waits on the pool, deadlock is impossible at any cap.
@@ -249,7 +250,7 @@ interface ImageRef {
 ```
 
 - The host keeps the bytes for the lifetime of the script. References are valid only within the script that received them.
-- Only images the script passes to `image(ref)` reach the model, at most 10 per script. An image shown without a file (from MCP or `image_gen`) is saved to a temp file and its path is reported, so a later turn can pass it to tools that take image paths.
+- Only images the script passes to `image(ref)` reach the model, at most 10 per script. `image()` throws a `TypeError` the script can catch for anything that is not a reference of at most 64 characters, the limit the host enforces on output frames. An image shown without a file (from MCP or `image_gen`) is saved to a temp file and its path is reported, so a later turn can pass it to tools that take image paths.
 - When a script ends with images it never showed, the result lists them, so the model learns the rule from the feedback instead of losing images silently.
 - The host retains at most 64 MiB of image bytes per script. A nested call whose images would exceed that rejects with `failed` (`limit_exceeded`).
 - Passing references as tool arguments is a non-goal: Volt's image tools take file paths (`image_gen` takes `referenced_image_paths`), which scripts pass as strings.

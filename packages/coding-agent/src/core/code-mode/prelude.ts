@@ -14,6 +14,7 @@ export interface PreludeConfig {
 	maxErrorChars: number;
 	maxErrorNameChars: number;
 	maxErrorSummaryChars: number;
+	maxImageRefLength: number;
 	scriptFilename: string;
 	scriptPrefixLength: number;
 	preludeFilename: string;
@@ -336,7 +337,10 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 				reference !== null && typeof reference === "object" && read(reference, "type") === "image"
 					? read(reference, "ref")
 					: undefined;
-			if (typeof ref !== "string") throw new TypeErrorCtor("image() takes an image reference returned by a tool");
+			// The host treats a longer reference as a protocol violation, so it is rejected here, catchably.
+			if (typeof ref !== "string" || ref.length > config.maxImageRefLength) {
+				throw new TypeErrorCtor("image() takes an image reference returned by a tool");
+			}
 			emit(`{"type":"image","ref":${JSONStringify(ref)}}`);
 		}
 

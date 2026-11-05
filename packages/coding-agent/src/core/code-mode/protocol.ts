@@ -2,6 +2,7 @@ import { decodeBridgeValue } from "./codec.ts";
 import {
 	MAX_BINDING_NAME_LENGTH,
 	MAX_BRIDGE_JSON_DEPTH,
+	MAX_IMAGE_REF_LENGTH,
 	MAX_SCRIPT_ERROR_CHARS,
 	MAX_SCRIPT_ERROR_NAME_CHARS,
 	MAX_SCRIPT_ERROR_SUMMARY_CHARS,
@@ -158,7 +159,6 @@ export type CodeModeOutputItem =
 	| { type: "image"; ref: string };
 
 const CONSOLE_LEVELS = new Set(["log", "info", "debug", "warn", "error"]);
-const MAX_IMAGE_REF_LENGTH = 64;
 
 /** Parses the payload of an `output` message. */
 export function parseOutputPayload(payload: string): CodeModeOutputItem {

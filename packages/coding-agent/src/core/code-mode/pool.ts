@@ -5,6 +5,7 @@ import {
 	type CodeModePoolOptions,
 	DEFAULT_CODE_MODE_POOL_OPTIONS,
 	MAX_BRIDGE_JSON_DEPTH,
+	MAX_IMAGE_REF_LENGTH,
 	MAX_SCRIPT_ERROR_CHARS,
 	MAX_SCRIPT_ERROR_NAME_CHARS,
 	MAX_SCRIPT_ERROR_SUMMARY_CHARS,
@@ -49,7 +50,14 @@ export class CodeModeWorker {
 	private idleTimer: NodeJS.Timeout | undefined;
 	private exited = false;
 	private exitReason = "the worker exited";
+	private booted = false;
+	private resolveReady: (engine: string) => void = () => {};
+	private rejectReady: (error: Error) => void = () => {};
 
+	/**
+	 * Starts the thread. It keeps the process alive, because its first script is waiting for it; the pool
+	 * releases that hold while the worker is idle (`keepAlive`).
+	 */
 	constructor(url: URL, data: Omit<CodeModeWorkerData, "control">, stackSizeMb: number, onExit: () => void) {
 		this.worker = new Worker(url, {
 			workerData: { ...data, control: this.control } satisfies CodeModeWorkerData,
@@ -57,37 +65,22 @@ export class CodeModeWorker {
 			// The worker needs no flags of the host process, and some host flags are invalid in workers.
 			execArgv: [],
 		});
-		this.worker.unref();
 		this.ready = new Promise<string>((resolve, reject) => {
-			const onReady = (raw: unknown) => {
-				const message = parseWorkerMessage(raw);
-				if (message?.type === "ready" && message.protocol === CODE_MODE_PROTOCOL_VERSION) {
-					this.worker.off("message", onReady);
-					this.worker.on("message", (next: unknown) => this.route(next));
-					resolve(message.engine);
-					return;
-				}
-				this.worker.off("message", onReady);
-				const reason =
-					message?.type === "ready"
-						? `protocol ${message.protocol} does not match ${CODE_MODE_PROTOCOL_VERSION}`
-						: message?.type === "crash"
-							? message.reason
-							: "unexpected first message";
-				reject(new Error(`The code mode worker failed to start: ${reason}`));
-				this.terminate();
-			};
-			this.worker.on("message", onReady);
-			this.worker.once("exit", () => reject(new Error(`The code mode worker failed to start: ${this.exitReason}`)));
+			this.resolveReady = resolve;
+			this.rejectReady = reject;
 		});
 		// Rejections are handled by whoever awaits `ready`; this keeps an unawaited failure from crashing the host.
 		this.ready.catch(() => {});
+		// One listener for the worker's lifetime: adding or removing a message listener refs or unrefs the
+		// worker's port, which would override `keepAlive`.
+		this.worker.on("message", (raw: unknown) => this.onWorkerMessage(raw));
 		this.worker.on("error", (error: Error) => {
 			this.exitReason = `the worker failed: ${error.message}`;
 		});
 		this.worker.on("exit", (code: number) => {
 			this.exited = true;
 			if (this.exitReason === "the worker exited") this.exitReason = `the worker exited with code ${code}`;
+			if (!this.booted) this.rejectReady(new Error(`The code mode worker failed to start: ${this.exitReason}`));
 			this.clearIdleTimer();
 			const listener = this.listener;
 			this.listener = undefined;
@@ -98,6 +91,16 @@ export class CodeModeWorker {
 
 	get alive(): boolean {
 		return !this.exited;
+	}
+
+	/**
+	 * Whether the worker keeps the process alive: while it boots or runs a script, its caller awaits the
+	 * result; while it is idle, it must not stop the process from exiting.
+	 */
+	keepAlive(active: boolean): void {
+		if (this.exited) return;
+		if (active) this.worker.ref();
+		else this.worker.unref();
 	}
 
 	attach(listener: CodeModeWorkerListener): void {
@@ -130,6 +133,27 @@ export class CodeModeWorker {
 		this.idleTimer = undefined;
 	}
 
+	private onWorkerMessage(raw: unknown): void {
+		if (this.booted) {
+			this.route(raw);
+			return;
+		}
+		const message = parseWorkerMessage(raw);
+		if (message?.type === "ready" && message.protocol === CODE_MODE_PROTOCOL_VERSION) {
+			this.booted = true;
+			this.resolveReady(message.engine);
+			return;
+		}
+		const reason =
+			message?.type === "ready"
+				? `protocol ${message.protocol} does not match ${CODE_MODE_PROTOCOL_VERSION}`
+				: message?.type === "crash"
+					? message.reason
+					: "unexpected first message";
+		this.rejectReady(new Error(`The code mode worker failed to start: ${reason}`));
+		this.terminate();
+	}
+
 	private route(raw: unknown): void {
 		const message = parseWorkerMessage(raw);
 		if (message === undefined) this.listener?.onMalformed();
@@ -147,7 +171,8 @@ interface Waiter {
 /**
  * Worker pool of one process (section 5.3 of docs/code-mode-design.md). It starts with no workers, grows
  * on demand up to `maxWorkers`, queues up to `maxQueuedScripts` scripts beyond that, and stops workers
- * that stay idle for `idleTimeoutMs`. Workers never keep the process alive.
+ * that stay idle for `idleTimeoutMs`. Idle workers never keep the process alive; a worker that is booting or
+ * running a script does, because its caller is waiting for the result.
  */
 export class CodeModeWorkerPool {
 	private readonly options: CodeModePoolOptions;
@@ -177,6 +202,7 @@ export class CodeModeWorkerPool {
 		const idle = this.idle.pop();
 		if (idle) {
 			idle.clearIdleTimer();
+			idle.keepAlive(true);
 			return idle;
 		}
 		if (this.hasCapacity()) return this.spawn(signal);
@@ -209,6 +235,7 @@ export class CodeModeWorkerPool {
 			this.hand(waiter, worker);
 			return;
 		}
+		worker.keepAlive(false);
 		this.idle.push(worker);
 		worker.startIdleTimer(this.options.idleTimeoutMs, () => this.discard(worker));
 	}
@@ -269,6 +296,7 @@ export class CodeModeWorkerPool {
 				maxErrorChars: MAX_SCRIPT_ERROR_CHARS,
 				maxErrorNameChars: MAX_SCRIPT_ERROR_NAME_CHARS,
 				maxErrorSummaryChars: MAX_SCRIPT_ERROR_SUMMARY_CHARS,
+				maxImageRefLength: MAX_IMAGE_REF_LENGTH,
 				scriptFilename: SCRIPT_FILENAME,
 				scriptPrefixLength: SCRIPT_PREFIX.length,
 				preludeFilename: PRELUDE_FILENAME,
