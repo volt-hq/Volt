@@ -12,6 +12,7 @@ import {
 } from "../../src/core/code-mode/prelude.ts";
 import {
 	type CodeModeOutputItem,
+	type CompiledWasm,
 	type ParsedDone,
 	parseCallPayload,
 	parseDonePayload,
@@ -29,9 +30,9 @@ const PRELUDE: PreludeConfig = {
 	preludeFilename: PRELUDE_FILENAME,
 };
 
-const wasmApi = (globalThis as unknown as { WebAssembly: { compile(bytes: Uint8Array): Promise<WebAssembly.Module> } })
+const wasmApi = (globalThis as unknown as { WebAssembly: { compile(bytes: Uint8Array): Promise<CompiledWasm> } })
 	.WebAssembly;
-let wasm: WebAssembly.Module;
+let wasm: CompiledWasm;
 
 beforeAll(async () => {
 	wasm = await wasmApi.compile(await readFile(createRequire(import.meta.url).resolve("quickjs-wasi/quickjs.wasm")));

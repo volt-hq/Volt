@@ -17,6 +17,7 @@ import {
 	SCRIPT_PREFIX,
 	SCRIPT_SUFFIX,
 } from "./prelude.ts";
+import type { CompiledWasm } from "./protocol.ts";
 
 /** Messages a VM produces; the worker adds the script id and forwards them to the host. */
 export type ScriptVmMessage =
@@ -28,7 +29,7 @@ export type ScriptVmMessage =
 	| { type: "crash"; reason: string };
 
 export interface ScriptVmOptions {
-	wasm: WebAssembly.Module;
+	wasm: CompiledWasm;
 	memoryLimitBytes: number;
 	prelude: PreludeConfig;
 	/** Polled by the interrupt handler; returns true when the host asked this script to stop. */

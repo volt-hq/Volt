@@ -12,13 +12,14 @@ import {
 	CODE_MODE_PROTOCOL_VERSION,
 	CONTROL_BUFFER_BYTES,
 	type CodeModeWorkerData,
+	type CompiledWasm,
 	type HostToWorkerMessage,
 	parseWorkerMessage,
 	type WorkerToHostMessage,
 } from "./protocol.ts";
 
-// The project's TypeScript libraries declare WebAssembly types but not the runtime object.
-const wasmApi = (globalThis as unknown as { WebAssembly: { compile(bytes: Uint8Array): Promise<WebAssembly.Module> } })
+// The package's TypeScript libraries do not declare the WebAssembly global.
+const wasmApi = (globalThis as unknown as { WebAssembly: { compile(bytes: Uint8Array): Promise<CompiledWasm> } })
 	.WebAssembly;
 
 /** Thrown when every worker is busy and the queue of waiting scripts is full. */
@@ -152,7 +153,7 @@ export class CodeModeWorkerPool {
 	private readonly waiters: Waiter[] = [];
 	/** Workers being created; they count against `maxWorkers` from the moment `acquire` decides to spawn. */
 	private spawning = 0;
-	private wasm: Promise<WebAssembly.Module> | undefined;
+	private wasm: Promise<CompiledWasm> | undefined;
 	private closed = false;
 
 	constructor(options: Partial<CodeModePoolOptions> = {}) {
@@ -305,7 +306,7 @@ export class CodeModeWorkerPool {
 		}
 	}
 
-	private loadWasm(): Promise<WebAssembly.Module> {
+	private loadWasm(): Promise<CompiledWasm> {
 		if (!this.wasm) {
 			const pending = readFile(createRequire(import.meta.url).resolve("quickjs-wasi/quickjs.wasm")).then((bytes) =>
 				wasmApi.compile(bytes),

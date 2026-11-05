@@ -24,8 +24,14 @@ export const CONTROL_COMPUTING_SINCE_INDEX = 1;
 /** BigInt64 index: milliseconds of compute the current script used before the current execution. */
 export const CONTROL_COMPUTE_USED_INDEX = 2;
 
+/**
+ * A compiled `WebAssembly.Module`, passed through as an opaque handle. The package's TypeScript libraries
+ * declare no WebAssembly types, and the module has no members the runtime uses.
+ */
+export type CompiledWasm = object;
+
 export interface CodeModeWorkerData {
-	wasm: WebAssembly.Module;
+	wasm: CompiledWasm;
 	memoryLimitBytes: number;
 	control: SharedArrayBuffer;
 	prelude: PreludeConfig;
