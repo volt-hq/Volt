@@ -130,7 +130,7 @@ Subagents share their parent's pool because they run in the same process. With a
 Decided: create a fresh VM for every script and evaluate the prelude in it, behind a `bootVm()` interface.
 
 - The prelude captures private references to the built-ins it depends on (primordials) before any script code runs, instead of freezing the whole realm. Scripts may patch globals without affecting the bridge, and boot is cheaper.
-- The VM's `Math.random()` seed is set explicitly. QuickJS seeds its generator from the first clock reading during context creation, and with the shim's coarse clock, two VMs created back to back produced identical sequences in testing. The host overrides the WASI clock during creation so the seed comes from `crypto.randomInt()`, then restores the real clock.
+- The VM's `Math.random()` seed is set explicitly. QuickJS seeds its generator from the first clock reading during context creation, and with the shim's coarse clock, two VMs created back to back produced identical sequences in testing. The worker overrides the WASI clock during creation so the seed comes from `crypto.randomInt()`, then restores the real clock. Seeding in the worker lets it boot the next VM before the next script arrives.
 - `maxStackSize` is always set (512 KiB, `MAX_STACK_SIZE`), and workers run with `resourceLimits.stackSizeMb: 8`. QuickJS's stack guard measures the stack it keeps in linear memory, but WebAssembly call frames also use the worker's native stack, which the guard does not see. Without the guard, deep recursion overflowed the host stack. With the guard and the 4 MB worker default, recursion ended in a catchable guest `RangeError` but a 100,000-level `JSON.parse` still overflowed the native stack; with 8 MB, every probe ended in a catchable guest `RangeError`. A host-side `RangeError` from a VM operation is still treated as a sandbox failure that discards the VM (section 5.11).
 
 Rejected for now:
@@ -197,10 +197,10 @@ The codec is lossless: a value either round-trips exactly or fails with an error
 - **Accepted values:** `null`, booleans, finite numbers (including `-0`), BigInt, strings (including lone surrogates), dense arrays, and plain objects whose prototype is `Object.prototype` or `null`.
 - **Rejected values:** `NaN`, `Infinity`, `-Infinity`, `undefined` in arrays, array holes, functions, symbols, symbol-keyed properties, non-plain objects (`Date`, `Map`, `Set`, `RegExp`, typed arrays, `ArrayBuffer`, errors, boxed primitives, class instances), cycles, keys named `__proto__`, and nesting deeper than 64 levels. `toJSON` is never called, so nothing converts silently.
 - **One normalization:** object properties whose value is `undefined` are omitted. A missing field and `undefined` mean the same thing in tool arguments.
-- **Encoding:** numbers are written as exact literals. BigInt values and `-0` are written with `JSON.rawJSON`.
-- **Decoding:** a number literal decodes to a number when a double holds its value exactly, and otherwise to a BigInt if it is an integer. JSON has one number type, so the codec preserves values, not the number/BigInt distinction: a BigInt that a double holds exactly arrives as a number. Decoded numbers must be finite.
+- **Encoding:** numbers are written as exact literals. Integers of 2^53 and above are written with all their digits (the double `2 ** 60` as `1152921504606846976`, not the shortest form `1152921504606847000`), so the literal is the double's exact value. Other numbers use their shortest form. BigInt values are written as their digits and `-0` as `-0`.
+- **Decoding:** an integer literal decodes to a number when a double holds its value exactly, and otherwise to a BigInt. A literal with a fraction or exponent must be the shortest form of the double it decodes to; anything else is a protocol violation. JSON has one number type, so the codec preserves values, not the number/BigInt distinction: a BigInt that a double holds exactly arrives as a number. Decoded numbers must be finite.
 - **Invariant:** neither side can produce a non-integer literal that a double cannot hold exactly, because both sides only hold doubles and BigInts. Receiving one is a protocol violation. When [#1024](https://github.com/volt-hq/Volt/issues/1024) brings exact decimals from MCP servers, the codec gains a type for them; `lossless-json`'s `LosslessNumber` is the reference design.
-- **Implementation:** native on both sides, using a `JSON.parse` reviver that reads `context.source`, and `JSON.rawJSON`. Both are available in QuickJS-NG 0.17 and in Node 22.20 and 24.20. The host decodes with plain `JSON.parse` when the text cannot contain an unsafe or non-finite number literal (no run of 16 or more digits and no exponent of three or more digits), and with the reviver otherwise.
+- **Implementation:** native on both sides, using a `JSON.parse` reviver that reads `context.source`, and `JSON.rawJSON`. Both are available in QuickJS-NG 0.17 and in Node 22.20 and 24.20. The host decodes with plain `JSON.parse` when the text cannot contain an unsafe or non-finite number literal (no run of 16 or more digits and decimal points, no exponent of three or more digits, and no `"__proto__"` key), and with the reviver otherwise. Encoding walks the value itself rather than using `JSON.stringify`, which would call `toJSON` (and so convert a `Date` to a string) before a replacer could reject it.
 - **Script-side parsing:** the script's own `JSON.parse` keeps standard semantics. Guidance shows the `context.source` reviver for scripts that parse large integers out of text output.
 
 Rejected:
@@ -261,21 +261,26 @@ Rejected:
 
 #### Bridge function
 
-The prelude calls one host function with two primitive strings: a kind (`call`, `output`, or `done`) and a payload. The worker checks `isString` on both before reading them and forwards them to the host. The prelude numbers call attempts with `seq` values 1, 2, 3, and so on.
+The prelude calls one host function with two primitive strings: a kind (`call`, `output`, or `done`) and a payload. The worker checks `isString` on both before reading them and forwards them to the host. The prelude numbers call attempts with `seq` values 1, 2, 3, and so on, assigned after the arguments are encoded, so a getter that calls a binding during encoding posts its call first and the numbers still arrive in order.
 
 #### Messages
 
 | Direction | Message | Contents |
 |---|---|---|
-| Worker to host | `ready` | `protocol`, `engine` versions |
+| Worker to host | `ready` | `protocol`, `engine` versions, sent once the first VM has booted |
 | Worker to host | `call` | `seq`, `binding`, `args` (codec text) |
 | Worker to host | `output` | One output item: text, console text, or an image reference |
-| Worker to host | `done` | `ok` with the return value (codec text), or the script error |
+| Worker to host | `done` | `ok` with the return value (codec text), or the script error and the phase it occurred in (`evaluate` for syntax errors, `run` otherwise) |
+| Worker to host | `stopped` | `reason`: the host's stop request, or the compute budget |
+| Worker to host | `stalled` | none; the script awaits a promise nothing can settle (section 5.11) |
 | Worker to host | `crash` | `reason` |
-| Host to worker | `start` | `script`, binding names, limits, random seed |
+| Host to worker | `start` | `script`, bindings, limits |
 | Host to worker | `result` | `seq` with a script value (codec text), or a `ToolCallError` description |
 | Host to worker | `stop` | none |
 
+- Every message except `ready` carries the id of its script. The worker ignores `result` and `stop` messages for a script that is no longer running, and the host ignores worker messages for a script that has ended, so a stop that crosses a `done` cannot affect the worker's next script.
+- `done`, `stopped`, `stalled`, and `crash` end the script; the worker then disposes the VM and boots the next one. After `done` or `stopped` the host may hand the worker to the next script immediately; after `crash` it terminates the worker.
+- The host's stop request travels twice: as the `stop` message, which the worker handles when its VM is idle, and as the script id written to memory shared with the worker, which the interrupt handler reads while the VM computes. The worker publishes in the same memory when its VM started executing and how much compute the script used before, which the watchdog reads.
 - Each `seq` receives at most one `result`, and the host sends nothing after `done`. The worker applies results only while the VM is idle.
 - A `protocol` version mismatch fails closed. This catches packaging errors such as a stale worker file in the standalone binary; it is not a compatibility path.
 - Messages travel over `postMessage` as plain objects with string fields today. A process backend would carry the same messages as length-prefixed UTF-8 JSON frames.
@@ -399,7 +404,7 @@ Decided. A failed script returns the rendering of section 5.10 with a failure st
 
 | Kind | Cause | Status line ending |
 |---|---|---|
-| `script_error` | An uncaught exception or rejection: syntax errors, a stack overflow inside the guest, out-of-memory, an uncaught `ToolCallError` | `uncaught TypeError` (the error's name), `syntax error` |
+| `script_error` | An uncaught exception or rejection: syntax errors, a stack overflow inside the guest, out-of-memory, an uncaught `ToolCallError`; or a script that awaits a promise nothing can settle | `uncaught TypeError` (the error's name), `syntax error`, `stalled` |
 | `compute_budget` | The compute budget ran out (interrupt or watchdog) | `compute budget of 30 s exhausted` |
 | `call_budget` | The nested-call budget ran out | `call budget of 200 exhausted` |
 | `timeout` | The script's own `timeoutMs` passed | `timed out after 60 s` |
@@ -408,6 +413,7 @@ Decided. A failed script returns the rendering of section 5.10 with a failure st
 | `sandbox` | The worker crashed or failed to start, a protocol violation, or any host-side exception from a VM operation, including a host-side `RangeError` | `sandbox failure` |
 
 - A script that never started, because the pool queue was full or it was aborted or timed out while waiting for a worker, says `The script did not start.` in its error block. It consumed no budget.
+- **Stalled scripts.** The VM has no timers, so when it is idle with no nested call in flight and the script has not finished, nothing can resume it. Without a default wall clock (section 5.6), such a script would hold the turn until the user aborts it. The worker detects this state after every turn and ends the script as `script_error` with `The script awaited a promise that nothing can settle: no tool calls were in flight.`
 - Scripts cannot intercept the terminations of section 5.9. In testing, a `try`/`catch` around a spinning loop did not catch the interrupt the host raises.
 
 #### Rendering
@@ -665,6 +671,7 @@ Rejected:
 Decided without a separate review round.
 
 - Code mode is off by default. A new host setting, `codeMode.enabled` (boolean, default `false`), adds `run_code` to a conversation's default active tools. Like other host settings it can be set globally, in a profile, or in a trusted project's `.volt/settings.json`, and it is read when a conversation's tools are created.
+- The setting stays out of the protocol. Remote clients read and change host settings through `QueryResult.settings` and `set_settings`, which list their fields explicitly and reject unknown ones, and the iOS app rejects unknown fields in host frames. `codeMode.enabled` is not added to either, so the recorded iOS build keeps working, and a phone can neither see nor change it. Exposing it remotely is a later protocol change that waits for app support.
 - `run_code` is otherwise an ordinary tool name: `--tools` must list it to keep it, `--exclude-tools run_code` removes it, `--no-tools` removes it, and SDK callers pass it in `tools`. A conversation a paired phone opens needs it in `remote.allowTools` when that ceiling is set. Enabling code mode never widens what a session may do (section 5.12).
 - Subagents inherit `run_code` with the parent's active tools unless their own tool policy leaves it out, and their scripts get bindings from their own tool policy.
 - In Plan mode, an enabled `run_code` is available with read-only bindings (section 5.12).
@@ -882,10 +889,10 @@ Follow-ups tracked outside this design:
 
 Each step is its own pull request. None changes the protocol contract, so none should need the `breaks-ios-app` label; each still runs the iOS compatibility workflow.
 
-1. **Runtime.** The `quickjs-wasi` dependency and license notices; the worker pool, VM boot, prelude, codec, and host–worker messages; supervision (compute budget, watchdog, interrupt, grace, memory and stack limits). Unit tests drive scripts against fake bindings. Nothing is exposed to the model yet.
+1. **Runtime.** The `quickjs-wasi` dependency; the worker pool, VM boot, prelude, codec, and host–worker messages; supervision (compute budget, watchdog, interrupt, grace, memory and stack limits). Unit tests drive scripts against fake bindings. Nothing is exposed to the model yet, and nothing reachable from the CLI imports the runtime, so neither bundled form includes it.
 2. **Bridge and scheduling.** Binding-set computation (no escalation, eligibility, grant profiles), the host checks with tool-call and tool-result policy and the `code_mode` origin, script-value projections, `ToolCallError`, image references, the scheduler, and per-server MCP limits with `maxConcurrentCalls`.
 3. **The `run_code` tool.** Input and TypeScript stripping, result rendering, truncation and spill, failure rendering, `store()`/`load()` session entries, the generated description, snippet, and guidelines, the presenter and `details`, compaction file tracking, the gateway `describe` addition, MCP audit attribution, the `codeMode.enabled` setting, user documentation (a code-mode page in `docs.json` and `docs/settings.md`), and the changeset.
-4. **Standalone packaging.** Ship `quickjs.wasm` and the worker entry in the standalone binary, add the WASM's third-party notices, and verify on all six targets.
+4. **Packaging.** Bundle the worker entry and load `quickjs.wasm` in the bundled npm CLI and the standalone binary, add the WASM's third-party notices to the standalone archive, and verify on all six targets. The npm package needs no notice of its own: npm installs `quickjs-wasi` as a dependency with its license file.
 
 ### Verification
 
@@ -1026,6 +1033,8 @@ Fixed per-request overhead of a default session, from the built system prompt an
 
 `run_code` card sizes (UTF-8 JSON of the presentation, with a 3.4 KB script and nested-call steps of about 142 bytes each): 7.6 KB with 20 calls and 30 output lines, 9.3 KB with 30 and 40, 13.7 KB with 50 and 100, and 38.9 KB with 200 and 200.
 
+Runtime implementation (delivery step 1, Node 24.20, Windows): the first script in a process took 104 ms end to end, including compiling `quickjs.wasm`, starting the worker, and booting the VM; the next script took 3 ms on the prepared VM. With a 200 ms compute budget and 250 ms grace, the interrupt stopped `while (true) {}` after 204 ms, and the watchdog terminated a worker blocked in `String.prototype.indexOf` after 489 ms.
+
 QuickJS heap for nested-call results (`getMemoryUsage().memoryUsedSize`, results of 1 MiB of JSON rows):
 
 | State | Heap |
@@ -1042,7 +1051,7 @@ Gaps:
 
 - Repeat the runtime measurements on Node 22.23.1, the standalone runtime, and on Linux and macOS, including the stack-guard table, which depends on native stack usage. The codec primitives are confirmed on Node 22.20.
 - Verify loading `quickjs.wasm` and the worker entry from the standalone binary.
-- Derive the license notices embedded in the WASM binary.
+- Derive the license notices embedded in the WASM binary. Inputs for `quickjs-wasi` 3.6.3, from its `Makefile` at tag `quickjs-wasi@3.6.3`: QuickJS-NG at submodule commit `6d46d07` (`quickjs.c`, `dtoa.c`, `libregexp.c`, `libunicode.c`; MIT), Vercel's `c/interface.c` (MIT), and the wasi-sdk 32 sysroot's libc and emulated process-clock and signal libraries, linked statically. The package's own `LICENSE` covers only Vercel's code.
 
 ## 12. References
 
