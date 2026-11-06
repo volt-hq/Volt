@@ -356,6 +356,29 @@ export class McpManager {
 		return candidates;
 	}
 
+	/**
+	 * Tools of enabled servers whose cached tool metadata is fresh and that pass their server's tool filters, and
+	 * whether each is a trusted read. Code mode binds these; a server whose metadata is missing or stale adds none
+	 * until discovery refreshes it (section 5.12 of docs/code-mode-design.md).
+	 */
+	getCallableTools(): { server: string; tool: string; trustedRead: boolean }[] {
+		const tools: { server: string; tool: string; trustedRead: boolean }[] = [];
+		for (const supervisor of this.supervisors.values()) {
+			if (!supervisor.server.enabled) continue;
+			const metadata = supervisor.cachedMetadata;
+			if (!metadata || this.isSupervisorMetadataStale(supervisor, metadata, TOOL_METADATA_CATEGORIES)) continue;
+			for (const tool of metadata.tools) {
+				if (!serverMatchesToolFilters(supervisor.server, tool.name)) continue;
+				tools.push({
+					server: supervisor.server.id,
+					tool: tool.name,
+					trustedRead: this.isTrustedToolRead(supervisor.server.id, tool.name),
+				});
+			}
+		}
+		return tools;
+	}
+
 	async startEagerServers(signal?: AbortSignal, options: { trustedReadsOnly?: boolean } = {}): Promise<void> {
 		const eager = Array.from(this.supervisors.values()).filter(
 			(supervisor) =>

@@ -516,6 +516,8 @@ Never bindable:
 - The `mcp` gateway tool. Its management actions (connect, authenticate, enable) are lifecycle operations, and MCP tool calls get their own bindings.
 - MCP prompts, which are user-preview by design, and MCP resources, which the model reads directly through the gateway.
 
+The binding-set code lists every built-in tool as bindable or never bindable, and a new built-in tool is not bindable until it is classified. Extension and SDK tools are bindable, including one that replaces a built-in tool by name. The never-bindable names are excluded whatever registered a tool by that name.
+
 Nested calls cannot start background jobs: a nested call with `background: true` rejects with `invalid_arguments` (`Scripts cannot start background jobs`).
 
 #### Writes and bash
@@ -526,9 +528,9 @@ Shell commands written inside JavaScript are fragile. In testing, 6 of 12 realis
 
 #### MCP tools
 
-- One binding per MCP tool. Calls dispatch through the MCP manager's call path, so server filters, `trustedReads` revalidation in restricted profiles, risk classification, audit, and authentication apply as they do to gateway calls. They do not go through the gateway's generic `call` action.
-- A lazy server connects on its first call. A server that needs authentication fails the call with `failed` (`unavailable`) and a message naming the sign-in command.
-- A tool promoted with `directTools` gets no second binding.
+- One binding per MCP tool of an enabled server whose cached tool metadata is fresh and that passes the server's tool filters; project trust already applies when the configuration loads. Bindings are fixed when a script starts, so they cannot include tools nobody has listed: a server whose tools were never listed, or whose metadata is stale, adds no bindings until `search`, `describe`, or `connect` refreshes it. Calls dispatch through the MCP manager's call path, so server filters, `trustedReads` revalidation in restricted profiles, risk classification, audit, and authentication apply as they do to gateway calls. They do not go through the gateway's generic `call` action.
+- A server whose tools were listed but which is not connected, such as a lazy server, connects on its first call. A server that needs authentication fails the call with `failed` (`unavailable`) and a message naming the sign-in command.
+- MCP tools are bound while the built-in `mcp` gateway is active. A tool promoted with `directTools` is also bound while its direct tool is active, so it stays callable from scripts when the gateway is excluded. Either way it has one binding, at `tools.mcp.<server>.<tool>`, and none under the direct tool's own name.
 - For failure summaries (section 5.11), an MCP call counts as read-only only when the MCP resolver authorizes it as a trusted read.
 - Binding names and discovery are part of the model-facing contract (section 5.14).
 
@@ -618,6 +620,7 @@ Scripts are JavaScript or erasable TypeScript. The host strips TypeScript with `
 #### Binding names
 
 - Built-in and extension tools: `tools.<name>`, using the tool's own name.
+- In call messages a binding is identified by the JSON text of its path, so identifiers are unique by construction. A tool whose binding the runtime could not install (an empty or `__proto__` path segment, or an identifier longer than 256 characters) gets none.
 - MCP tools: `tools.mcp.<server>.<tool>`. Names that are not JavaScript identifiers use brackets: `tools.mcp["my-server"]["get-file"](args)`. Normalized MCP server ids may contain hyphens (`src/core/mcp/config.ts:184`), and both `my-server` and `my_server` are valid ids, so identifier aliases could collide; as in DeepSeek's design, there are none.
 
 #### Presentation
@@ -911,9 +914,9 @@ The invariants below tie each guarantee to the test that fails when it breaks.
 
 ### Invariants
 
-Each guarantee the runtime makes, where it is enforced, and the test that fails when it breaks. Section 5 records the decisions; these tables are how they are kept. A pull request that adds a guarantee adds its row, and a guarantee without a test says why. Step 1 rows describe merged code. Step 2 rows are planned: their tests are written before the implementation, and the pull request that lands each part names its enforcement point and tests. Steps 3 and 4 add their rows in their own pull requests.
+Each guarantee the runtime makes, where it is enforced, and the test that fails when it breaks. Section 5 records the decisions; these tables are how they are kept. A pull request that adds a guarantee adds its row, and a guarantee without a test says why. Rows in the tables before the planned one describe merged code. Planned rows name the test to write before the implementation; the pull request that lands each part moves its rows into a table of their own. Steps 3 and 4 add their rows in their own pull requests.
 
-Sources are in `src/core/code-mode/` and tests in `test/code-mode/`. Tests are cited as `file: "test name"`, where `vm`, `codec`, and `runtime` are the three test files.
+Sources are in `src/core/code-mode/` unless a path says otherwise. Tests are cited as `file: "test name"`, where `file` names a test file in `test/code-mode/` without `.test.ts`, except `mcp`, which is `test/mcp.test.ts`.
 
 #### Isolation and the engine
 
@@ -980,13 +983,21 @@ Sources are in `src/core/code-mode/` and tests in `test/code-mode/`. Tests are c
 | Closing the pool ends running scripts with a `sandbox` failure. | `pool.ts` `close` | runtime: "ends running scripts when the pool closes" |
 | Idle workers stop after the idle timeout. | `pool.ts` `startIdleTimer` | runtime: "stops idle workers after the idle timeout" |
 
+#### Bindings
+
+| Guarantee | Enforced in | Test |
+|---|---|---|
+| A binding exists only for a call the model could make directly in the same session at that moment, and every such call has one. | `bindings.ts` `computeCodeModeBindings`; `src/core/session/tool-runtime.ts` `codeModeBindingSources` | bindings: "binds exactly the calls the model could make directly, at paths the runtime accepts"; session-bindings: "binds active built-in, extension, and listed MCP tools in Build mode" |
+| Never-bindable tools get no binding, whatever registered them, and a built-in tool is bindable only once it is classified. | `bindings.ts` `BUILTIN_TOOL_ELIGIBILITY`, `NEVER_BINDABLE_TOOL_NAMES` | bindings: "classifies every built-in tool as bindable or never bindable, as the design lists them"; "binds no never-bindable tool, whoever registered it" |
+| In a restricted profile, bindings are limited to built-in tools the profile can authorize and MCP tools configured as trusted reads. | `bindings.ts` `computeCodeModeBindings` | bindings: "limits bindings in Plan mode to what the research profile authorizes"; session-bindings: "binds only tools the research profile authorizes in Plan mode" |
+| An MCP tool is bound once, at its MCP path, through the built-in gateway or its own direct tool, and only from fresh metadata that passes its server's filters. | `bindings.ts` `computeCodeModeBindings`; `src/core/mcp/manager.ts` `getCallableTools` | bindings: "binds MCP tools only through an active gateway that is the built-in one, or their own direct tool"; session-bindings: "keeps a promoted MCP tool bound through its direct tool when the gateway is excluded"; mcp: "lists callable tools only from fresh metadata that passes the server's filters" |
+| Binding names are unique, no path is a namespace of another, and a binding the runtime could not install is omitted. | `bindings.ts` `computeCodeModeBindings` | bindings: "binds exactly the calls the model could make directly, at paths the runtime accepts"; "omits bindings whose path the runtime would reject" |
+
 #### Step 2 (planned)
 
 | Guarantee | Enforced in | Test, written before the implementation |
 |---|---|---|
-| A binding exists only for an operation the model could call directly in the same session at that moment. | Binding-set computation | Property over generated tool sets, tool policies, and MCP filters and trust: every binding is directly callable |
-| Tools that are never bindable (section 5.12) get no binding under any configuration. | Binding-set computation | The same property, and one example per excluded tool |
-| In a restricted profile, bindings are limited to what the profile authorizes, and per-call authorization still applies. | Binding-set computation; tool-call policy | Plan mode suite scenario: `lsp` `rename` rejects with `blocked`, and nested reads record research evidence |
+| In a restricted profile, per-call authorization still applies to each nested call. | Call pipeline; tool-call policy | Plan mode suite scenario: `lsp` `rename` rejects with `blocked`, and nested reads record research evidence |
 | Every nested call passes `prepareArguments`, `validateToolArguments`, and the tool-call and tool-result policy, with a `code_mode` origin and the ID `<parentToolCallId>:cm:<seq>`; the host never calls `execute` directly. | Call pipeline | Suite scenario with a recording policy hook; a denial rejects with `blocked` |
 | Checks 6 to 11 of section 5.9 run in order after the step 1 checks, each with its documented outcome. | Call pipeline | One case per check from a test worker, asserting the outcome and that later checks did not run |
 | A nested call cannot start a background job. | Call pipeline | `background: true` rejects with `invalid_arguments` |

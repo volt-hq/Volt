@@ -10,6 +10,7 @@ import { join } from "node:path";
 import type { AgentMessage, AgentTool, Conversation } from "@hansjm10/volt-agent-core";
 import type { Api, ImageContent, JsonValue, Model } from "@hansjm10/volt-ai";
 import type { AgentSessionConfig, AgentSessionEvent } from "../agent-session.ts";
+import type { CodeModeActiveTool, CodeModeBindingSources } from "../code-mode/bindings.ts";
 import { type ToolDefinition, type ToolInfo, wrapRegisteredTools } from "../extensions/index.ts";
 import type { LiveState } from "../host/live-state.ts";
 import { resolveLspConfig } from "../lsp/config.ts";
@@ -17,6 +18,7 @@ import { LspManager, type LspServerStatus } from "../lsp/manager.ts";
 import type { LspServerPool } from "../lsp/server-pool.ts";
 import { createMcpDirectToolDefinitions } from "../mcp/direct-tools.ts";
 import type { McpManager } from "../mcp/manager.ts";
+import type { McpDirectToolCandidate } from "../mcp/types.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import {
 	getTrustedToolOperationResolver,
@@ -61,6 +63,21 @@ interface ToolDefinitionEntry {
 	sourceInfo: SourceInfo;
 	/** The manifest id of the extension that registered the tool, if one did. */
 	extensionId?: string;
+}
+
+/**
+ * The server tool each direct MCP tool calls, by tool name. A later candidate with the same name replaces an
+ * earlier one, as its definition does in the registry.
+ */
+function directMcpToolTargets(
+	candidates: readonly McpDirectToolCandidate[],
+): Map<string, { server: string; tool: string }> {
+	return new Map(
+		candidates.map((candidate) => [
+			candidate.directToolName,
+			{ server: candidate.server, tool: candidate.tool.name },
+		]),
+	);
 }
 
 function normalizePromptSnippet(text: string | undefined): string | undefined {
@@ -180,7 +197,8 @@ export class SessionToolRuntime {
 	private mcpManager?: McpManager;
 	private unsubscribeMcpManager?: () => void;
 	private readonly mcpAuthRequests: McpAuthRequests;
-	private directMcpToolNames: Set<string> = new Set();
+	/** The registered direct MCP tools, by tool name, and the server tool each calls. */
+	private directMcpTools: Map<string, { server: string; tool: string }> = new Map();
 	private requestedBuildToolNames: string[] = [];
 	private planningRuntimeInitialized = false;
 	private trustedHostToolNames: Set<string> = new Set();
@@ -316,6 +334,28 @@ export class SessionToolRuntime {
 
 	getMcpManager(): McpManager | undefined {
 		return this.mcpManager;
+	}
+
+	/**
+	 * What the model could call directly now, from which code mode computes a script's bindings (section 5.12 of
+	 * docs/code-mode-design.md).
+	 */
+	codeModeBindingSources(): CodeModeBindingSources {
+		const activeTools = this.getActiveToolNames().map((name): CodeModeActiveTool => {
+			if (this.isTrustedBuiltin(name))
+				return { name, kind: "builtin", resolver: this.trustedOperationResolver(name) };
+			const direct = this.directMcpTools.get(name);
+			// A tool an extension registered under a direct tool's name replaces it.
+			if (direct && this.toolDefinitions.get(name)?.sourceInfo.source === "builtin") {
+				return { name, kind: "mcp_direct", server: direct.server, tool: direct.tool };
+			}
+			return { name, kind: "other" };
+		});
+		return {
+			activeTools,
+			grantProfile: this.host.operationGrantProfile(),
+			mcpTools: this.mcpManager?.getCallableTools() ?? [],
+		};
 	}
 
 	/**
@@ -508,7 +548,9 @@ export class SessionToolRuntime {
 		}
 		await this.mcpManager.startEagerServers();
 		this.host.assertActive();
-		const previousDirectToolNames = this.directMcpToolNames;
+		const previousDirectToolNames = new Set(this.directMcpTools.keys());
+		// Read in the same synchronous step as the definitions, so they describe the same candidates.
+		const directCandidates = this.mcpManager.getDirectToolCandidates();
 		const directDefinitions = createMcpDirectToolDefinitions(this.mcpManager);
 		for (const name of previousDirectToolNames) {
 			this.baseToolDefinitions.delete(name);
@@ -516,7 +558,7 @@ export class SessionToolRuntime {
 		for (const definition of directDefinitions) {
 			this.baseToolDefinitions.set(definition.name, definition as ToolDefinition<any, any>);
 		}
-		this.directMcpToolNames = new Set(directDefinitions.map((definition) => definition.name));
+		this.directMcpTools = directMcpToolTargets(directCandidates);
 
 		const previouslyRequestedDirectTools = new Set(
 			this.requestedBuildToolNames.filter((name) => previousDirectToolNames.has(name)),
@@ -821,8 +863,10 @@ export class SessionToolRuntime {
 		if (previousLspManager?.sharesServersWith(this.lspManager)) this.lspManager.resetFailures();
 		previousLspManager?.dispose();
 
+		// Read in the same synchronous step as the definitions, so they describe the same candidates.
+		const directMcpCandidates = this.mcpManager?.getDirectToolCandidates() ?? [];
 		const directMcpToolDefinitions = this.mcpManager ? createMcpDirectToolDefinitions(this.mcpManager) : [];
-		this.directMcpToolNames = new Set(directMcpToolDefinitions.map((definition) => definition.name));
+		this.directMcpTools = directMcpToolTargets(directMcpCandidates);
 		const isSubagentRuntime = this.subagentToolManager?.isSubagentRuntime?.() === true;
 		const subagentToolManager =
 			this.subagentToolManager &&
