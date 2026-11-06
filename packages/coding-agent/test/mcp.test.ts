@@ -934,6 +934,29 @@ describe("MCP support", () => {
 		await manager.dispose();
 	});
 
+	it("lists callable tools only from fresh metadata that passes the server's filters", async () => {
+		const tempDir = makeTempDir();
+		tempDirs.push(tempDir);
+		const createManager = (serverOverrides: Record<string, unknown>) =>
+			new McpManager({
+				config: createTestConfig(tempDir, serverOverrides),
+				clientFactory: createFakeFactory("output"),
+				metadataCache: new McpMetadataCache({ agentDir: tempDir }),
+				outputStore: new McpOutputStore({ agentDir: tempDir, maxOutputBytes: 4096, maxOutputLines: 100 }),
+			});
+		const overrides = { excludeTools: ["update_note"], trustedReads: { tools: ["read_note"] } };
+		const manager = createManager(overrides);
+		// Before discovery the server has no metadata, so it adds no tools.
+		expect(manager.getCallableTools()).toEqual([]);
+		await manager.connectServer("fake");
+		expect(manager.getCallableTools()).toEqual([{ server: "fake", tool: "read_note", trustedRead: true }]);
+		// Metadata cached under another server configuration is stale.
+		const changed = createManager({ ...overrides, command: "other-fake-mcp" });
+		expect(changed.getCallableTools()).toEqual([]);
+		await changed.dispose();
+		await manager.dispose();
+	});
+
 	it("persists enablement overlays and exposes configured direct tools", async () => {
 		const tempDir = makeTempDir();
 		tempDirs.push(tempDir);
