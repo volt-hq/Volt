@@ -123,6 +123,11 @@ describe("ProjectTrustStore", () => {
 			expect(hasTrustRequiringProjectResources(cwd)).toBe(true);
 			rmSync(join(cwd, ".volt"), { recursive: true, force: true });
 
+			mkdirSync(join(cwd, ".volt", "agents"), { recursive: true });
+			writeFileSync(join(cwd, ".volt", "agents", "reviewer.md"), "---\nname: reviewer\n---\nReview.");
+			expect(hasTrustRequiringProjectResources(cwd)).toBe(true);
+			rmSync(join(cwd, ".volt"), { recursive: true, force: true });
+
 			writeFileSync(join(cwd, "AGENTS.md"), "Project instructions");
 			expect(hasTrustRequiringProjectResources(cwd)).toBe(false);
 			rmSync(join(cwd, "AGENTS.md"), { force: true });
