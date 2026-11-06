@@ -185,7 +185,7 @@ describe("moving a silent foreground command to a background job", () => {
 	test("a call that finishes or is aborted before its deadline does not move", async () => {
 		const { jobs, tool } = await jobCapableBash();
 		const finished = await tool.execute("move-4a", { command: "printf 'quick\\n'" }, undefined, undefined, ctx);
-		expect(finished).toEqual({ content: [{ type: "text", text: "quick\n" }] });
+		expect(finished).toEqual({ content: [{ type: "text", text: "quick\n" }], details: { exitCode: 0 } });
 		const controller = new AbortController();
 		setTimeout(() => controller.abort(), 150);
 		expect(

@@ -3,7 +3,9 @@ import {
 	type CodeModeScriptLimits,
 	DEFAULT_CODE_MODE_SCRIPT_LIMITS,
 	MAX_BINDING_NAME_LENGTH,
+	MAX_BRIDGE_JSON_DEPTH,
 	MAX_CODE_MODE_SCRIPT_TIMEOUT_MS,
+	MAX_SHOWN_IMAGES,
 } from "./limits.ts";
 import { CodeModePoolBusyError, type CodeModeWorker, type CodeModeWorkerPool } from "./pool.ts";
 import type { CodeModeBinding, CodeModeErrorDescription } from "./prelude.ts";
@@ -64,6 +66,11 @@ export interface CodeModeScriptRequest {
 	/** Optional wall-clock limit, including the wait for a worker. */
 	timeoutMs?: number;
 	limits?: Partial<CodeModeScriptLimits>;
+	/**
+	 * The script's image references. An image reference in a call's value that this knows becomes one the script
+	 * may show with `image()`; without it, the script can show no images.
+	 */
+	images?: { has(ref: string): boolean };
 }
 
 export type CodeModeCallStatus = "completed" | "failed" | "cancelled" | "unsettled";
@@ -198,6 +205,26 @@ function truncateUtf8(text: string, maxBytes: number): string {
 	return `${text.slice(0, end)}${marker}`;
 }
 
+/**
+ * Adds to `refs` every image reference in a call's value that the script's image store knows. The value has
+ * already been encoded, so it is plain data no deeper than the bridge's nesting limit.
+ */
+function collectImageRefs(
+	value: unknown,
+	images: { has(ref: string): boolean },
+	refs: Set<string>,
+	depth: number,
+): void {
+	if (value === null || typeof value !== "object" || depth > MAX_BRIDGE_JSON_DEPTH) return;
+	if (Array.isArray(value)) {
+		for (const item of value) collectImageRefs(item, images, refs, depth + 1);
+		return;
+	}
+	const record = value as Record<string, unknown>;
+	if (record.type === "image" && typeof record.ref === "string" && images.has(record.ref)) refs.add(record.ref);
+	for (const key of Object.keys(record)) collectImageRefs(record[key], images, refs, depth + 1);
+}
+
 function delay(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms).unref());
 }
@@ -221,6 +248,9 @@ class ScriptRun {
 	private retainedChars = 0;
 	private lastSeq = 0;
 	private outstandingArgumentBytes = 0;
+	/** Image references sent to the script in call results. */
+	private readonly issuedImageRefs = new Set<string>();
+	private shownImages = 0;
 	private worker: CodeModeWorker | undefined;
 	private stopFlags: Int32Array | undefined;
 	private clock: BigInt64Array | undefined;
@@ -523,7 +553,7 @@ class ScriptRun {
 		if (state.done) return;
 		this.inFlight.delete(state);
 		this.outstandingArgumentBytes -= state.bytes;
-		let reply: { ok: boolean; payload: string };
+		let reply: { ok: boolean; payload: string; imageRefs?: string[] };
 		try {
 			reply = outcome.ok ? this.valuePayload(state, outcome.value) : this.failurePayload(state, outcome.error);
 		} catch {
@@ -534,7 +564,7 @@ class ScriptRun {
 		this.reply(state, reply);
 	}
 
-	private valuePayload(state: CallState, value: unknown): { ok: boolean; payload: string } {
+	private valuePayload(state: CallState, value: unknown): { ok: boolean; payload: string; imageRefs?: string[] } {
 		let encoded: string;
 		try {
 			encoded = encodeBridgeValue(value, "result");
@@ -556,7 +586,9 @@ class ScriptRun {
 			);
 		}
 		state.record.status = "completed";
-		return { ok: true, payload: encoded };
+		const imageRefs = new Set<string>();
+		if (this.request.images) collectImageRefs(value, this.request.images, imageRefs, 0);
+		return { ok: true, payload: encoded, imageRefs: [...imageRefs] };
 	}
 
 	private failurePayload(state: CallState, error: unknown): { ok: boolean; payload: string } {
@@ -569,12 +601,21 @@ class ScriptRun {
 		return { ok: false, payload: JSON.stringify({ kind, reason, message }) };
 	}
 
-	private reply(state: CallState, reply: { ok: boolean; payload: string }): void {
+	private reply(state: CallState, reply: { ok: boolean; payload: string; imageRefs?: string[] }): void {
 		state.done = true;
 		state.record.durationMs = performance.now() - state.startedAt;
 		// After the outcome is decided, the host sends nothing more to the VM.
 		if (this.failure || this.workerSettled || !this.worker) return;
-		this.worker.post({ type: "result", id: this.id, seq: state.record.seq, ok: reply.ok, payload: reply.payload });
+		const imageRefs = reply.imageRefs ?? [];
+		for (const ref of imageRefs) this.issuedImageRefs.add(ref);
+		this.worker.post({
+			type: "result",
+			id: this.id,
+			seq: state.record.seq,
+			ok: reply.ok,
+			payload: reply.payload,
+			imageRefs,
+		});
 	}
 
 	private onOutput(payload: string): void {
@@ -591,6 +632,18 @@ class ScriptRun {
 		} catch (error) {
 			this.protocolViolation(errorMessage(error));
 			return;
+		}
+		// The prelude shows only references the script received, and at most the limit; anything else is forged.
+		if (item.type === "image") {
+			if (!this.issuedImageRefs.has(item.ref)) {
+				this.protocolViolation("an image reference the script did not receive");
+				return;
+			}
+			if (this.shownImages >= MAX_SHOWN_IMAGES) {
+				this.protocolViolation(`more than ${MAX_SHOWN_IMAGES} images shown`);
+				return;
+			}
+			this.shownImages++;
 		}
 		const chars = item.type === "image" ? 0 : item.text.length;
 		if (

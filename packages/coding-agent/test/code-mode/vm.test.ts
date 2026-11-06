@@ -8,6 +8,7 @@ import {
 	MAX_SCRIPT_ERROR_CHARS,
 	MAX_SCRIPT_ERROR_NAME_CHARS,
 	MAX_SCRIPT_ERROR_SUMMARY_CHARS,
+	MAX_SHOWN_IMAGES,
 } from "../../src/core/code-mode/limits.ts";
 import {
 	type CodeModeBinding,
@@ -34,6 +35,7 @@ const PRELUDE: PreludeConfig = {
 	maxErrorNameChars: MAX_SCRIPT_ERROR_NAME_CHARS,
 	maxErrorSummaryChars: MAX_SCRIPT_ERROR_SUMMARY_CHARS,
 	maxImageRefLength: MAX_IMAGE_REF_LENGTH,
+	maxShownImages: MAX_SHOWN_IMAGES,
 	scriptFilename: SCRIPT_FILENAME,
 	scriptPrefixLength: SCRIPT_PREFIX.length,
 	preludeFilename: PRELUDE_FILENAME,
@@ -57,6 +59,8 @@ interface RunOptions {
 	maxArgumentBytes?: number;
 	/** Answers the most recent call first instead of the oldest. */
 	lastInFirstOut?: boolean;
+	/** Image references every successful result carries. */
+	imageRefs?: string[];
 }
 
 interface RunResult {
@@ -94,7 +98,7 @@ async function runScript(code: string, options: RunOptions = {}): Promise<RunRes
 			calls.push(call);
 			try {
 				const value = await (options.onCall ?? (() => null))(call.binding, call.args);
-				vm.settle(call.seq, true, encodeBridgeValue(value, "result"));
+				vm.settle(call.seq, true, encodeBridgeValue(value, "result"), options.imageRefs ?? []);
 			} catch (error) {
 				vm.settle(call.seq, false, JSON.stringify({ kind: "failed", message: (error as Error).message }));
 			}
@@ -165,24 +169,55 @@ describe("code mode VM output", () => {
 		]);
 	});
 
-	it("rejects image references the host would not accept with a catchable TypeError", async () => {
-		const result = await runScript(`
-			image({ type: "image", ref: "r".repeat(64) });
+	it("shows only image references the script received, at most the limit, and rejects the rest catchably", async () => {
+		const picture = { type: "image", ref: "img_1", mimeType: "image/png", bytes: 68 };
+		const result = await runScript(
+			`
+			const picture = await tools.picture();
 			const errors = [];
-			for (const reference of [{ type: "image", ref: "r".repeat(65) }, { type: "image", ref: 1 }, "img_1"]) {
+			const invalid = [{ type: "image", ref: "img_2" }, { type: "image", ref: "r".repeat(65) }, { ...picture, ref: 1 }, "img_1"];
+			for (const reference of invalid) {
 				try { image(reference); } catch (error) { errors.push(error.name + ": " + error.message); }
 			}
+			for (let i = 0; i <= ${MAX_SHOWN_IMAGES}; i++) {
+				try { image(picture); } catch (error) { errors.push(error.name + ": " + error.message); }
+			}
 			return errors;
-		`);
-		expect(result.output).toStrictEqual([{ type: "image", ref: "r".repeat(64) }]);
+		`,
+			{ bindings: [{ name: "picture", path: ["picture"] }], onCall: () => picture, imageRefs: ["img_1"] },
+		);
+		expect(result.output).toStrictEqual(
+			Array.from({ length: MAX_SHOWN_IMAGES }, () => ({ type: "image", ref: "img_1" })),
+		);
 		expect(result.done).toMatchObject({
 			ok: true,
 			value: [
-				"TypeError: image() takes an image reference returned by a tool",
-				"TypeError: image() takes an image reference returned by a tool",
-				"TypeError: image() takes an image reference returned by a tool",
+				...Array.from({ length: 4 }, () => "TypeError: image() takes an image reference returned by a tool"),
+				`RangeError: image(): at most ${MAX_SHOWN_IMAGES} images can be shown per script`,
 			],
 		});
+	});
+
+	it("keeps image() working when a script patches Set", async () => {
+		const result = await runScript(
+			`
+			const picture = await tools.picture();
+			Set.prototype.has = () => false;
+			Set.prototype.add = () => { throw new Error("patched add"); };
+			image(picture);
+			return image(await tools.picture());
+		`,
+			{
+				bindings: [{ name: "picture", path: ["picture"] }],
+				onCall: () => ({ type: "image", ref: "img_1" }),
+				imageRefs: ["img_1"],
+			},
+		);
+		expect(result.output).toStrictEqual([
+			{ type: "image", ref: "img_1" },
+			{ type: "image", ref: "img_1" },
+		]);
+		expect(result.done).toStrictEqual({ ok: true, hasValue: false });
 	});
 
 	it("returns values through the codec and reports values it cannot represent", async () => {

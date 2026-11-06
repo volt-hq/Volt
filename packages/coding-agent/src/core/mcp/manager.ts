@@ -156,7 +156,8 @@ function toToolSummary(
 	}));
 }
 
-function contentPartToText(part: unknown): string | undefined {
+/** Renders one MCP content block as the gateway shows it to the model. */
+export function contentPartToText(part: unknown): string | undefined {
 	if (!isRecord(part) || typeof part.type !== "string") {
 		return undefined;
 	}

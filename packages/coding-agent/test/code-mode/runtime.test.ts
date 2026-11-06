@@ -1,6 +1,8 @@
 import { type SpawnSyncReturns, spawnSync } from "node:child_process";
 import fc from "fast-check";
 import { afterAll, describe, expect, it, vi } from "vitest";
+import { CodeModeImageStore } from "../../src/core/code-mode/images.ts";
+import { MAX_SHOWN_IMAGES } from "../../src/core/code-mode/limits.ts";
 import { CodeModeWorker, type CodeModeWorkerListener, CodeModeWorkerPool } from "../../src/core/code-mode/pool.ts";
 import type { PreludeConfig } from "../../src/core/code-mode/prelude.ts";
 import {
@@ -82,12 +84,18 @@ function forgingPool(messagesFor: (id: number) => ForgedMessage[]): { pool: Code
 		},
 		post(message: HostToWorkerMessage) {
 			if (message.type !== "start") return;
-			for (const forged of messagesFor(message.id)) {
-				queueMicrotask(() => {
-					if (forged === "malformed") this.listener?.onMalformed();
-					else this.listener?.onMessage(forged);
+			// A macrotask apart, so the host has answered a forged call before the next message arrives.
+			const forged = messagesFor(message.id);
+			const deliver = (index: number) => {
+				if (index >= forged.length) return;
+				setImmediate(() => {
+					const next = forged[index];
+					if (next === "malformed") this.listener?.onMalformed();
+					else this.listener?.onMessage(next);
+					deliver(index + 1);
 				});
-			}
+			};
+			deliver(0);
 		},
 		terminate() {
 			this.alive = false;
@@ -146,6 +154,8 @@ const SCRIPT_API_VALUES = [
 	'{ get nested() { tools.call({ from: "getter" }); return 1; } }',
 	'{ get printed() { text("from a getter"); return 1; } }',
 	"{ get gone() { delete this.later; return 1; }, later: 2 }",
+	// A real image reference, which image() shows until the limit.
+	"(await tools.picture())",
 ];
 
 /** Uses of the script API; each `$` is replaced with a value. */
@@ -219,6 +229,16 @@ const scriptApiStatement = fc.oneof(
 	{
 		weight: 1,
 		arbitrary: fc.constantFrom(...SCRIPT_API_PATCHES).map((patch) => `try { ${patch} } catch { caught++; }`),
+	},
+	// Shows a real image reference several times, so scripts reach the limit on shown images.
+	{
+		weight: 1,
+		arbitrary: fc
+			.integer({ min: 1, max: 12 })
+			.map(
+				(times) =>
+					`try { const picture = await tools.picture(); for (let i = 0; i < ${times}; i++) image(picture); } catch { caught++; }`,
+			),
 	},
 );
 
@@ -684,12 +704,16 @@ describe("code mode runtime", () => {
 		await fc.assert(
 			fc.asyncProperty(fc.array(scriptApiStatement, { minLength: 1, maxLength: 10 }), async (statements) => {
 				const code = `let caught = 0;\n${statements.join("\n")}\nreturn caught;`;
+				const images = new CodeModeImageStore();
+				const [picture] = images.add([{ data: "iVBORw0KGgo=", mimeType: "image/png" }]);
 				const result = await run(code, {
 					bindings: [
 						{ name: "call", path: ["call"] },
 						{ name: "nested.deep", path: ["nested", "deep"] },
+						{ name: "picture", path: ["picture"] },
 					],
-					onCall: async (call) => call.args,
+					onCall: async (call) => (call.binding === "picture" ? picture : call.args),
+					images,
 					timeoutMs: 20_000,
 					limits: { maxArgumentBytes: 1_000 },
 				});
@@ -699,6 +723,65 @@ describe("code mode runtime", () => {
 			{ numRuns: 100 },
 		);
 	}, 120_000);
+
+	it("shows only images the script received in call results, at most the limit", async () => {
+		const images = new CodeModeImageStore();
+		const [received, notReceived] = images.add([
+			{ data: "iVBORw0KGgo=", mimeType: "image/png" },
+			{ data: "R0lGODlh", mimeType: "image/gif" },
+		]);
+		const result = await run(
+			`
+			const errors = [];
+			try { image(${JSON.stringify(notReceived)}); } catch (error) { errors.push(error.name); }
+			// The reference is nested in the value; the host finds it wherever it is.
+			const picture = (await tools.picture()).found[0];
+			for (let i = 0; i <= ${MAX_SHOWN_IMAGES}; i++) {
+				try { image(picture); } catch (error) { errors.push(error.name); }
+			}
+			return errors;
+		`,
+			{
+				bindings: [{ name: "picture", path: ["picture"] }],
+				onCall: async () => ({ found: [received] }),
+				images,
+			},
+		);
+		expect(result).toMatchObject({ ok: true, value: ["TypeError", "RangeError"] });
+		expect(result.output).toStrictEqual(
+			Array.from({ length: MAX_SHOWN_IMAGES }, () => ({ type: "image", ref: received.ref })),
+		);
+	});
+
+	it("treats an image the script could not have shown as a protocol violation", async () => {
+		const shown = (ref: string) => `{"type":"image","ref":"${ref}"}`;
+		const notReceived = failed(
+			await runForged(forgingPool((id) => [{ type: "output", id, payload: shown("img_1") }])),
+		);
+		expect(notReceived.failure).toStrictEqual({
+			kind: "sandbox",
+			reason: "protocol violation: an image reference the script did not receive",
+		});
+		const images = new CodeModeImageStore();
+		const [picture] = images.add([{ data: "iVBORw0KGgo=", mimeType: "image/png" }]);
+		const tooMany = failed(
+			await runForged(
+				forgingPool((id) => [
+					{ type: "call", id, payload: '{"seq":1,"binding":"call","args":{}}' },
+					...Array.from(
+						{ length: MAX_SHOWN_IMAGES + 1 },
+						(): ForgedMessage => ({ type: "output", id, payload: shown(picture.ref) }),
+					),
+				]),
+				{ onCall: async () => picture, images },
+			),
+		);
+		expect(tooMany.failure).toStrictEqual({
+			kind: "sandbox",
+			reason: `protocol violation: more than ${MAX_SHOWN_IMAGES} images shown`,
+		});
+		expect(tooMany.output).toHaveLength(MAX_SHOWN_IMAGES);
+	});
 
 	it("agrees with the prelude on the argument limit when the binding name needs escaping", async () => {
 		// {"s":"éé..."} with 500 two-byte characters is exactly 1,008 bytes.
@@ -832,6 +915,7 @@ describe("code mode worker pool", () => {
 			maxErrorNameChars: 1,
 			maxErrorSummaryChars: 1,
 			maxImageRefLength: 1,
+			maxShownImages: 1,
 			scriptFilename: "script.js",
 			scriptPrefixLength: 0,
 			preludeFilename: "prelude.js",

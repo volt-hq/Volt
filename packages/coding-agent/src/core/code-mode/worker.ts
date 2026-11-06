@@ -96,7 +96,7 @@ function handle(message: HostToWorkerMessage): Promise<void> | undefined {
 			return start(message);
 		case "result":
 			if (current?.id === message.id) {
-				current.vm.settle(message.seq, message.ok, message.payload);
+				current.vm.settle(message.seq, message.ok, message.payload, message.imageRefs);
 				afterTurn();
 			}
 			return undefined;

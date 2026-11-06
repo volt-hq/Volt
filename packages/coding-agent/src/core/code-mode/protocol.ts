@@ -57,7 +57,8 @@ export type HostToWorkerMessage =
 			maxReportedRejections: number;
 			maxArgumentBytes: number;
 	  }
-	| { type: "result"; id: number; seq: number; ok: boolean; payload: string }
+	/** `imageRefs` lists the image references the value carries, which the script may then pass to `image()`. */
+	| { type: "result"; id: number; seq: number; ok: boolean; payload: string; imageRefs: string[] }
 	| { type: "stop"; id: number };
 
 export type WorkerToHostMessage =

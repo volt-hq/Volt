@@ -15,6 +15,7 @@ export interface PreludeConfig {
 	maxErrorNameChars: number;
 	maxErrorSummaryChars: number;
 	maxImageRefLength: number;
+	maxShownImages: number;
 	scriptFilename: string;
 	scriptPrefixLength: number;
 	preludeFilename: string;
@@ -48,8 +49,11 @@ export interface PreludeApi {
 	install(installText: string): void;
 	/** Runs the script function and reports its completion through the bridge. */
 	run(script: () => unknown): void;
-	/** Settles nested call `seq`. Returns `ok`, `unknown` for an unexpected seq, or `invalid`. */
-	settle(seq: string, status: string, payload: string): string;
+	/**
+	 * Settles nested call `seq`. `imageRefs` is JSON text of the image references the value carries. Returns
+	 * `ok`, `unknown` for an unexpected seq, or `invalid`.
+	 */
+	settle(seq: string, status: string, payload: string, imageRefs: string): string;
 	/** Describes a thrown value as JSON text of a `CodeModeErrorDescription`. */
 	describe(value: unknown): string;
 }
@@ -120,6 +124,9 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 	const MapPrototypeDelete = uncurry(Map.prototype.delete);
 	const MapPrototypeForEach = uncurry(Map.prototype.forEach);
 	const MapSize = getter(Map.prototype, "size");
+	const SetCtor = Set;
+	const SetPrototypeAdd = uncurry(Set.prototype.add);
+	const SetPrototypeHas = uncurry(Set.prototype.has);
 	const SetPrototypeForEach = uncurry(Set.prototype.forEach);
 	const SetSize = getter(Set.prototype, "size");
 	const PromiseCtor = Promise;
@@ -150,6 +157,9 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 		>();
 		let lastSeq = 0;
 		let maxArgumentBytes = 0;
+		/** Image references the script received in call results; only these can be shown. */
+		const receivedImageRefs = new SetCtor<string>();
+		let shownImages = 0;
 
 		/**
 		 * A data property descriptor without a prototype. defineProperty reads descriptor fields with [[Get]], so
@@ -337,10 +347,15 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 				reference !== null && typeof reference === "object" && read(reference, "type") === "image"
 					? read(reference, "ref")
 					: undefined;
-			// The host treats a longer reference as a protocol violation, so it is rejected here, catchably.
-			if (typeof ref !== "string" || ref.length > config.maxImageRefLength) {
+			// The host treats a reference the script never received, or an image past the limit, as a protocol
+			// violation, so both are rejected here, catchably.
+			if (typeof ref !== "string" || !SetPrototypeHas(receivedImageRefs, ref)) {
 				throw new TypeErrorCtor("image() takes an image reference returned by a tool");
 			}
+			if (shownImages >= config.maxShownImages) {
+				throw new RangeErrorCtor(`image(): at most ${config.maxShownImages} images can be shown per script`);
+			}
+			shownImages++;
 			emit(`{"type":"image","ref":${JSONStringify(ref)}}`);
 		}
 
@@ -588,17 +603,26 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 			}
 		}
 
-		function settle(seqText: string, status: string, payload: string): string {
+		function settle(seqText: string, status: string, payload: string, imageRefsText: string): string {
 			const seq = NumberCtor(seqText);
 			const entry = MapPrototypeGet(pending, seq);
 			if (entry === undefined) return "unknown";
 			MapPrototypeDelete(pending, seq);
 			if (status === "ok") {
 				let value: unknown;
+				let imageRefs: unknown;
 				try {
 					value = codec.decode(payload);
+					imageRefs = JSONParse(imageRefsText);
 				} catch {
 					return "invalid";
+				}
+				if (!ArrayIsArray(imageRefs)) return "invalid";
+				for (let i = 0; i < imageRefs.length; i++) {
+					const ref: unknown = imageRefs[i];
+					if (typeof ref !== "string" || ref.length === 0 || ref.length > config.maxImageRefLength)
+						return "invalid";
+					SetPrototypeAdd(receivedImageRefs, ref);
 				}
 				entry.resolve(value);
 				return "ok";

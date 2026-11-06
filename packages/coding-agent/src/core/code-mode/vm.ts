@@ -249,18 +249,29 @@ export class ScriptVm {
 		}
 	}
 
-	/** Settles nested call `seq` and runs the VM until it is idle. */
-	settle(seq: number, ok: boolean, payload: string): void {
+	/**
+	 * Settles nested call `seq` and runs the VM until it is idle. `imageRefs` are the image references the value
+	 * carries; the script may pass them to `image()` from then on.
+	 */
+	settle(seq: number, ok: boolean, payload: string, imageRefs: readonly string[] = []): void {
 		if (this.state !== "running") return;
 		const vm = this.quickjs;
 		this.outstandingCalls--;
 		const seqHandle = vm.newString(String(seq));
 		const statusHandle = vm.newString(ok ? "ok" : "error");
 		const payloadHandle = vm.newString(payload);
+		const refsHandle = vm.newString(JSON.stringify(imageRefs));
 		let status = "";
 		try {
 			this.runUntilIdle(() => {
-				const result = vm.callFunction(this.api.settle, vm.undefined, seqHandle, statusHandle, payloadHandle);
+				const result = vm.callFunction(
+					this.api.settle,
+					vm.undefined,
+					seqHandle,
+					statusHandle,
+					payloadHandle,
+					refsHandle,
+				);
 				status = result.isString ? result.toString() : "";
 				result.dispose();
 				if (status !== "ok") this.halt("crash", `the VM rejected the result of call ${seq} (${status})`);
@@ -269,6 +280,7 @@ export class ScriptVm {
 			seqHandle.dispose();
 			statusHandle.dispose();
 			payloadHandle.dispose();
+			refsHandle.dispose();
 		}
 	}
 

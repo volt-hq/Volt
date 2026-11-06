@@ -458,19 +458,22 @@ describe("Coding Agent Tools", () => {
 			const result = await bashTool.execute("test-call-8", { command: "echo 'test output'" });
 
 			expect(getTextOutput(result)).toContain("test output");
-			expect(result.details).toBeUndefined();
+			expect(result.details).toEqual({ exitCode: 0 });
 		});
 
 		it("should handle command errors", async () => {
 			const result = await bashTool.execute("test-call-9", { command: "exit 1" });
 			expect(result.isError).toBe(true);
 			expect(getTextOutput(result)).toMatch(/Command exited with code 1$/);
+			expect(result.details).toEqual({ exitCode: 1 });
 		});
 
 		it("should respect timeout", async () => {
 			const result = await bashTool.execute("test-call-10", { command: "sleep 5", timeout: 1 });
 			expect(result.isError).toBe(true);
 			expect(getTextOutput(result)).toMatch(/timed out/i);
+			// A command that did not run to completion has no exit code.
+			expect(result.details?.exitCode).toBeUndefined();
 		});
 
 		it("should keep truncation details and the full output path for truncated timeout and abort errors", async () => {

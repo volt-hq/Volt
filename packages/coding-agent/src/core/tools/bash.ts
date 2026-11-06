@@ -96,6 +96,19 @@ function resolveStallSeconds(value: number | undefined): number {
 export interface BashToolDetails {
 	truncation?: TruncationResult;
 	fullOutputPath?: string;
+	/**
+	 * The exit code of a command that ran to completion, or null when a signal ended it. Absent when the command
+	 * was aborted, timed out, or killed as hung.
+	 */
+	exitCode?: number | null;
+}
+
+/** The text the result shows for a command that printed nothing. */
+export const BASH_NO_OUTPUT_TEXT = "(no output)";
+
+/** The status line appended to the output of a command that exited with a non-zero code. */
+export function bashExitStatus(exitCode: number): string {
+	return `Command exited with code ${exitCode}`;
 }
 
 /**
@@ -369,7 +382,7 @@ export function createBashToolDefinition(
 				return snapshot;
 			};
 
-			const formatOutput = (snapshot: Awaited<ReturnType<typeof finishOutput>>, emptyText = "(no output)") => {
+			const formatOutput = (snapshot: Awaited<ReturnType<typeof finishOutput>>, emptyText = BASH_NO_OUTPUT_TEXT) => {
 				const truncation = snapshot.truncation;
 				let text = snapshot.content || emptyText;
 				let details: BashToolDetails | undefined;
@@ -442,13 +455,11 @@ export function createBashToolDefinition(
 
 				const snapshot = await finishOutput();
 				const output = formatOutput(snapshot);
+				const details: BashToolDetails = { ...output.details, exitCode };
 				if (exitCode !== 0 && exitCode !== null) {
-					return failure(output, `Command exited with code ${exitCode}`);
+					return failure({ text: output.text, details }, bashExitStatus(exitCode));
 				}
-				return {
-					content: [{ type: "text", text: output.text }],
-					...(output.details === undefined ? {} : { details: output.details }),
-				};
+				return { content: [{ type: "text", text: output.text }], details };
 			} finally {
 				clearUpdateTimer();
 				clearStallTimer();
