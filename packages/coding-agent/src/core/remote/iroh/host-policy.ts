@@ -9,9 +9,20 @@ export interface IrohRemoteWorkspaceTrustStore {
 export interface ResolveIrohRemoteWorkspaceProjectTrustOptions {
 	approvedWorkspacePaths?: ReadonlySet<string>;
 	hasTrustRequiringProjectResources?: (cwd: string) => boolean;
+	/**
+	 * Where the project resources load from: the workspace, or a managed
+	 * worktree checkout of it. Resources that need trust are looked for here;
+	 * the decision is the workspace's. `workspace.path` by default.
+	 */
+	resourcesRoot?: string;
 	trustStore?: IrohRemoteWorkspaceTrustStore;
 }
 
+/**
+ * The project trust of a remote conversation loading project resources from
+ * `options.resourcesRoot`: trusted when nothing there needs trust, else as
+ * decided for the workspace (#1034).
+ */
 export function resolveIrohRemoteWorkspaceProjectTrusted(
 	workspace: IrohRemoteWorkspace,
 	options: ResolveIrohRemoteWorkspaceProjectTrustOptions = {},
@@ -20,7 +31,7 @@ export function resolveIrohRemoteWorkspaceProjectTrusted(
 		return true;
 	}
 	const hasTrustResources = (options.hasTrustRequiringProjectResources ?? hasTrustRequiringProjectResources)(
-		workspace.path,
+		options.resourcesRoot ?? workspace.path,
 	);
 	if (!hasTrustResources) {
 		return true;

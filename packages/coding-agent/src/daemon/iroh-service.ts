@@ -1394,7 +1394,10 @@ class IrohDaemonService {
 					repositoryDisplayName: request.gitContext.repository,
 					branch: request.gitContext.branch,
 					headOid: request.gitContext.headOid,
-					trusted: resolveIrohRemoteWorkspaceProjectTrusted(currentWorkspace, { trustStore: this.trustStore }),
+					trusted: resolveIrohRemoteWorkspaceProjectTrusted(currentWorkspace, {
+						resourcesRoot: worktree?.path ?? currentWorkspace.path,
+						trustStore: this.trustStore,
+					}),
 					...(request.gitContext.baseRef === undefined ? {} : { baseBranches: [request.gitContext.baseRef] }),
 				},
 				isCurrentRevision,
@@ -3370,7 +3373,10 @@ class IrohDaemonService {
 					workspaceName: workspace.name,
 					workspaceGeneration: authorization.workspaceGeneration ?? 0,
 					root,
-					projectTrusted: resolveIrohRemoteWorkspaceProjectTrusted(workspace, { trustStore: this.trustStore }),
+					projectTrusted: resolveIrohRemoteWorkspaceProjectTrusted(workspace, {
+						resourcesRoot: root,
+						trustStore: this.trustStore,
+					}),
 					...(this.profile === undefined ? {} : { profile: this.profile }),
 				},
 				signal === undefined ? admission.signal : AbortSignal.any([admission.signal, signal]),
@@ -3784,8 +3790,8 @@ class IrohDaemonService {
 					workspaceAllowTools: authorization.workspace.allowedTools,
 					daemonAllowTools: this.services.state.state.settings.allowTools,
 				}),
-			projectTrusted: (workspace) =>
-				resolveIrohRemoteWorkspaceProjectTrusted(workspace, { trustStore: this.trustStore }),
+			projectTrusted: (workspace, root) =>
+				resolveIrohRemoteWorkspaceProjectTrusted(workspace, { resourcesRoot: root, trustStore: this.trustStore }),
 			resolveWorktree: (workspaceName, hello, targetSessionId, placement) =>
 				this.resolveConversationWorktree(workspaceName, hello, targetSessionId, placement),
 			resolveWorkingDirectory: (options) => this.resolveConversationWorkingDirectory(options),
