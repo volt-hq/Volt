@@ -608,6 +608,201 @@ describe("review engines", () => {
 		}
 	});
 
+	it("reuses a released checkout whose head has a gitlink with no .gitmodules entry", async () => {
+		const { harness, start } = await fixture();
+		// A nested repository committed by accident: a gitlink that `git submodule` cannot map to a URL.
+		git(harness.tempDir, "update-index", "--add", "--cacheinfo", `160000,${"1".repeat(40)},vendor/x`);
+		// Without its directory the uncommitted snapshot would record the gitlink as deleted.
+		mkdirSync(join(harness.tempDir, "vendor", "x"), { recursive: true });
+		git(harness.tempDir, "commit", "-m", "add a gitlink");
+		let first: ReviewEngineCheckout | undefined;
+		let gitlinkReached = false;
+		let reused: { path: string; value: string; leftBehind: boolean; setupRuns: string } | undefined;
+		const { work } = await start(
+			engine(async (ctx) => {
+				first = await ctx.checkout();
+				gitlinkReached = existsSync(join(first.path, "vendor", "x"));
+				writeFileSync(join(first.path, "src", "value.ts"), "changed\n");
+				writeFileSync(join(first.path, "left-behind"), "untracked\n");
+				await first.release();
+				const next = await ctx.checkout();
+				reused = {
+					path: next.path,
+					value: readFileSync(join(next.path, "src", "value.ts"), "utf8"),
+					leftBehind: existsSync(join(next.path, "left-behind")),
+					setupRuns: readFileSync(join(next.path, "installed", "runs"), "utf8"),
+				};
+				await reviewCarefully(ctx);
+			}),
+			{
+				setup: {
+					command:
+						"mkdir -p installed .git/info && echo installed/ >> .git/info/exclude && echo run >> installed/runs",
+				},
+			},
+		);
+		expect(work?.outcome).toBe("completed");
+		expect(gitlinkReached).toBe(true);
+		expect(reused?.path).toBe(first?.path);
+		expect(reused?.value).toContain("if (divisor === 0) return amount;");
+		expect(reused?.leftBehind).toBe(false);
+		expect(reused?.setupRuns.trim()).toBe("run");
+	});
+
+	it.each([
+		{ mapping: "without a .gitmodules entry", gitmodules: false },
+		{ mapping: "with a .gitmodules entry", gitmodules: true },
+	])(
+		"resets a gitlink the setup cloned rather than initialized, nested ones included, $mapping",
+		async ({ gitmodules }) => {
+			const { harness, start } = await fixture();
+			const origins = mkdtempSync(join(tmpdir(), "volt-review-gitlink-"));
+			try {
+				const repository = (name: string, file: string): string => {
+					const path = join(origins, name);
+					mkdirSync(path);
+					git(path, "init", "--initial-branch=main");
+					git(path, "config", "user.email", "review@example.com");
+					git(path, "config", "user.name", "Review Test");
+					writeFileSync(join(path, file), "original\n");
+					git(path, "add", ".");
+					git(path, "commit", "-m", "initial");
+					return path;
+				};
+				const inner = repository("inner", "inner.txt");
+				const lib = repository("lib", "lib.txt");
+				git(lib, "update-index", "--add", "--cacheinfo", `160000,${git(inner, "rev-parse", "HEAD")},inner`);
+				git(lib, "commit", "-m", "add inner");
+				const recorded = git(lib, "rev-parse", "HEAD");
+				const url = (path: string): string => path.replaceAll("\\", "/");
+				git(harness.tempDir, "update-index", "--add", "--cacheinfo", `160000,${recorded},vendor/x`);
+				mkdirSync(join(harness.tempDir, "vendor", "x"), { recursive: true });
+				if (gitmodules) {
+					writeFileSync(
+						join(harness.tempDir, ".gitmodules"),
+						`[submodule "x"]\n\tpath = vendor/x\n\turl = ${url(lib)}\n`,
+					);
+					git(harness.tempDir, "add", ".gitmodules");
+				}
+				git(harness.tempDir, "commit", "-m", "add vendor/x");
+				let first: ReviewEngineCheckout | undefined;
+				let reused:
+					| {
+							path: string;
+							head: string;
+							lib: string;
+							libLeftBehind: boolean;
+							inner: string;
+							innerLeftBehind: boolean;
+							setupRuns: string;
+					  }
+					| undefined;
+				const { work } = await start(
+					engine(async (ctx) => {
+						first = await ctx.checkout();
+						const x = join(first.path, "vendor", "x");
+						writeFileSync(join(x, "lib.txt"), "changed\n");
+						git(
+							x,
+							"-c",
+							"user.email=review@example.com",
+							"-c",
+							"user.name=Review Test",
+							"commit",
+							"-am",
+							"drift",
+						);
+						writeFileSync(join(x, "left-behind"), "untracked\n");
+						writeFileSync(join(x, "inner", "inner.txt"), "changed\n");
+						writeFileSync(join(x, "inner", "left-behind"), "untracked\n");
+						await first.release();
+						const next = await ctx.checkout();
+						const y = join(next.path, "vendor", "x");
+						reused = {
+							path: next.path,
+							head: git(y, "rev-parse", "HEAD"),
+							lib: readFileSync(join(y, "lib.txt"), "utf8").trim(),
+							libLeftBehind: existsSync(join(y, "left-behind")),
+							inner: readFileSync(join(y, "inner", "inner.txt"), "utf8").trim(),
+							innerLeftBehind: existsSync(join(y, "inner", "left-behind")),
+							setupRuns: readFileSync(join(next.path, "installed", "runs"), "utf8").trim(),
+						};
+						await reviewCarefully(ctx);
+					}),
+					{
+						setup: {
+							command: [
+								`git clone --quiet "${url(lib)}" vendor/x`,
+								`git clone --quiet "${url(inner)}" vendor/x/inner`,
+								"mkdir -p installed .git/info",
+								"echo installed/ >> .git/info/exclude",
+								"echo run >> installed/runs",
+							].join(" && "),
+						},
+					},
+				);
+				expect(work?.outcome).toBe("completed");
+				expect(reused).toEqual({
+					path: first?.path,
+					head: recorded,
+					lib: "original",
+					libLeftBehind: false,
+					inner: "original",
+					innerLeftBehind: false,
+					setupRuns: "run",
+				});
+			} finally {
+				rmSync(origins, { recursive: true, force: true, maxRetries: 10 });
+			}
+		},
+	);
+
+	it("drops a released checkout whose gitlink leads to a repository outside it, leaving that repository alone", async () => {
+		const { harness, start } = await fixture();
+		const origins = mkdtempSync(join(tmpdir(), "volt-review-gitlink-"));
+		try {
+			const lib = join(origins, "lib");
+			mkdirSync(lib);
+			git(lib, "init", "--initial-branch=main");
+			git(lib, "config", "user.email", "review@example.com");
+			git(lib, "config", "user.name", "Review Test");
+			writeFileSync(join(lib, "lib.txt"), "original\n");
+			git(lib, "add", ".");
+			git(lib, "commit", "-m", "initial");
+			const recorded = git(lib, "rev-parse", "HEAD");
+			// A repository of the user's that has the recorded commit, and moved past it.
+			const outside = join(origins, "outside");
+			git(origins, "clone", "--quiet", lib, outside);
+			writeFileSync(join(outside, "lib.txt"), "later\n");
+			git(outside, "-c", "user.email=review@example.com", "-c", "user.name=Review Test", "commit", "-am", "later");
+			const outsideHead = git(outside, "rev-parse", "HEAD");
+			git(harness.tempDir, "update-index", "--add", "--cacheinfo", `160000,${recorded},vendor/x`);
+			mkdirSync(join(harness.tempDir, "vendor", "x"), { recursive: true });
+			git(harness.tempDir, "commit", "-m", "add vendor/x");
+			let first: ReviewEngineCheckout | undefined;
+			let nextPath: string | undefined;
+			const { work } = await start(
+				engine(async (ctx) => {
+					first = await ctx.checkout();
+					writeFileSync(
+						join(first.path, "vendor", "x", ".git"),
+						`gitdir: ${join(outside, ".git").replaceAll("\\", "/")}\n`,
+					);
+					await first.release();
+					nextPath = (await ctx.checkout()).path;
+					await reviewCarefully(ctx);
+				}),
+			);
+			expect(work?.outcome).toBe("completed");
+			expect(nextPath).toBeDefined();
+			expect(nextPath).not.toBe(first?.path);
+			expect(git(outside, "rev-parse", "HEAD")).toBe(outsideHead);
+			expect(git(outside, "status", "--porcelain")).toBe("");
+		} finally {
+			rmSync(origins, { recursive: true, force: true, maxRetries: 10 });
+		}
+	});
+
 	it("leaves a checkout released after cancellation as it is, never handing it out again", async () => {
 		const { harness } = await fixture();
 		const started = Promise.withResolvers<void>();
