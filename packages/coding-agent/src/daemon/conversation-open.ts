@@ -85,7 +85,8 @@ export interface ConversationOpenServices {
 	readonly profile?: string;
 	/** The phone's tool policy: its grant ∩ the workspace ceiling ∩ `remote.allowTools` (D9). */
 	toolPolicy(authorization: IrohRemoteClientAuthorizationSuccess): IrohRemoteRuntimeToolPolicy;
-	projectTrusted(workspace: IrohRemoteWorkspace): boolean;
+	/** The project trust of a conversation in `workspace` loading its project resources from `root` (its checkout). */
+	projectTrusted(workspace: IrohRemoteWorkspace, root: string): boolean;
 	/**
 	 * The worktree the conversation runs in. `placement` is where the stored
 	 * session `targetSessionId` runs for the workspace, read from its summary;
@@ -299,7 +300,7 @@ export async function resolveConversationOpen(
 	const compatibility = {
 		origin: "phone" as const,
 		toolPolicy: { tools: [...toolPolicy.tools], allowUnlistedExtensionTools: toolPolicy.allowUnlistedExtensionTools },
-		projectTrusted: services.projectTrusted(workspace),
+		projectTrusted: services.projectTrusted(workspace, rootPath),
 		...(services.profile === undefined ? {} : { profile: services.profile }),
 	};
 
