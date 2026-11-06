@@ -59,7 +59,10 @@ export interface CodeModePoolOptions {
 	idleTimeoutMs: number;
 	/** Memory limit of each VM, in bytes. */
 	memoryLimitBytes: number;
-	/** Native stack of each worker thread, in megabytes. */
+	/**
+	 * Native stack of each worker thread, in megabytes. QuickJS's stack guard does not see the native stack
+	 * that WebAssembly frames use, so it must be deep enough for the guard to fire first (section 5.4).
+	 */
 	workerStackSizeMb: number;
 }
 
@@ -68,7 +71,7 @@ export const DEFAULT_CODE_MODE_POOL_OPTIONS: Readonly<CodeModePoolOptions> = Obj
 	maxQueuedScripts: 4,
 	idleTimeoutMs: 5 * 60_000,
 	memoryLimitBytes: 64 * MIB,
-	workerStackSizeMb: 8,
+	workerStackSizeMb: 32,
 });
 
 /** The longest wall-clock timeout a script may request. */
