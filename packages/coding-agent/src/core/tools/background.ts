@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { AgentToolResult } from "@hansjm10/volt-agent-core";
 import type { JsonObject } from "@hansjm10/volt-ai";
 import { type Static, type TObject, type TProperties, Type } from "typebox";
@@ -56,6 +57,17 @@ function movedResult(job: JobSummary, silentSeconds: number): AgentToolResult<un
 		// As with explicit background starts, only the settled job result passes the tool's result policy.
 		details: { job },
 	};
+}
+
+const nestedCallScope = new AsyncLocalStorage<true>();
+
+/**
+ * Runs a tool call made from inside another tool, such as a code mode script's nested call. Such a call cannot start
+ * a background job, and a silent bash command is killed as hung instead of moving to the background, because the
+ * caller needs the command's result (section 5.6 of docs/code-mode-design.md).
+ */
+export function withoutBackgroundJobs<T>(execute: () => Promise<T>): Promise<T> {
+	return nestedCallScope.run(true, execute);
 }
 
 /** Applied only to native Bash/subagent definitions, before extension overrides. */
@@ -152,6 +164,10 @@ export function withBackgroundJobs<T extends TProperties, TDetails>(
 				}
 				return options.finalize ? options.finalize(toolName, toolCallId, input, result, jobSignal) : result;
 			};
+			if (nestedCallScope.getStore()) {
+				if (background) throw new Error("A nested call cannot start a background job.");
+				return execute(signal, onUpdate, ctx);
+			}
 			if (needsPreflight || (!background && toolName !== "bash")) return execute(signal, onUpdate, ctx);
 			if (!background) {
 				// A foreground command that goes silent for its stall deadline moves to a

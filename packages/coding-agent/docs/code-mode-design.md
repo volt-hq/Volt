@@ -167,7 +167,7 @@ Decided: a compute budget and a nested-call budget, with no default wall-clock d
 - **Stop sequence.** Interrupt flag, then a grace period (initially 250 ms; honored interrupts stopped within about 70 ms in testing), then `worker.terminate()` and a background respawn.
 - **Excluded time.** VM boot and waiting in the pool queue count toward no budget.
 - **Memory.** `memoryLimit` is set on every VM. A 32 MiB limit held in testing: a string bomb and `new ArrayBuffer(1e9)` both failed with a catchable out-of-memory error, linear memory stayed at 32.3 MiB, and the VM remained usable. The default is 64 MiB (section 5.18).
-- **Bash stall move.** Bash calls made from a script run without the stall-move context, because a script needs the command's result, not a background job handle.
+- **Bash stall move.** Bash calls made from a script run without the stall-move context, because a script needs the command's result, not a background job handle. Nested calls run in a scope the background-job wrapper of bash and subagent honors: a silent command is killed as hung, and `background: true` is refused.
 
 Rejected: a single elapsed deadline covering tool and approval waits (Pi, DeepSeek). Approvals answered from a phone would count against it, the model would have to guess a timeout, and legitimate long work would fail. An overall cap that pauses while a nested call waits on the user may be added later if needed. Codex-style yield-and-poll is rejected; an opt-in background mode that reuses Volt's existing jobs and completion-wake mechanism is the preferred direction for long scripts, outside v1.
 
@@ -232,7 +232,7 @@ The bridge cannot recover precision a transport has already lost. MCP results ar
   - `invalid_arguments`: argument preparation or schema validation failed.
   - `blocked`: the tool-call policy denied the call.
   - `failed`: the tool returned an error result or threw, or the call hit a limit. `reason` distinguishes `result_too_large`, `limit_exceeded`, and `unavailable`.
-  - `cancelled`: the call was aborted.
+  - `cancelled`: the call was aborted. `reason` is `not_started` for a call that never started because the script ended while it waited.
 
   Scripts can catch these, and `Promise.allSettled` keeps the results of calls that succeed. Projections may resolve instead of rejecting where a failure is ordinary data, as bash does for exit codes.
 - **Terminations:** exhausting the call budget or the compute budget, the script timeout, a user abort, the output limit, and a protocol violation end the script. The script cannot catch them, and pending awaits never resume. Section 5.11 describes how they are reported.
@@ -304,9 +304,9 @@ The prelude calls one host function with two primitive strings: a kind (`call`, 
 3. **Binding set.** The binding must be in the set fixed when the script started; otherwise it is a protocol violation, because the prelude exposes only those bindings.
 4. **Outstanding argument bytes** across unfinished calls must stay within their cap; otherwise the call rejects with `failed` (`limit_exceeded`).
 5. **Decode `args`** with the codec. The result must be a plain object; otherwise `invalid_arguments`.
-6. **Tool still active.** An MCP server may have disconnected or a tool may have been disabled since the script started; otherwise `failed` (`unavailable`).
-7. **`prepareArguments` and `validateToolArguments`,** the same path as the agent loop; otherwise `invalid_arguments`.
-8. **Tool-call policy,** with an origin naming the parent tool call and `seq`, and the call ID `<parentToolCallId>:cm:<seq>`. IDs follow attempts, so invalid attempts leave gaps. A denial rejects with `blocked`.
+6. **Tool still active.** An MCP server may have disconnected or a tool may have been disabled since the script started; otherwise `failed` (`unavailable`). A built-in or extension tool must also be the same registered tool it was when the script started, so a tool an extension replaced in the meantime is unavailable.
+7. **`prepareArguments` and `validateToolArguments`,** the same path as the agent loop; otherwise `invalid_arguments`. Arguments holding a BigInt are rejected first, because no tool schema accepts one, and so is `background: true` (section 5.12).
+8. **Tool-call policy,** with an origin naming the parent tool call and `seq`, and the call ID `<parentToolCallId>:cm:<seq>`. IDs follow attempts, so invalid attempts leave gaps. A denial rejects with `blocked`. The policy is the session's, the one model-issued calls go through: the active-tool check, extension `tool_call` hooks, the grant profile, and registered turn policies. Checks 6 to 8 run in submission order: a call's checks start once the earlier call's have finished, so a call waiting for an approval holds back the checks of later calls, as the agent loop prepares calls in order.
 9. **Schedule and execute,** with an abort signal linked to the script's, under the scheduling rules of section 5.13.
 10. **Tool-result policy, projection, and size cap,** then the `result` message. The projection receives the result as the tool returned it and what the tool-result policy returned, which is nothing when no `tool_result` hook saw the result.
 11. **Record the call** for the outer result: tool name, a bounded summary of the arguments, status, duration, and error.
@@ -1041,16 +1041,25 @@ Sources are in `src/core/code-mode/` unless a path says otherwise. Tests are cit
 | A script shows only image references the host issued with its call results, at most 10; anything else throws an error it can catch. The host reads a call's value once, to encode it. | `prelude.ts` `image`, `settle`; `runtime.ts` `reply` | vm: "shows only image references the script received, at most the limit, and rejects the rest catchably"; "keeps image() working when a script patches Set"; runtime: "shows only images the script received in call results, at most the limit"; "reads each property of a call's value once" |
 | An image output for a reference the script did not receive, or past the limit, is a protocol violation. | `runtime.ts` `onOutput` | runtime: "treats an image the script could not have shown as a protocol violation" |
 
+#### Call dispatch
+
+| Guarantee | Enforced in | Test |
+|---|---|---|
+| Every nested call of a built-in or extension tool passes argument preparation and validation, then the session's tool-call and tool-result policy with a `code_mode` origin and the ID `<parentToolCallId>:cm:<seq>`, before and after the registered tool runs. | `dispatch.ts` `createCodeModeCallHandler`; `src/core/session/turn-policy.ts` (`origin`) | dispatch: "runs a call through the policies and the tool with its nested call id and origin"; session-dispatch: "passes a nested call through the session's hooks with its call ID and code mode origin" |
+| A tool no longer active, or replaced since the script started, rejects with `unavailable` before any policy runs. | `dispatch.ts` `createCodeModeCallHandler` | dispatch: "rejects a call to a tool that is no longer active or was replaced, before any policy runs" |
+| Invalid arguments, including a BigInt, reject with `invalid_arguments`, and so does `background: true`, without the policy or the tool running. | `dispatch.ts` `createCodeModeCallHandler` | dispatch: "prepares and validates arguments as the agent loop does"; "rejects background jobs without running the policies or the tool"; session-dispatch: "rejects background jobs and kills a silent nested command instead of moving it to the background" |
+| A policy denial rejects with `blocked` and its reason, and the tool does not run. | `dispatch.ts` `createCodeModeCallHandler` | dispatch: "rejects a call the policy blocks, with its reason"; session-dispatch: "rejects a nested call an extension hook blocks, without running it" |
+| In a restricted profile, each nested call is authorized as a model-issued call would be, and nested reads count as Plan research. | `src/core/session/turn-policy.ts` `toolCall`, `toolResult` | session-dispatch: "authorizes each nested call under Plan mode and counts nested reads as research" |
+| Checks 6 to 8 of later calls start only after an earlier call's have finished. | `dispatch.ts` `createCodeModeCallHandler` | dispatch: "runs the checks of a later call only after an earlier call's checks finish" |
+| A tool's failure passes the tool-result policy and rejects with `failed`; a call aborted while it runs rejects with `cancelled`, and one cancelled before it ran with `cancelled` (`not_started`). | `dispatch.ts` `createCodeModeCallHandler`, `run` | dispatch: "passes a tool's failure through the tool-result policy and rejects with it"; "rejects a call aborted while it runs as cancelled"; "rejects a call cancelled while it waits to run as cancelled before it ran" |
+| The projection receives the executed result and the tool-result policy's return value unchanged, so a result a hook saw is never projected from the full output file. | `dispatch.ts` `createCodeModeCallHandler`; `projections.ts` | dispatch: "passes the tool-result policy's result to the projection, which then never reads the full output file" |
+| A nested bash command that goes silent is killed as hung rather than moved to a background job, and a nested call cannot start one. | `src/core/tools/background.ts` `withoutBackgroundJobs`; `dispatch.ts` `run` | session-dispatch: "rejects background jobs and kills a silent nested command instead of moving it to the background" |
+
 #### Step 2 (planned)
 
 | Guarantee | Enforced in | Test, written before the implementation |
 |---|---|---|
-| In a restricted profile, per-call authorization still applies to each nested call. | Call pipeline; tool-call policy | Plan mode suite scenario: `lsp` `rename` rejects with `blocked`, and nested reads record research evidence |
-| Every nested call passes `prepareArguments`, `validateToolArguments`, and the tool-call and tool-result policy, with a `code_mode` origin and the ID `<parentToolCallId>:cm:<seq>`; the host never calls `execute` directly. | Call pipeline | Suite scenario with a recording policy hook; a denial rejects with `blocked` |
-| Checks 6 to 11 of section 5.9 run in order after the step 1 checks, each with its documented outcome. | Call pipeline | One case per check from a test worker, asserting the outcome and that later checks did not run |
-| A nested call cannot start a background job. | Call pipeline | `background: true` rejects with `invalid_arguments` |
-| An MCP call from a script goes through the manager's checks, events, and audit, and its projection receives the raw result. | Call pipeline; `src/core/mcp/manager.ts` | A fake MCP server: the call is audited and the script value carries its structured content and images |
-| A tool call's projection receives the executed result and the tool-result policy's return value unchanged, so a result a hook saw is never projected from the executed result. | Call pipeline | Suite scenario with a redacting `tool_result` hook on a truncated bash result: the script value holds the redacted text and no `fullOutputPath` |
+| An MCP call from a script goes through the manager's checks, events, and audit, as the call model-issued calls of that MCP tool take, and its projection receives the raw result. | MCP dispatch; `src/core/mcp/manager.ts` | A fake MCP server: hooks see the gateway or direct call, the call is audited, and the script value carries its structured content and images |
 
 ## 10. Risks
 

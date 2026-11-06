@@ -25,7 +25,12 @@ import type {
 import type { ImageContent, JsonObject, JsonValue, TextContent } from "@hansjm10/volt-ai";
 import type { AgentSessionTurnPolicy } from "../agent-session.ts";
 import { cloneCanonicalData } from "../canonical-data.ts";
-import { ExtensionMessageRoleMismatchError, type ExtensionRunner, type ToolResultEvent } from "../extensions/index.ts";
+import {
+	ExtensionMessageRoleMismatchError,
+	type ExtensionOperationOrigin,
+	type ExtensionRunner,
+	type ToolResultEvent,
+} from "../extensions/index.ts";
 import type { PolicyRegistration } from "../extensions/policy-registration.ts";
 import { withoutExtensionServices } from "../extensions/services-runtime.ts";
 import { getClientMessageId } from "../messages.ts";
@@ -368,9 +373,15 @@ export class SessionTurnPolicy {
 		}
 	}
 
-	/** The session's tool-call policy (activity, extensions, capability profile), then registered turn policies. */
-	*toolCallPolicies(signal: AbortSignal | undefined): Generator<ToolCallPolicy<TurnToolCall>> {
-		yield (event) => this.toolCall(event, signal);
+	/**
+	 * The session's tool-call policy (activity, extensions, capability profile), then registered turn policies.
+	 * `origin` attributes the call for extension hooks: the agent's own calls, or a code mode script's.
+	 */
+	*toolCallPolicies(
+		signal: AbortSignal | undefined,
+		origin: ExtensionOperationOrigin = { kind: "agent" },
+	): Generator<ToolCallPolicy<TurnToolCall>> {
+		yield (event) => this.toolCall(event, signal, origin);
 		for (const registration of this.workToolPolicies) {
 			yield async (event) => {
 				const snapshot = registration.policy;
@@ -387,6 +398,7 @@ export class SessionTurnPolicy {
 			input: JsonObject;
 		},
 		signal: AbortSignal | undefined,
+		origin: ExtensionOperationOrigin,
 	): Promise<{ block?: boolean; reason?: string } | undefined> {
 		this.host.assertNotLost();
 		if (!this.host.activeToolNames().includes(event.toolName)) {
@@ -399,13 +411,9 @@ export class SessionTurnPolicy {
 		}
 		let extensionDecision: { block?: boolean; reason?: string } | undefined;
 		if (this.host.extensionRunner().hasHandlers("tool_call")) {
-			extensionDecision = await this.host.extensionRunner().emitToolCall(
-				{ type: "tool_call", ...event },
-				{
-					origin: { kind: "agent" },
-					signal,
-				},
-			);
+			extensionDecision = await this.host
+				.extensionRunner()
+				.emitToolCall({ type: "tool_call", ...event }, { origin, signal });
 			if (extensionDecision?.block) return extensionDecision;
 		}
 		const profile = this.host.operationGrantProfile();
@@ -443,7 +451,7 @@ export class SessionTurnPolicy {
 	 * The session's tool-result policy: Plan research evidence, aborted subagent
 	 * details, and extension `tool_result` hooks. A background job's start
 	 * acknowledgement passes unchanged; the job's settled result passes here
-	 * with `backgroundCompletion`.
+	 * with `backgroundCompletion`. `origin` attributes the call for extension hooks.
 	 */
 	async toolResult(
 		event: {
@@ -455,6 +463,7 @@ export class SessionTurnPolicy {
 			isError: boolean;
 		},
 		backgroundCompletion = false,
+		origin: ExtensionOperationOrigin = { kind: "agent" },
 	): Promise<{ content: Array<TextContent | ImageContent>; details?: JsonValue; isError: boolean } | undefined> {
 		this.host.assertNotLost();
 		if (!backgroundCompletion && this.host.jobs().takeStartAcknowledgement(event.toolName, event.toolCallId)) {
@@ -491,7 +500,7 @@ export class SessionTurnPolicy {
 				...event,
 			} satisfies ToolResultEvent,
 			{
-				origin: { kind: "agent" },
+				origin,
 				signal: this.host.jobs().hookSignal(),
 			},
 		);
