@@ -41,7 +41,10 @@ type SessionTestInternals = {
 	_streamFn: StreamFn;
 	_turnPolicy: {
 		toolCallPolicies(signal: AbortSignal | undefined): Iterable<ToolCallPolicy<TurnToolCall>>;
-		toolResult(event: Omit<ToolResultEvent, "type">): Promise<ToolResultPatch | undefined>;
+		toolResult(
+			event: Omit<ToolResultEvent, "type">,
+			options: { signal: AbortSignal | undefined },
+		): Promise<ToolResultPatch | undefined>;
 	};
 };
 
@@ -171,7 +174,9 @@ export function createAgentSessionTestControl(session: AgentSession) {
 		},
 		evaluateToolResult: async (event: ToolResultEvent) => {
 			const { type: _type, ...rest } = event;
-			const patch = await internals(session)._turnPolicy.toolResult(rest);
+			const patch = await internals(session)._turnPolicy.toolResult(rest, {
+				signal: conversation().operation?.signal,
+			});
 			return {
 				content: patch?.content ?? event.content,
 				...((patch?.details ?? event.details) === undefined ? {} : { details: patch?.details ?? event.details }),

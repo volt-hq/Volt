@@ -264,16 +264,19 @@ export class SessionTurnPolicy {
 					{ type: "tool_call", toolCallId: toolCall.id, toolName: toolCall.name, input: args },
 					this.toolCallPolicies(signal),
 				),
-			afterToolCall: async ({ toolCall, args, result, isError }) => {
+			afterToolCall: async ({ toolCall, args, result, isError }, signal) => {
 				const details = result.details as JsonValue | undefined;
-				return await this.toolResult({
-					toolName: toolCall.name,
-					toolCallId: toolCall.id,
-					input: args,
-					content: result.content,
-					...(details === undefined ? {} : { details }),
-					isError,
-				});
+				return await this.toolResult(
+					{
+						toolName: toolCall.name,
+						toolCallId: toolCall.id,
+						input: args,
+						content: result.content,
+						...(details === undefined ? {} : { details }),
+						isError,
+					},
+					{ signal },
+				);
 			},
 			messageEnd: async (message, _signal, origin) => await this.messageEnd(message, origin),
 			prepareDelivery: (delivery) => this.host.prepareDelivery(delivery),
@@ -451,7 +454,9 @@ export class SessionTurnPolicy {
 	 * The session's tool-result policy: Plan research evidence, aborted subagent
 	 * details, and extension `tool_result` hooks. A background job's start
 	 * acknowledgement passes unchanged; the job's settled result passes here
-	 * with `backgroundCompletion`. `origin` attributes the call for extension hooks.
+	 * with `backgroundCompletion`. `signal` is the signal the hooks observe: the
+	 * caller's own, such as the running operation's, a job's, or a script call's.
+	 * `origin` attributes the call for extension hooks.
 	 */
 	async toolResult(
 		event: {
@@ -462,10 +467,14 @@ export class SessionTurnPolicy {
 			details?: JsonValue;
 			isError: boolean;
 		},
-		backgroundCompletion = false,
-		origin: ExtensionOperationOrigin = { kind: "agent" },
+		options: {
+			signal: AbortSignal | undefined;
+			backgroundCompletion?: boolean;
+			origin?: ExtensionOperationOrigin;
+		},
 	): Promise<{ content: Array<TextContent | ImageContent>; details?: JsonValue; isError: boolean } | undefined> {
 		this.host.assertNotLost();
+		const { signal, backgroundCompletion = false, origin = { kind: "agent" } } = options;
 		if (!backgroundCompletion && this.host.jobs().takeStartAcknowledgement(event.toolName, event.toolCallId)) {
 			// A start acknowledgement is not the native tool's completed result.
 			// The worker invokes the original result policy once, at settlement.
@@ -499,10 +508,7 @@ export class SessionTurnPolicy {
 				type: "tool_result",
 				...event,
 			} satisfies ToolResultEvent,
-			{
-				origin,
-				signal: this.host.jobs().hookSignal(),
-			},
+			{ origin, signal },
 		);
 		const finalDetails =
 			hookResult?.details !== undefined

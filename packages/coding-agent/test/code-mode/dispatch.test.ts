@@ -29,13 +29,17 @@ interface ResultCall extends PolicyCall {
 	content: Array<TextContent | ImageContent>;
 	details?: JsonValue;
 	isError: boolean;
+	signal: AbortSignal;
 }
 
 interface FakeHostOptions {
 	tools: AgentTool[];
 	trusted?: string[];
 	inactive?: string[];
-	decide?: (call: TurnToolCall) => ToolCallDecision | undefined | Promise<ToolCallDecision | undefined>;
+	decide?: (
+		call: TurnToolCall,
+		signal: AbortSignal,
+	) => ToolCallDecision | undefined | Promise<ToolCallDecision | undefined>;
 	patchResult?: (event: ResultCall) => ToolResultPatch | undefined;
 }
 
@@ -43,26 +47,29 @@ interface FakeHostOptions {
 function fakeHost(options: FakeHostOptions) {
 	const tools = new Map(options.tools.map((tool) => [tool.name, tool]));
 	const inactive = new Set(options.inactive);
+	const trusted = new Set(options.trusted);
 	const policyCalls: PolicyCall[] = [];
 	const resultCalls: ResultCall[] = [];
 	const host: CodeModeDispatchHost = {
 		cwd,
 		isToolActive: (name) => tools.has(name) && !inactive.has(name),
-		tool: (name) => tools.get(name),
-		isTrustedBuiltin: (name) => options.trusted?.includes(name) ?? false,
-		*toolCallPolicies(_signal, origin) {
+		tool: (name) => {
+			const registered = tools.get(name);
+			return registered && { tool: registered, trustedBuiltin: trusted.has(name) };
+		},
+		*toolCallPolicies(signal, origin) {
 			yield async (call) => {
 				policyCalls.push({ toolCallId: call.toolCallId, toolName: call.toolName, input: call.input, origin });
-				return await options.decide?.(call);
+				return await options.decide?.(call, signal);
 			};
 		},
-		toolResult: async (event, origin) => {
-			const recorded = { ...event, origin };
+		toolResult: async (event, signal, origin) => {
+			const recorded = { ...event, origin, signal };
 			resultCalls.push(recorded);
 			return options.patchResult?.(recorded);
 		},
 	};
-	return { host, tools, inactive, policyCalls, resultCalls };
+	return { host, tools, inactive, trusted, policyCalls, resultCalls };
 }
 
 function tool(
@@ -304,12 +311,54 @@ describe("code mode call dispatch", () => {
 		expect(executions).toBe(1);
 	});
 
-	it("rejects a call aborted while it runs as cancelled", async () => {
+	it("rejects a call cancelled while a policy is pending, which rejects on the abort, as cancelled before it ran", async () => {
+		let executed = false;
+		const { host } = fakeHost({
+			tools: [
+				tool("write", async () => {
+					executed = true;
+					return text("written");
+				}),
+			],
+			decide: (_call, signal) =>
+				new Promise((_resolve, reject) => {
+					signal.addEventListener("abort", () => reject(new Error("approval withdrawn")), { once: true });
+				}),
+		});
+		const controller = new AbortController();
+		const pending = handlerFor(host, [binding("write")])(call(1, "write", {}, controller.signal));
+		await settle();
+		controller.abort(new Error("the script ended"));
+		expect(await rejection(pending)).toMatchObject({ kind: "cancelled", reason: "not_started" });
+		expect(executed).toBe(false);
+	});
+
+	it("rejects a call aborted while it runs as cancelled, with none of the tool's output", async () => {
 		const { host } = fakeHost({
 			tools: [
 				tool("read", (_id, _args, signal) => {
-					return new Promise((_resolve, reject) => {
-						signal?.addEventListener("abort", () => reject(new Error("Operation aborted")), { once: true });
+					return new Promise((resolve) => {
+						signal?.addEventListener("abort", () => resolve(text("secret token 1234")), { once: true });
+					});
+				}),
+			],
+			patchResult: () => ({ content: [{ type: "text", text: "[redacted]" }], isError: false }),
+		});
+		const controller = new AbortController();
+		const pending = handlerFor(host, [binding("read")])(call(1, "read", {}, controller.signal));
+		await settle();
+		controller.abort();
+		const error = await rejection(pending);
+		expect(error).toMatchObject({ kind: "cancelled", message: "The call was cancelled" });
+		expect(error.reason).toBeUndefined();
+	});
+
+	it("gives the tool-result policy the call's signal, which shows a script that stopped during the call", async () => {
+		const { host, resultCalls } = fakeHost({
+			tools: [
+				tool("read", (_id, _args, signal) => {
+					return new Promise((resolve) => {
+						signal?.addEventListener("abort", () => resolve(text("partial")), { once: true });
 					});
 				}),
 			],
@@ -318,7 +367,38 @@ describe("code mode call dispatch", () => {
 		const pending = handlerFor(host, [binding("read")])(call(1, "read", {}, controller.signal));
 		await settle();
 		controller.abort();
-		expect(await rejection(pending)).toMatchObject({ kind: "cancelled", message: "Operation aborted" });
+		await rejection(pending);
+		expect(resultCalls).toHaveLength(1);
+		expect(resultCalls[0]!.signal).toBe(controller.signal);
+		expect(resultCalls[0]!.signal.aborted).toBe(true);
+	});
+
+	it("projects a result by the trust of the tool that ran, even when the registry changes while it runs", async () => {
+		const file = join(cwd, "extension-output.txt");
+		writeFileSync(file, "read from the full output file\n");
+		let finish: () => void = () => {};
+		const extensionBash = tool(
+			"bash",
+			async () =>
+				await new Promise<AgentToolResult<unknown>>((resolve) => {
+					finish = () =>
+						resolve({
+							content: [{ type: "text", text: "extension output" }],
+							details: { exitCode: 0, truncation: { truncated: true }, fullOutputPath: file },
+						});
+				}),
+		);
+		const { host, tools, trusted } = fakeHost({ tools: [extensionBash] });
+		const pending = handlerFor(host, [binding("bash")])(call(1, "bash", {}));
+		await settle();
+		// The trusted built-in takes the name while the extension's tool runs.
+		tools.set(
+			"bash",
+			tool("bash", async () => text("built-in")),
+		);
+		trusted.add("bash");
+		finish();
+		expect(await pending).toBe("extension output");
 	});
 
 	it("rejects calls to MCP tools as unavailable until MCP dispatch exists", async () => {

@@ -36,6 +36,7 @@ describe("code mode call dispatch in a session", () => {
 	let agentDir: string;
 	const sessions: AgentSession[] = [];
 	let seen: SeenEvent[];
+	let hookSignals: Array<{ type: SeenEvent["type"]; signal: AbortSignal | undefined }>;
 
 	beforeEach(() => {
 		tempDir = join(tmpdir(), `volt-code-mode-dispatch-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -43,6 +44,7 @@ describe("code mode call dispatch in a session", () => {
 		mkdirSync(agentDir, { recursive: true });
 		writeFileSync(join(tempDir, "notes.txt"), "first\nsecond");
 		seen = [];
+		hookSignals = [];
 	});
 
 	afterEach(async () => {
@@ -64,7 +66,8 @@ describe("code mode call dispatch in a session", () => {
 			settingsManager,
 			extensionFactories: [
 				testExtension("recorder", (volt) => {
-					volt.on("tool_call", (event) => {
+					volt.on("tool_call", (event, ctx) => {
+						hookSignals.push({ type: "tool_call", signal: ctx.signal });
 						seen.push({
 							type: "tool_call",
 							toolName: event.toolName,
@@ -77,7 +80,8 @@ describe("code mode call dispatch in a session", () => {
 						}
 						return undefined;
 					});
-					volt.on("tool_result", (event) => {
+					volt.on("tool_result", (event, ctx) => {
+						hookSignals.push({ type: "tool_result", signal: ctx.signal });
 						seen.push({
 							type: "tool_result",
 							toolName: event.toolName,
@@ -113,12 +117,12 @@ describe("code mode call dispatch in a session", () => {
 			parentToolCallId: "run-1",
 		});
 		let seq = 0;
-		return (toolName: string, args: Record<string, unknown>) =>
+		return (toolName: string, args: Record<string, unknown>, signal = new AbortController().signal) =>
 			handle({
 				seq: ++seq,
 				binding: JSON.stringify([toolName]),
 				args,
-				signal: new AbortController().signal,
+				signal,
 				images: new CodeModeImageStore().stage(),
 				maxValueBytes: 1024 * 1024,
 			});
@@ -142,6 +146,15 @@ describe("code mode call dispatch in a session", () => {
 			{ type: "tool_call", toolName: "read", toolCallId: "run-1:cm:1", origin },
 			{ type: "tool_result", toolName: "read", toolCallId: "run-1:cm:1", origin },
 		]);
+	});
+
+	it("gives the session's tool_call and tool_result hooks the script call's signal", async () => {
+		const call = scriptCalls(await createSession("build"));
+		const signal = new AbortController().signal;
+		expect(await call("read", { path: "notes.txt" }, signal)).toBe("first\nsecond");
+		expect(hookSignals.map((hook) => hook.type)).toStrictEqual(["tool_call", "tool_result"]);
+		// Identity, not equality: the session's own signals would compare equal to an unaborted one.
+		expect(hookSignals.every((hook) => hook.signal === signal)).toBe(true);
 	});
 
 	it("rejects a nested call an extension hook blocks, without running it", async () => {
