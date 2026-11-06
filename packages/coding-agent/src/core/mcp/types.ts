@@ -81,6 +81,11 @@ export interface McpServerConfig {
 	callTimeoutMs?: number;
 	idleTimeoutMs?: number;
 	metadataRefreshMs?: number;
+	/**
+	 * Calls from code mode scripts to this server that may run at once, counted across the process. Unset means
+	 * `DEFAULT_MCP_MAX_CONCURRENT_CALLS`.
+	 */
+	maxConcurrentCalls?: number;
 	command?: string;
 	args: string[];
 	cwd?: string;

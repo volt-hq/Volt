@@ -560,7 +560,7 @@ Decided. After the host checks of section 5.9, each nested call enters a per-scr
 | Class | Tools | Rule |
 |---|---|---|
 | Parallel | Tools without an `executionMode`, which is every bindable built-in tool | Runs concurrently with other calls |
-| Exclusive | Tools that declare `executionMode: "sequential"`, in practice extension tools | Waits until running calls finish, runs alone, and holds back later calls until it completes |
+| Exclusive | Tools that declare `executionMode: "sequential"`, in practice extension tools | Starts after every earlier call has finished, runs alone, and holds back later calls until it completes |
 | Per server | MCP tools | At most `maxConcurrentCalls` calls run at once per server |
 
 - The exclusive class respects what a tool's author declared, as DeepSeek's exclusive calls and Pydantic's `sequential=True` tools do. Pi does not: its nested calls run as soon as they are issued and ignore `executionMode` (`runToolCall` in `@earendil-works/pi-agent-core`).
@@ -571,13 +571,16 @@ Decided. After the host checks of section 5.9, each nested call enters a per-scr
 
 - **Per script:** at most 10 nested calls run at once (DeepSeek's default). With the pool's cap of four scripts per process (section 5.3), a process runs at most 40 nested calls at once.
 - **Per MCP server:** at most 4 calls at once by default, counted across every script in the process. A server's MCP configuration may set `maxConcurrentCalls` to change this; 1 serializes a server that does not handle concurrent requests well. This adds one optional field to the MCP server configuration format.
+- Every session, subagents included, has its own MCP manager, so the count is kept for the process and keyed by server id rather than kept by a manager. A call starts while fewer calls to its server id than its own configured limit run, which is the configured limit itself whenever the sessions share a configuration.
+- A `maxConcurrentCalls` that is not a positive integer is ignored with a configuration warning. The field does not change cached tool metadata, and it is not reported to clients.
 
 #### Ordering
 
 - Host checks, including tool-call policy, run in submission order (section 5.9), as the agent loop prepares calls in order before executing them.
 - Calls start in submission order under the per-script limit and within each MCP server.
-- A call waiting only for its server's limit does not hold back calls to other servers or calls to other tools.
-- An exclusive call is a full barrier: no later call starts before it finishes.
+- A call waiting only for its server's limit does not hold back calls to other servers or calls to other tools, and it does not count toward the script's limit of 10.
+- When a server slot frees, the longest-waiting call that can start takes it. A call whose script cannot start it yet, because the script is at its limit or behind an exclusive call, keeps its place, and the slot goes to the next one. No slot stays free while a call that could use it waits.
+- An exclusive call is a full barrier in both directions: it starts only after every earlier call has finished, including one still waiting for its server, and no later call starts before it finishes.
 - A call cancelled while queued never starts and is recorded as `cancelled before it ran` (section 5.11).
 
 #### The code-mode tool at the top level
@@ -993,6 +996,19 @@ Sources are in `src/core/code-mode/` unless a path says otherwise. Tests are cit
 | An MCP tool is bound once, at its MCP path, through the built-in gateway or its own direct tool, and only from fresh metadata that passes its server's filters. | `bindings.ts` `computeCodeModeBindings`; `src/core/mcp/manager.ts` `getCallableTools` | bindings: "binds MCP tools only through an active gateway that is the built-in one, or their own direct tool"; session-bindings: "keeps a promoted MCP tool bound through its direct tool when the gateway is excluded"; mcp: "lists callable tools only from fresh metadata that passes the server's filters" |
 | Binding names are unique, no path is a namespace of another, and a binding the runtime could not install is omitted. | `bindings.ts` `computeCodeModeBindings` | bindings: "binds exactly the calls the model could make directly, at paths the runtime accepts"; "omits bindings whose path the runtime would reject" |
 
+#### Scheduling
+
+| Guarantee | Enforced in | Test |
+|---|---|---|
+| At most 10 nested calls of a script run at once, and a call waiting for its server does not count. | `scheduler.ts` `CodeModeCallScheduler` | scheduler: "follows the scheduling rules for any sequence of calls, finishes, and cancellations"; "starts calls to other servers and tools while a call waits for its server" |
+| Calls start in submission order, and a call waiting for a full server holds back only later calls to that server. | `scheduler.ts` `CodeModeCallScheduler` | scheduler: "follows the scheduling rules for any sequence of calls, finishes, and cancellations"; "starts calls to other servers and tools while a call waits for its server"; "starts a call to a freed server past an earlier call held behind a stricter call to its own server" |
+| An exclusive call starts after every earlier call has finished, runs alone, and holds back every later call. | `scheduler.ts` `CodeModeCallScheduler` | scheduler: "follows the scheduling rules for any sequence of calls, finishes, and cancellations"; "runs an exclusive call after every earlier call has finished and before any later call starts" |
+| A call to an MCP server starts only while fewer calls to that server than its limit run in the process. A freed slot goes to the longest-waiting call that can start, and no slot stays free while a call that could use it waits. | `scheduler.ts` `CodeModeServerLimiter`, `getCodeModeServerLimiter` | scheduler: "follows the scheduling rules for any sequence of calls, finishes, and cancellations"; "gives a freed server slot to the longest-waiting call that can start, across scripts"; "keeps the place of a server call submitted while its script is full"; "starts a server call only while fewer calls to that server than its own limit run in the process"; "shares one server limiter across the process" |
+| A call cancelled while it waits never starts and rejects as not started, and every other call eventually runs. | `scheduler.ts` `CodeModeCallScheduler` | scheduler: "follows the scheduling rules for any sequence of calls, finishes, and cancellations"; "rejects calls cancelled before they start, which never run"; "never starts a queued call whose signal aborted with the call that was holding it back"; "never starts a call cancelled while a freed server slot is offered" |
+| A call's failure, including a synchronous throw, reaches its caller and frees its slots. | `scheduler.ts` `CodeModeCallScheduler` | scheduler: "passes on a call's failure, including a synchronous throw, and keeps scheduling" |
+| MCP tools are limited per server whatever their direct tool declares; other tools run exclusively only if they declare `executionMode: "sequential"`. | `scheduler.ts` `schedulingClassFor` | scheduler: "derives the scheduling class from the binding target and the tool's execution mode" |
+| A server's `maxConcurrentCalls` is a positive integer that defaults to 4; an invalid value is ignored with a warning, and the field does not change cached tool metadata. | `src/core/mcp/config.ts` `normalizeServer`; `src/core/mcp/manager.ts` `getMaxConcurrentCalls` | mcp: "reads each server's maxConcurrentCalls and warns about invalid values" |
+
 #### Step 2 (planned)
 
 | Guarantee | Enforced in | Test, written before the implementation |
@@ -1002,7 +1018,6 @@ Sources are in `src/core/code-mode/` unless a path says otherwise. Tests are cit
 | Checks 6 to 11 of section 5.9 run in order after the step 1 checks, each with its documented outcome. | Call pipeline | One case per check from a test worker, asserting the outcome and that later checks did not run |
 | A nested call cannot start a background job. | Call pipeline | `background: true` rejects with `invalid_arguments` |
 | Script values and image bytes stay within their caps before they are materialized; image bytes never enter the VM, and a reference is valid only in the script that received it. | Projections; image store | An oversized result per projection; a reference from another script is rejected |
-| At most 10 nested calls run at once per script; an exclusive call runs alone and holds back later calls; MCP calls are limited per server across every script in the process; a call waiting on one server does not hold back others; calls start in submission order within these rules; a call cancelled while queued never starts. | Scheduler | Model-based property with fake tools that record overlapping execution |
 
 ## 10. Risks
 

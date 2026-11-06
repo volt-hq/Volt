@@ -3,6 +3,7 @@ import type { CallToolResult, GetPromptResult, ReadResourceResult } from "@model
 import { omitUndefined } from "../../utils/json.ts";
 import type { McpAuditLogger } from "./audit.ts";
 import {
+	DEFAULT_MCP_MAX_CONCURRENT_CALLS,
 	getMcpDirectToolName,
 	getServerTimeoutMs,
 	hashMcpServerConfig,
@@ -409,6 +410,11 @@ export class McpManager {
 	hasTrustedResourceReads(serverId: string): boolean {
 		const server = this.findServerConfig(serverId);
 		return server?.enabled === true && serverTrustsResourceReads(server);
+	}
+
+	/** Calls from code mode scripts to the server that may run at once, across the process. */
+	getMaxConcurrentCalls(serverId: string): number {
+		return this.findServerConfig(serverId)?.maxConcurrentCalls ?? DEFAULT_MCP_MAX_CONCURRENT_CALLS;
 	}
 
 	isTrustedToolRead(serverId: string, toolName: string): boolean {
