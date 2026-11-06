@@ -13,6 +13,9 @@ import type {
 	McpTransportKind,
 } from "./types.ts";
 
+/** Calls from code mode scripts that may run at once per server, across the process (section 5.13 of docs/code-mode-design.md). */
+export const DEFAULT_MCP_MAX_CONCURRENT_CALLS = 4;
+
 export const DEFAULT_MCP_SETTINGS: McpSettings = {
 	enabled: true,
 	mode: "proxy",
@@ -345,6 +348,17 @@ function normalizeServer(
 		});
 		return undefined;
 	}
+	const maxConcurrentCalls = server.maxConcurrentCalls;
+	const validMaxConcurrentCalls =
+		typeof maxConcurrentCalls === "number" && Number.isSafeInteger(maxConcurrentCalls) && maxConcurrentCalls >= 1;
+	if (maxConcurrentCalls !== undefined && !validMaxConcurrentCalls) {
+		diagnostics.push({
+			severity: "warning",
+			message: `MCP server ${id} maxConcurrentCalls must be a positive integer; using ${DEFAULT_MCP_MAX_CONCURRENT_CALLS}`,
+			path: source.path,
+			serverId: id,
+		});
+	}
 	if (enabled && (transport === "streamable-http" || transport === "sse") && !url) {
 		diagnostics.push({
 			severity: "error",
@@ -372,6 +386,7 @@ function normalizeServer(
 		callTimeoutMs: asFiniteNumber(server.callTimeoutMs),
 		idleTimeoutMs: asFiniteNumber(server.idleTimeoutMs),
 		metadataRefreshMs: asFiniteNumber(server.metadataRefreshMs),
+		...(validMaxConcurrentCalls ? { maxConcurrentCalls } : {}),
 		...(command ? { command } : {}),
 		args: isStringArray(server.args) ? [...server.args] : [],
 		...(typeof server.cwd === "string" && server.cwd.trim().length > 0 ? { cwd: server.cwd.trim() } : {}),

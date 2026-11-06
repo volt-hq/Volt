@@ -74,6 +74,9 @@ export const DEFAULT_CODE_MODE_POOL_OPTIONS: Readonly<CodeModePoolOptions> = Obj
 	workerStackSizeMb: 32,
 });
 
+/** Nested calls of one script that may run at once (section 5.13). */
+export const MAX_CONCURRENT_NESTED_CALLS = 10;
+
 /** The longest wall-clock timeout a script may request. */
 export const MAX_CODE_MODE_SCRIPT_TIMEOUT_MS = 30 * 60_000;
 

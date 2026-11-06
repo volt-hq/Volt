@@ -8,6 +8,7 @@ import { cloneCanonicalData } from "../src/core/canonical-data.ts";
 import { getMcpServerAuthState } from "../src/core/mcp/auth.ts";
 import {
 	createEmptyMcpMergedConfig,
+	DEFAULT_MCP_MAX_CONCURRENT_CALLS,
 	finalizeMcpConfig,
 	hashMcpServerConfig,
 	mergeMcpConfigFile,
@@ -955,6 +956,38 @@ describe("MCP support", () => {
 		expect(changed.getCallableTools()).toEqual([]);
 		await changed.dispose();
 		await manager.dispose();
+	});
+
+	it("reads each server's maxConcurrentCalls and warns about invalid values", () => {
+		const tempDir = makeTempDir();
+		tempDirs.push(tempDir);
+		const limitOf = (config: McpResolvedConfig) =>
+			new McpManager({
+				config,
+				clientFactory: createFakeFactory("output"),
+				metadataCache: new McpMetadataCache({ agentDir: tempDir }),
+				outputStore: new McpOutputStore({ agentDir: tempDir, maxOutputBytes: 4096, maxOutputLines: 100 }),
+			}).getMaxConcurrentCalls("fake");
+		const unset = createTestConfig(tempDir);
+		expect(unset.servers.fake.maxConcurrentCalls).toBeUndefined();
+		expect(limitOf(unset)).toBe(DEFAULT_MCP_MAX_CONCURRENT_CALLS);
+		const serialized = createTestConfig(tempDir, { maxConcurrentCalls: 1 });
+		expect(serialized.diagnostics).toEqual([]);
+		expect(limitOf(serialized)).toBe(1);
+		// The limit does not change the server's tools, so metadata cached without it stays valid.
+		expect(hashMcpServerConfig(serialized.servers.fake)).toBe(hashMcpServerConfig(unset.servers.fake));
+		for (const invalid of [0, -1, 1.5, "3"]) {
+			const config = createTestConfig(tempDir, { maxConcurrentCalls: invalid });
+			expect(config.servers.fake.maxConcurrentCalls).toBeUndefined();
+			expect(limitOf(config)).toBe(DEFAULT_MCP_MAX_CONCURRENT_CALLS);
+			expect(config.diagnostics).toEqual([
+				expect.objectContaining({
+					severity: "warning",
+					serverId: "fake",
+					message: "MCP server fake maxConcurrentCalls must be a positive integer; using 4",
+				}),
+			]);
+		}
 	});
 
 	it("persists enablement overlays and exposes configured direct tools", async () => {
