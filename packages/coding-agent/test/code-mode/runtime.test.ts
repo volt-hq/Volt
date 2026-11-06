@@ -1,7 +1,13 @@
 import { type SpawnSyncReturns, spawnSync } from "node:child_process";
-import { afterAll, describe, expect, it } from "vitest";
-import { type CodeModeWorkerListener, CodeModeWorkerPool } from "../../src/core/code-mode/pool.ts";
-import type { HostToWorkerMessage, WorkerToHostMessage } from "../../src/core/code-mode/protocol.ts";
+import fc from "fast-check";
+import { afterAll, describe, expect, it, vi } from "vitest";
+import { CodeModeWorker, type CodeModeWorkerListener, CodeModeWorkerPool } from "../../src/core/code-mode/pool.ts";
+import type { PreludeConfig } from "../../src/core/code-mode/prelude.ts";
+import {
+	CODE_MODE_PROTOCOL_VERSION,
+	type HostToWorkerMessage,
+	type WorkerToHostMessage,
+} from "../../src/core/code-mode/protocol.ts";
 import {
 	type CodeModeCall,
 	CodeModeCallError,
@@ -55,11 +61,15 @@ function deferred<T>() {
 	return { promise, resolve };
 }
 
+/** A forged message from a worker, or one that fails validation. */
+type ForgedMessage = WorkerToHostMessage | "malformed";
+
 /**
- * A pool whose single worker answers `start` with one forged message, standing in for a compromised worker.
- * It implements only what the runtime uses.
+ * A pool whose single worker answers `start` with forged messages, standing in for a compromised worker. It
+ * implements only what the runtime uses and records whether the runtime released or discarded the worker.
  */
-function forgingPool(messageFor: (id: number) => WorkerToHostMessage): CodeModeWorkerPool {
+function forgingPool(messagesFor: (id: number) => ForgedMessage[]): { pool: CodeModeWorkerPool; returned: string[] } {
+	const returned: string[] = [];
 	const worker = {
 		control: new SharedArrayBuffer(24),
 		alive: true,
@@ -72,14 +82,145 @@ function forgingPool(messageFor: (id: number) => WorkerToHostMessage): CodeModeW
 		},
 		post(message: HostToWorkerMessage) {
 			if (message.type !== "start") return;
-			queueMicrotask(() => this.listener?.onMessage(messageFor(message.id)));
+			for (const forged of messagesFor(message.id)) {
+				queueMicrotask(() => {
+					if (forged === "malformed") this.listener?.onMalformed();
+					else this.listener?.onMessage(forged);
+				});
+			}
 		},
 		terminate() {
 			this.alive = false;
 		},
 	};
-	return { acquire: async () => worker, release: () => {}, discard: () => {} } as unknown as CodeModeWorkerPool;
+	const pool = {
+		acquire: async () => worker,
+		release: () => returned.push("released"),
+		discard: () => returned.push("discarded"),
+	} as unknown as CodeModeWorkerPool;
+	return { pool, returned };
 }
+
+/** Runs `code` on a forging pool's worker, which never runs it; the forged messages decide the outcome. */
+function runForged(
+	forging: { pool: CodeModeWorkerPool },
+	options: Partial<CodeModeScriptRequest> = {},
+): Promise<CodeModeScriptResult> {
+	return runCodeModeScript(forging.pool, {
+		code: "",
+		bindings: [{ name: "call", path: ["call"] }],
+		onCall: async () => null,
+		timeoutMs: 2_000,
+		...options,
+	});
+}
+
+/** Source of values a script might pass to the script API, from ordinary to hostile. */
+const SCRIPT_API_VALUES = [
+	"undefined",
+	"null",
+	"-0",
+	"NaN",
+	"10n ** 30n",
+	'Symbol("s")',
+	"function named() {}",
+	'"\\ud800 lone surrogate"',
+	'"line\\nbreak\\u2028separator"',
+	"new Date(0)",
+	'new Map([["k", 1]])',
+	"new Uint8Array(2)",
+	"[1, , 3]",
+	"Object.assign([1], { extra: 1 })",
+	"Object.create(null)",
+	"{ __proto__: { inherited: 1 }, own: 1 }",
+	"(() => { const c = { list: [] }; c.list.push(c); return c; })()",
+	"(() => { let d = {}; for (let i = 0; i < 70; i++) d = { d }; return d; })()",
+	'(() => { const e = new Error("loop"); e.cause = e; return e; })()',
+	'Object.defineProperty(new Error("x"), "name", { get() { throw new Error("name getter"); } })',
+	'new Proxy({}, { get() { throw new Error("trap"); }, ownKeys() { throw new Error("trap"); }, getPrototypeOf() { throw new Error("trap"); } })',
+	"(() => { const r = Proxy.revocable({}, {}); r.revoke(); return r.proxy; })()",
+	'{ toString() { throw new Error("toString"); }, valueOf() { throw new Error("valueOf"); } }',
+	'{ [Symbol.toPrimitive]() { throw new Error("toPrimitive"); } }',
+	'{ get type() { throw new Error("getter"); }, get ref() { throw new Error("getter"); } }',
+	'{ type: "image", get ref() { return "r".repeat(65); } }',
+	'{ get nested() { tools.call({ from: "getter" }); return 1; } }',
+	'{ get printed() { text("from a getter"); return 1; } }',
+	"{ get gone() { delete this.later; return 1; }, later: 2 }",
+];
+
+/** Uses of the script API; each `$` is replaced with a value. */
+const SCRIPT_API_CALLS = [
+	"text($)",
+	"console.log($, $)",
+	"console.warn($)",
+	"console.error($)",
+	"console.debug($)",
+	"console.info($)",
+	"image($)",
+	"tools.call($)",
+	"tools.call()",
+	"tools.nested.deep($)",
+	"Reflect.apply(text, undefined, [$])",
+	"tools.call.call(null, $)",
+	"new tools.call($)",
+	"new ToolCallError($, $, $, $)",
+	'String(new ToolCallError($, "tool", "failed", $))',
+];
+
+/**
+ * Patches that persist for the rest of the script. `Promise.prototype.constructor` and `Object.prototype.then`
+ * are left alone: they change how `await` itself behaves in any engine.
+ */
+const SCRIPT_API_PATCHES = [
+	'Object.defineProperty(Array.prototype, 0, { configurable: true, get() { return "inherited"; }, set() { throw new Error("setter"); } });',
+	'Object.defineProperty(Object.prototype, "get", { configurable: true, value() { throw new Error("descriptor"); } });',
+	'JSON.stringify = () => { throw new Error("patched"); };',
+	'Array.prototype.push = () => { throw new Error("patched"); };',
+	'Array.prototype.join = () => "patched";',
+	"Object.keys = () => [];",
+	'Map.prototype.set = () => { throw new Error("patched"); };',
+	'String.prototype.slice = () => "patched";',
+	'Promise.prototype.then = function () { throw new Error("patched"); };',
+	'Function.prototype.call = function () { throw new Error("patched"); };',
+];
+
+const scriptApiValue = fc.oneof(
+	fc.constantFrom(...SCRIPT_API_VALUES),
+	fc.jsonValue({ maxDepth: 3 }).map((value) => JSON.stringify(value)),
+	fc.constantFrom(0, 63, 64, 65, 1_000, 100_000).map((length) => `"x".repeat(${length})`),
+	fc.constantFrom(0, 63, 64, 65).map((length) => `({ type: "image", ref: "r".repeat(${length}) })`),
+	// Arguments around the property's 1,000-byte limit, in one-, two-, and four-byte UTF-8 characters.
+	fc
+		.record({
+			unit: fc.constantFrom(["x", 1], ["\\u00e9", 2], ["\\u{1F4A9}", 4] as const),
+			delta: fc.integer({ min: -3, max: 3 }),
+		})
+		.map(({ unit: [char, bytes], delta }) => `({ s: "${char}".repeat(${Math.floor(992 / bytes) + delta}) })`),
+);
+
+/** One statement of a generated script; every one catches what it throws. */
+const scriptApiStatement = fc.oneof(
+	{
+		weight: 4,
+		arbitrary: fc
+			.record({
+				call: fc.constantFrom(...SCRIPT_API_CALLS),
+				values: fc.array(scriptApiValue, { minLength: 4, maxLength: 4 }),
+				awaited: fc.boolean(),
+			})
+			.map(({ call, values, awaited }) => {
+				let next = 0;
+				const expression = call.replace(/\$/g, () => values[next++]);
+				return awaited
+					? `try { await (${expression}); } catch { caught++; }`
+					: `try { void (${expression}); } catch { caught++; }`;
+			}),
+	},
+	{
+		weight: 1,
+		arbitrary: fc.constantFrom(...SCRIPT_API_PATCHES).map((patch) => `try { ${patch} } catch { caught++; }`),
+	},
+);
 
 /** Runs `body` in a fresh process with nothing else to keep it alive, after importing the pool and the runtime. */
 function runInFreshProcess(body: string): SpawnSyncReturns<string> {
@@ -324,21 +465,27 @@ describe("code mode runtime", () => {
 		expect(texts(result)).toStrictEqual(["small"]);
 	});
 
+	it("fails with an output limit and reuses the worker when the done frame is larger than a message frame", async () => {
+		// A well-formed done frame of about 2,000 bytes, over the 1,000-byte frame limit. The VM has ended.
+		const payload = JSON.stringify({ ok: true, value: "x".repeat(2_000) });
+		const forging = forgingPool((id) => [{ type: "done", id, payload }]);
+		const result = failed(await runForged(forging, { limits: { maxFrameBytes: 1_000 } }));
+		expect(result.failure).toStrictEqual({ kind: "output_limit" });
+		expect(forging.returned).toStrictEqual(["released"]);
+	});
+
 	it("treats call arguments over the argument limit as a protocol violation", async () => {
 		let called = false;
 		// Within the coarse check before parsing (limit plus envelope room), but over the limit itself.
 		const payload = `{"seq":1,"binding":"call","args":${JSON.stringify({ s: "x".repeat(200) })}}`;
 		const result = failed(
-			await runCodeModeScript(
-				forgingPool((id) => ({ type: "call", id, payload })),
+			await runForged(
+				forgingPool((id) => [{ type: "call", id, payload }]),
 				{
-					code: "",
-					bindings: [{ name: "call", path: ["call"] }],
 					onCall: async () => {
 						called = true;
 						return null;
 					},
-					timeoutMs: 2_000,
 					limits: { maxArgumentBytes: 100 },
 				},
 			),
@@ -359,19 +506,199 @@ describe("code mode runtime", () => {
 				throw new Error("handler bug");
 			},
 		});
-		const result = failed(
-			await runCodeModeScript(forgingPool(throwing), {
-				code: "",
-				bindings: [{ name: "call", path: ["call"] }],
-				onCall: async () => null,
-				timeoutMs: 2_000,
-			}),
-		);
+		const result = failed(await runForged(forgingPool((id) => [throwing(id)])));
 		expect(result.failure).toStrictEqual({
 			kind: "sandbox",
 			reason: "the host failed while supervising the script: handler bug",
 		});
 	});
+
+	it("treats hostile worker frames as protocol violations and discards the worker", async () => {
+		const call = (id: number, seq: number, binding = "call", args = "{}"): ForgedMessage => ({
+			type: "call",
+			id,
+			payload: `{"seq":${seq},"binding":${JSON.stringify(binding)},"args":${args}}`,
+		});
+		const failedDone = (error: Record<string, unknown>) =>
+			JSON.stringify({
+				ok: false,
+				phase: "run",
+				error: { name: "Error", summary: "Error: x", text: "Error: x", outOfMemory: false, ...error },
+			});
+		// Each case: the forged messages, the start of the failure reason, and how many calls reach the handler.
+		const cases: [(id: number) => ForgedMessage[], string, number][] = [
+			[() => ["malformed"], "protocol violation: malformed message", 0],
+			[(id) => [{ type: "call", id, payload: "{" }], "protocol violation: invalid call frame", 0],
+			[(id) => [call(id, 2)], "protocol violation: call 2 after call 0", 0],
+			[(id) => [call(id, 1), call(id, 1)], "protocol violation: call 1 after call 1", 1],
+			[(id) => [call(id, 1, "other")], "protocol violation: unknown binding other", 0],
+			[
+				(id) => [call(id, 1, "call", '{"n":0.1000000000000000055511151231257827}')],
+				"protocol violation: invalid call frame",
+				0,
+			],
+			[
+				(id) => [{ type: "output", id, payload: '{"type":"console","level":"trace","text":"x"}' }],
+				"protocol violation: invalid output frame",
+				0,
+			],
+			[
+				(id) => [{ type: "output", id, payload: `{"type":"image","ref":"${"r".repeat(65)}"}` }],
+				"protocol violation: invalid output frame",
+				0,
+			],
+			[
+				(id) => [{ type: "done", id, payload: failedDone({ summary: "Error: x\nNested tool calls: 0" }) }],
+				"protocol violation: error description exceeds its limits",
+				0,
+			],
+			[(id) => [{ type: "done", id, payload: "done" }], "protocol violation: invalid done frame", 0],
+		];
+		for (const [messagesFor, reason, expectedCalls] of cases) {
+			const forging = forgingPool(messagesFor);
+			let calls = 0;
+			const result = failed(
+				await runForged(forging, {
+					onCall: async () => {
+						calls++;
+						return null;
+					},
+				}),
+			);
+			expect(result.failure.kind, reason).toBe("sandbox");
+			expect(result.failure.kind === "sandbox" && result.failure.reason.startsWith(reason), reason).toBe(true);
+			expect(calls, reason).toBe(expectedCalls);
+			expect(forging.returned, reason).toStrictEqual(["discarded"]);
+		}
+	});
+
+	it("runs the host checks for a call in order and ignores messages for other scripts", async () => {
+		// A forged call with array arguments fails the last check and is answered, not treated as a violation;
+		// a `done` for another script is ignored.
+		let called = false;
+		const answered = forgingPool((id) => [
+			{ type: "done", id: id + 1, payload: '{"ok":true,"value":"another script"}' },
+			{ type: "call", id, payload: '{"seq":1,"binding":"call","args":[1]}' },
+			{ type: "done", id, payload: '{"ok":true,"value":"this script"}' },
+		]);
+		const result = await runForged(answered, {
+			onCall: async () => {
+				called = true;
+				return null;
+			},
+		});
+		expect(result).toMatchObject({ ok: true, value: "this script" });
+		expect(result.calls).toMatchObject([
+			{
+				seq: 1,
+				status: "failed",
+				error: { kind: "invalid_arguments", message: "tool arguments must be an object" },
+			},
+		]);
+		expect(called).toBe(false);
+		expect(answered.returned).toStrictEqual(["released"]);
+		// The outstanding-argument check comes before the argument check.
+		const outstanding = await runForged(
+			forgingPool((id) => [
+				{ type: "call", id, payload: '{"seq":1,"binding":"call","args":[1]}' },
+				{ type: "done", id, payload: '{"ok":true}' },
+			]),
+			{ limits: { maxOutstandingArgumentBytes: 1 } },
+		);
+		expect(outstanding.calls).toMatchObject([{ error: { kind: "failed", reason: "limit_exceeded" } }]);
+		// The call budget comes before the binding check: the second call exhausts it, so its unknown binding
+		// is never examined.
+		const budget = forgingPool((id) => [
+			{ type: "call", id, payload: '{"seq":1,"binding":"call","args":{}}' },
+			{ type: "call", id, payload: '{"seq":2,"binding":"other","args":{}}' },
+		]);
+		expect(failed(await runForged(budget, { limits: { callBudget: 1 } })).failure).toStrictEqual({
+			kind: "call_budget",
+			budget: 1,
+		});
+	});
+
+	it("rejects a call whose arguments would exceed the outstanding-argument limit until earlier calls finish", async () => {
+		// Each call's arguments, {"s":"x..."}, are exactly 1,000 bytes; the limit admits one call at a time.
+		const result = await run(
+			`
+			const first = tools.call({ s: 'x'.repeat(992) });
+			let second;
+			try { second = await tools.call({ s: 'x'.repeat(992) }); } catch (error) { second = [error.kind, error.reason]; }
+			await first;
+			return [second, await tools.call({ s: 'x'.repeat(992) })];
+		`,
+			{
+				limits: { maxOutstandingArgumentBytes: 1_500 },
+				onCall: async (call) => {
+					if (call.seq === 1) await new Promise((resolve) => setTimeout(resolve, 50));
+					return "ok";
+				},
+			},
+		);
+		expect(result).toMatchObject({ ok: true, value: [["failed", "limit_exceeded"], "ok"] });
+		expect(result.calls.map((call) => call.status)).toStrictEqual(["completed", "failed", "completed"]);
+	});
+
+	it("runs every script in a fresh VM, so nothing a script changes reaches the next one", async () => {
+		const single = newPool({ maxWorkers: 1 });
+		const changed = await run(
+			"globalThis.leak = 1; Array.prototype.push = () => 0; Object.prototype.polluted = 1; tools.extra = 1; return 'changed';",
+			{},
+			single,
+		);
+		expect(changed).toMatchObject({ ok: true, value: "changed" });
+		const next = await run("return [typeof leak, [].push(1), typeof ({}).polluted, typeof tools.extra];", {}, single);
+		expect(next).toMatchObject({ ok: true, value: ["undefined", 1, "undefined", "undefined"] });
+		expect(single.stats.workers).toBe(1);
+	});
+
+	it("ends stack exhaustion in a catchable error, including source nested deeper than the parser allows", async () => {
+		// Runs on a pool worker: the worker's native stack, not the test thread's, decides whether the VM's own stack
+		// guard fires first. Parsing deeply nested source overflowed an 8 MB worker stack on Node 24 and 25.
+		const result = await run(`
+			const probes = [
+				() => { function f() { return f() + 1; } f(); },
+				() => JSON.parse("[".repeat(100000) + "]".repeat(100000)),
+				() => eval("[".repeat(100000) + "]".repeat(100000)),
+				() => new Function("return " + "(".repeat(100000) + "1" + ")".repeat(100000))(),
+				() => eval("\`\${".repeat(5000) + "1" + "}\`".repeat(5000)),
+			];
+			const outcomes = [];
+			for (const probe of probes) {
+				try { probe(); outcomes.push("completed"); } catch (error) { outcomes.push(error.name); }
+			}
+			return outcomes;
+		`);
+		expect(result).toMatchObject({
+			ok: true,
+			value: ["RangeError", "RangeError", "RangeError", "RangeError", "RangeError"],
+		});
+		const source = failed(await run(`return ${"[".repeat(100_000)}${"]".repeat(100_000)};`));
+		expect(source.failure).toMatchObject({ kind: "script_error", phase: "evaluate", error: { name: "RangeError" } });
+	});
+
+	it("never ends a script as a sandbox failure, whatever it passes to the script API", async () => {
+		// Every host check has a matching prelude check that throws an error the script can catch, so only a forged
+		// frame can be a protocol violation.
+		await fc.assert(
+			fc.asyncProperty(fc.array(scriptApiStatement, { minLength: 1, maxLength: 10 }), async (statements) => {
+				const code = `let caught = 0;\n${statements.join("\n")}\nreturn caught;`;
+				const result = await run(code, {
+					bindings: [
+						{ name: "call", path: ["call"] },
+						{ name: "nested.deep", path: ["nested", "deep"] },
+					],
+					onCall: async (call) => call.args,
+					timeoutMs: 20_000,
+					limits: { maxArgumentBytes: 1_000 },
+				});
+				if (!result.ok) throw new Error(`the script failed: ${JSON.stringify(result.failure)}\n${code}`);
+				expect(typeof result.value).toBe("number");
+			}),
+			{ numRuns: 100 },
+		);
+	}, 120_000);
 
 	it("agrees with the prelude on the argument limit when the binding name needs escaping", async () => {
 		// {"s":"éé..."} with 500 two-byte characters is exactly 1,008 bytes.
@@ -493,6 +820,36 @@ describe("code mode worker pool", () => {
 		expect(child.error).toBeUndefined();
 		expect(child.stdout.trim()).toBe(JSON.stringify({ value: 1, calls: ["unsettled"] }));
 		expect(child.status).toBe(0);
+	});
+
+	it("fails closed when a worker reports a different protocol version", async () => {
+		const source =
+			'import { parentPort } from "node:worker_threads"; parentPort.postMessage({ type: "ready", protocol: 999, engine: "stale" }); setInterval(() => {}, 1000);';
+		// The stand-in worker never reads its configuration.
+		const prelude: PreludeConfig = {
+			maxJsonDepth: 1,
+			maxErrorChars: 1,
+			maxErrorNameChars: 1,
+			maxErrorSummaryChars: 1,
+			maxImageRefLength: 1,
+			scriptFilename: "script.js",
+			scriptPrefixLength: 0,
+			preludeFilename: "prelude.js",
+		};
+		let exited = false;
+		const worker = new CodeModeWorker(
+			new URL(`data:text/javascript,${encodeURIComponent(source)}`),
+			{ wasm: {}, memoryLimitBytes: 1024 * 1024, prelude },
+			8,
+			() => {
+				exited = true;
+			},
+		);
+		await expect(worker.ready).rejects.toThrow(
+			`The code mode worker failed to start: protocol 999 does not match ${CODE_MODE_PROTOCOL_VERSION}`,
+		);
+		await vi.waitFor(() => expect(exited).toBe(true));
+		expect(worker.alive).toBe(false);
 	});
 
 	it("stops idle workers after the idle timeout", async () => {

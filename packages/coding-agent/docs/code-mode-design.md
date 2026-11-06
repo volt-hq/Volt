@@ -116,7 +116,7 @@ Decided:
 - **Scope:** one pool per conversation process. Separate conversations never share or contend for workers. No cross-process limit through voltd.
 - **One VM per worker.** A worker hosts at most one VM at a time. Sharing a worker among VMs would let one computing script block the others, and a hard kill would fail every co-tenant script after its side effects had already happened.
 - **Elastic size:** the pool starts with no workers, grows on demand up to a per-process cap, and stops idle workers after an idle timeout.
-- **Process lifetime:** a worker that is booting or running a script keeps the process alive, because its caller is waiting for the result; an idle worker does not, so a short-lived process exits when its work is done instead of when the idle timeout ends. A test runs a script in a fresh process and checks both.
+- **Process lifetime:** a script keeps the process alive from the moment it is submitted until its result is returned, including the drain of nested calls, because its caller is waiting for the result. Workers never keep the process alive, idle or busy, so a short-lived process exits when its work is done instead of when the idle timeout ends.
 - **Concurrency:** each conversation (a root conversation or a subagent) runs at most one script at a time.
 - **Bounded queue:** when the cap is reached, scripts wait in a bounded queue; beyond it, the code-mode call fails immediately with a clear error instead of hanging the turn.
 - **No nesting:** scripts cannot call `subagent` or the code-mode tool. Without nested waits on the pool, deadlock is impossible at any cap.
@@ -132,7 +132,7 @@ Decided: create a fresh VM for every script and evaluate the prelude in it, behi
 
 - The prelude captures private references to the built-ins it depends on (primordials) before any script code runs, instead of freezing the whole realm. Scripts may patch globals without affecting the bridge, and boot is cheaper.
 - The VM's `Math.random()` seed is set explicitly. During context creation QuickJS reads the realtime clock (WASI clock 0) to seed its generator and the monotonic clock (clock 1) to set `performance.timeOrigin`; with the shim's coarse clock, two VMs created back to back produced identical sequences in testing. The worker serves the realtime clock from `Date.now()`, returning a seed from `crypto.randomInt()` instead while the VM is created, and the monotonic clock from `process.hrtime.bigint()`, so `performance.now()` measures time since the VM booted and never follows wall-clock steps. Seeding in the worker lets it boot the next VM before the next script arrives.
-- `maxStackSize` is always set (512 KiB, `MAX_STACK_SIZE`), and workers run with `resourceLimits.stackSizeMb: 8`. QuickJS's stack guard measures the stack it keeps in linear memory, but WebAssembly call frames also use the worker's native stack, which the guard does not see. Without the guard, deep recursion overflowed the host stack. With the guard and the 4 MB worker default, recursion ended in a catchable guest `RangeError` but a 100,000-level `JSON.parse` still overflowed the native stack; with 8 MB, every probe ended in a catchable guest `RangeError`. A host-side `RangeError` from a VM operation is still treated as a sandbox failure that discards the VM (section 5.11).
+- `maxStackSize` is always set (512 KiB, `MAX_STACK_SIZE`), and workers run with `resourceLimits.stackSizeMb: 32`. QuickJS's stack guard measures the stack it keeps in linear memory, but WebAssembly call frames also use the worker's native stack, which the guard does not see, so the native stack must be deep enough for the guard to fire first. Without the guard, deep recursion overflowed the host stack. With the guard, recursion and a 100,000-level `JSON.parse` ended in a catchable guest `RangeError` from 8 MB up, but parsing deeply nested source (the script itself, `eval`, or `new Function`) needed 11 MB on Node 24.20 and 13 MB on Node 25.2 (section 11). Newer V8 versions use more native stack per WebAssembly frame, so the default leaves about 2.5 times the most measured. Stack pages become resident only as a script recurses, but on Windows each worker commits its whole stack when it starts: 4 workers at 32 MB committed 96 MB more than at 8 MB on Node 24.20, so a process commits up to 128 MB of worker stack while its workers are alive. A host-side `RangeError` from a VM operation is still treated as a sandbox failure that discards the VM (section 5.11).
 
 Rejected for now:
 
@@ -811,7 +811,7 @@ Decided without a separate review round. Every limit in one place; only the last
 | Workers per conversation process | 4 | 5.3 | Width of one parallel subagent spawn |
 | Scripts waiting for a worker | 4 | 5.3 | Fail fast instead of hanging a turn |
 | Worker idle timeout | 5 minutes | 5.3 | Keeps a worker warm during active work; a cold start costs about 44 ms |
-| Worker native stack | 8 MB | 5.4 | Smallest tested size at which every stack probe ended in a guest `RangeError` |
+| Worker native stack | 32 MB | 5.4 | About 2.5 times the most any tested Node version needed for every stack probe, deeply nested source included, to end in a guest `RangeError` (13 MB on Node 25.2); on Windows each live worker commits all of it, so 4 workers commit 128 MB per process at most |
 | QuickJS `maxStackSize` | 512 KiB | 5.4 | `MAX_STACK_SIZE` |
 | VM memory limit | 64 MiB | 5.6 | Holds 18 parsed 1 MiB results at once (32 MiB holds 9, 128 MiB holds 38); 4 VMs make 256 MiB per process at most. Pi and Pydantic use 256 MiB, Cloudflare 32 MiB |
 | Compute budget | 30 s | 5.6 | Pydantic's per-snippet limit |
@@ -901,11 +901,97 @@ Each step is its own pull request. None changes the protocol contract, so none s
 ### Verification
 
 - **Codec:** property-based tests (fast-check) that accepted values round-trip exactly and rejected values fail with their path, on Node and in QuickJS.
-- **Runtime:** interrupts, the watchdog's hard kill on non-polling built-ins, out-of-memory, stack overflow with the 8 MB worker stack, stalled promises, and cancellation, as measured in section 11.
+- **Runtime:** interrupts, the watchdog's hard kill on non-polling built-ins, out-of-memory, stack overflow with the 32 MB worker stack, stalled promises, and cancellation, as measured in section 11.
 - **Bridge:** hostile and malformed frames from a test worker, every host check in order, and bounded outstanding arguments.
 - **Scheduling:** ordering guarantees, exclusive barriers, and per-server limits, with a fake MCP server that records overlapping requests.
 - **Integration:** `packages/coding-agent/test/suite/` scenarios with the faux provider: policy and hooks on nested calls, Plan mode bindings and research evidence, failure summaries, spill files, state across branches, and compaction file lists.
 - **Measurements:** repeat the runtime and stack measurements on the standalone Node 22.23.1 runtime and on Linux and macOS before step 4 ships.
+
+The invariants below tie each guarantee to the test that fails when it breaks.
+
+### Invariants
+
+Each guarantee the runtime makes, where it is enforced, and the test that fails when it breaks. Section 5 records the decisions; these tables are how they are kept. A pull request that adds a guarantee adds its row, and a guarantee without a test says why. Step 1 rows describe merged code. Step 2 rows are planned: their tests are written before the implementation, and the pull request that lands each part names its enforcement point and tests. Steps 3 and 4 add their rows in their own pull requests.
+
+Sources are in `src/core/code-mode/` and tests in `test/code-mode/`. Tests are cited as `file: "test name"`, where `vm`, `codec`, and `runtime` are the three test files.
+
+#### Isolation and the engine
+
+| Guarantee | Enforced in | Test |
+|---|---|---|
+| A script has no ambient capability: no timers, `process`, `require`, `fetch`, `WebAssembly`, module loading, `WeakRef`, or `FinalizationRegistry`. | `vm.ts`: intrinsics without `WEAK_REF`, no module loader, every import implemented by the host | vm: "omits timers, WeakRef, module loading, and host globals" |
+| Without timers, a script that is idle with no call in flight can never resume, so it ends as stalled. | `vm.ts` `endTurn` | vm: "detects a script waiting on a promise nothing can settle"; runtime: "reports stalled scripts and syntax errors as script errors" |
+| The bridge is the only host function, and the script cannot reach it. | `vm.ts` `initialize`; the prelude's closure | vm: "omits timers, WeakRef, module loading, and host globals" (`typeof bridge`) |
+| The host reads only primitive strings from the guest and never converts a guest value, so no guest code runs on the host. | `vm.ts` `onBridge` | Reviewed only: the prelude passes only strings, so a script cannot reach this check without corrupting VM memory |
+| Engine diagnostics never reach the terminal or a client. | `vm.ts` `fd_write` | Reviewed only: no script-reachable path writes to file descriptors 1 or 2 |
+| Every script runs in a fresh VM: nothing a script changes reaches the next script on the same worker. | `worker.ts` `afterTurn` | runtime: "runs every script in a fresh VM, so nothing a script changes reaches the next one" |
+| Stack exhaustion in guest code, including parsing deeply nested source, ends in a catchable guest error, never a host stack overflow. | `vm.ts` `maxStackSize`; `limits.ts` `workerStackSizeMb` | runtime: "ends stack exhaustion in a catchable error, including source nested deeper than the parser allows" |
+| Memory exhaustion is a catchable out-of-memory error, flagged when uncaught. | `vm.ts` `memoryLimit` | vm: "keeps out-of-memory catchable and flags it when uncaught" |
+| VMs get distinct `Math.random` sequences, and `performance.now()` is monotonic. | `vm.ts` `clock_time_get` | vm: "seeds Math.random differently in every VM"; "measures performance.now() from VM start with the monotonic clock" |
+
+#### Codec
+
+| Guarantee | Enforced in | Test |
+|---|---|---|
+| Accepted values round-trip exactly, on the host and in the VM. | `codec.ts` | codec: "round-trips every accepted value exactly"; vm: "round-trips accepted values through the VM exactly" |
+| A value with any unrepresentable part fails with an error naming that part's path, on the host and in the VM; nothing converts silently. | `codec.ts` `write` | codec: "rejects every value with one unrepresentable part, naming the path of that part"; vm: "rejects unrepresentable values inside the VM, naming the same path as the host" |
+| Each element and property is read only while it is still own and enumerable, and holes present when encoding starts are rejected. | `codec.ts` `readOwn`, `checkArrayShape` | codec: "reads only properties that are still own and enumerable when a getter changes the value"; vm: "rejects elements and properties a getter deletes and the prototype fills during encoding" |
+| The decoder accepts only text the encoder could produce, and bounds nesting before parsing. | `codec.ts` `decode`, `decodeBridgeValue` | codec: "rejects literals the encoder cannot produce"; "bounds nesting before parsing" |
+| Patched built-ins and prototypes do not change how the prelude or the codec behaves. | `prelude.ts`, `codec.ts`: captured built-ins, and lists and descriptors without prototypes | vm: "keeps the whole bridge working in a realm the script has made hostile", and the three tests before it |
+
+#### Script API
+
+| Guarantee | Enforced in | Test |
+|---|---|---|
+| Nothing a script passes to `text`, `console`, `image`, or a binding ends it as a `sandbox` failure; invalid input throws an error the script can catch. | `prelude.ts`: a check before each host check a script could otherwise trip (argument encoding and size, image reference length) | runtime: "never ends a script as a sandbox failure, whatever it passes to the script API" |
+| The prelude and the host count arguments in the same exact UTF-8 bytes. | `prelude.ts` `callTool`; `runtime.ts` `onCall` | vm: "counts arguments in exact UTF-8 bytes, including characters outside the BMP"; runtime: "agrees with the prelude on the argument limit when the binding name needs escaping" |
+| Call numbers reach the host in order, even when a getter calls a binding while arguments are encoded. | `prelude.ts` `callTool` | vm: "assigns call numbers after encoding so nested calls keep the order they are posted in" |
+| Error names and summaries are bounded and on one line, and error blocks are bounded, on both sides of the bridge. | `prelude.ts` `describe`; `protocol.ts` `parseErrorDescription` | vm: "bounds error names, summaries, and blocks, markers included"; "keeps summaries and error names on one line"; codec: "parses output and done frames" |
+
+#### Host validation
+
+| Guarantee | Enforced in | Test |
+|---|---|---|
+| A malformed message, a forged frame, call arguments over the argument limit, or an image reference or error description beyond its bounds is a protocol violation: the script fails as `sandbox`, no call handler runs for it, and the worker is discarded. | `protocol.ts` parsers; `runtime.ts` `protocolViolation` | runtime: "treats hostile worker frames as protocol violations and discards the worker"; "treats call arguments over the argument limit as a protocol violation" |
+| An output or done frame larger than the message frame is not a protocol violation: the script fails as `output_limit`. An oversized output frame stops the VM like any other output past the limit; after an oversized done frame the VM has already ended, and the worker is reused. | `runtime.ts` `onOutput`, `onDone` | runtime: "fails with an output limit when one output item is larger than a message frame"; "fails with an output limit and reuses the worker when the done frame is larger than a message frame" |
+| The host checks a call in this order: frame size and shape, `seq` order, call budget, binding set, outstanding argument bytes, plain-object arguments. An attempt that fails a check after the budget still counts against it. | `runtime.ts` `onCall` | runtime: "runs the host checks for a call in order and ignores messages for other scripts"; "rejects a call whose arguments would exceed the outstanding-argument limit until earlier calls finish" |
+| Messages for another script are ignored, on both sides. | `runtime.ts` `onMessage`; `worker.ts` `handle` | Host: runtime: "runs the host checks for a call in order and ignores messages for other scripts". Worker: reviewed only, because a test would need two scripts racing on one worker |
+| A worker whose protocol version differs fails closed. | `pool.ts` `onWorkerMessage` | runtime: "fails closed when a worker reports a different protocol version" |
+| An exception in a host handler for a worker message, a timer, or an abort fails that script, never the process. | `runtime.ts` `contain` | runtime: "fails the script instead of the process when handling a worker message throws"; "fails the script instead of the process when the output handler throws" |
+
+#### Supervision
+
+| Guarantee | Enforced in | Test |
+|---|---|---|
+| A script that computes past its budget is stopped and cannot catch it; the watchdog terminates a worker stuck in a built-in that ignores the interrupt. | `vm.ts` `shouldInterrupt`; `runtime.ts` `checkWatchdog` | vm: "stops a script that exhausts its compute budget, which the script cannot catch"; runtime: "stops computing scripts by interrupt or by terminating the worker, then runs the next script" |
+| The call budget, the timeout, an abort, and the output limit end a script, which cannot catch them. | `runtime.ts` `terminate` | runtime: "terminates a script when its call budget runs out"; "times out, keeps partial output, and records calls that may still apply"; "aborts in-flight calls through their signal"; "fails with an output limit and keeps the output retained until then" |
+| Every stop the host decides cancels in-flight nested calls at once. | `runtime.ts` `terminate` | runtime: "cancels in-flight calls at once, even while the VM is stuck in a built-in" |
+| When a script ends, in-flight calls are aborted and drained for at most `drainMs`; the rest are recorded as `unsettled`, and their later results are discarded. | `runtime.ts` `finalize`, `execute` | runtime: "times out, keeps partial output, and records calls that may still apply"; "keeps an unsettled record unchanged when the call completes after the script returned" |
+| Unhandled rejections are reported only once the script cannot resume, at most 10 described and the rest counted exactly; a script the host stops reports none. | `vm.ts` `trackRejection`, `reportRejections` | vm: "does not report rejections the script handles after awaiting a call"; "counts unhandled rejections it does not describe, including untracked ones"; "stops a script that exhausts its compute budget, which the script cannot catch" |
+
+#### Pool and process
+
+| Guarantee | Enforced in | Test |
+|---|---|---|
+| At most `maxWorkers` scripts run and `maxQueuedScripts` wait; a script beyond that fails without starting. | `pool.ts` `acquire`, `spawn` | runtime: "queues scripts beyond its workers and fails scripts beyond its queue without starting them" |
+| A script aborted while it waits for a worker, or while the engine loads, never starts and leaves no worker behind. | `pool.ts` `acquire`, `spawn` | runtime: "gives up waiting for a worker when the script is aborted"; "gives up without booting a worker when a script is aborted while the engine loads" |
+| A worker is reused only after its VM ended normally; a crash, a hard kill, or a protocol violation discards it. | `runtime.ts` `settleWorker` | runtime: "treats hostile worker frames as protocol violations and discards the worker"; "stops computing scripts by interrupt or by terminating the worker, then runs the next script" |
+| A run keeps the process alive from entry until it returns, drain included; workers never keep it alive. | `runtime.ts` `run`; `pool.ts` `CodeModeWorker` | runtime: "keeps the process alive while a script runs and lets it exit once its worker is idle"; "keeps the process alive while it drains calls that outlive the script" |
+| Closing the pool ends running scripts with a `sandbox` failure. | `pool.ts` `close` | runtime: "ends running scripts when the pool closes" |
+| Idle workers stop after the idle timeout. | `pool.ts` `startIdleTimer` | runtime: "stops idle workers after the idle timeout" |
+
+#### Step 2 (planned)
+
+| Guarantee | Enforced in | Test, written before the implementation |
+|---|---|---|
+| A binding exists only for an operation the model could call directly in the same session at that moment. | Binding-set computation | Property over generated tool sets, tool policies, and MCP filters and trust: every binding is directly callable |
+| Tools that are never bindable (section 5.12) get no binding under any configuration. | Binding-set computation | The same property, and one example per excluded tool |
+| In a restricted profile, bindings are limited to what the profile authorizes, and per-call authorization still applies. | Binding-set computation; tool-call policy | Plan mode suite scenario: `lsp` `rename` rejects with `blocked`, and nested reads record research evidence |
+| Every nested call passes `prepareArguments`, `validateToolArguments`, and the tool-call and tool-result policy, with a `code_mode` origin and the ID `<parentToolCallId>:cm:<seq>`; the host never calls `execute` directly. | Call pipeline | Suite scenario with a recording policy hook; a denial rejects with `blocked` |
+| Checks 6 to 11 of section 5.9 run in order after the step 1 checks, each with its documented outcome. | Call pipeline | One case per check from a test worker, asserting the outcome and that later checks did not run |
+| A nested call cannot start a background job. | Call pipeline | `background: true` rejects with `invalid_arguments` |
+| Script values and image bytes stay within their caps before they are materialized; image bytes never enter the VM, and a reference is valid only in the script that received it. | Projections; image store | An oversized result per projection; a reference from another script is rejected |
+| At most 10 nested calls run at once per script; an exclusive call runs alone and holds back later calls; MCP calls are limited per server across every script in the process; a call waiting on one server does not hold back others; calls start in submission order within these rules; a call cancelled while queued never starts. | Scheduler | Model-based property with fake tools that record overlapping execution |
 
 ## 10. Risks
 
@@ -979,6 +1065,16 @@ Stack guard against the worker's native stack (recursion through plain and async
 | 4 MB (worker default) | 512 KiB | Guest `RangeError` | Guest `RangeError` | Host overflow |
 | 8 MB | 512 KiB | Guest `RangeError` | Guest `RangeError` | Guest `RangeError` |
 | 4 MB | 256 KiB | Guest `RangeError` | Guest `RangeError` | Guest `RangeError` |
+
+Parsing nested source needs a deeper native stack, and how much deeper depends on the Node version. The probes, on Windows with `maxStackSize` at 512 KiB: `eval` of a 100,000-level array literal, `new Function` with 100,000 levels of parentheses, `eval` of 5,000 nested template literals, and a script whose own source is a 100,000-level array literal.
+
+| Node | Smallest worker native stack at which every probe ended in a guest error |
+|---|---|
+| 22.20.0 | 8 MB or less |
+| 24.20.0 | 11 MB |
+| 25.2.1 | 13 MB |
+
+At every size from 8 MB, these ended in a guest error or completed: getter, async, and generator recursion; proxy, `bind`, and prototype chains 100,000 deep; `JSON.stringify`, `String`, and `flat` on a 100,000-level array; and deeply nested regular expressions.
 
 Error reporting in QuickJS, through the same-line wrapper:
 

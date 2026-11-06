@@ -25,7 +25,7 @@ import {
 	parseOutputPayload,
 } from "../../src/core/code-mode/protocol.ts";
 import { ScriptVm, type ScriptVmMessage } from "../../src/core/code-mode/vm.ts";
-import { bridgeValue, expectedAfterRoundTrip } from "./values.ts";
+import { bridgeValue, expectedAfterRoundTrip, rejectedValue } from "./values.ts";
 
 const MIB = 1024 * 1024;
 const PRELUDE: PreludeConfig = {
@@ -203,6 +203,29 @@ describe("code mode VM output", () => {
 			onCall: () => samples,
 		});
 		expect(result.done).toStrictEqual({ ok: true, hasValue: true, value: expectedAfterRoundTrip(samples) });
+	});
+
+	it("rejects unrepresentable values inside the VM, naming the same path as the host", async () => {
+		const samples = fc.sample(rejectedValue, { numRuns: 200, seed: 7 });
+		const result = await runScript(
+			`
+			const makers = [${samples.map((sample) => `() => (${sample.source})`).join(",\n")}];
+			const messages = [];
+			for (const make of makers) {
+				try { await tools.read({ v: make() }); messages.push("sent"); } catch (error) { messages.push(error.name + ": " + error.message); }
+			}
+			return messages;
+		`,
+			{ bindings: [{ name: "read", path: ["read"] }] },
+		);
+		expect(result.calls).toStrictEqual([]);
+		const messages = result.done?.ok ? (result.done.value as string[]) : [];
+		expect(messages).toHaveLength(samples.length);
+		for (const [index, sample] of samples.entries()) {
+			// The value is passed as `{ v: value }`, because arguments must be an object.
+			const path = sample.path.replace(/^args/, "args.v");
+			expect(messages[index].startsWith(`TypeError: ${path}: `), `${sample.kind}: ${messages[index]}`).toBe(true);
+		}
 	});
 });
 
@@ -629,9 +652,11 @@ describe("code mode VM failures", () => {
 	});
 
 	it("stops a script that exhausts its compute budget, which the script cannot catch", async () => {
-		const result = await runScript("try { while (true) {} } catch (error) { text('caught'); }", {
-			computeBudgetMs: 100,
-		});
+		// A stopped script reports no unhandled rejections: describing one would run script code after the stop.
+		const result = await runScript(
+			"Promise.reject(new Error('unreported')); try { while (true) {} } catch (error) { text('caught'); }",
+			{ computeBudgetMs: 100 },
+		);
 		expect(result.end).toStrictEqual({ type: "stopped", reason: "compute_budget" });
 		expect(result.output).toStrictEqual([]);
 	});
@@ -653,15 +678,28 @@ describe("code mode VM failures", () => {
 });
 
 describe("code mode VM engine configuration", () => {
-	it("omits WeakRef, module loading, and host globals", async () => {
+	it("omits timers, WeakRef, module loading, and host globals", async () => {
+		// Stall detection depends on the absence of timers: with no call in flight, nothing can resume a script.
+		const globals = [
+			"setTimeout",
+			"setInterval",
+			"setImmediate",
+			"WeakRef",
+			"FinalizationRegistry",
+			"process",
+			"require",
+			"fetch",
+			"WebAssembly",
+			"bridge",
+		];
 		const result = await runScript(`
 			let imported;
 			try { await import("node:fs"); imported = "loaded"; } catch (error) { imported = error.name; }
-			return [typeof WeakRef, typeof FinalizationRegistry, typeof process, typeof require, typeof bridge, imported];
+			return [${globals.map((name) => `typeof ${name}`).join(", ")}, imported];
 		`);
 		const value = result.done?.ok ? (result.done.value as string[]) : [];
-		expect(value.slice(0, 5)).toStrictEqual(["undefined", "undefined", "undefined", "undefined", "undefined"]);
-		expect(value[5]).not.toBe("loaded");
+		expect(value.slice(0, globals.length)).toStrictEqual(globals.map(() => "undefined"));
+		expect(value[globals.length]).not.toBe("loaded");
 	});
 
 	it("measures performance.now() from VM start with the monotonic clock", async () => {
