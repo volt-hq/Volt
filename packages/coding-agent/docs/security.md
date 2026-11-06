@@ -10,7 +10,7 @@ Volt considers a project to have resources that require trust when it finds any 
 
 - `.volt/settings.json`
 - `.mcp.json` or `.volt/mcp.json`
-- `.volt/extensions`, `.volt/skills`, `.volt/prompts`, or `.volt/themes`
+- `.volt/extensions`, `.volt/skills`, `.volt/prompts`, `.volt/themes`, or `.volt/agents`
 - `.volt/SYSTEM.md` or `.volt/APPEND_SYSTEM.md`
 - project `.agents/skills` in the current directory or an ancestor directory
 
@@ -24,7 +24,7 @@ Trusting a project allows volt to load project resources that require trust, inc
 
 - `.volt/settings.json`
 - project MCP server config in `.mcp.json` or `.volt/mcp.json`
-- `.volt` resources such as extensions, skills, prompt templates, themes, and system prompt files
+- `.volt` resources such as extensions, skills, prompt templates, themes, subagent definitions, and system prompt files
 - missing project packages configured through project settings
 - project-local extensions and project package-managed extensions
 
@@ -163,7 +163,7 @@ Supported preview safety model:
 
 Unsafe remote tools are powerful. Granting `bash`, `edit`, or `write` lets the remote session modify files or run shell commands on the host. Granting `image_gen` lets it read and upload local reference images and write generated PNG files. Extension tools run code installed on the host and may do the same; expose them only when those extensions, the client device, and the network path are trusted.
 
-Remote sessions do not bypass project trust. Project-local settings, extensions, skills, prompt templates, themes, system prompts, and package-managed resources follow the same project trust rules as local Volt. A conversation a paired device opens honors a saved trust decision for the workspace; otherwise its worker runs those resources untrusted. A device attached to a conversation a desktop TUI opened works with the trust that conversation's worker decided. Save trust from a desktop Volt session in that workspace.
+Remote sessions do not bypass project trust. Project-local settings, extensions, skills, prompt templates, themes, subagent definitions, system prompts, and package-managed resources follow the same project trust rules as local Volt. A conversation a paired device opens honors a saved trust decision for the workspace; otherwise its worker runs those resources untrusted. A device attached to a conversation a desktop TUI opened works with the trust that conversation's worker decided. Save trust from a desktop Volt session in that workspace.
 
 The daemon requires a Node.js npm package install or source checkout with the exact required `@hansjm10/volt-iroh` wrapper and its optional selected native binding. `--omit=optional` installs retain the wrapper but cannot provide phone transport. Darwin x64 has no binding and is local CLI/TUI only. Standalone Node SEA builds intentionally do not bundle Iroh: their daemon serves local clients and workers only, re-executing its own binary by absolute path for each worker. If status reports `native_binding_missing`, reinstall with optional dependencies enabled on a supported platform.
 
