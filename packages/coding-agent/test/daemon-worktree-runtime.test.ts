@@ -183,8 +183,8 @@ describe("worktree conversation placement (conversation open)", () => {
 			projectTrusted: true,
 		});
 		expect(spawn).not.toHaveProperty("profile");
-		// Trust is evaluated against the registered (parent) workspace.
-		expect(projectTrusted).toHaveBeenCalledWith(authorization.workspace);
+		// Trust is the registered (parent) workspace's, for the resources the checkout holds (#1034).
+		expect(projectTrusted).toHaveBeenCalledWith(authorization.workspace, worktreePath);
 		expect(await isStored("new-session-1")).toBe(true);
 		expect(bindWorktreeSession).toHaveBeenCalledExactlyOnceWith("ws", "fix-login", "new-session-1");
 		expect(prepareWorktreeRuntime).toHaveBeenCalledExactlyOnceWith("ws", "fix-login", "new-session-1");
