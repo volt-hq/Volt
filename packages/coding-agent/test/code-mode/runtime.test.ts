@@ -465,6 +465,15 @@ describe("code mode runtime", () => {
 		expect(texts(result)).toStrictEqual(["small"]);
 	});
 
+	it("fails with an output limit and reuses the worker when the done frame is larger than a message frame", async () => {
+		// A well-formed done frame of about 2,000 bytes, over the 1,000-byte frame limit. The VM has ended.
+		const payload = JSON.stringify({ ok: true, value: "x".repeat(2_000) });
+		const forging = forgingPool((id) => [{ type: "done", id, payload }]);
+		const result = failed(await runForged(forging, { limits: { maxFrameBytes: 1_000 } }));
+		expect(result.failure).toStrictEqual({ kind: "output_limit" });
+		expect(forging.returned).toStrictEqual(["released"]);
+	});
+
 	it("treats call arguments over the argument limit as a protocol violation", async () => {
 		let called = false;
 		// Within the coarse check before parsing (limit plus envelope room), but over the limit itself.
