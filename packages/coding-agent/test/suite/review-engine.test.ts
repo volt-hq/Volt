@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -557,6 +558,54 @@ describe("review engines", () => {
 		expect(reused?.setupRuns.trim()).toBe("run");
 		// Releasing once the review ended does nothing, and never fails.
 		await expect(held!.release()).resolves.toBeUndefined();
+	});
+
+	it("resets the initialized submodules of a released checkout as well", async () => {
+		const { harness, start } = await fixture();
+		const origin = mkdtempSync(join(tmpdir(), "volt-review-submodule-"));
+		try {
+			git(origin, "init", "--initial-branch=main");
+			git(origin, "config", "user.email", "review@example.com");
+			git(origin, "config", "user.name", "Review Test");
+			writeFileSync(join(origin, "file.txt"), "original\n");
+			git(origin, "add", ".");
+			git(origin, "commit", "-m", "initial");
+			// Git refuses local submodule URLs unless file transport is allowed.
+			const url = origin.replaceAll("\\", "/");
+			git(harness.tempDir, "-c", "protocol.file.allow=always", "submodule", "add", "--quiet", url, "lib");
+			git(harness.tempDir, "commit", "-m", "add submodule");
+			let first: ReviewEngineCheckout | undefined;
+			let reused: { path: string; value: string; leftBehind: boolean; nestedLeftBehind: boolean } | undefined;
+			const { work } = await start(
+				engine(async (ctx) => {
+					first = await ctx.checkout();
+					const lib = join(first.path, "lib");
+					writeFileSync(join(lib, "file.txt"), "changed\n");
+					writeFileSync(join(lib, "left-behind"), "untracked\n");
+					mkdirSync(join(lib, "nested"));
+					git(join(lib, "nested"), "init");
+					writeFileSync(join(lib, "nested", "file"), "untracked\n");
+					await first.release();
+					const next = await ctx.checkout();
+					reused = {
+						path: next.path,
+						value: readFileSync(join(next.path, "lib", "file.txt"), "utf8").trim(),
+						leftBehind: existsSync(join(next.path, "lib", "left-behind")),
+						nestedLeftBehind: existsSync(join(next.path, "lib", "nested")),
+					};
+					await reviewCarefully(ctx);
+				}),
+				{ setup: { command: "git -c protocol.file.allow=always submodule --quiet update --init" } },
+			);
+			expect(work?.outcome).toBe("completed");
+			// Reused, with the submodule's tracked file restored and its untracked ones gone.
+			expect(reused?.path).toBe(first?.path);
+			expect(reused?.value).toBe("original");
+			expect(reused?.leftBehind).toBe(false);
+			expect(reused?.nestedLeftBehind).toBe(false);
+		} finally {
+			rmSync(origin, { recursive: true, force: true, maxRetries: 10 });
+		}
 	});
 
 	it("leaves a checkout released after cancellation as it is, never handing it out again", async () => {

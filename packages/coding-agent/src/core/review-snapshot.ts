@@ -154,8 +154,9 @@ export interface ReviewSnapshot {
 	materializeHead(): Promise<string>;
 	/**
 	 * Return `directory`, a checkout {@link materializeHead} made, to the reviewed head: tracked files restored and
-	 * untracked ones removed, nested repositories included, while ignored ones (what a setup installed) stay. Aborting
-	 * `signal` stops it and rejects, leaving the checkout only partly reset.
+	 * untracked ones removed, nested repositories included, while ignored ones (what a setup installed) stay. The same
+	 * goes inside initialized submodules, which are returned to the commits the head records and stay initialized.
+	 * Aborting `signal` stops it and rejects, leaving the checkout only partly reset.
 	 */
 	resetHead(directory: string, signal?: AbortSignal): Promise<void>;
 	dispose(): Promise<void>;
@@ -2957,11 +2958,27 @@ class GitReviewSnapshot implements ReviewSnapshot {
 			this.limits,
 			sourceSignal && signal ? AbortSignal.any([sourceSignal, signal]) : (sourceSignal ?? signal),
 		);
-		const reset = await runCommand("git", ["reset", "--hard", "--quiet", commit], directory, options);
+		// Initialized submodules are reset too, to the commits the head records.
+		const reset = await runCommand(
+			"git",
+			["reset", "--hard", "--quiet", "--recurse-submodules", commit],
+			directory,
+			options,
+		);
 		if (!reset.ok) throw new Error(`Could not reset review checkout: ${commandError(reset)}`);
 		// Forced twice, so it also removes untracked directories that hold a repository of their own.
 		const clean = await runCommand("git", ["clean", "-d", "--force", "--force", "--quiet"], directory, options);
 		if (!clean.ok) throw new Error(`Could not clean review checkout: ${commandError(clean)}`);
+		// Git clean never enters a submodule, so each initialized one is cleaned the same way.
+		const cleanSubmodules = await runCommand(
+			"git",
+			["submodule", "--quiet", "foreach", "--recursive", "git", "clean", "-d", "--force", "--force", "--quiet"],
+			directory,
+			options,
+		);
+		if (!cleanSubmodules.ok) {
+			throw new Error(`Could not clean review checkout submodules: ${commandError(cleanSubmodules)}`);
+		}
 	}
 
 	async dispose(): Promise<void> {
