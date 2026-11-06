@@ -27,55 +27,100 @@ export interface CodeModeImageInput {
 /** An image the host retains for a script, and its reference. */
 export interface CodeModeStoredImage {
 	ref: CodeModeImageRef;
+	/** The image as canonical base64. */
 	data: string;
+}
+
+/** Where a nested call puts the images of its value (`CodeModeCall.images`). */
+export interface CodeModeCallImages {
+	/**
+	 * Retains images of the call's value, all or none, and returns their references for the value to carry. The
+	 * images reach the script only with the value: the runtime keeps them when it delivers the value and drops
+	 * them otherwise. Rejects with `failed`: `limit_exceeded` when the script's images would exceed its limit, and
+	 * without a reason for an image that is empty or not base64.
+	 */
+	add(images: readonly CodeModeImageInput[]): CodeModeImageRef[];
+}
+
+/** The images of one nested call until the runtime delivers its value or drops it. */
+export interface CodeModeImageStaging extends CodeModeCallImages {
+	/** References of the images added so far. */
+	readonly refs: readonly string[];
+	/** Keeps the images: their value reached the script. */
+	commit(): void;
+	/** Drops the images: their value never reached the script. */
+	release(): void;
+}
+
+// ASCII whitespace, which base64 decoders skip (WHATWG forgiving-base64, and so the MCP SDK's check).
+const BASE64_WHITESPACE = /[\t\n\f\r ]/;
+const BASE64_WHITESPACE_RUNS = /[\t\n\f\r ]+/g;
+
+/**
+ * Whether `data` is `canonical`, the base64 of the bytes it decoded to, apart from whitespace and missing
+ * padding. Anything else the lenient decoder skipped or misread, such as other characters, base64url, or a
+ * `data:` prefix, would change the bytes.
+ */
+function isBase64Of(data: string, canonical: string): boolean {
+	const stripped = BASE64_WHITESPACE.test(data) ? data.replace(BASE64_WHITESPACE_RUNS, "") : data;
+	if (stripped === canonical) return true;
+	const padding = canonical.length - stripped.length;
+	return padding > 0 && padding <= 2 && canonical.endsWith("=".repeat(padding)) && canonical.startsWith(stripped);
 }
 
 /**
  * The images of one script. References are `img_1`, `img_2`, and so on, valid only within the script that
- * received them. The bytes of all images together stay within `maxBytes`.
+ * received them. The bytes of all images, retained or staged by calls in flight, stay within `maxBytes`.
  */
 export class CodeModeImageStore {
 	private readonly maxBytes: number;
 	private readonly images = new Map<string, CodeModeStoredImage>();
 	private retained = 0;
+	private staged = 0;
+	private lastRef = 0;
 
 	constructor(maxBytes: number = MAX_RETAINED_IMAGE_BYTES) {
 		this.maxBytes = maxBytes;
 	}
 
-	/** Bytes of every image retained so far. */
+	/** Bytes of the images delivered to the script. */
 	get retainedBytes(): number {
 		return this.retained;
 	}
 
-	/**
-	 * Retains the images of one nested call, all or none, and returns their references. Rejects the call with
-	 * `failed` (`limit_exceeded`) when the images would exceed the script's limit.
-	 */
-	add(images: readonly CodeModeImageInput[]): CodeModeImageRef[] {
-		const decoded = images.map((image) => ({ image, bytes: Buffer.from(image.data, "base64") }));
-		const total = decoded.reduce((sum, entry) => sum + entry.bytes.length, 0);
-		if (this.retained + total > this.maxBytes) {
-			throw new CodeModeCallError(
-				"failed",
-				`the result's images are ${total} bytes, and the script already holds ${this.retained} of its ${this.maxBytes}-byte image limit`,
-				"limit_exceeded",
-			);
-		}
-		return decoded.map(({ image, bytes }) => {
-			const dimensions = imageDimensions(bytes);
-			const ref: CodeModeImageRef = {
-				type: "image",
-				ref: `img_${this.images.size + 1}`,
-				mimeType: image.mimeType,
-				...dimensions,
-				bytes: bytes.length,
-				...(image.path === undefined ? {} : { path: image.path }),
-			};
-			this.images.set(ref.ref, { ref, data: image.data });
-			this.retained += bytes.length;
-			return ref;
-		});
+	/** Opens the images of one nested call. Its images count toward the limit from when they are added. */
+	stage(): CodeModeImageStaging {
+		const pending: CodeModeStoredImage[] = [];
+		let pendingBytes = 0;
+		let open = true;
+		const close = () => {
+			open = false;
+			this.staged -= pendingBytes;
+		};
+		return {
+			get refs() {
+				return pending.map((image) => image.ref.ref);
+			},
+			add: (images) => {
+				if (!open) throw new CodeModeCallError("cancelled", "the call ended before its images were added");
+				const prepared = this.prepare(images);
+				for (const image of prepared) {
+					pending.push(image);
+					pendingBytes += image.ref.bytes;
+					this.staged += image.ref.bytes;
+				}
+				return prepared.map((image) => image.ref);
+			},
+			commit: () => {
+				if (!open) return;
+				close();
+				for (const image of pending) this.images.set(image.ref.ref, image);
+				this.retained += pendingBytes;
+			},
+			release: () => {
+				if (open) close();
+			},
+		};
 	}
 
 	has(ref: string): boolean {
@@ -84,6 +129,38 @@ export class CodeModeImageStore {
 
 	get(ref: string): CodeModeStoredImage | undefined {
 		return this.images.get(ref);
+	}
+
+	/**
+	 * Checks and measures images for retention, all or none. The limit is checked first against an upper bound
+	 * that needs no decoding, the size the base64 length allows, so data over the limit is never decoded.
+	 */
+	private prepare(images: readonly CodeModeImageInput[]): CodeModeStoredImage[] {
+		const held = this.retained + this.staged;
+		const bound = images.reduce((sum, image) => sum + Buffer.byteLength(image.data, "base64"), 0);
+		if (held + bound > this.maxBytes) {
+			throw new CodeModeCallError(
+				"failed",
+				`the result's images are up to ${bound} bytes, and the script already holds ${held} of its ${this.maxBytes}-byte image limit`,
+				"limit_exceeded",
+			);
+		}
+		return images.map((image, index) => {
+			const bytes = Buffer.from(image.data, "base64");
+			const data = bytes.toString("base64");
+			if (bytes.length === 0 || !isBase64Of(image.data, data)) {
+				throw new CodeModeCallError("failed", `image ${index + 1} of the result is empty or not base64`);
+			}
+			const ref: CodeModeImageRef = {
+				type: "image",
+				ref: `img_${++this.lastRef}`,
+				mimeType: image.mimeType,
+				...imageDimensions(bytes),
+				bytes: bytes.length,
+				...(image.path === undefined ? {} : { path: image.path }),
+			};
+			return { ref, data };
+		});
 	}
 }
 

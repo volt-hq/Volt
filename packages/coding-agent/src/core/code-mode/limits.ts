@@ -92,11 +92,8 @@ export const MAX_IMAGE_REF_LENGTH = 64;
 /** Images a script may show with `image()` (section 5.9). */
 export const MAX_SHOWN_IMAGES = 10;
 
-/** Image bytes the host retains for one script (section 5.9). */
+/** Decoded image bytes the host retains for one script, including those of calls in flight (section 5.9). */
 export const MAX_RETAINED_IMAGE_BYTES = 64 * MIB;
-
-/** UTF-8 bytes of command output in a bash script value: the head and tail halves of the full output. */
-export const MAX_BASH_OUTPUT_BYTES = 1 * MIB;
 
 /** Length of the error block a script failure reports, in characters, truncation marker included. */
 export const MAX_SCRIPT_ERROR_CHARS = 8 * KIB;

@@ -394,6 +394,68 @@ export function decodeBridgeValue(text: string, maxDepth: number = MAX_BRIDGE_JS
 	return hostCodec.decode(text);
 }
 
+/**
+ * UTF-8 bytes of the code point starting at `index` in bridge text, and the UTF-16 units it spans. Strings are
+ * written with `JSON.stringify`: quotes, backslashes, and the short control escapes take 2 bytes, other control
+ * characters and lone surrogates a 6-byte `\u` escape, and everything else its UTF-8 bytes.
+ */
+function encodedCodePoint(text: string, index: number): { bytes: number; units: number } {
+	const code = text.charCodeAt(index);
+	if (code === 0x22 || code === 0x5c) return { bytes: 2, units: 1 };
+	if (code < 0x20) {
+		const short = code === 0x08 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d;
+		return { bytes: short ? 2 : 6, units: 1 };
+	}
+	if (code < 0x80) return { bytes: 1, units: 1 };
+	if (code < 0x800) return { bytes: 2, units: 1 };
+	if (code >= 0xd800 && code <= 0xdbff) {
+		const next = text.charCodeAt(index + 1);
+		return next >= 0xdc00 && next <= 0xdfff ? { bytes: 4, units: 2 } : { bytes: 6, units: 1 };
+	}
+	if (code >= 0xdc00 && code <= 0xdfff) return { bytes: 6, units: 1 };
+	return { bytes: 3, units: 1 };
+}
+
+/** UTF-8 bytes `text` takes in bridge text, without its quotes. */
+export function encodedStringBytes(text: string): number {
+	let bytes = 0;
+	for (let i = 0; i < text.length; ) {
+		const point = encodedCodePoint(text, i);
+		bytes += point.bytes;
+		i += point.units;
+	}
+	return bytes;
+}
+
+/** The longest prefix of `text`, cut between code points, that takes at most `maxBytes` in bridge text. */
+export function encodedPrefix(text: string, maxBytes: number): string {
+	let bytes = 0;
+	let end = 0;
+	while (end < text.length) {
+		const point = encodedCodePoint(text, end);
+		if (bytes + point.bytes > maxBytes) break;
+		bytes += point.bytes;
+		end += point.units;
+	}
+	return text.slice(0, end);
+}
+
+/** The longest suffix of `text`, cut between code points, that takes at most `maxBytes` in bridge text. */
+export function encodedSuffix(text: string, maxBytes: number): string {
+	let bytes = 0;
+	let start = text.length;
+	while (start > 0) {
+		const low = text.charCodeAt(start - 1);
+		const high = start > 1 ? text.charCodeAt(start - 2) : 0;
+		const pairStart = low >= 0xdc00 && low <= 0xdfff && high >= 0xd800 && high <= 0xdbff ? start - 2 : start - 1;
+		const point = encodedCodePoint(text, pairStart);
+		if (bytes + point.bytes > maxBytes) break;
+		bytes += point.bytes;
+		start = pairStart;
+	}
+	return text.slice(start);
+}
+
 function exceedsJsonDepth(text: string, maxDepth: number): boolean {
 	let depth = 0;
 	let inString = false;

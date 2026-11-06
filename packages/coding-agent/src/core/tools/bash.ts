@@ -101,10 +101,12 @@ export interface BashToolDetails {
 	 * was aborted, timed out, or killed as hung.
 	 */
 	exitCode?: number | null;
+	/** Set for a command that ran to completion without output; its text shows `BASH_NO_OUTPUT_TEXT` instead. */
+	noOutput?: true;
 }
 
 /** The text the result shows for a command that printed nothing. */
-export const BASH_NO_OUTPUT_TEXT = "(no output)";
+const BASH_NO_OUTPUT_TEXT = "(no output)";
 
 /** The status line appended to the output of a command that exited with a non-zero code. */
 export function bashExitStatus(exitCode: number): string {
@@ -455,7 +457,11 @@ export function createBashToolDefinition(
 
 				const snapshot = await finishOutput();
 				const output = formatOutput(snapshot);
-				const details: BashToolDetails = { ...output.details, exitCode };
+				const details: BashToolDetails = {
+					...output.details,
+					exitCode,
+					...(snapshot.content ? {} : { noOutput: true }),
+				};
 				if (exitCode !== 0 && exitCode !== null) {
 					return failure({ text: output.text, details }, bashExitStatus(exitCode));
 				}

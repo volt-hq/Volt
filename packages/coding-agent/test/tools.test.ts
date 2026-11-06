@@ -465,7 +465,8 @@ describe("Coding Agent Tools", () => {
 			const result = await bashTool.execute("test-call-9", { command: "exit 1" });
 			expect(result.isError).toBe(true);
 			expect(getTextOutput(result)).toMatch(/Command exited with code 1$/);
-			expect(result.details).toEqual({ exitCode: 1 });
+			// The command printed nothing; the text shows a placeholder.
+			expect(result.details).toEqual({ exitCode: 1, noOutput: true });
 		});
 
 		it("should respect timeout", async () => {

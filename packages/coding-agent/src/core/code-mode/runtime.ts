@@ -1,9 +1,9 @@
 import { encodeBridgeValue } from "./codec.ts";
+import type { CodeModeCallImages, CodeModeImageStaging, CodeModeImageStore } from "./images.ts";
 import {
 	type CodeModeScriptLimits,
 	DEFAULT_CODE_MODE_SCRIPT_LIMITS,
 	MAX_BINDING_NAME_LENGTH,
-	MAX_BRIDGE_JSON_DEPTH,
 	MAX_CODE_MODE_SCRIPT_TIMEOUT_MS,
 	MAX_SHOWN_IMAGES,
 } from "./limits.ts";
@@ -48,6 +48,13 @@ export interface CodeModeCall {
 	args: Record<string, unknown>;
 	/** Aborted when the script ends, fails, or is terminated. */
 	signal: AbortSignal;
+	/**
+	 * Where the call puts the images of its value. The references `add` returns must appear in the value, and the
+	 * images reach the script only if the value does.
+	 */
+	images: CodeModeCallImages;
+	/** UTF-8 bytes the value may take once encoded; a larger value rejects with `failed` (`result_too_large`). */
+	maxValueBytes: number;
 }
 
 export interface CodeModeScriptRequest {
@@ -67,10 +74,10 @@ export interface CodeModeScriptRequest {
 	timeoutMs?: number;
 	limits?: Partial<CodeModeScriptLimits>;
 	/**
-	 * The script's image references. An image reference in a call's value that this knows becomes one the script
-	 * may show with `image()`; without it, the script can show no images.
+	 * The script's images. Nested calls retain the images of their values here (`CodeModeCall.images`), and the
+	 * caller reads the images the script shows from it. One store serves one script.
 	 */
-	images?: { has(ref: string): boolean };
+	images: CodeModeImageStore;
 }
 
 export type CodeModeCallStatus = "completed" | "failed" | "cancelled" | "unsettled";
@@ -170,6 +177,8 @@ interface CallState {
 	bytes: number;
 	settled: Promise<void>;
 	done: boolean;
+	/** The images of the call's value, for a call that reached the handler. */
+	images?: CodeModeImageStaging;
 }
 
 const STALLED_ERROR: CodeModeErrorDescription = {
@@ -203,26 +212,6 @@ function truncateUtf8(text: string, maxBytes: number): string {
 	let end = Math.min(text.length, maxBytes);
 	while (end > 0 && Buffer.byteLength(text.slice(0, end)) + marker.length > maxBytes) end--;
 	return `${text.slice(0, end)}${marker}`;
-}
-
-/**
- * Adds to `refs` every image reference in a call's value that the script's image store knows. The value has
- * already been encoded, so it is plain data no deeper than the bridge's nesting limit.
- */
-function collectImageRefs(
-	value: unknown,
-	images: { has(ref: string): boolean },
-	refs: Set<string>,
-	depth: number,
-): void {
-	if (value === null || typeof value !== "object" || depth > MAX_BRIDGE_JSON_DEPTH) return;
-	if (Array.isArray(value)) {
-		for (const item of value) collectImageRefs(item, images, refs, depth + 1);
-		return;
-	}
-	const record = value as Record<string, unknown>;
-	if (record.type === "image" && typeof record.ref === "string" && images.has(record.ref)) refs.add(record.ref);
-	for (const key of Object.keys(record)) collectImageRefs(record[key], images, refs, depth + 1);
 }
 
 function delay(ms: number): Promise<void> {
@@ -539,21 +528,28 @@ class ScriptRun {
 	private async execute(state: CallState, args: Record<string, unknown>): Promise<void> {
 		let outcome: { ok: true; value: unknown } | { ok: false; error: unknown };
 		try {
+			const images = this.request.images.stage();
+			state.images = images;
 			const value = await this.request.onCall({
 				seq: state.record.seq,
 				binding: state.record.binding,
 				args,
 				signal: this.callController.signal,
+				images,
+				maxValueBytes: this.limits.maxScriptValueBytes,
 			});
 			outcome = { ok: true, value };
 		} catch (error) {
 			outcome = { ok: false, error };
 		}
 		// A call recorded as unsettled at the end of the script keeps that record; its late result is dropped.
-		if (state.done) return;
+		if (state.done) {
+			state.images?.release();
+			return;
+		}
 		this.inFlight.delete(state);
 		this.outstandingArgumentBytes -= state.bytes;
-		let reply: { ok: boolean; payload: string; imageRefs?: string[] };
+		let reply: { ok: boolean; payload: string };
 		try {
 			reply = outcome.ok ? this.valuePayload(state, outcome.value) : this.failurePayload(state, outcome.error);
 		} catch {
@@ -564,7 +560,7 @@ class ScriptRun {
 		this.reply(state, reply);
 	}
 
-	private valuePayload(state: CallState, value: unknown): { ok: boolean; payload: string; imageRefs?: string[] } {
+	private valuePayload(state: CallState, value: unknown): { ok: boolean; payload: string } {
 		let encoded: string;
 		try {
 			encoded = encodeBridgeValue(value, "result");
@@ -586,9 +582,7 @@ class ScriptRun {
 			);
 		}
 		state.record.status = "completed";
-		const imageRefs = new Set<string>();
-		if (this.request.images) collectImageRefs(value, this.request.images, imageRefs, 0);
-		return { ok: true, payload: encoded, imageRefs: [...imageRefs] };
+		return { ok: true, payload: encoded };
 	}
 
 	private failurePayload(state: CallState, error: unknown): { ok: boolean; payload: string } {
@@ -601,21 +595,33 @@ class ScriptRun {
 		return { ok: false, payload: JSON.stringify({ kind, reason, message }) };
 	}
 
-	private reply(state: CallState, reply: { ok: boolean; payload: string; imageRefs?: string[] }): void {
+	private reply(state: CallState, reply: { ok: boolean; payload: string }): void {
 		state.done = true;
 		state.record.durationMs = performance.now() - state.startedAt;
+		const images = state.images;
 		// After the outcome is decided, the host sends nothing more to the VM.
-		if (this.failure || this.workerSettled || !this.worker) return;
-		const imageRefs = reply.imageRefs ?? [];
+		if (this.failure || this.workerSettled || !this.worker) {
+			images?.release();
+			return;
+		}
+		// A call's images reach the script only with its value; they are kept once the value is posted.
+		if (!reply.ok) images?.release();
+		const imageRefs = reply.ok && images ? [...images.refs] : [];
+		try {
+			this.worker.post({
+				type: "result",
+				id: this.id,
+				seq: state.record.seq,
+				ok: reply.ok,
+				payload: reply.payload,
+				imageRefs,
+			});
+		} catch (error) {
+			images?.release();
+			throw error;
+		}
+		images?.commit();
 		for (const ref of imageRefs) this.issuedImageRefs.add(ref);
-		this.worker.post({
-			type: "result",
-			id: this.id,
-			seq: state.record.seq,
-			ok: reply.ok,
-			payload: reply.payload,
-			imageRefs,
-		});
 	}
 
 	private onOutput(payload: string): void {
@@ -692,6 +698,7 @@ class ScriptRun {
 			]);
 			for (const state of this.inFlight) {
 				state.done = true;
+				state.images?.release();
 				state.record.status = "unsettled";
 				state.record.durationMs = performance.now() - state.startedAt;
 			}

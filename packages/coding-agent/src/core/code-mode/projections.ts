@@ -3,31 +3,42 @@ import type { AgentToolResult } from "@hansjm10/volt-agent-core";
 import type { ImageContent, TextContent } from "@hansjm10/volt-ai";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { contentPartToText } from "../mcp/manager.ts";
-import { BASH_NO_OUTPUT_TEXT, bashExitStatus } from "../tools/bash.ts";
+import { bashExitStatus } from "../tools/bash.ts";
 import { resolveReadPathAsync } from "../tools/path-utils.ts";
-import type { CodeModeImageInput, CodeModeImageStore } from "./images.ts";
-import { MAX_BASH_OUTPUT_BYTES } from "./limits.ts";
+import { encodeBridgeValue, encodedPrefix, encodedStringBytes, encodedSuffix } from "./codec.ts";
+import type { CodeModeCallImages, CodeModeImageInput } from "./images.ts";
 import { CodeModeCallError } from "./runtime.ts";
 
 /**
- * Script values of nested calls (section 5.9 of docs/code-mode-design.md). A projection turns a tool's result,
- * after the tool-result policy, into the value the script's call resolves with, or rejects the call with a
- * `CodeModeCallError`. Projections are internal to built-in tools and MCP; any other tool gets the default.
+ * Script values of nested calls (section 5.9 of docs/code-mode-design.md). A projection turns a tool's result
+ * into the value the script's call resolves with, or rejects the call with a `CodeModeCallError`. Projections are
+ * internal to built-in tools and MCP; any other tool gets the default.
  */
 
 export interface CodeModeProjectionContext {
 	/** The session's working directory, against which file arguments resolve. */
 	cwd: string;
-	/** The images of the script; images in a value are retained here and replaced by references. */
-	images: CodeModeImageStore;
-	/** Bytes of command output in a bash value. */
-	maxBashOutputBytes?: number;
+	/** Where the value's images go (`CodeModeCall.images`); the value carries their references. */
+	images: CodeModeCallImages;
+	/** UTF-8 bytes the encoded value may take (`CodeModeCall.maxValueBytes`); bash output is cut to fit. */
+	maxValueBytes: number;
 }
 
 /** A tool that ran, and whether it is the trusted built-in tool of that name. */
 export interface CodeModeProjectedTool {
 	name: string;
 	trustedBuiltin: boolean;
+}
+
+/** A finished tool call's result, as the tool returned it and as the tool-result policy left it. */
+export interface CodeModeToolResults {
+	/** The result the tool returned. */
+	executed: AgentToolResult<unknown>;
+	/**
+	 * What the tool-result policy returned: the result as `tool_result` hooks left it, or undefined when no hook
+	 * saw the result. A value never holds what a hook did not see, such as the rest of a full output file.
+	 */
+	reviewed: AgentToolResult<unknown> | undefined;
 }
 
 /**
@@ -43,10 +54,11 @@ export interface CodeModeProjectedTool {
 export async function projectToolResult(
 	tool: CodeModeProjectedTool,
 	args: Record<string, unknown>,
-	result: AgentToolResult<unknown>,
+	results: CodeModeToolResults,
 	context: CodeModeProjectionContext,
 ): Promise<unknown> {
-	if (tool.trustedBuiltin && tool.name === "bash") return projectBash(result, context);
+	if (tool.trustedBuiltin && tool.name === "bash") return projectBash(results, context);
+	const result = results.reviewed ?? results.executed;
 	if (result.isError) throw failedCall(textOf(result.content));
 	if (tool.trustedBuiltin && (tool.name === "read" || tool.name === "image_gen")) {
 		const image = result.content.find((part): part is ImageContent => part.type === "image");
@@ -101,9 +113,12 @@ function textOf(content: readonly (TextContent | ImageContent)[]): string {
 		.join("\n");
 }
 
+function recordOf(value: unknown): Record<string, unknown> {
+	return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
 function stringField(value: unknown, key: string): string | undefined {
-	if (value === null || typeof value !== "object") return undefined;
-	const field = (value as Record<string, unknown>)[key];
+	const field = recordOf(value)[key];
 	return typeof field === "string" ? field : undefined;
 }
 
@@ -117,76 +132,113 @@ function mcpImage(part: unknown): CodeModeImageInput | undefined {
 	return type === "image" && typeof data === "string" && typeof mimeType === "string" ? { data, mimeType } : undefined;
 }
 
+/** Command output in a bash value, and whether it is incomplete. */
+interface BoundedOutput {
+	text: string;
+	truncated: boolean;
+}
+
 /**
  * The bash value. The exit code comes from the result's details, present only for a command that ran to
- * completion; anything else rejects with the result's text. Output the model saw truncated is read from the
- * full output file, keeping its head and tail when it exceeds the value's limit. `truncated` says whether
- * `output` is incomplete.
+ * completion; anything else rejects with the result's text. When no hook saw the result, output the model saw
+ * truncated is read from the full output file; a reviewed result gives the text the hooks left. Output that does
+ * not fit the value's limit keeps its head and tail around a marker. `truncated` says whether `output` is
+ * incomplete.
  */
-async function projectBash(result: AgentToolResult<unknown>, context: CodeModeProjectionContext): Promise<unknown> {
-	const details: Record<string, unknown> =
-		result.details !== null && typeof result.details === "object" ? (result.details as Record<string, unknown>) : {};
+async function projectBash(results: CodeModeToolResults, context: CodeModeProjectionContext): Promise<unknown> {
+	const reviewed = results.reviewed !== undefined;
+	const result = results.reviewed ?? results.executed;
+	const details = recordOf(result.details);
 	const exitCode = details.exitCode;
 	const text = textOf(result.content);
 	if (typeof exitCode !== "number" && exitCode !== null) throw failedCall(text);
-	const fullOutputPath = typeof details.fullOutputPath === "string" ? details.fullOutputPath : undefined;
-	const modelTruncated =
-		details.truncation !== null &&
-		typeof details.truncation === "object" &&
-		(details.truncation as { truncated?: unknown }).truncated === true;
-	let output: { text: string; truncated: boolean } | undefined;
+	const modelTruncated = recordOf(details.truncation).truncated === true;
+	// A hook saw only the result's text, never the file.
+	const fullOutputPath = !reviewed && typeof details.fullOutputPath === "string" ? details.fullOutputPath : undefined;
+	const path = fullOutputPath === undefined ? {} : { fullOutputPath };
+	// Bytes left for `output` once the rest of the value is encoded, counting the longer `truncated` literal.
+	const room =
+		context.maxValueBytes -
+		Buffer.byteLength(encodeBridgeValue({ output: "", exitCode, truncated: false, ...path }, "result"));
+	let output: BoundedOutput | undefined;
 	if (modelTruncated && fullOutputPath !== undefined) {
-		output = await readHeadAndTail(fullOutputPath, context.maxBashOutputBytes ?? MAX_BASH_OUTPUT_BYTES).catch(
-			() => undefined,
-		);
+		output = await readBounded(fullOutputPath, room).catch(() => undefined);
 	}
-	output ??= { text: stripBashStatus(text, exitCode), truncated: modelTruncated };
-	return {
-		output: output.text,
-		exitCode,
-		truncated: output.truncated,
-		...(fullOutputPath === undefined ? {} : { fullOutputPath }),
-	};
+	output ??= boundText(reviewed ? text : commandOutput(text, exitCode, details), modelTruncated, room, fullOutputPath);
+	return { output: output.text, exitCode, truncated: output.truncated, ...path };
 }
 
 /**
- * The command's output from the result text: without the status line bash appends for a non-zero exit, and
- * empty instead of the no-output placeholder. Text a tool-result hook changed is kept whole.
+ * The command's output from bash's own result text: without the status line bash appends for a non-zero exit,
+ * and empty for a command that printed nothing.
  */
-function stripBashStatus(text: string, exitCode: number | null): string {
-	let output = text;
+function commandOutput(text: string, exitCode: number | null, details: Record<string, unknown>): string {
+	if (details.noOutput === true) return "";
 	if (exitCode !== null && exitCode !== 0) {
 		const status = `\n\n${bashExitStatus(exitCode)}`;
-		if (output.endsWith(status)) output = output.slice(0, -status.length);
+		if (text.endsWith(status)) return text.slice(0, -status.length);
 	}
-	return output === BASH_NO_OUTPUT_TEXT ? "" : output;
+	return text;
 }
 
-/** The file's text, or its first and last halves of `maxBytes` around a marker, cut at character boundaries. */
-async function readHeadAndTail(path: string, maxBytes: number): Promise<{ text: string; truncated: boolean }> {
+/** `text` when it fits `room` bytes of bridge text, or its head and tail around a marker. */
+function boundText(text: string, truncated: boolean, room: number, path: string | undefined): BoundedOutput {
+	if (encodedStringBytes(text) <= room) return { text, truncated };
+	return { text: headAndTail(text, text, Buffer.byteLength(text), room, path), truncated: true };
+}
+
+/** The full output file's text, or its head and tail around a marker when it does not fit `room`. */
+async function readBounded(path: string, room: number): Promise<BoundedOutput> {
 	const file = await open(path, "r");
 	try {
 		const { size } = await file.stat();
-		if (size <= maxBytes) {
+		// Every byte of the file takes at least one byte of bridge text, so only a file within `room` can fit.
+		if (size <= room) {
 			const whole = Buffer.alloc(size);
-			await file.read(whole, 0, size, 0);
-			return { text: whole.toString("utf8"), truncated: false };
+			const { bytesRead } = await file.read(whole, 0, size, 0);
+			return boundText(whole.subarray(0, bytesRead).toString("utf8"), false, room, path);
 		}
-		const half = Math.floor(maxBytes / 2);
-		const head = Buffer.alloc(half);
-		const tail = Buffer.alloc(half);
-		await file.read(head, 0, half, 0);
-		await file.read(tail, 0, half, size - half);
-		const headText = wholeCharactersAtStart(head);
-		const tailText = wholeCharactersAtEnd(tail);
-		const omitted = size - headText.length - tailText.length;
-		return {
-			text: `${headText.toString("utf8")}\n\n[... ${omitted} bytes omitted; full output: ${path} ...]\n\n${tailText.toString("utf8")}`,
-			truncated: true,
-		};
+		const [headRoom, tailRoom] = splitRoom(size, room, path);
+		const head = Buffer.alloc(headRoom);
+		const tail = Buffer.alloc(tailRoom);
+		const headRead = await file.read(head, 0, headRoom, 0);
+		const tailRead = await file.read(tail, 0, tailRoom, size - tailRoom);
+		const headText = wholeCharactersAtStart(head.subarray(0, headRead.bytesRead)).toString("utf8");
+		const tailText = wholeCharactersAtEnd(tail.subarray(0, tailRead.bytesRead)).toString("utf8");
+		return { text: headAndTail(headText, tailText, size, room, path), truncated: true };
 	} finally {
 		await file.close();
 	}
+}
+
+/**
+ * The head of `headSource` and the tail of `tailSource` around an omission marker, all within `room` bytes of
+ * bridge text. `totalBytes` is the size of the whole output. When both sources are the same text, which does not
+ * fit `room`, the head and tail cannot overlap.
+ */
+function headAndTail(
+	headSource: string,
+	tailSource: string,
+	totalBytes: number,
+	room: number,
+	path: string | undefined,
+): string {
+	const [headRoom, tailRoom] = splitRoom(totalBytes, room, path);
+	const head = encodedPrefix(headSource, headRoom);
+	const tail = encodedSuffix(tailSource, tailRoom);
+	const omitted = Math.max(0, totalBytes - Buffer.byteLength(head) - Buffer.byteLength(tail));
+	return `${head}${omissionMarker(omitted, path)}${tail}`;
+}
+
+/** Room for the head and the tail once the marker is placed; the marker never counts more than `totalBytes`. */
+function splitRoom(totalBytes: number, room: number, path: string | undefined): [number, number] {
+	const parts = Math.max(0, room - encodedStringBytes(omissionMarker(totalBytes, path)));
+	const head = Math.floor(parts / 2);
+	return [head, parts - head];
+}
+
+function omissionMarker(omitted: number, path: string | undefined): string {
+	return `\n\n[... ${omitted} bytes omitted${path === undefined ? "" : `; full output: ${path}`} ...]\n\n`;
 }
 
 /** The bytes up to the last complete UTF-8 character. */

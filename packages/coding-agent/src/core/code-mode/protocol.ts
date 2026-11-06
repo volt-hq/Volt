@@ -15,8 +15,11 @@ import type { CodeModeBinding, CodeModeErrorDescription, PreludeConfig } from ".
  * JSON frames. The host validates every message as if the worker were untrusted.
  */
 
-/** A worker whose protocol version differs fails closed; this catches stale worker files, not old clients. */
-export const CODE_MODE_PROTOCOL_VERSION = 1;
+/**
+ * A worker whose protocol version differs fails closed; this catches stale worker files, not old clients. Bump it
+ * whenever a message shape or the prelude's script API changes.
+ */
+export const CODE_MODE_PROTOCOL_VERSION = 2;
 
 /**
  * Shared memory between the host and one worker. The host writes the id of a script it wants stopped;
@@ -57,7 +60,7 @@ export type HostToWorkerMessage =
 			maxReportedRejections: number;
 			maxArgumentBytes: number;
 	  }
-	/** `imageRefs` lists the image references the value carries, which the script may then pass to `image()`. */
+	/** `imageRefs` lists the images the host issued with the value, which the script may then pass to `image()`. */
 	| { type: "result"; id: number; seq: number; ok: boolean; payload: string; imageRefs: string[] }
 	| { type: "stop"; id: number };
 
