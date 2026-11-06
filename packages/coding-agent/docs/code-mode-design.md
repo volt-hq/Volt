@@ -219,11 +219,15 @@ The bridge cannot recover precision a transport has already lost. MCP results ar
 - `tools.<name>(args)` takes zero or one argument. An omitted or `undefined` argument becomes `{}`; anything else must encode to a plain object. It returns a promise of the call's script value. An encoding error rejects that promise without issuing a call.
 - **Script values:**
   - **Default:** the tool result's text blocks joined with newlines.
-  - **bash:** `{ output, exitCode, truncated, fullOutputPath? }` for a command that ran to completion with any exit code. A command that could not start, timed out, or was aborted rejects. When the output exceeds the model-facing limit, `output` holds up to 1 MiB: the first and last 512 KiB of `fullOutputPath`.
+  - **bash:** `{ output, exitCode, truncated, fullOutputPath? }` for a command that ran to completion with any exit code. A command that could not start, timed out, or was aborted rejects. The exit code comes from the bash result's `details`, which carry `exitCode` for a command that ran to completion.
+    - When no `tool_result` hook saw the result, `output` is the command's output: without the status line bash appends for a non-zero exit, empty when `details.noOutput` says the command printed nothing (the text then shows a placeholder), and read from `fullOutputPath` when the model saw it truncated.
+    - When a hook saw the result, `output` is the result's text as the hooks left it, and `fullOutputPath` is omitted. A hook sees only the model-facing text, so a value that read the rest of the file would bypass a redacting hook.
+    - Output that does not fit the size cap keeps its head and tail, cut at character boundaries around a marker, so the whole value fits. `truncated` says whether `output` is incomplete.
   - **read:** the text result for a text file, and an image reference for an image file.
+  - **image_gen:** an image reference whose `path` is the file the image was saved to.
   - **MCP tool calls:** `{ text, structured?, images }`. `structured` is the result's `structuredContent`, typed from the tool's output schema when it has one. `images` holds image references for image blocks. `text` joins the remaining blocks as the gateway renders them for the model (`contentPartToText`).
   - Projections are internal to built-in tools and MCP in v1. `ToolDefinition` is unchanged, and extension tools get the default.
-- **Size:** a script value is at most 1 MiB once encoded. Projections bound themselves before materializing a value, for example by reading only the head and tail of `fullOutputPath`. A value that still exceeds the cap rejects with `failed` (`result_too_large`).
+- **Size:** a script value is at most 1 MiB once encoded. The runtime gives each call this cap (`maxValueBytes`), and projections bound themselves to it before materializing a value: bash measures the encoded size of its output exactly, escapes included, and reads only the head and tail of `fullOutputPath`. A value that still exceeds the cap rejects with `failed` (`result_too_large`), and the images it carried are dropped.
 - **Errors:** a failed nested call rejects with a `ToolCallError` (an `Error` subclass the prelude provides) carrying `tool`, `kind`, an optional `reason`, and a `message` of at most 8 KiB. Kinds:
   - `invalid_arguments`: argument preparation or schema validation failed.
   - `blocked`: the tool-call policy denied the call.
@@ -250,9 +254,12 @@ interface ImageRef {
 ```
 
 - The host keeps the bytes for the lifetime of the script. References are valid only within the script that received them.
-- Only images the script passes to `image(ref)` reach the model, at most 10 per script. `image()` throws a `TypeError` the script can catch for anything that is not a reference of at most 64 characters, the limit the host enforces on output frames. An image shown without a file (from MCP or `image_gen`) is saved to a temp file and its path is reported, so a later turn can pass it to tools that take image paths.
+- A call retains the images of its value through the runtime (`CodeModeCall.images`) and puts their references in the value. They count toward the script's limit from then on, but become the script's only when the value is posted to it; a rejected value (such as `result_too_large`), a failed call, and a call still unsettled when the script ends drop them. The references the host issues are these images, never found by scanning the value, so a value shaped like a reference cannot be shown.
+- Only images the script passes to `image(ref)` reach the model, at most 10 per script. A `result` message lists the image references the host issued with its value, and the prelude accepts only references the script has received: `image()` throws a `TypeError` for anything else and a `RangeError` for an eleventh image, both catchable. The host checks both as well, and treats an image output that breaks either rule as a protocol violation. An image shown without a file (from MCP) is saved to a temp file and its path is reported, so a later turn can pass it to tools that take image paths.
+- `width` and `height` come from the image's PNG, GIF, JPEG, or WebP header, and are absent when the header does not give them.
 - When a script ends with images it never showed, the result lists them, so the model learns the rule from the feedback instead of losing images silently.
-- The host retains at most 64 MiB of image bytes per script. A nested call whose images would exceed that rejects with `failed` (`limit_exceeded`).
+- The host retains at most 64 MiB of decoded image bytes per script, counting the images of calls in flight. A nested call whose images would exceed that rejects with `failed` (`limit_exceeded`). The limit is checked first against the size the base64 length allows, so data over it is never decoded.
+- Image data must be base64 (RFC 4648). Whitespace and missing padding are accepted, and the host keeps the canonical form, which is what later reaches the model. Empty data or data that is not base64, such as base64url or a `data:` URL, rejects the call with `failed`.
 - Passing references as tool arguments is a non-goal: Volt's image tools take file paths (`image_gen` takes `referenced_image_paths`), which scripts pass as strings.
 
 Rejected:
@@ -277,14 +284,14 @@ The prelude calls one host function with two primitive strings: a kind (`call`, 
 | Worker to host | `stalled` | none; the script awaits a promise nothing can settle (section 5.11) |
 | Worker to host | `crash` | `reason` |
 | Host to worker | `start` | `script`, bindings, limits |
-| Host to worker | `result` | `seq` with a script value (codec text), or a `ToolCallError` description |
+| Host to worker | `result` | `seq` with a script value (codec text) and the image references the host issued with it, or a `ToolCallError` description |
 | Host to worker | `stop` | none |
 
 - Every message except `ready` carries the id of its script. The worker ignores `result` and `stop` messages for a script that is no longer running, and the host ignores worker messages for a script that has ended, so a stop that crosses a `done` cannot affect the worker's next script.
 - `done`, `stopped`, `stalled`, and `crash` end the script; the worker then disposes the VM and boots the next one. After `done` or `stopped` the host may hand the worker to the next script immediately; after `crash` it terminates the worker.
 - The host's stop request travels twice: as the `stop` message, which the worker handles when its VM is idle, and as the script id written to memory shared with the worker, which the interrupt handler reads while the VM computes. The worker publishes in the same memory when its VM started executing, from `process.hrtime.bigint()`, a monotonic clock shared by the threads of a process, and how much compute the script used before, which the watchdog reads.
 - Each `seq` receives at most one `result`, and the host sends nothing after `done`. The worker applies results only while the VM is idle.
-- A `protocol` version mismatch fails closed. This catches packaging errors such as a stale worker file in the standalone binary; it is not a compatibility path.
+- A `protocol` version mismatch fails closed. This catches packaging errors such as a stale worker file in the standalone binary; it is not a compatibility path. The version changes whenever a message shape or the prelude's script API changes.
 - Messages travel over `postMessage` as plain objects with string fields today. A process backend would carry the same messages as length-prefixed UTF-8 JSON frames.
 - The host validates every message as if the worker were untrusted. Worker code is trusted today, but a future backend may not be. A malformed message is a protocol violation: the host terminates the VM, and the script fails with a `sandbox` error.
 - The host enforces the bounds and the one-line rule of error descriptions (section 5.11) itself; a description beyond them is a protocol violation.
@@ -301,7 +308,7 @@ The prelude calls one host function with two primitive strings: a kind (`call`, 
 7. **`prepareArguments` and `validateToolArguments`,** the same path as the agent loop; otherwise `invalid_arguments`.
 8. **Tool-call policy,** with an origin naming the parent tool call and `seq`, and the call ID `<parentToolCallId>:cm:<seq>`. IDs follow attempts, so invalid attempts leave gaps. A denial rejects with `blocked`.
 9. **Schedule and execute,** with an abort signal linked to the script's, under the scheduling rules of section 5.13.
-10. **Tool-result policy, projection, and size cap,** then the `result` message.
+10. **Tool-result policy, projection, and size cap,** then the `result` message. The projection receives the result as the tool returned it and what the tool-result policy returned, which is nothing when no `tool_result` hook saw the result.
 11. **Record the call** for the outer result: tool name, a bounded summary of the arguments, status, duration, and error.
 
 #### End of a script
@@ -645,7 +652,8 @@ The script is the body of an async function: top-level await and return work. Er
 Call tools as `await tools.<name>(args)` with the same arguments as the tool itself:
 - tools.bash(args): Promise<{ output: string; exitCode: number | null; truncated: boolean; fullOutputPath?: string }>, resolving for any exit code
 - tools.read(args): Promise<string | ImageRef>
-- tools.edit(args), tools.write(args), tools.web_search(args), tools.web_fetch(args), tools.image_gen(args): Promise<string>
+- tools.image_gen(args): Promise<ImageRef>
+- tools.edit(args), tools.write(args), tools.web_search(args), tools.web_fetch(args): Promise<string>
 - MCP tools: tools.mcp.<server>.<tool>(args): Promise<{ text: string; structured?: unknown; images: ImageRef[] }>. Find them and their arguments with the mcp tool's search and describe actions first. Use brackets for names that are not identifiers: tools.mcp["my-server"]["get-file"](args).
 
 A failed call rejects with ToolCallError { tool; kind: "invalid_arguments" | "blocked" | "failed" | "cancelled"; reason?; message }. Use Promise.allSettled for independent calls so one failure does not lose the others.
@@ -949,7 +957,7 @@ Sources are in `src/core/code-mode/` unless a path says otherwise. Tests are cit
 
 | Guarantee | Enforced in | Test |
 |---|---|---|
-| Nothing a script passes to `text`, `console`, `image`, or a binding ends it as a `sandbox` failure; invalid input throws an error the script can catch. | `prelude.ts`: a check before each host check a script could otherwise trip (argument encoding and size, image reference length) | runtime: "never ends a script as a sandbox failure, whatever it passes to the script API" |
+| Nothing a script passes to `text`, `console`, `image`, or a binding ends it as a `sandbox` failure; invalid input throws an error the script can catch. | `prelude.ts`: a check before each host check a script could otherwise trip (argument encoding and size, image references the script received, the shown-image limit) | runtime: "never ends a script as a sandbox failure, whatever it passes to the script API" |
 | The prelude and the host count arguments in the same exact UTF-8 bytes. | `prelude.ts` `callTool`; `runtime.ts` `onCall` | vm: "counts arguments in exact UTF-8 bytes, including characters outside the BMP"; runtime: "agrees with the prelude on the argument limit when the binding name needs escaping" |
 | Call numbers reach the host in order, even when a getter calls a binding while arguments are encoded. | `prelude.ts` `callTool` | vm: "assigns call numbers after encoding so nested calls keep the order they are posted in" |
 | Error names and summaries are bounded and on one line, and error blocks are bounded, on both sides of the bridge. | `prelude.ts` `describe`; `protocol.ts` `parseErrorDescription` | vm: "bounds error names, summaries, and blocks, markers included"; "keeps summaries and error names on one line"; codec: "parses output and done frames" |
@@ -1009,6 +1017,30 @@ Sources are in `src/core/code-mode/` unless a path says otherwise. Tests are cit
 | MCP tools are limited per server whatever their direct tool declares; other tools run exclusively only if they declare `executionMode: "sequential"`. | `scheduler.ts` `schedulingClassFor` | scheduler: "derives the scheduling class from the binding target and the tool's execution mode" |
 | A server's `maxConcurrentCalls` is a positive integer that defaults to 4; an invalid value is ignored with a warning, and the field does not change cached tool metadata. | `src/core/mcp/config.ts` `normalizeServer`; `src/core/mcp/manager.ts` `getMaxConcurrentCalls` | mcp: "reads each server's maxConcurrentCalls and warns about invalid values" |
 
+#### Script values
+
+| Guarantee | Enforced in | Test |
+|---|---|---|
+| A bash command that ran resolves with its output and exit code, whatever the code; one that timed out or was aborted rejects. | `projections.ts` `projectBash`; `src/core/tools/bash.ts` (`details.exitCode`) | projections: "resolves with the output and exit code of a command that ran, whatever the code"; "rejects a command that timed out or was aborted" |
+| Bash output is the command's own output, even when it reads like the no-output placeholder. | `projections.ts` `commandOutput`; `src/core/tools/bash.ts` (`details.noOutput`) | projections: "resolves with the output and exit code of a command that ran, whatever the code" |
+| Bash output the model saw truncated comes from the full output file, and output beyond the cap keeps its head and tail, cut at character boundaries, so the encoded value fits the cap. | `projections.ts` `readBounded`, `boundText`; `codec.ts` `encodedStringBytes`, `encodedPrefix`, `encodedSuffix` | projections: "reads output the model saw truncated from the full output file"; "keeps the head and tail of large output whole, with the value within its limit"; codec: "measures strings and cuts them between code points by their encoded size" |
+| A bash result a `tool_result` hook saw resolves with the text the hooks left, and never reads the full output file. | `projections.ts` `projectBash` | projections: "gives a result a hook saw as the hook left it, never reading the full output file" |
+| `read` and `image_gen` resolve with an image reference for an image, and other tools with their text; an error result rejects with its text. | `projections.ts` `projectToolResult` | projections: "resolves with the text of a text file and a reference to an image file"; "resolves with a reference to a generated image and the file it was saved to"; "joins a result's text blocks and rejects an error result with its text" |
+| The built-in projections apply only to the trusted built-in tools; any other tool gets the default. | `projections.ts` `projectToolResult` | projections: "applies the bash projection only to the trusted built-in tool" |
+| An MCP result resolves with its text, structured content, and image references; an error result rejects and keeps none of its images. | `projections.ts` `projectMcpResult` | projections: "resolves with an MCP result's text, structured content, and image references"; "rejects an MCP error result or images over the limit, keeping none of their images" |
+
+#### Images
+
+| Guarantee | Enforced in | Test |
+|---|---|---|
+| Image bytes stay on the host; a script receives references, unique within the script, with the image's type, size, and file. | `images.ts` `CodeModeImageStore` | images: "issues sequential references with each image's type, size, and file" |
+| A script's image bytes, including those of calls in flight, stay within its limit; a call whose images would exceed it rejects with `limit_exceeded` and keeps none of them. | `images.ts` `CodeModeImageStore` | images: "keeps a call's images only once committed, and counts staged images toward the limit"; "checks the limit against the base64 length before decoding"; projections: "rejects an MCP error result or images over the limit, keeping none of their images"; runtime: "counts the images of calls in flight toward the script's image limit" |
+| A call's images become the script's only when its value is posted; a rejected value, a failed call, and an unsettled call drop them. | `runtime.ts` `execute`, `reply`, `finalize` | runtime: "keeps a call's images only when its value reaches the script" |
+| Image data is base64, kept canonical; anything else rejects the call. | `images.ts` `CodeModeImageStore` | images: "accepts base64 with whitespace or without padding, keeps it canonical, and rejects other data" |
+| Width and height come from the image header when it gives them, and reading them never throws. | `images.ts` `imageDimensions` | images: "reads the size of PNG and JPEG images"; "reads the size of GIF and WebP images"; "gives no size for data that is not a complete image header, and never throws" |
+| A script shows only image references the host issued with its call results, at most 10; anything else throws an error it can catch. The host reads a call's value once, to encode it. | `prelude.ts` `image`, `settle`; `runtime.ts` `reply` | vm: "shows only image references the script received, at most the limit, and rejects the rest catchably"; "keeps image() working when a script patches Set"; runtime: "shows only images the script received in call results, at most the limit"; "reads each property of a call's value once" |
+| An image output for a reference the script did not receive, or past the limit, is a protocol violation. | `runtime.ts` `onOutput` | runtime: "treats an image the script could not have shown as a protocol violation" |
+
 #### Step 2 (planned)
 
 | Guarantee | Enforced in | Test, written before the implementation |
@@ -1017,7 +1049,8 @@ Sources are in `src/core/code-mode/` unless a path says otherwise. Tests are cit
 | Every nested call passes `prepareArguments`, `validateToolArguments`, and the tool-call and tool-result policy, with a `code_mode` origin and the ID `<parentToolCallId>:cm:<seq>`; the host never calls `execute` directly. | Call pipeline | Suite scenario with a recording policy hook; a denial rejects with `blocked` |
 | Checks 6 to 11 of section 5.9 run in order after the step 1 checks, each with its documented outcome. | Call pipeline | One case per check from a test worker, asserting the outcome and that later checks did not run |
 | A nested call cannot start a background job. | Call pipeline | `background: true` rejects with `invalid_arguments` |
-| Script values and image bytes stay within their caps before they are materialized; image bytes never enter the VM, and a reference is valid only in the script that received it. | Projections; image store | An oversized result per projection; a reference from another script is rejected |
+| An MCP call from a script goes through the manager's checks, events, and audit, and its projection receives the raw result. | Call pipeline; `src/core/mcp/manager.ts` | A fake MCP server: the call is audited and the script value carries its structured content and images |
+| A tool call's projection receives the executed result and the tool-result policy's return value unchanged, so a result a hook saw is never projected from the executed result. | Call pipeline | Suite scenario with a redacting `tool_result` hook on a truncated bash result: the script value holds the redacted text and no `fullOutputPath` |
 
 ## 10. Risks
 

@@ -1,6 +1,12 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { decodeBridgeValue, encodeBridgeValue } from "../../src/core/code-mode/codec.ts";
+import {
+	decodeBridgeValue,
+	encodeBridgeValue,
+	encodedPrefix,
+	encodedStringBytes,
+	encodedSuffix,
+} from "../../src/core/code-mode/codec.ts";
 import {
 	CodeModeProtocolError,
 	parseCallPayload,
@@ -181,6 +187,43 @@ describe("code mode bridge codec", () => {
 				expect(decodeBridgeValue(encodeBridgeValue(value, "value"))).toStrictEqual(expectedAfterRoundTrip(value));
 			}),
 			{ numRuns: 500 },
+		);
+	});
+
+	it("measures strings and cuts them between code points by their encoded size", () => {
+		// Escapes, characters of each UTF-8 size, lone surrogates, and surrogates that pair up when joined.
+		const unit = fc.oneof(
+			fc.constantFrom('"', "\\", "\n", "\u0001", "\u007f", "\u2028", "\ud800", "\udc00", "\u00e9", "\u{1f600}"),
+			fc.integer({ min: 0, max: 0xffff }).map((code) => String.fromCharCode(code)),
+			fc.integer({ min: 0x10000, max: 0x10ffff }).map((code) => String.fromCodePoint(code)),
+		);
+		const text = fc.array(unit, { maxLength: 40 }).map((units) => units.join(""));
+		const isHigh = (code: number) => code >= 0xd800 && code <= 0xdbff;
+		const isLow = (code: number) => code >= 0xdc00 && code <= 0xdfff;
+		// Whether a cut at `index` would split a surrogate pair.
+		const splitsPair = (s: string, index: number) => isHigh(s.charCodeAt(index - 1)) && isLow(s.charCodeAt(index));
+		fc.assert(
+			fc.property(text, fc.nat({ max: 80 }), (s, max) => {
+				expect(encodedStringBytes(s)).toBe(Buffer.byteLength(encodeBridgeValue(s, "value")) - 2);
+				const prefix = encodedPrefix(s, max);
+				expect(s.startsWith(prefix)).toBe(true);
+				expect(encodedStringBytes(prefix)).toBeLessThanOrEqual(max);
+				expect(splitsPair(s, prefix.length)).toBe(false);
+				if (prefix.length < s.length) {
+					const next = splitsPair(s, prefix.length + 1) ? 2 : 1;
+					expect(encodedStringBytes(s.slice(0, prefix.length + next))).toBeGreaterThan(max);
+				}
+				const suffix = encodedSuffix(s, max);
+				const start = s.length - suffix.length;
+				expect(s.endsWith(suffix)).toBe(true);
+				expect(encodedStringBytes(suffix)).toBeLessThanOrEqual(max);
+				expect(splitsPair(s, start)).toBe(false);
+				if (start > 0) {
+					const previous = splitsPair(s, start - 1) ? 2 : 1;
+					expect(encodedStringBytes(s.slice(start - previous))).toBeGreaterThan(max);
+				}
+			}),
+			{ numRuns: 1_000 },
 		);
 	});
 });

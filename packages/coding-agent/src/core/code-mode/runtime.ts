@@ -1,9 +1,11 @@
 import { encodeBridgeValue } from "./codec.ts";
+import type { CodeModeCallImages, CodeModeImageStaging, CodeModeImageStore } from "./images.ts";
 import {
 	type CodeModeScriptLimits,
 	DEFAULT_CODE_MODE_SCRIPT_LIMITS,
 	MAX_BINDING_NAME_LENGTH,
 	MAX_CODE_MODE_SCRIPT_TIMEOUT_MS,
+	MAX_SHOWN_IMAGES,
 } from "./limits.ts";
 import { CodeModePoolBusyError, type CodeModeWorker, type CodeModeWorkerPool } from "./pool.ts";
 import type { CodeModeBinding, CodeModeErrorDescription } from "./prelude.ts";
@@ -46,6 +48,13 @@ export interface CodeModeCall {
 	args: Record<string, unknown>;
 	/** Aborted when the script ends, fails, or is terminated. */
 	signal: AbortSignal;
+	/**
+	 * Where the call puts the images of its value. The references `add` returns must appear in the value, and the
+	 * images reach the script only if the value does.
+	 */
+	images: CodeModeCallImages;
+	/** UTF-8 bytes the value may take once encoded; a larger value rejects with `failed` (`result_too_large`). */
+	maxValueBytes: number;
 }
 
 export interface CodeModeScriptRequest {
@@ -64,6 +73,11 @@ export interface CodeModeScriptRequest {
 	/** Optional wall-clock limit, including the wait for a worker. */
 	timeoutMs?: number;
 	limits?: Partial<CodeModeScriptLimits>;
+	/**
+	 * The script's images. Nested calls retain the images of their values here (`CodeModeCall.images`), and the
+	 * caller reads the images the script shows from it. One store serves one script.
+	 */
+	images: CodeModeImageStore;
 }
 
 export type CodeModeCallStatus = "completed" | "failed" | "cancelled" | "unsettled";
@@ -163,6 +177,8 @@ interface CallState {
 	bytes: number;
 	settled: Promise<void>;
 	done: boolean;
+	/** The images of the call's value, for a call that reached the handler. */
+	images?: CodeModeImageStaging;
 }
 
 const STALLED_ERROR: CodeModeErrorDescription = {
@@ -221,6 +237,9 @@ class ScriptRun {
 	private retainedChars = 0;
 	private lastSeq = 0;
 	private outstandingArgumentBytes = 0;
+	/** Image references sent to the script in call results. */
+	private readonly issuedImageRefs = new Set<string>();
+	private shownImages = 0;
 	private worker: CodeModeWorker | undefined;
 	private stopFlags: Int32Array | undefined;
 	private clock: BigInt64Array | undefined;
@@ -509,18 +528,25 @@ class ScriptRun {
 	private async execute(state: CallState, args: Record<string, unknown>): Promise<void> {
 		let outcome: { ok: true; value: unknown } | { ok: false; error: unknown };
 		try {
+			const images = this.request.images.stage();
+			state.images = images;
 			const value = await this.request.onCall({
 				seq: state.record.seq,
 				binding: state.record.binding,
 				args,
 				signal: this.callController.signal,
+				images,
+				maxValueBytes: this.limits.maxScriptValueBytes,
 			});
 			outcome = { ok: true, value };
 		} catch (error) {
 			outcome = { ok: false, error };
 		}
 		// A call recorded as unsettled at the end of the script keeps that record; its late result is dropped.
-		if (state.done) return;
+		if (state.done) {
+			state.images?.release();
+			return;
+		}
 		this.inFlight.delete(state);
 		this.outstandingArgumentBytes -= state.bytes;
 		let reply: { ok: boolean; payload: string };
@@ -572,9 +598,30 @@ class ScriptRun {
 	private reply(state: CallState, reply: { ok: boolean; payload: string }): void {
 		state.done = true;
 		state.record.durationMs = performance.now() - state.startedAt;
+		const images = state.images;
 		// After the outcome is decided, the host sends nothing more to the VM.
-		if (this.failure || this.workerSettled || !this.worker) return;
-		this.worker.post({ type: "result", id: this.id, seq: state.record.seq, ok: reply.ok, payload: reply.payload });
+		if (this.failure || this.workerSettled || !this.worker) {
+			images?.release();
+			return;
+		}
+		// A call's images reach the script only with its value; they are kept once the value is posted.
+		if (!reply.ok) images?.release();
+		const imageRefs = reply.ok && images ? [...images.refs] : [];
+		try {
+			this.worker.post({
+				type: "result",
+				id: this.id,
+				seq: state.record.seq,
+				ok: reply.ok,
+				payload: reply.payload,
+				imageRefs,
+			});
+		} catch (error) {
+			images?.release();
+			throw error;
+		}
+		images?.commit();
+		for (const ref of imageRefs) this.issuedImageRefs.add(ref);
 	}
 
 	private onOutput(payload: string): void {
@@ -591,6 +638,18 @@ class ScriptRun {
 		} catch (error) {
 			this.protocolViolation(errorMessage(error));
 			return;
+		}
+		// The prelude shows only references the script received, and at most the limit; anything else is forged.
+		if (item.type === "image") {
+			if (!this.issuedImageRefs.has(item.ref)) {
+				this.protocolViolation("an image reference the script did not receive");
+				return;
+			}
+			if (this.shownImages >= MAX_SHOWN_IMAGES) {
+				this.protocolViolation(`more than ${MAX_SHOWN_IMAGES} images shown`);
+				return;
+			}
+			this.shownImages++;
 		}
 		const chars = item.type === "image" ? 0 : item.text.length;
 		if (
@@ -639,6 +698,7 @@ class ScriptRun {
 			]);
 			for (const state of this.inFlight) {
 				state.done = true;
+				state.images?.release();
 				state.record.status = "unsettled";
 				state.record.durationMs = performance.now() - state.startedAt;
 			}
