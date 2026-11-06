@@ -53,8 +53,6 @@ export interface ReviewTarget {
 	commonDir: string;
 	/** A file as it was before the change, from the host's snapshot; undefined when it did not exist or is not text. */
 	readBase(path: string, signal: AbortSignal): Promise<string | undefined>;
-	/** Materializes another private checkout of the reviewed state, set up as the review asked; the caller removes it. */
-	createCheckout(): Promise<string>;
 }
 
 export interface UsageTotals {

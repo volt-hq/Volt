@@ -1,6 +1,5 @@
 import type { ReviewEngineChangedFile, ReviewEngineContext } from "@hansjm10/volt-coding-agent";
 import { createBaseReader } from "./base.ts";
-import { repositoryOf } from "./git.ts";
 import type { DiffShard, ReviewTarget } from "./types.ts";
 
 /** What one worker's part of the diff holds at most, in bytes of patch text. */
@@ -57,20 +56,17 @@ export function packShards(
  * Swarm's view of the change the host resolved: its shards of hunks, a checkout of the reviewed head to work in, and
  * the base-file reader. Returns a user-facing message when there is nothing to review.
  */
-export async function buildTarget(engine: ReviewEngineContext, signal: AbortSignal): Promise<ReviewTarget | string> {
-	const repository = await repositoryOf(engine.cwd, signal);
-	if (!repository) return "Swarm review needs a Git repository.";
+export async function buildTarget(engine: ReviewEngineContext): Promise<ReviewTarget | string> {
 	const files = engine.changedFiles().filter((file) => file.inScope);
 	const reviewable = files.filter((file) => file.reviewable && file.hunks.length > 0);
 	if (reviewable.length === 0) {
 		return `No reviewable changes in ${engine.target.description}${engine.target.controls.scope.length > 0 ? " match the scope" : ""}.`;
 	}
 	const { shards, fileHunks, hunkBytes } = packShards(reviewable);
-	// The host sets up each checkout as the review asked, such as installing its dependencies.
-	const createCheckout = (): Promise<string> => engine.checkout();
 	return {
-		repoRoot: repository.repoRoot,
-		checkout: await createCheckout(),
+		repoRoot: engine.target.root,
+		// Held for the whole review: every pass reads it, and none changes it.
+		checkout: (await engine.checkout()).path,
 		description: engine.target.description,
 		stat: files.map(statLine).join("\n"),
 		scope: engine.target.controls.scope,
@@ -79,8 +75,7 @@ export async function buildTarget(engine: ReviewEngineContext, signal: AbortSign
 		hunkBytes,
 		complete: shards.length === 1 && shards[0]?.partialFiles.length === 0,
 		submodules: files.some((file) => file.unsupportedReason?.startsWith("Submodule") === true),
-		commonDir: repository.commonDir,
+		commonDir: engine.target.commonDirectory,
 		readBase: createBaseReader(engine),
-		createCheckout,
 	};
 }

@@ -164,6 +164,7 @@ function snapshot(headOid: string, hunkId = "hunk-1"): ReviewSnapshot {
 			},
 		],
 		root: "/tmp/review",
+		commonDirectory: "/tmp/review/.git",
 		readFile: async () => undefined,
 		listFiles: async () => [],
 		search: async () => ({
@@ -175,6 +176,7 @@ function snapshot(headOid: string, hunkId = "hunk-1"): ReviewSnapshot {
 			complete: true,
 		}),
 		materializeHead: async () => "/tmp/review-materialized",
+		resetHead: async () => {},
 		dispose: async () => {},
 	};
 }

@@ -51,7 +51,6 @@ describe("swarm review tools in a checkout reached through a symlink (issue #950
 			submodules: false,
 			commonDir: join(checkout, ".git"),
 			readBase: async () => undefined,
-			createCheckout: async () => checkout,
 		};
 		const tools: ToolDefinition[] = createRepositoryTools(target, checkout);
 		const read = tools.find((tool) => tool.name === "read");

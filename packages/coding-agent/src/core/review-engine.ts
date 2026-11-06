@@ -349,6 +349,11 @@ export interface ReviewEngineTarget {
 	identity: ReviewSnapshotIdentity;
 	/** The repository the review was started in. */
 	root: string;
+	/**
+	 * The repository's Git common directory, its symlinks resolved: the same in every worktree of the repository, so it
+	 * identifies the repository across them.
+	 */
+	commonDirectory: string;
 	/** Host-written text about the target, such as a branch's commit list, or none. */
 	extraContext?: string;
 	controls: { focus?: string; scope: string[]; effort: ReviewEffort; includeOptional: boolean };
@@ -365,6 +370,19 @@ export interface ReviewEnginePass {
 	diff(hunkIds: readonly string[], maxBytes: number): ReviewDiffDelivery;
 	/** What this pass has observed so far. */
 	coverage(): ReviewObservedCoverage;
+}
+
+/** A checkout of the reviewed head that the engine holds until it releases it: see {@link ReviewEngineContext.checkout}. */
+export interface ReviewEngineCheckout {
+	/** The checkout's directory. */
+	readonly path: string;
+	/**
+	 * Hand the checkout back once done with it. The host resets it to the reviewed head (tracked files restored,
+	 * untracked ones removed, ignored ones such as what the setup installed kept) and gives it to a later
+	 * {@link ReviewEngineContext.checkout}. Once the review is cancelled, it leaves the checkout as it is, to be
+	 * removed. Do not use it afterwards. Never rejects; releasing again does nothing.
+	 */
+	release(): Promise<void>;
 }
 
 /** What {@link ReviewEngineContext.validate} says about a candidate report. */
@@ -474,12 +492,13 @@ export interface ReviewEngineContext {
 	 */
 	readonly tools: readonly string[];
 	/**
-	 * A new disposable checkout of the reviewed head, removed when the review ends. When the review was started with
-	 * a setup (such as installing dependencies), it has run there, so commands find what a working copy has; a setup
-	 * that fails rejects with its output. The setup runs in every new checkout, so an engine that runs commands in
-	 * several passes should reuse checkouts (reset to the head between uses) rather than ask for one per pass.
+	 * A checkout of the reviewed head that nothing else holds: one released earlier, reset to the head, or else a new
+	 * one. When the review was started with a setup (such as installing dependencies), it has run there once, when the
+	 * checkout was made, so commands find what a working copy has; a setup that fails rejects with its output. Release
+	 * a checkout once done with it, so a later call reuses it instead of setting up another. Every checkout is removed
+	 * when the review ends.
 	 */
-	checkout(): Promise<string>;
+	checkout(): Promise<ReviewEngineCheckout>;
 }
 
 /** Most commands, and most failed attempts, one result reports. */
@@ -602,6 +621,8 @@ export class ReviewEngineRun {
 	private readonly shellPath: string | undefined;
 	private readonly coverage = new ReviewRunCoverage();
 	private readonly inScopeHunkIds: ReadonlySet<string>;
+	/** Checkouts the engine released, reset to the head, for its next {@link ReviewEngineContext.checkout}. */
+	private readonly idleCheckouts: string[] = [];
 	private inventory: ReviewCoverageTracker | undefined;
 	private submitted: ParsedReview | undefined;
 	private pendingPrior: PendingPriorDecisions | undefined;
@@ -717,6 +738,7 @@ export class ReviewEngineRun {
 				description: snapshot.description,
 				identity: structuredClone(snapshot.identity),
 				root: snapshot.root,
+				commonDirectory: snapshot.commonDirectory,
 				...(snapshot.extraContext === undefined ? {} : { extraContext: snapshot.extraContext }),
 				controls: {
 					...(controls.focus === undefined ? {} : { focus: controls.focus }),
@@ -729,14 +751,34 @@ export class ReviewEngineRun {
 			pass: () => this.pass(),
 			validate: (candidates) => this.validate(candidates),
 			submit: (result) => this.submit(result),
-			checkout: async () => {
-				this.assertLive();
-				const checkout = await snapshot.materializeHead();
-				if (this.setup) await setUpReviewCheckout(checkout, this.setup, this.shellPath, channels.signal);
-				return checkout;
-			},
+			checkout: () => this.checkout(channels.signal),
 		};
 		return Object.freeze(context);
+	}
+
+	private async checkout(signal: AbortSignal): Promise<ReviewEngineCheckout> {
+		this.assertLive();
+		const reused = this.idleCheckouts.pop();
+		const path = reused ?? (await this.snapshot.materializeHead());
+		if (reused === undefined && this.setup) await setUpReviewCheckout(path, this.setup, this.shellPath, signal);
+		let released = false;
+		return Object.freeze({
+			path,
+			release: async () => {
+				if (released || this.ended) return;
+				released = true;
+				// A cancelled review is ending: its checkouts are removed, not reset for reuse.
+				if (signal.aborted) return;
+				try {
+					await this.snapshot.resetHead(path, signal);
+				} catch {
+					// One that cannot be reset, or whose reset was cancelled, is not handed out again; it is removed with
+					// the others.
+					return;
+				}
+				if (!this.ended) this.idleCheckouts.push(path);
+			},
+		});
 	}
 
 	private changedFiles(): ReviewEngineChangedFile[] {

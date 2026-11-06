@@ -1,7 +1,8 @@
 import { Buffer } from "node:buffer";
 import type { ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import type { Stats } from "node:fs";
+import { copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawnProcess } from "../utils/child-process.ts";
@@ -146,10 +147,21 @@ export interface ReviewSnapshot {
 	branchBase?: ReviewBranchBase;
 	changedFiles: ReviewChangedFile[];
 	root: string;
+	/** The repository's Git common directory, its symlinks resolved: the same in every worktree of the repository. */
+	commonDirectory: string;
 	readFile(revision: ReviewSnapshotRevision, path: string): Promise<ReviewSnapshotFile | undefined>;
 	listFiles(options?: ReviewSnapshotListOptions): Promise<ReviewSnapshotTreeEntry[]>;
 	search(options: ReviewSnapshotSearchOptions): Promise<ReviewSnapshotSearchResult>;
 	materializeHead(): Promise<string>;
+	/**
+	 * Return `directory`, a checkout {@link materializeHead} made, to the reviewed head: tracked files restored and
+	 * untracked ones removed, nested repositories included, while ignored ones (what a setup installed) stay. The same
+	 * goes inside every populated submodule, nested ones included, whether initialized or a repository a setup cloned
+	 * there: each is returned to the commit the head records and stays populated, and one not populated is left alone.
+	 * Rejects when the checkout's Git directory, or a submodule's, is outside the checkout or shared with another.
+	 * Aborting `signal` stops it and rejects, leaving the checkout only partly reset.
+	 */
+	resetHead(directory: string, signal?: AbortSignal): Promise<void>;
 	dispose(): Promise<void>;
 }
 
@@ -491,6 +503,22 @@ async function repositoryObjectDirectory(
 	throwIfResolutionCancelled(signal);
 	throwIfOutputLimited("git rev-parse failed", result);
 	return result.ok ? text(result).trim() || undefined : undefined;
+}
+
+async function repositoryCommonDirectory(
+	cwd: string,
+	limits: ReviewSnapshotLimits,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	const result = await runCommand(
+		"git",
+		["rev-parse", "--path-format=absolute", "--git-common-dir"],
+		cwd,
+		commandOptions(limits, signal),
+	);
+	throwIfOutputLimited("git rev-parse failed", result);
+	const directory = result.ok ? text(result).trim() : "";
+	return directory ? await realpath(directory) : undefined;
 }
 
 async function repositoryObjectFormat(
@@ -2392,11 +2420,14 @@ class GitReviewSnapshot implements ReviewSnapshot {
 	readonly identity: ReviewSnapshotIdentity;
 	readonly branchBase?: ReviewBranchBase;
 	readonly root: string;
+	readonly commonDirectory: string;
 	readonly changedFiles: ReviewChangedFile[];
 	private readonly source: GitSource;
 	private readonly limits: ReviewSnapshotLimits;
 	private readonly temporaryDirectories: string[];
 	private readonly materializedDirectories: string[] = [];
+	/** The commit each materialized checkout was made at, by directory: what {@link resetHead} returns it to. */
+	private readonly materializedCommits = new Map<string, string>();
 	private readonly treeEntries = new Map<ReviewSnapshotRevision, Map<string, ReviewSnapshotTreeEntry>>();
 	private readonly pathspecUnsafeEntries = new Map<ReviewSnapshotRevision, ReadonlySet<ReviewSnapshotTreeEntry>>();
 	private readonly searchManifests = new Map<string, Promise<SearchManifest>>();
@@ -2409,6 +2440,7 @@ class GitReviewSnapshot implements ReviewSnapshot {
 
 	private constructor(
 		init: SnapshotInit,
+		commonDirectory: string,
 		changedFiles: ReviewChangedFile[],
 		baseInventory: ParsedReviewSnapshotTree,
 		headInventory: ParsedReviewSnapshotTree,
@@ -2421,6 +2453,7 @@ class GitReviewSnapshot implements ReviewSnapshot {
 		this.identity = init.identity;
 		this.branchBase = init.branchBase;
 		this.root = init.root;
+		this.commonDirectory = commonDirectory;
 		this.source = init.source;
 		this.limits = init.limits;
 		this.temporaryDirectories = init.temporaryDirectories;
@@ -2432,6 +2465,8 @@ class GitReviewSnapshot implements ReviewSnapshot {
 	}
 
 	static async create(init: SnapshotInit): Promise<GitReviewSnapshot> {
+		const commonDirectory = await repositoryCommonDirectory(init.root, init.limits, init.source.signal);
+		if (!commonDirectory) throw new Error("Could not resolve the Git common directory.");
 		const baseTreeResult = await git(init.source, ["ls-tree", "-r", "-z", "-l", init.identity.baseTree]);
 		const headTreeResult = await git(init.source, ["ls-tree", "-r", "-z", "-l", init.identity.headTree]);
 		if (!baseTreeResult.ok || !headTreeResult.ok) {
@@ -2448,7 +2483,7 @@ class GitReviewSnapshot implements ReviewSnapshot {
 			baseInventory.entries,
 			headInventory.entries,
 		);
-		return new GitReviewSnapshot(init, changedFiles, baseInventory, headInventory);
+		return new GitReviewSnapshot(init, commonDirectory, changedFiles, baseInventory, headInventory);
 	}
 
 	async readFile(revision: ReviewSnapshotRevision, path: string): Promise<ReviewSnapshotFile | undefined> {
@@ -2913,7 +2948,119 @@ class GitReviewSnapshot implements ReviewSnapshot {
 			commandOptions(this.limits, this.source.signal),
 		);
 		if (!reset.ok) throw new Error(`Could not materialize review checkout: ${commandError(reset)}`);
+		this.materializedCommits.set(directory, commitOid);
 		return directory;
+	}
+
+	async resetHead(directory: string, signal?: AbortSignal): Promise<void> {
+		this.assertActive();
+		const commit = this.materializedCommits.get(directory);
+		if (commit === undefined) throw new Error("Not a checkout of this review snapshot.");
+		// Commands run in the checkout can replace it or its Git directory with a link to another repository, which the
+		// reset would then move: both must still be directories of their own.
+		const gitDirectory = join(directory, ".git");
+		if (!(await lstat(directory)).isDirectory() || !(await lstat(gitDirectory)).isDirectory()) {
+			throw new Error("The review checkout or its Git directory is no longer a directory.");
+		}
+		const root = await realpath(directory);
+		const usedGitDirectories = new Set([await realpath(gitDirectory)]);
+		const pathspecUnsafe = this.pathspecUnsafeEntries.get("head");
+		const gitlinks = [...(this.treeEntries.get("head")?.values() ?? [])].filter((entry) => entry.type === "commit");
+		const unaddressable = gitlinks.find((gitlink) => pathspecUnsafe?.has(gitlink));
+		if (unaddressable)
+			throw new Error(`The submodule path ${JSON.stringify(unaddressable.path)} is not valid UTF-8.`);
+		const sourceSignal = this.source.signal;
+		const options = commandOptions(
+			this.limits,
+			sourceSignal && signal ? AbortSignal.any([sourceSignal, signal]) : (sourceSignal ?? signal),
+		);
+		// Initialized submodules are reset too, to the commits the head records.
+		const reset = await runCommand(
+			"git",
+			["reset", "--hard", "--quiet", "--recurse-submodules", commit],
+			directory,
+			options,
+		);
+		if (!reset.ok) throw new Error(`Could not reset review checkout: ${commandError(reset)}`);
+		// Forced twice, so it also removes untracked directories that hold a repository of their own.
+		const clean = await runCommand("git", ["clean", "-d", "--force", "--force", "--quiet"], directory, options);
+		if (!clean.ok) throw new Error(`Could not clean review checkout: ${commandError(clean)}`);
+		for (const gitlink of gitlinks) {
+			await this.resetGitlink(root, join(directory, gitlink.path), gitlink.oid, usedGitDirectories, options);
+		}
+	}
+
+	/**
+	 * Return the repository populating the gitlink at `workTree`, if one does, to `oid` and clean it the way
+	 * {@link resetHead} cleans the checkout, then each gitlink of its own. Git's submodule commands would not do: they
+	 * stop at a gitlink with no `.gitmodules` entry, and pass over a repository a setup cloned there rather than
+	 * initialized. Only a repository whose Git directory and work tree are inside `root`, the checkout, is touched, and
+	 * none may share a Git directory with one in `used`, those reset already.
+	 */
+	private async resetGitlink(
+		root: string,
+		workTree: string,
+		oid: string,
+		used: Set<string>,
+		options: ReturnType<typeof commandOptions>,
+	): Promise<void> {
+		const dotGit = join(workTree, ".git");
+		const dotGitStats = await lstatIfPresent(dotGit);
+		if (dotGitStats === undefined) return;
+		let gitDirectory: string;
+		if (dotGitStats.isDirectory()) {
+			gitDirectory = dotGit;
+		} else if (dotGitStats.isFile()) {
+			const gitFile = (await readFile(dotGit, "utf8")).trimEnd();
+			if (!gitFile.startsWith("gitdir: ")) throw new Error(`${dotGit} does not name a Git directory.`);
+			gitDirectory = resolve(workTree, gitFile.slice("gitdir: ".length));
+		} else {
+			throw new Error(`${dotGit} is neither a directory nor a file.`);
+		}
+		const realGitDirectory = await realpath(gitDirectory);
+		const realWorkTree = await realpath(workTree);
+		if (!pathWithinRoot(root, realGitDirectory) || !pathWithinRoot(root, realWorkTree)) {
+			throw new Error(`The repository at ${workTree} is outside the review checkout.`);
+		}
+		// A worktree's Git directory keeps its refs in another repository's, which the reset would move.
+		if ((await lstatIfPresent(join(realGitDirectory, "commondir"))) !== undefined) {
+			throw new Error(`The repository at ${workTree} is a worktree of another.`);
+		}
+		if (used.has(realGitDirectory)) throw new Error(`The repository at ${workTree} shares its Git directory.`);
+		used.add(realGitDirectory);
+		const inRepository = (args: string[]): Promise<CommandResult> =>
+			runCommand(
+				"git",
+				[`--git-dir=${realGitDirectory}`, `--work-tree=${realWorkTree}`, ...args],
+				realWorkTree,
+				options,
+			);
+		const reset = await inRepository(["reset", "--hard", "--quiet", oid]);
+		if (!reset.ok) throw new Error(`Could not reset the repository at ${workTree}: ${commandError(reset)}`);
+		const clean = await inRepository(["clean", "-d", "--force", "--force", "--quiet"]);
+		if (!clean.ok) throw new Error(`Could not clean the repository at ${workTree}: ${commandError(clean)}`);
+		const index = await inRepository(["ls-files", "--stage", "-z"]);
+		if (!index.ok) throw new Error(`Could not list the repository at ${workTree}: ${commandError(index)}`);
+		const records = index.stdout;
+		let start = 0;
+		while (start < records.length) {
+			const nul = records.indexOf(0, start);
+			const record = records.subarray(start, nul < 0 ? records.length : nul);
+			start = nul < 0 ? records.length : nul + 1;
+			const tab = record.indexOf(9);
+			if (tab < 0) continue;
+			const [mode, nestedOid] = record.subarray(0, tab).toString("utf8").split(" ");
+			if (mode !== "160000") continue;
+			const pathBytes = record.subarray(tab + 1);
+			const path = pathBytes.toString("utf8");
+			if (!Buffer.from(path, "utf8").equals(pathBytes)) {
+				throw new Error(`A submodule path in the repository at ${workTree} is not valid UTF-8.`);
+			}
+			if (nestedOid === undefined || !CANONICAL_GIT_OBJECT_ID_PATTERN.test(nestedOid)) {
+				throw new Error(`The repository at ${workTree} records submodule ${path} at no valid commit.`);
+			}
+			await this.resetGitlink(root, join(realWorkTree, path), nestedOid, used, options);
+		}
 	}
 
 	async dispose(): Promise<void> {
@@ -2967,6 +3114,16 @@ export function pageUtf8(textValue: string, offset: number, maxBytes: number): R
 		totalBytes: buffer.length,
 		...(end < buffer.length ? { nextOffset: end } : {}),
 	};
+}
+
+/** What is at `path`, a final symbolic link not followed, or `undefined` when nothing is. */
+async function lstatIfPresent(path: string): Promise<Stats | undefined> {
+	try {
+		return await lstat(path);
+	} catch (error) {
+		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return undefined;
+		throw error;
+	}
 }
 
 export function pathWithinRoot(root: string, candidate: string): boolean {

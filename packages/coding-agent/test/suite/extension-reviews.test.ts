@@ -238,7 +238,7 @@ async function setup(): Promise<Fixture> {
 						targets: ["uncommitted"],
 						async run(ctx) {
 							const checkout = await ctx.checkout();
-							const marker = join(checkout, "setup-marker");
+							const marker = join(checkout.path, "setup-marker");
 							ran.push({
 								tools: ctx.tools,
 								marker: existsSync(marker) ? readFileSync(marker, "utf8") : undefined,

@@ -675,6 +675,7 @@ export type {
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.ts";
 export type {
 	ReviewEngineChangedFile,
+	ReviewEngineCheckout,
 	ReviewEngineContext,
 	ReviewEngineHunk,
 	ReviewEnginePass,

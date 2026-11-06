@@ -112,6 +112,7 @@ async function fixture() {
 	};
 	const snapshot: snapshots.ReviewSnapshot = {
 		root: cwd,
+		commonDirectory: join(cwd, ".git"),
 		description: "PR #414",
 		diffCommand: "git diff base..head",
 		identity: {
@@ -134,6 +135,7 @@ async function fixture() {
 			complete: true,
 		}),
 		materializeHead: async () => cwd,
+		resetHead: async () => {},
 		dispose: vi.fn(async () => {}),
 	};
 	const captured: Extract<ReviewCodeHostContextCaptureResult, { ok: true }> = {

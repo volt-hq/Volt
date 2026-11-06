@@ -345,6 +345,7 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 		const snapshot: ReviewSnapshot = {
 			...review().target,
 			root: "/unused",
+			commonDirectory: "/unused/.git",
 			changedFiles: [],
 			readFile: async () => undefined,
 			listFiles: async () => [],
@@ -357,6 +358,7 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 				complete: true,
 			}),
 			materializeHead: async () => "/unused",
+			resetHead: async () => {},
 			dispose: async () => {},
 		};
 		for (const options of [{}, { parentRunId: "review:341" }]) {
