@@ -34,7 +34,10 @@ interface Call {
 	cls: CodeModeSchedulingClass;
 	state: State;
 	finish: ReturnType<typeof deferred<number>>;
+	/** Cancels the call; calls submitted with the same controller share its signal, as a script's calls do. */
 	controller: AbortController;
+	/** Runs synchronously when the call starts, inside the scheduler's reaction that started it. */
+	whenStarted: (() => void) | undefined;
 	outcome: { ok: true; value: unknown } | { ok: false; error: unknown } | undefined;
 }
 
@@ -47,24 +50,25 @@ class Harness {
 	readonly violations: string[] = [];
 	readonly schedulers: CodeModeCallScheduler[];
 
+	readonly limiter = new CodeModeServerLimiter();
+
 	constructor(scripts: number) {
-		const limiter = new CodeModeServerLimiter();
 		this.schedulers = Array.from(
 			{ length: scripts },
-			() => new CodeModeCallScheduler({ limiter, maxConcurrentCalls: MAX_PER_SCRIPT }),
+			() => new CodeModeCallScheduler({ limiter: this.limiter, maxConcurrentCalls: MAX_PER_SCRIPT }),
 		);
 	}
 
-	submit(script: number, cls: CodeModeSchedulingClass, signal?: AbortSignal): Call {
-		const controller = new AbortController();
+	submit(script: number, cls: CodeModeSchedulingClass, controller = new AbortController()): Call {
 		const call: Call = {
 			id: this.calls.length,
 			script,
 			cls,
 			// A call whose signal has already aborted is never queued.
-			state: signal?.aborted ? "cancelled" : "queued",
+			state: controller.signal.aborted ? "cancelled" : "queued",
 			finish: deferred<number>(),
 			controller,
+			whenStarted: undefined,
 			outcome: undefined,
 		};
 		this.calls.push(call);
@@ -75,7 +79,7 @@ class Harness {
 					this.onStart(call);
 					return call.finish.promise;
 				},
-				signal ?? controller.signal,
+				controller.signal,
 			)
 			.then(
 				(value) => {
@@ -122,16 +126,27 @@ class Harness {
 			if (call.cls.kind === "server" && this.serverRunning(call.cls.server) >= call.cls.limit) {
 				this.violations.push(`${label} started beyond its server's limit`);
 			}
-			// A call may start ahead of an earlier one only if that one waits for a different, full server.
+			// A call may start ahead of an earlier one only if that one waits for a different server.
 			for (const earlier of this.earlierQueued(call)) {
-				const blocked =
-					earlier.cls.kind === "server" &&
-					!(call.cls.kind === "server" && call.cls.server === earlier.cls.server) &&
-					this.serverRunning(earlier.cls.server) >= earlier.cls.limit;
-				if (!blocked) this.violations.push(`${label} started before call ${earlier.id}`);
+				const sameServer =
+					call.cls.kind === "server" && earlier.cls.kind === "server" && call.cls.server === earlier.cls.server;
+				if (sameServer || !this.waitsForServer(earlier)) {
+					this.violations.push(`${label} started before call ${earlier.id}`);
+				}
 			}
 		}
 		call.state = "running";
+		call.whenStarted?.();
+	}
+
+	/** Whether a queued call waits only for its server: the server is full for it, or an earlier call to it waits. */
+	private waitsForServer(call: Call): boolean {
+		const { cls } = call;
+		if (cls.kind !== "server") return false;
+		return (
+			this.serverRunning(cls.server) >= cls.limit ||
+			this.earlierQueued(call).some((other) => other.cls.kind === "server" && other.cls.server === cls.server)
+		);
 	}
 
 	/** Whether the rules let a queued call start now; none may be left waiting while it could. */
@@ -159,8 +174,11 @@ class Harness {
 		else call.finish.resolve(call.id);
 	}
 
+	/** Aborts a queued call's signal, which cancels every queued call that shares it. */
 	cancel(call: Call): void {
-		call.state = "cancelled";
+		for (const other of this.queued()) {
+			if (other.controller === call.controller) other.state = "cancelled";
+		}
 		call.controller.abort(new Error("cancelled"));
 	}
 }
@@ -173,12 +191,14 @@ const CLASSES: CodeModeSchedulingClass[] = [
 	{ kind: "parallel" },
 	{ kind: "exclusive" },
 	{ kind: "server", server: "a", limit: 1 },
+	// The same server with a different limit, as after a configuration reload during a script.
+	{ kind: "server", server: "a", limit: 3 },
 	{ kind: "server", server: "b", limit: 2 },
 	{ kind: "server", server: "b", limit: 2 },
 ];
 
 type Step =
-	| { type: "submit"; script: number; cls: number }
+	| { type: "submit"; script: number; cls: number; shared: boolean }
 	| { type: "finish"; pick: number; fail: boolean }
 	| { type: "cancel"; pick: number };
 
@@ -189,6 +209,7 @@ const step: fc.Arbitrary<Step> = fc.oneof(
 			type: fc.constant("submit" as const),
 			script: fc.nat({ max: 2 }),
 			cls: fc.nat({ max: CLASSES.length - 1 }),
+			shared: fc.boolean(),
 		}),
 	},
 	{ weight: 3, arbitrary: fc.record({ type: fc.constant("finish" as const), pick: fc.nat(), fail: fc.boolean() }) },
@@ -200,15 +221,23 @@ describe("code mode call scheduler", () => {
 		await fc.assert(
 			fc.asyncProperty(fc.array(step, { minLength: 1, maxLength: 40 }), async (steps) => {
 				const harness = new Harness(3);
+				// Calls may share their script's signal, as a script's nested calls do; once aborted, it is replaced.
+				const shared = [0, 1, 2].map(() => new AbortController());
 				for (const current of steps) {
 					if (current.type === "submit") {
-						harness.submit(current.script, CLASSES[current.cls]);
+						const controller = current.shared ? shared[current.script] : new AbortController();
+						harness.submit(current.script, CLASSES[current.cls], controller);
 					} else if (current.type === "finish") {
 						const running = harness.running();
 						if (running.length > 0) harness.finish(running[current.pick % running.length], current.fail);
 					} else {
 						const queued = harness.queued();
-						if (queued.length > 0) harness.cancel(queued[current.pick % queued.length]);
+						if (queued.length > 0) {
+							const target = queued[current.pick % queued.length];
+							harness.cancel(target);
+							const script = shared.indexOf(target.controller);
+							if (script !== -1) shared[script] = new AbortController();
+						}
 					}
 					await settle();
 					expect(harness.violations).toStrictEqual([]);
@@ -301,6 +330,38 @@ describe("code mode call scheduler", () => {
 		expect(harness.violations).toStrictEqual([]);
 	});
 
+	it("keeps the place of a server call submitted while its script is full", async () => {
+		const harness = new Harness(3);
+		const server: CodeModeSchedulingClass = { kind: "server", server: "a", limit: 1 };
+		const holder = harness.submit(0, server);
+		const fillers = [0, 1, 2].map(() => harness.submit(1, { kind: "parallel" }));
+		// Script 1 is full when its call is submitted, and script 2 submits a call to the same server after it.
+		const earlier = harness.submit(1, server);
+		const later = harness.submit(2, server);
+		await settle();
+		harness.finish(fillers[0], false);
+		await settle();
+		harness.finish(holder, false);
+		await settle();
+		expect([earlier.state, later.state]).toStrictEqual(["running", "queued"]);
+		expect(harness.violations).toStrictEqual([]);
+	});
+
+	it("starts a call to a freed server past an earlier call held behind a stricter call to its own server", async () => {
+		const harness = new Harness(3);
+		harness.submit(2, { kind: "server", server: "a", limit: 1 });
+		const holderB = harness.submit(1, { kind: "server", server: "b", limit: 1 });
+		// The limit-3 call could run beside the running call to a, but it waits behind the limit-1 call.
+		harness.submit(0, { kind: "server", server: "a", limit: 1 });
+		harness.submit(0, { kind: "server", server: "a", limit: 3 });
+		const waitingForB = harness.submit(0, { kind: "server", server: "b", limit: 1 });
+		await settle();
+		harness.finish(holderB, false);
+		await settle();
+		expect(waitingForB.state).toBe("running");
+		expect(harness.violations).toStrictEqual([]);
+	});
+
 	it("starts a server call only while fewer calls to that server than its own limit run in the process", async () => {
 		const harness = new Harness(2);
 		const strict = harness.submit(0, { kind: "server", server: "s", limit: 1 });
@@ -324,7 +385,9 @@ describe("code mode call scheduler", () => {
 		const harness = new Harness(1);
 		const exclusive = harness.submit(0, { kind: "exclusive" });
 		const queued = harness.submit(0, { kind: "parallel" });
-		const aborted = harness.submit(0, { kind: "parallel" }, AbortSignal.abort(new Error("already aborted")));
+		const abortedController = new AbortController();
+		abortedController.abort(new Error("already aborted"));
+		const aborted = harness.submit(0, { kind: "parallel" }, abortedController);
 		await settle();
 		harness.cancel(queued);
 		harness.finish(exclusive, false);
@@ -341,6 +404,43 @@ describe("code mode call scheduler", () => {
 		harness.cancel(barrier);
 		await settle();
 		expect([blocker.state, behind.state]).toStrictEqual(["running", "running"]);
+	});
+
+	it("never starts a queued call whose signal aborted with the call that was holding it back", async () => {
+		const harness = new Harness(1);
+		const script = new AbortController();
+		harness.submit(0, { kind: "parallel" });
+		const barrier = harness.submit(0, { kind: "exclusive" }, script);
+		const behind = harness.submit(0, { kind: "parallel" }, script);
+		await settle();
+		// Cancelling the barrier frees the call behind it, whose own abort listener has not run yet.
+		harness.cancel(barrier);
+		await settle();
+		for (const call of [barrier, behind]) {
+			expect(call.outcome?.ok === false && call.outcome.error).toBeInstanceOf(CodeModeCallNotStartedError);
+		}
+		expect(harness.violations).toStrictEqual([]);
+	});
+
+	it("never starts a call cancelled while a freed server slot is offered", async () => {
+		const harness = new Harness(3);
+		const holder = harness.submit(0, { kind: "server", server: "a", limit: 1 });
+		const first = harness.submit(1, { kind: "server", server: "a", limit: 1 });
+		const blocked = harness.submit(2, { kind: "server", server: "a", limit: 1 });
+		const relaxed = harness.submit(2, { kind: "server", server: "a", limit: 3 });
+		// The first waiter to get the freed slot cancels the waiters after it as it starts.
+		first.whenStarted = () => {
+			harness.cancel(relaxed);
+			harness.cancel(blocked);
+		};
+		await settle();
+		harness.finish(holder, false);
+		await settle();
+		for (const call of [blocked, relaxed]) {
+			expect(call.outcome?.ok === false && call.outcome.error).toBeInstanceOf(CodeModeCallNotStartedError);
+		}
+		expect(harness.violations).toStrictEqual([]);
+		expect(harness.limiter.runningCalls("a")).toBe(1);
 	});
 
 	it("passes on a call's failure, including a synchronous throw, and keeps scheduling", async () => {

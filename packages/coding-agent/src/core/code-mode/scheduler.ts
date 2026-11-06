@@ -32,16 +32,16 @@ export class CodeModeCallNotStartedError extends Error {
 	}
 }
 
-/** A call waiting for a server slot, offered one when a slot frees. */
+/** A queued call to a server, offered a slot when one frees. */
 interface ServerWaiter {
 	readonly limit: number;
-	/** Starts the call if its script lets it start now. */
+	/** Lets the call's script start the calls the rules allow now. */
 	offer(): void;
 }
 
 /**
- * Counts the running calls to each MCP server across every script in the process, and the calls waiting for a
- * slot in the order they started waiting. Schedulers use it; nothing else should.
+ * Counts the running calls to each MCP server across every script in the process, and the queued calls to each
+ * server in submission order. Schedulers use it; nothing else should.
  */
 export class CodeModeServerLimiter {
 	private readonly running = new Map<string, number>();
@@ -64,7 +64,8 @@ export class CodeModeServerLimiter {
 		if (!waiting) return;
 		// A call whose script cannot start it now keeps its place; the slot goes to the next one.
 		for (const waiter of [...waiting]) {
-			if ((this.running.get(server) ?? 0) < waiter.limit) waiter.offer();
+			// An offer runs calls, which may start or cancel the waiters after it.
+			if (waiting.has(waiter) && (this.running.get(server) ?? 0) < waiter.limit) waiter.offer();
 		}
 	}
 
@@ -104,8 +105,8 @@ interface QueuedCall {
 	readonly reject: (error: unknown) => void;
 	readonly signal: AbortSignal | undefined;
 	onAbort: (() => void) | undefined;
-	/** Set while the call waits for a server slot. */
-	waiter: ServerWaiter | undefined;
+	/** Set for a call to a server, queued with the limiter until the call starts or is cancelled. */
+	readonly waiter: ServerWaiter | undefined;
 }
 
 export interface CodeModeCallSchedulerOptions {
@@ -151,13 +152,15 @@ export class CodeModeCallScheduler {
 				reject,
 				signal,
 				onAbort: undefined,
-				waiter: undefined,
+				// Queued with the limiter from submission, so the call keeps its place while its script holds it back.
+				waiter: cls.kind === "server" ? { limit: cls.limit, offer: () => this.pump() } : undefined,
 			};
 			if (signal) {
 				call.onAbort = () => this.cancel(call);
 				signal.addEventListener("abort", call.onAbort, { once: true });
 			}
 			this.queue.push(call);
+			if (call.waiter && cls.kind === "server") this.limiter.wait(cls.server, call.waiter);
 			this.pump();
 		});
 	}
@@ -168,6 +171,11 @@ export class CodeModeCallScheduler {
 		const starting: QueuedCall[] = [];
 		const fullServers = new Set<string>();
 		for (const call of [...this.queue]) {
+			// Cancelled here if its signal aborted before the abort reached its listener, as with calls sharing a signal.
+			if (call.signal?.aborted) {
+				this.drop(call);
+				continue;
+			}
 			const { cls } = call;
 			if (cls.kind === "exclusive") {
 				if (this.queue[0] === call && this.running === 0) starting.push(this.reserve(call));
@@ -178,7 +186,6 @@ export class CodeModeCallScheduler {
 				// Calls to a server start in submission order: once one waits, later ones wait behind it.
 				if (fullServers.has(cls.server) || !this.limiter.tryAcquire(cls.server, cls.limit)) {
 					fullServers.add(cls.server);
-					this.waitForServer(call, cls.server, cls.limit);
 					continue;
 				}
 			}
@@ -188,37 +195,24 @@ export class CodeModeCallScheduler {
 		for (const call of starting) this.start(call);
 	}
 
-	/** Offered a slot of the server `call` waits for; starts it if nothing in its script must start first. */
-	private startWaiting(call: QueuedCall, server: string, limit: number): void {
-		if (this.runningExclusive || this.running >= this.maxConcurrentCalls) return;
-		for (const earlier of this.queue) {
-			if (earlier === call) break;
-			// Only an earlier call waiting for another, full server may be passed.
-			if (
-				earlier.cls.kind !== "server" ||
-				earlier.cls.server === server ||
-				this.limiter.runningCalls(earlier.cls.server) < earlier.cls.limit
-			) {
-				return;
-			}
-		}
-		if (!this.limiter.tryAcquire(server, limit)) return;
-		this.start(this.reserve(call));
-	}
-
-	private waitForServer(call: QueuedCall, server: string, limit: number): void {
-		call.waiter ??= { limit, offer: () => this.startWaiting(call, server, limit) };
-		this.limiter.wait(server, call.waiter);
-	}
-
 	/** Removes a call from the queue and counts it as running; its server slot, if any, is already taken. */
 	private reserve(call: QueuedCall): QueuedCall {
-		this.queue.splice(this.queue.indexOf(call), 1);
+		this.dequeue(call);
 		this.running++;
 		if (call.cls.kind === "exclusive") this.runningExclusive = true;
+		return call;
+	}
+
+	/** Removes a cancelled call from the queue and rejects it; it never ran. */
+	private drop(call: QueuedCall): void {
+		this.dequeue(call);
+		call.reject(new CodeModeCallNotStartedError(call.signal?.reason));
+	}
+
+	private dequeue(call: QueuedCall): void {
+		this.queue.splice(this.queue.indexOf(call), 1);
 		if (call.waiter && call.cls.kind === "server") this.limiter.stopWaiting(call.cls.server, call.waiter);
 		if (call.onAbort) call.signal?.removeEventListener("abort", call.onAbort);
-		return call;
 	}
 
 	private start(call: QueuedCall): void {
@@ -248,11 +242,8 @@ export class CodeModeCallScheduler {
 	}
 
 	private cancel(call: QueuedCall): void {
-		const index = this.queue.indexOf(call);
-		if (index === -1) return;
-		this.queue.splice(index, 1);
-		if (call.waiter && call.cls.kind === "server") this.limiter.stopWaiting(call.cls.server, call.waiter);
-		call.reject(new CodeModeCallNotStartedError(call.signal?.reason));
+		if (!this.queue.includes(call)) return;
+		this.drop(call);
 		// A cancelled call may have been holding back the calls behind it.
 		this.pump();
 	}
