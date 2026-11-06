@@ -3,6 +3,7 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { PrReviewLaunch } from "../../../src/core/pr-review-placement.ts";
 import { createIrohRemotePresetAccess } from "../../../src/core/remote/iroh/access-grant.ts";
 import { IrohRemoteAuditLogger } from "../../../src/core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../../../src/core/remote/iroh/authorization.ts";
@@ -13,7 +14,11 @@ import { IrohRemoteHostStateManager } from "../../../src/core/remote/iroh/state-
 import { ProjectTrustStore } from "../../../src/core/trust-manager.ts";
 import { type ConversationOpenServices, resolveConversationOpen } from "../../../src/daemon/conversation-open.ts";
 import { WorkspaceSessions } from "../../../src/daemon/workspace-sessions.ts";
-import { getWorktreeCheckoutPath, WorktreeManager } from "../../../src/daemon/worktree-manager.ts";
+import {
+	getConversationProjectRoot,
+	getWorktreeCheckoutPath,
+	WorktreeManager,
+} from "../../../src/daemon/worktree-manager.ts";
 import { createIrohRemoteHostStateFixture } from "../../utilities/iroh-host-state.ts";
 
 /**
@@ -23,12 +28,18 @@ import { createIrohRemoteHostStateFixture } from "../../utilities/iroh-host-stat
  * clean parent lacks (a fetched pull request head, say) ran them without any
  * trust decision. Resources are now looked for where they load from; the
  * decision stays the workspace's.
+ *
+ * A checkout that holds a pull request review holds content its author
+ * controls, so a trusted workspace would still have run a fork's project
+ * extensions there. Its conversations now load project resources from the
+ * same repository in the workspace instead, never from the review's head.
  */
-describe("#1034 remote worktree conversations look for resources that need trust in their checkout", () => {
+describe("#1034 remote worktree conversations take project trust and resources from where they load", () => {
 	let root: string;
 	let agentDir: string;
 	let workspace: IrohRemoteWorkspace;
 	let checkout: string;
+	let reviewCheckout: string;
 	let stateManager: IrohRemoteHostStateManager;
 	let worktrees: WorktreeManager;
 	const owned: WorkspaceSessions[] = [];
@@ -51,8 +62,21 @@ describe("#1034 remote worktree conversations look for resources that need trust
 			createdAt: 1,
 			sessionIds: [],
 		};
+		// A prepared pull request review: the fork's head carries project extensions of its own.
+		reviewCheckout = getWorktreeCheckoutPath(agentDir, workspace.path, "review");
+		mkdirSync(join(reviewCheckout, ".volt", "extensions"), { recursive: true });
+		writeFileSync(join(reviewCheckout, ".volt", "extensions", "payload.ts"), "export default () => {};\n");
+		const review: IrohRemoteWorkspaceWorktree = {
+			id: "review",
+			workspaceName: "ws",
+			path: reviewCheckout,
+			branch: "volt/review",
+			createdAt: 1,
+			sessionIds: ["review-session"],
+			prReviewLaunches: [reviewLaunch(reviewCheckout)],
+		};
 		stateManager = new IrohRemoteHostStateManager({
-			initialState: createIrohRemoteHostStateFixture({ workspaces: [workspace], worktrees: [worktree] }),
+			initialState: createIrohRemoteHostStateFixture({ workspaces: [workspace], worktrees: [worktree, review] }),
 		});
 		worktrees = new WorktreeManager({
 			agentDir,
@@ -66,6 +90,37 @@ describe("#1034 remote worktree conversations look for resources that need trust
 		for (const sessions of owned.splice(0)) await sessions.close();
 		await rm(root, { recursive: true, force: true });
 	});
+
+	/** The receipt of a pull request review prepared in `cwd` and bound to its session. */
+	function reviewLaunch(cwd: string): PrReviewLaunch {
+		return {
+			sessionId: "review-session",
+			requestFingerprint: "a".repeat(64),
+			disposition: "created",
+			sessionGeneration: "generation-1",
+			storeId: "store-1",
+			placement: {
+				workspaceName: "ws",
+				workspaceGeneration: 1,
+				worktreeId: "review",
+				cwd,
+				sourceCwd: workspace.path,
+				commonDirectory: join(workspace.path, ".git"),
+				pullRequest: {
+					provider: "github",
+					url: "https://github.com/owner/repo/pull/7",
+					number: 7,
+					title: "Fork change",
+					repository: "owner/repo",
+					headRefName: "topic",
+					headRefOid: "b".repeat(40),
+				},
+				repositoryId: "github:github.com/owner/repo",
+				headRepositoryId: "github:github.com/contributor/repo",
+				remote: "origin",
+			},
+		};
+	}
 
 	function trusted(resourcesRoot: string): boolean {
 		return resolveIrohRemoteWorkspaceProjectTrusted(workspace, {
@@ -159,5 +214,50 @@ describe("#1034 remote worktree conversations look for resources that need trust
 		const inWorkspace = await resolveConversationOpen(newConversationHello(), authorization(), services());
 		expect(inWorkspace.worktree).toBeUndefined();
 		expect(inWorkspace.compatibility.projectTrusted).toBe(true);
+	});
+
+	it("opens a pull request review's conversation with the trusted workspace's project resources, not the head's", async () => {
+		mkdirSync(join(workspace.path, ".volt", "extensions"), { recursive: true });
+		writeFileSync(join(workspace.path, ".volt", "extensions", "own.ts"), "export default () => {};\n");
+		new ProjectTrustStore(agentDir).set(workspace.path, true);
+
+		const inReview = await resolveConversationOpen(newConversationHello("review"), authorization(), services());
+		expect(inReview.worktree?.id).toBe("review");
+		expect(inReview.compatibility.projectTrusted).toBe(true);
+		// It works in the review's checkout and loads its project resources from the workspace.
+		expect(await inReview.prepare(1)).toMatchObject({
+			cwd: reviewCheckout,
+			root: reviewCheckout,
+			projectCwd: workspace.path,
+			projectTrusted: true,
+		});
+
+		// A checkout that never held a review keeps loading its own.
+		const inCheckout = await resolveConversationOpen(newConversationHello("pr-head"), authorization(), services());
+		expect(await inCheckout.prepare(1)).toMatchObject({ cwd: checkout, root: checkout, projectCwd: checkout });
+	});
+
+	it("trusts a pull request review as its workspace's own resources need", async () => {
+		const reviewTrusted = async () =>
+			(await resolveConversationOpen(newConversationHello("review"), authorization(), services())).compatibility
+				.projectTrusted;
+		// The head's extensions do not load, so they need no trust; nothing in the workspace does either.
+		expect(await reviewTrusted()).toBe(true);
+
+		mkdirSync(join(workspace.path, ".volt", "skills"), { recursive: true });
+		expect(await reviewTrusted()).toBe(false);
+		new ProjectTrustStore(agentDir).set(workspace.path, true);
+		expect(await reviewTrusted()).toBe(true);
+	});
+
+	it("loads a nested repository's review from that repository in the workspace", () => {
+		const review = {
+			path: reviewCheckout,
+			sourceRootRelativePath: "apps/web",
+			prReviewLaunches: [reviewLaunch(reviewCheckout)],
+		};
+		expect(getConversationProjectRoot(workspace, review)).toBe(join(workspace.path, "apps", "web"));
+		expect(getConversationProjectRoot(workspace, { ...review, prReviewLaunches: undefined })).toBe(reviewCheckout);
+		expect(getConversationProjectRoot(workspace, undefined)).toBe(workspace.path);
 	});
 });

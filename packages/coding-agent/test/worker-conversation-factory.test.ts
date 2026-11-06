@@ -278,6 +278,51 @@ export default function (volt) {
 		}
 	});
 
+	it("loads project resources from the project root, not the working directory (#1034)", async () => {
+		writeRuntimeConfig({});
+		// A pull request review: the conversation works in the head's checkout, its project is the workspace.
+		const projectCwd = join(tempDir, "main");
+		const project = (dir: string, tool: string, instructions: string): void => {
+			mkdirSync(join(dir, ".volt", "extensions"), { recursive: true });
+			writeFileSync(
+				join(dir, ".volt", "extensions", `${tool}.ts`),
+				`import { Type } from "typebox";
+
+export const manifest = { id: "${tool.replace("_", "-")}", displayName: "${tool}" };
+export default function (volt) {
+	volt.registerTool({
+		name: "${tool}",
+		label: "${tool}",
+		description: "${tool}",
+		parameters: Type.Object({}),
+		execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
+	});
+}
+`,
+			);
+			writeFileSync(join(dir, "AGENTS.md"), `${instructions}\n`);
+		};
+		project(projectCwd, "workspace_tool", "Workspace instructions.");
+		project(cwd, "head_tool", "Head instructions.");
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		let runtime: Awaited<ReturnType<typeof createIrohRemoteAgentRuntime>> | undefined;
+		try {
+			runtime = await createIrohRemoteAgentRuntime({ agentDir, cwd, projectCwd, projectTrusted: true });
+			const { session } = runtime.conversation;
+
+			expect(session.sessionManager.getCwd()).toBe(cwd);
+			const tools = session.getAllTools().map((tool) => tool.name);
+			expect(tools).toContain("workspace_tool");
+			expect(tools).not.toContain("head_tool");
+			expect(session.systemPrompt).toContain("Workspace instructions.");
+			expect(session.systemPrompt).not.toContain("Head instructions.");
+		} finally {
+			errorSpy.mockRestore();
+			await runtime?.host.close(runtime.conversation);
+		}
+	});
+
 	it("routes the conversation's extensions to the daemon's managed worktrees", async () => {
 		writeRuntimeConfig({});
 		mkdirSync(join(agentDir, "extensions"), { recursive: true });

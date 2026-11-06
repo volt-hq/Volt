@@ -32,7 +32,11 @@ import type { WorkerSpawnInput } from "./worker-registry.ts";
 import type { WorkerCompatibility } from "./worker-spawn-options.ts";
 import { isPathInside, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
 import type { SessionPlacement, WorkspaceSession, WorkspaceSessions } from "./workspace-sessions.ts";
-import { getRegisteredWorkingDirectoryForWorktree, type WorktreeRuntimePreparation } from "./worktree-manager.ts";
+import {
+	getConversationProjectRoot,
+	getRegisteredWorkingDirectoryForWorktree,
+	type WorktreeRuntimePreparation,
+} from "./worktree-manager.ts";
 
 export function createConversationOpenError(
 	outcome: IrohRemoteHostHandshakeFailureOutcome,
@@ -85,7 +89,7 @@ export interface ConversationOpenServices {
 	readonly profile?: string;
 	/** The phone's tool policy: its grant ∩ the workspace ceiling ∩ `remote.allowTools` (D9). */
 	toolPolicy(authorization: IrohRemoteClientAuthorizationSuccess): IrohRemoteRuntimeToolPolicy;
-	/** The project trust of a conversation in `workspace` loading its project resources from `root` (its checkout). */
+	/** The project trust of a conversation in `workspace` loading its project resources from `root`. */
 	projectTrusted(workspace: IrohRemoteWorkspace, root: string): boolean;
 	/**
 	 * The worktree the conversation runs in. `placement` is where the stored
@@ -202,6 +206,7 @@ export async function resolveConversationOpen(
 			? located
 			: await placeStoredTarget(sessions, workspace.name, async () => storedLocation);
 	const rootPath = worktree?.path ?? workspace.path;
+	const projectRoot = getConversationProjectRoot(workspace, worktree);
 	const requestedWorkingDirectory =
 		hello.conversation.target === "new" ? hello.conversation.workingDirectory : undefined;
 	const initialDirectory = await services.resolveWorkingDirectory({
@@ -300,7 +305,7 @@ export async function resolveConversationOpen(
 	const compatibility = {
 		origin: "phone" as const,
 		toolPolicy: { tools: [...toolPolicy.tools], allowUnlistedExtensionTools: toolPolicy.allowUnlistedExtensionTools },
-		projectTrusted: services.projectTrusted(workspace, rootPath),
+		projectTrusted: services.projectTrusted(workspace, projectRoot),
 		...(services.profile === undefined ? {} : { profile: services.profile }),
 	};
 
@@ -345,7 +350,7 @@ export async function resolveConversationOpen(
 					session: ref,
 					cwd: cwd.absolutePath,
 					root: rootPath,
-					projectCwd: rootPath,
+					projectCwd: projectRoot,
 					...(worktree?.baseRef === undefined ? {} : { baseRef: worktree.baseRef }),
 					toolPolicy: { ...compatibility.toolPolicy, tools: [...compatibility.toolPolicy.tools] },
 					projectTrusted: compatibility.projectTrusted,

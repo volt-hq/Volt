@@ -10,9 +10,11 @@ export interface ResolveIrohRemoteWorkspaceProjectTrustOptions {
 	approvedWorkspacePaths?: ReadonlySet<string>;
 	hasTrustRequiringProjectResources?: (cwd: string) => boolean;
 	/**
-	 * Where the project resources load from: the workspace, or a managed
-	 * worktree checkout of it. Resources that need trust are looked for here;
-	 * the decision is the workspace's. `workspace.path` by default.
+	 * Where the project resources load from: the workspace, a managed worktree
+	 * checkout of it, or for a pull request review checkout the repository in
+	 * the workspace (`getConversationProjectRoot`). Resources that need trust
+	 * are looked for here; the decision is the workspace's. `workspace.path` by
+	 * default.
 	 */
 	resourcesRoot?: string;
 	trustStore?: IrohRemoteWorkspaceTrustStore;

@@ -633,6 +633,12 @@ Otherwise it creates a dedicated worktree and local branch at the verified PR
 head, including fork PRs. It never switches, resets or stashes the parent
 checkout, installs dependencies, or runs checkout hooks or filters.
 
+Conversations in a review checkout work on the PR's files but load project
+settings, extensions, skills, prompts, MCP servers, and context files
+(`AGENTS.md`) from the same repository in the workspace, with its trust, never
+from the PR head. A pull request's own `.volt`, `.mcp.json`, or
+`.agents/skills` changes therefore never run on the host from the app.
+
 The app keeps one session ID for each launch intent. Preparation durably binds
 that ID to its checkout; identical retries retain the placement across daemon
 restarts. Only after preparation succeeds does the app attach and configure
@@ -714,7 +720,9 @@ Key behaviors:
   a TUI resuming the session) land back in the worktree checkout.
 - **Policy inheritance.** A worktree conversation uses exactly the parent
   workspace's trust decision and tool allowlist — never wider. Trust is never
-  prompted for or persisted on worktree paths.
+  prompted for or persisted on worktree paths. A pull-request review checkout
+  loads its project resources from the workspace's repository instead of the
+  checkout (see [App-started pull-request reviews](#app-started-pull-request-reviews)).
 - **Branch layout.** Each worktree gets its own branch (default
   `volt/<id>`) off the recorded base ref (default: the checkout's current
   branch). `volt remote worktree list` shows dirtiness and ahead/behind counts
