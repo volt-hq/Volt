@@ -466,7 +466,9 @@ describe("code mode call scheduler", () => {
 			kind: "exclusive",
 		});
 		// MCP tools are limited per server, whatever their direct tool declares.
-		expect(schedulingClassFor({ kind: "mcp", server: "github", tool: "x" }, "sequential", 2)).toStrictEqual({
+		expect(
+			schedulingClassFor({ kind: "mcp", server: "github", tool: "x", toolName: "mcp__github__x" }, "sequential", 2),
+		).toStrictEqual({
 			kind: "server",
 			server: "github",
 			limit: 2,

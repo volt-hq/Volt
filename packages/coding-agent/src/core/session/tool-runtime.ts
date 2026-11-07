@@ -336,6 +336,11 @@ export class SessionToolRuntime {
 		return this.mcpManager;
 	}
 
+	/** Whether a restricted mode such as Plan mode limits the session's operations to a grant profile now. */
+	isOperationRestricted(): boolean {
+		return this.host.operationGrantProfile() !== undefined;
+	}
+
 	/**
 	 * What the model could call directly now, from which code mode computes a script's bindings (section 5.12 of
 	 * docs/code-mode-design.md).
