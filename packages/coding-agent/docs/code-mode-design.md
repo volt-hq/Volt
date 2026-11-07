@@ -354,8 +354,8 @@ Rejected:
 
 #### Rendering
 
-- The first line is a status line: `Script completed in 3.2 s (14 tool calls)`.
-- Items follow, one per line. An item whose text spans several lines is fenced, and the fence header states its line count, so the end of the item is unambiguous even if the item itself contains `>>>`:
+- The first line is a status line: `Script completed in 3.2s (14 tool calls)`. Durations use Volt's display format (`formatDuration`: tenths of a second under a minute, then `1m 12s`).
+- Items follow, one per line. Items are numbered from 1 in the order the script produced them, images included, and one trailing line break is dropped from each item, so `console.log("done\n")` is one line. An item whose text spans several lines is fenced, and the fence header states its line count, so the end of the item is unambiguous even if the item itself contains `>>>`:
 
   ```
   <<< output #3, 12 lines
@@ -364,8 +364,10 @@ Rejected:
   ```
 
   Pi had to fix outputs running together because models could not tell where one ended and the next began ([v1.1.0](https://github.com/earendil-works/pi/releases/tag/v1.1.0)). Fencing only multi-line items keeps boundaries unambiguous at no cost when items are single lines.
+- The return value renders as the codec writes it (section 5.9), so large integers stay exact, except that a string renders as it is (`""` for an empty string). A string of several lines is fenced like an item: `<<< return value, 3 lines`.
+- An image caption names the image's file. A shown image without one (from MCP) is saved to a temp file only the user can read (`volt-run-code-<random>.png`, the extension from its MIME type), whose path the caption names; if the file cannot be written, the caption has no path. A caption whose reference the host cannot resolve reads `[image img_9: unavailable]` and has no image block.
 - A script that printed nothing and returned `undefined` renders `(no output)`.
-- Images not shown with `image(ref)` are listed on one line after the return value: `2 images not shown: img_3 (read b.png), img_4 (MCP browser.screenshot)`.
+- Images not shown with `image(ref)` are listed on one line after the return value: `2 images not shown: img_3 (read b.png), img_4 (MCP browser.screenshot)`. At most 10 are named, followed by `and N more`. The caller names each image's source, because the image store does not record which call returned it.
 - Nested-call records do not appear in a successful result; they go to `details`. Models use whatever reaches them: Cloudflare moved call records out of model output after models rebuilt answers from them, and Pi shows nested calls to the model only after a failure.
 - Text blocks are split around image blocks. Boundaries are marked in the text, so providers that join text blocks still see them.
 - The result is plain text, not a JSON envelope. In the prototype a compact JSON envelope cost about the same tokens, cost more with images (108 against 70), and became invalid JSON once truncated.
@@ -373,7 +375,7 @@ Rejected:
 Example:
 
 ```
-Script completed in 3.2 s (14 tool calls)
+Script completed in 3.2s (14 tool calls)
 reading 2 files
 <<< output #2, 2 lines
 export const a = 1;
@@ -394,8 +396,11 @@ Return value: {"files":["a.ts","b.ts"],"lines":5}
   2. The return value may use up to half the budget. A larger return value is truncated structurally: array lengths and string lengths are capped uniformly until it fits, with `"[N more items]"` and `"... [N more chars]"` markers, so it remains valid JSON. A string return value keeps its head and tail.
   3. The output stream uses the remaining budget, keeping its head and tail around one marker.
 
-  Either part may use budget the other leaves unused.
-- **Spill.** When anything is truncated, the full rendering is written to a temp file through `OutputAccumulator`, as bash does, and the marker names it: `[... 3365 lines omitted (4002 lines, 315 KB total). Full output: <path> (read with offset/limit)]`. The model reads it with `read`, which is authorized in Build and Plan alike. Temp files are left for the OS to clean up, as bash's are.
+  Either part may use budget the other leaves unused. The list of unshown images is kept with the status line.
+- **Structural truncation.** Strings are capped first, all to the same length, the largest that fits but at least 64 characters; a string that capping would not shorten is left whole. If strings at 64 characters do not fit, arrays are capped, all to the same length, the largest that fits, with a final `"[N more items]"` element. Both keep the value valid JSON. Only a value these caps cannot shrink enough, such as an object with thousands of keys, has its text cut with a final `... [N more chars]`, which leaves it incomplete; the spill file holds it whole. A one-line string return value keeps its head and tail around `[... N chars omitted]`; a multi-line one keeps its first and last lines inside its fence around `[... N lines omitted]`.
+- **Head and tail.** The head and the tail each get half of the room the marker leaves, in bytes and in lines, and either uses what the other leaves; both keep whole lines. A line longer than half that room (or than all of it, for a lone line) is first cut in the middle around `[... N chars omitted]`, so one long line cannot leave either end empty. The marker counts the lines left out entirely; when long lines were only shortened it reads `[... long lines shortened (...)]`. An image whose caption is left out is dropped with it.
+- **Spill.** When anything is truncated, the full rendering is written to a temp file through `OutputAccumulator`, as bash does, and the marker names it: `[... 3365 lines omitted (4002 lines, 315.0KB total). Full output: <path> (read with offset/limit)]`. The totals are the spill file's. When only the return value was truncated, the line after it names the file: `[Return value truncated to fit the output limit. Full output: <path> (read with offset/limit)]`. The model reads it with `read`, which is authorized in Build and Plan alike. Temp files are left for the OS to clean up, as bash's are. If the file cannot be written, the markers leave out the path and the notice is omitted.
+- **Backstop.** If the parts that are always kept do not fit by themselves, such as an error block of thousands of short lines, lines are kept from the start and the rendering ends with `[... output truncated (...)]`, so the budget holds for any input.
 - **No per-script override** of the budget (unlike Pi's `max_output_tokens`), matching bash. The model reads the spill file when it needs more.
 
 Rejected:
@@ -417,20 +422,21 @@ Decided. A failed script returns the rendering of section 5.10 with a failure st
 | Kind | Cause | Status line ending |
 |---|---|---|
 | `script_error` | An uncaught exception or rejection: syntax errors, a stack overflow inside the guest, out-of-memory, an uncaught `ToolCallError`; or a script that awaits a promise nothing can settle | `uncaught TypeError` (the error's name), `syntax error`, `stalled` |
-| `compute_budget` | The compute budget ran out (interrupt or watchdog) | `compute budget of 30 s exhausted` |
+| `compute_budget` | The compute budget ran out (interrupt or watchdog) | `compute budget of 30s exhausted` |
 | `call_budget` | The nested-call budget ran out | `call budget of 200 exhausted` |
-| `timeout` | The script's own `timeoutMs` passed | `timed out after 60 s` |
+| `timeout` | The script's own `timeoutMs` passed | `timed out after 1m` |
 | `aborted` | The user or caller aborted | `aborted` |
 | `output_limit` | Retained output exceeded its limit | `output limit exceeded` |
 | `sandbox` | The worker crashed or failed to start, a protocol violation, or any host-side exception from a VM operation, including a host-side `RangeError` | `sandbox failure` |
 
-- A script that never started, because the pool queue was full or it was aborted or timed out while waiting for a worker, says `The script did not start.` in its error block. It consumed no budget.
-- **Stalled scripts.** The VM has no timers, so when it is idle with no nested call in flight and the script has not finished, nothing can resume it. Without a default wall clock (section 5.6), such a script would hold the turn until the user aborts it. The worker detects this state after every turn and ends the script as `script_error` with `The script awaited a promise that nothing can settle: no tool calls were in flight.`
+- Limits in status lines are written in whole seconds when they are whole (`30s`, `1m`) and with tenths otherwise. `syntax error` ends the status line only for a `SyntaxError` raised while the script is evaluated; any other error, including a `RangeError` from parsing deeply nested source, reads `uncaught <name>`.
+- A script that never started, because the pool queue was full or it was aborted or timed out while waiting for a worker, says `The script did not start.` in its error block, followed by the cause: `It was aborted while it waited for the sandbox.`, `Its timeoutMs of 60000 passed while it waited for the sandbox.`, or `The sandbox could not run it: <reason>.` It consumed no budget.
+- **Stalled scripts.** The VM has no timers, so when it is idle with no nested call in flight and the script has not finished, nothing can resume it. Without a default wall clock (section 5.6), such a script would hold the turn until the user aborts it. The worker detects this state after every turn and ends the script as `script_error` with `The script awaited a promise that nothing can settle: no tool calls were in flight.` The host marks the failure as stalled (`stalled: true`); an error the script itself names `stalled` is an ordinary uncaught error.
 - Scripts cannot intercept the terminations of section 5.9. In testing, a `try`/`catch` around a spinning loop did not catch the interrupt the host raises.
 
 #### Rendering
 
-The status line names the kind: `Script failed after 6.4 s (49 tool calls): uncaught TypeError`. The output stream follows as in section 5.10, then the error block, then the nested-call summary.
+The status line names the kind: `Script failed after 6.4s (49 tool calls): uncaught TypeError`. The output stream follows as in section 5.10, then the error block, then the nested-call summary.
 
 **Error block:**
 
@@ -438,27 +444,29 @@ The status line names the kind: `Script failed after 6.4 s (49 tool calls): unca
 - Out-of-memory adds a hint: `The script exceeded its memory limit (64 MiB). Filter or aggregate data instead of accumulating it.`
 - Other kinds get one sentence naming the limit and what to do next, following DeepSeek's call-limit message:
   - `call_budget`: `Call 201 was not made. The script may loop without end; check loop termination, or split the work into several scripts.`
-  - `compute_budget`: `The script computed for more than 30 s without waiting on a tool. Process less data per script, or move heavy work into tools.`
+  - `compute_budget`: `The script computed for more than 30s without waiting on a tool. Process less data per script, or move heavy work into tools.`
   - `timeout`: `The script's timeoutMs of 60000 passed. Nested calls in flight were cancelled.`
   - `aborted`: `The script was aborted. Nested calls in flight were cancelled.`
   - `output_limit`: `The script printed more than 16 Mi characters or 100,000 items. Print summaries and return selected fields instead of whole results.`
-  - `sandbox`: `The sandbox failed: <reason>. Calls listed below may have taken effect.`
+  - `sandbox`: `The sandbox failed: <reason>. Calls listed below may have taken effect.` The second sentence appears only when the script made calls. The reason is one line of at most 1,024 characters.
+- The limits named are the ones the script ran with.
 - The error block is at most 8 KiB. The one-line summary used in status lines and warnings is at most 1,024 characters, and the error's name at most 128; line breaks in either appear as `\n`, so a message cannot add lines that read as other parts of the result. Each limit includes its truncation marker.
 
 **Nested-call summary:**
 
-- A totals line with exact counts: `Nested tool calls: 49 (46 completed, 1 failed, 1 cancelled, 1 may have applied). Completed calls were not undone.` A script that made no calls says `No tool calls were made.`
-- Read-only calls are collapsed per tool: `Read-only: read ×41 (1 cancelled), grep ×3`. A call is read-only when its trusted operation resolution contains only read capabilities (`workspace.read`, `network.read`, `process.inspect`, `integration.discover`, `integration.read`).
+- A totals line with exact counts: `Nested tool calls: 49 (46 completed, 1 failed, 1 cancelled, 1 may have applied). Completed calls were not undone.` Counts of zero are left out, and the last sentence appears only when a call completed. A script that made no calls says `No tool calls were made.`
+- Read-only calls are collapsed per tool, in the order of each tool's first call: `Read-only: read ×41 (1 cancelled), grep ×3 (1 failed, 1 still running)`. At most 20 tools are named, followed by `and N more tools`. A call is read-only when its trusted operation resolution contains only read capabilities (`workspace.read`, `network.read`, `process.inspect`, `integration.discover`, `integration.read`).
 - Every other call is listed individually under `May have changed state:`: calls that resolve to a write, execute, or prompt capability (bash resolves to `process.execute`), and calls with no trusted resolver, such as `image_gen` and extension tools. Each entry shows the tool name, an argument preview, and the outcome.
   - Argument preview: strings of up to 60 characters in full, longer strings as `<1470 chars>`, other values as compact JSON, at most 120 characters per call.
-  - Outcomes: `completed`, `failed: <message>`, `cancelled before it ran`, and `still running when stopped; may have applied`.
-- At most 20 entries are listed, followed by `(N more not shown)`; the totals stay exact.
+  - Outcomes: `completed`; `failed: <message>`, `blocked: <message>`, or `invalid arguments: <message>` by the call's `ToolCallError` kind, the message on one line of at most 120 characters; `cancelled before it ran`; `cancelled while running; may have applied`; and `still running when stopped; may have applied`.
+  - Tool names are written on one line of at most 80 characters.
+- At most 20 entries are listed, in call order, followed by `(N more not shown)`; the totals stay exact.
 - Full call records go to `details` on success and failure alike. A successful result omits the summary (section 5.10).
 
 Example:
 
 ```
-Script failed after 6.4 s (49 tool calls): uncaught TypeError
+Script failed after 6.4s (49 tool calls): uncaught TypeError
 generated 6 test files
 warn: widget3 has no default export
 
@@ -1071,6 +1079,25 @@ Sources are in `src/core/code-mode/` unless a path says otherwise. Tests are cit
 | A failure before the request is sent rejects with `failed` (`unavailable`) after the tool-result policy sees it as an error result, and a server that needs authentication says how to sign in. Later failures and error results reject with `failed`. | `src/core/mcp/manager.ts` `McpToolUnavailableError`, `callToolRaw`; `src/core/mcp/server-supervisor.ts` `McpServerAuthRequiredError`; `dispatch.ts` `createCodeModeCallHandler` | mcp: "fails a script's call as unavailable before sending it to a filtered tool, a disabled server, or a server that needs authentication"; dispatch: "rejects an MCP call that fails before its request is sent as unavailable, after the tool-result policy sees the failure" |
 | Hooks see the complete result as text, without details. Unless they change it, the script gets a successful result's whole projection, structured content and images included. Once they do, it gets only the text they left. An error result, changed or not, rejects with `failed` and the text the hooks left, structured content included, and keeps none of its images. | `dispatch.ts` `createCodeModeCallHandler` | dispatch: "runs an MCP call through the gateway's policies and the session's MCP manager, with its nested call id and origin"; "projects an MCP result in full unless a hook changes it, then gives only the text the hook left"; "rejects an MCP error result with the text the hooks saw, structured content included, keeping none of its images"; session-mcp-dispatch: "calls an MCP tool through the gateway's hooks and the manager, and gives the script the whole result" |
 | In Plan mode, a trusted-read MCP call is authorized through the gateway's resolver and counts as research. | `src/core/session/turn-policy.ts` `toolCall`, `toolResult`; `src/core/operation-authorization.ts` (the MCP resolver) | session-mcp-dispatch: "authorizes a trusted-read MCP call through the gateway in Plan mode and counts it as research" |
+
+#### Model-facing result
+
+The rendering in `render.ts` is not yet wired to a tool; the `run_code` tool supplies each call's tool name, arguments, and read-only classification, and each image's source.
+
+| Guarantee | Enforced in | Test |
+|---|---|---|
+| Every rendering stays within 50 KB and 2000 lines, whatever the output, return value, failure, and calls. | `render.ts` `renderCodeModeResult`, `withinBudget` | render: "keeps every rendering within 50 KB and 2000 lines, and a failure's error block and summary whole" |
+| The status line comes first and names the duration, the call count, and for a failure its kind. A script is reported as stalled only when the host detected it, and `syntax error` only for a `SyntaxError` raised while the script is evaluated. | `render.ts` `statusLine`, `failureEnding`; `runtime.ts` `onMessage` (`stalled`) | render: "renders the status line and the output stream in order, fencing multi-line items"; "ends the status line with the kind of failure and follows the partial output with the error block"; runtime: "reports stalled scripts and syntax errors as script errors" |
+| Output items appear in the order the script produced them, and an item of several lines is fenced with a header that counts them. | `render.ts` `streamLines`, `itemLines` | render: "renders the status line and the output stream in order, fencing multi-line items"; "counts the end of a fenced item in its header, even when the item contains the closing fence" |
+| A return value renders with exact numbers, and a string renders as it is. | `render.ts` `returnLines` | render: "renders a string return value as it is, fenced when it has several lines, and other values as exact JSON" |
+| Only images the script showed reach the model, each as an image block after its caption; images it did not show are listed, at most 10 by name. A shown image without a file is saved to a temp file only the user can read. | `render.ts` `showImages`, `saveImage`, `assemble` | render: "captions shown images, splits text blocks around them, and lists images the script did not show"; "names one unshown image in the singular and shows an image as often as the script shows it"; "saves a shown image that has no file to a temp file only the user can read, and captions its path"; "captions an image without a size or a stored copy without failing" |
+| Text from a tool, a server, or the script cannot start lines of its own in the status line, captions, the list of unshown images, the error block's sentences, or the nested-call summary. | `render.ts` `oneLine`, `capChars`, `previewCodeModeArgs` | render: "keeps text from tools, servers, and scripts on one line"; "stays within its length on one line" |
+| A failed result keeps its partial output, then the error block and the nested-call summary: exact totals, read-only calls per tool, and at most 20 state-changing calls with their outcome. A script that never started says so. | `render.ts` `errorBlock`, `callSummary`, `callOutcome` | render: "summarizes nested calls: exact totals, read-only calls per tool, and state-changing calls with their outcome"; "lists at most 20 state-changing calls and keeps the totals exact"; "says a script that never started did not start"; "adds a hint naming the memory limit to an out-of-memory error"; "names the limits the script ran with" |
+| Beside a stream that does not fit, the return value uses at most half the budget, and more when the stream leaves room. A failed result keeps its error block and summary whole and cuts its output first. | `render.ts` `layOutSuccess`, `layOutFailure`, `share` | render: "truncates a return value beside a long stream to valid JSON in at most half the budget"; "gives the return value the room a short stream leaves"; "keeps a failed script's error block and summary and cuts its output first"; "keeps every rendering within 50 KB and 2000 lines, and a failure's error block and summary whole" |
+| A truncated return value stays valid JSON whenever capping strings and arrays is enough; otherwise its text is cut within its budget. | `render.ts` `truncateJson`, `capValue`, `largestFitting` | render: "truncates a return value beside a long stream to valid JSON in at most half the budget"; "cuts the JSON text of a value too wide for the caps, within its budget" |
+| A truncated stream keeps its head and tail, split evenly, around one marker; a line too long for either end is cut in the middle; an image whose caption is left out is dropped. | `render.ts` `truncateLines`, `cutMiddle` | render: "keeps the head and tail of a long stream around one marker that names the full output"; "cuts a lone long line in the middle and still names the full output"; "keeps the first and last lines of a long multi-line return value inside its fence"; "drops an image whose caption is left out" |
+| When anything is left out, the full rendering is written to a temp file that the stream marker or the return-value notice names; when it cannot be written, no path is named. | `render.ts` `spill`, `omissionMarker` | render: "writes the full rendering, fences and return value included, to the file it names"; "keeps the head and tail of a long stream around one marker that names the full output"; "names the full output after a truncated return value when the stream was not cut"; "leaves out the file path when the full rendering cannot be written" |
+| An argument preview shows strings of up to 60 characters in full and longer ones by length, other values as compact JSON with exact numbers, on one line within its length. | `render.ts` `previewCodeModeArgs`, `boundedJson` | render: "shows strings of up to 60 characters in full and longer ones by their length"; "shows other values as compact JSON with exact numbers, quotes keys that are not identifiers, and skips undefined"; "stays within its length on one line" |
 
 ## 10. Risks
 

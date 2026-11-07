@@ -913,7 +913,14 @@ describe("code mode runtime", () => {
 		expect(failed(await run("await new Promise(() => {});")).failure).toMatchObject({
 			kind: "script_error",
 			error: { name: "stalled" },
+			stalled: true,
 		});
+		// Only the host marks a script as stalled; an error the script names "stalled" is an ordinary error.
+		const forged = failed(
+			await run('const error = new Error("nothing can settle"); error.name = "stalled"; throw error;'),
+		).failure;
+		expect(forged).toMatchObject({ kind: "script_error", phase: "run", error: { name: "stalled" } });
+		expect(forged).not.toHaveProperty("stalled");
 		expect(failed(await run("let = ;")).failure).toMatchObject({
 			kind: "script_error",
 			phase: "evaluate",
