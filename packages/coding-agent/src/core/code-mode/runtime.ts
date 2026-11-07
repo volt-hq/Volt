@@ -26,7 +26,7 @@ export type { CodeModeOutputItem } from "./protocol.ts";
 
 /** Kinds of `ToolCallError` (section 5.9 of docs/code-mode-design.md). */
 export type CodeModeCallErrorKind = "invalid_arguments" | "blocked" | "failed" | "cancelled";
-export type CodeModeCallErrorReason = "result_too_large" | "limit_exceeded" | "unavailable";
+export type CodeModeCallErrorReason = "result_too_large" | "limit_exceeded" | "unavailable" | "not_started";
 
 /** Thrown by a call handler to reject a nested call with a typed `ToolCallError` in the script. */
 export class CodeModeCallError extends Error {

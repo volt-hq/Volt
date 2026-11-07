@@ -201,7 +201,9 @@ export interface ExtensionOperationEvent {
 
 export type ExtensionOperationOrigin =
 	| { kind: "agent" }
-	| { kind: "extension"; extensionId: string; scopeId: string; ownerId: string; ownerKind: "task" | "validation" };
+	| { kind: "extension"; extensionId: string; scopeId: string; ownerId: string; ownerKind: "task" | "validation" }
+	/** A call a code mode script made: `seq` numbers the script's calls, and the call ID is `<parentToolCallId>:cm:<seq>`. */
+	| { kind: "code_mode"; parentToolCallId: string; seq: number };
 
 /** Host ceilings. All values are finite nonnegative integers; only firstRequestWaitMs can exceed its default (up to 100). */
 export interface ExtensionServicesLimits {

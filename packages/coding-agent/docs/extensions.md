@@ -895,6 +895,8 @@ Every message commits to the session log before its `message_end` is published, 
 
 In the default parallel tool execution mode, sibling tool calls from the same assistant message are preflighted sequentially, then executed concurrently. `tool_call` is not guaranteed to see sibling tool results from that same assistant message in `ctx.sessionManager`.
 
+A tool call a code mode script makes also passes `tool_call` and `tool_result`, without `tool_execution_start` or an assistant message of its own. Its `event.origin` is `{ kind: "code_mode", parentToolCallId, seq }`, where `parentToolCallId` is the ID of the code-mode tool call running the script and `seq` numbers the script's calls, and its `event.toolCallId` is `<parentToolCallId>:cm:<seq>`.
+
 `event.input` is mutable. Mutate it in place to patch tool arguments before execution.
 
 Behavior guarantees:

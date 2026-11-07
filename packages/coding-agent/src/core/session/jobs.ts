@@ -59,7 +59,7 @@ export class SessionJobs {
 		);
 	}
 
-	/** The signal extension hooks observe: a job's, or the running operation's. */
+	/** The signal an extension context observes when its event carries none: a job's, or the running operation's. */
 	hookSignal(): AbortSignal | undefined {
 		return this.toolContext.getStore()?.signal ?? this.host.conversation().operation?.signal;
 	}
@@ -113,7 +113,7 @@ export class SessionJobs {
 							...(owned.details === undefined ? {} : { details: owned.details as JsonValue }),
 							isError: owned.isError === true,
 						},
-						true,
+						{ signal, backgroundCompletion: true },
 					),
 				);
 				this.assertToolContextCurrent(signal);
