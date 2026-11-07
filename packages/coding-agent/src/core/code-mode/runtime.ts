@@ -93,7 +93,13 @@ export interface CodeModeCallRecord {
 
 /** Why a script failed (section 5.11 of docs/code-mode-design.md). */
 export type CodeModeFailure =
-	| { kind: "script_error"; phase: "evaluate" | "run"; error: CodeModeErrorDescription }
+	| {
+			kind: "script_error";
+			phase: "evaluate" | "run";
+			error: CodeModeErrorDescription;
+			/** The script awaited a promise nothing can settle. Set only by the host, so a script cannot forge it. */
+			stalled?: true;
+	  }
 	| { kind: "compute_budget"; budgetMs: number }
 	| { kind: "call_budget"; budget: number }
 	| { kind: "timeout"; timeoutMs: number }
@@ -442,7 +448,7 @@ class ScriptRun {
 				this.settleWorker();
 				return;
 			case "stalled":
-				this.failure ??= { kind: "script_error", phase: "run", error: STALLED_ERROR };
+				this.failure ??= { kind: "script_error", phase: "run", error: STALLED_ERROR, stalled: true };
 				this.settleWorker();
 				return;
 			case "crash":
