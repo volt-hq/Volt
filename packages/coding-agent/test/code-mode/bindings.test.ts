@@ -79,32 +79,42 @@ function paths(bindings: CodeModeBindingSpec[]): string[][] {
 	return bindings.map((binding) => binding.path);
 }
 
-/** Whether the model could make the call directly in a session with these sources (section 5.12). */
-function directlyCallable(input: CodeModeBindingSources, target: CodeModeBindingTarget): boolean {
+function visibleIn(input: CodeModeBindingSources, resolver: ToolOperationResolver | undefined): boolean {
+	return input.grantProfile === undefined || isToolVisibleUnderGrant(resolver, input.grantProfile);
+}
+
+/**
+ * The tool a model-issued call to an MCP tool goes through in a session with these sources, or undefined when the
+ * model could not make the call: the built-in gateway when it makes the tool callable, otherwise the tool's own
+ * direct tool (section 5.12).
+ */
+function mcpRoute(input: CodeModeBindingSources, server: string, tool: string): string | undefined {
 	const profile = input.grantProfile;
-	const visible = (resolver: ToolOperationResolver | undefined) =>
-		profile === undefined || isToolVisibleUnderGrant(resolver, profile);
-	if (target.kind === "tool") {
-		const tool = input.activeTools.find((candidate) => candidate.name === target.toolName);
-		if (!tool || DESIGN_NEVER.includes(tool.name)) return false;
-		if (tool.kind === "builtin") return DESIGN_BINDABLE.includes(tool.name) && visible(tool.resolver);
-		return tool.kind === "other" && profile === undefined;
-	}
 	const gateway = input.activeTools.some(
-		(tool) => tool.kind === "builtin" && tool.name === "mcp" && visible(tool.resolver),
+		(candidate) => candidate.kind === "builtin" && candidate.name === "mcp" && visibleIn(input, candidate.resolver),
 	);
-	const viaGateway =
+	if (
 		gateway &&
 		input.mcpTools.some(
-			(tool) =>
-				tool.server === target.server && tool.tool === target.tool && (profile === undefined || tool.trustedRead),
-		);
-	const viaDirect =
-		profile === undefined &&
-		input.activeTools.some(
-			(tool) => tool.kind === "mcp_direct" && tool.server === target.server && tool.tool === target.tool,
-		);
-	return viaGateway || viaDirect;
+			(candidate) =>
+				candidate.server === server && candidate.tool === tool && (profile === undefined || candidate.trustedRead),
+		)
+	) {
+		return "mcp";
+	}
+	if (profile !== undefined) return undefined;
+	return input.activeTools.find(
+		(candidate) => candidate.kind === "mcp_direct" && candidate.server === server && candidate.tool === tool,
+	)?.name;
+}
+
+/** Whether the model could make the call directly in a session with these sources, through the target's tool. */
+function directlyCallable(input: CodeModeBindingSources, target: CodeModeBindingTarget): boolean {
+	if (target.kind === "mcp") return mcpRoute(input, target.server, target.tool) === target.toolName;
+	const tool = input.activeTools.find((candidate) => candidate.name === target.toolName);
+	if (!tool || DESIGN_NEVER.includes(tool.name)) return false;
+	if (tool.kind === "builtin") return DESIGN_BINDABLE.includes(tool.name) && visibleIn(input, tool.resolver);
+	return tool.kind === "other" && input.grantProfile === undefined;
 }
 
 function pathOf(target: CodeModeBindingTarget): string[] {
@@ -158,7 +168,8 @@ describe("code mode bindings", () => {
 		fc.assert(
 			fc.property(bindingSources, (input) => {
 				const bindings = computeCodeModeBindings(input);
-				// Sound: every binding is a call the model could make directly, at its target's path.
+				// Sound: every binding is a call the model could make directly, through the tool its target names, at its
+				// target's path.
 				for (const binding of bindings) {
 					expect(directlyCallable(input, binding.target), binding.name).toBe(true);
 					expect(binding.path).toStrictEqual(pathOf(binding.target));
@@ -175,20 +186,24 @@ describe("code mode bindings", () => {
 						expect(JSON.stringify(prefix) === outer.name, `${outer.name} contains ${inner.name}`).toBe(false);
 					}
 				}
-				// Complete: every call the model could make directly, at a valid path, has a binding.
+				// Complete: every call the model could make directly, at a valid path, has a binding through its route.
+				const mcpCandidates = [
+					...input.activeTools.flatMap((tool) => (tool.kind === "mcp_direct" ? [tool] : [])),
+					...input.mcpTools,
+				];
 				const candidates: CodeModeBindingTarget[] = [
 					...input.activeTools.flatMap((tool): CodeModeBindingTarget[] =>
-						tool.kind === "mcp_direct"
-							? [{ kind: "mcp", server: tool.server, tool: tool.tool }]
-							: [{ kind: "tool", toolName: tool.name }],
+						tool.kind === "mcp_direct" ? [] : [{ kind: "tool", toolName: tool.name }],
 					),
-					...input.mcpTools.map(
-						(tool): CodeModeBindingTarget => ({ kind: "mcp", server: tool.server, tool: tool.tool }),
-					),
+					...mcpCandidates.flatMap(({ server, tool }): CodeModeBindingTarget[] => {
+						const toolName = mcpRoute(input, server, tool);
+						return toolName === undefined ? [] : [{ kind: "mcp", server, tool, toolName }];
+					}),
 				];
 				for (const target of candidates) {
 					if (!directlyCallable(input, target) || !pathIsValid(pathOf(target))) continue;
-					expect(names, JSON.stringify(target)).toContain(JSON.stringify(pathOf(target)));
+					const name = JSON.stringify(pathOf(target));
+					expect(bindings.find((binding) => binding.name === name)?.target, name).toStrictEqual(target);
 				}
 			}),
 			{ numRuns: 1000 },
@@ -212,12 +227,12 @@ describe("code mode bindings", () => {
 			{
 				name: '["mcp","github","create_issue"]',
 				path: ["mcp", "github", "create_issue"],
-				target: { kind: "mcp", server: "github", tool: "create_issue" },
+				target: { kind: "mcp", server: "github", tool: "create_issue", toolName: "mcp" },
 			},
 			{
 				name: '["mcp","my-server","get-file"]',
 				path: ["mcp", "my-server", "get-file"],
-				target: { kind: "mcp", server: "my-server", tool: "get-file" },
+				target: { kind: "mcp", server: "my-server", tool: "get-file", toolName: "mcp" },
 			},
 		]);
 	});
@@ -236,14 +251,30 @@ describe("code mode bindings", () => {
 		expect(computeCodeModeBindings(sources({ mcpTools }))).toStrictEqual([]);
 		expect(computeCodeModeBindings(sources({ activeTools: [other("mcp")], mcpTools }))).toStrictEqual([]);
 		const promoted = ["mcp", "github", "create_issue"];
-		// A promoted tool gets one binding, whether the gateway, its direct tool, or both are active.
-		for (const activeTools of [
-			[builtin("mcp")],
-			[direct("github", "create_issue")],
-			[builtin("mcp"), direct("github", "create_issue")],
-		]) {
-			expect(paths(computeCodeModeBindings(sources({ activeTools, mcpTools })))).toStrictEqual([promoted]);
+		// A promoted tool gets one binding, whether the gateway, its direct tool, or both are active. Its calls go
+		// through the gateway whenever the gateway makes it callable.
+		for (const [activeTools, toolName] of [
+			[[builtin("mcp")], "mcp"],
+			[[direct("github", "create_issue")], "mcp__github__create_issue"],
+			[[builtin("mcp"), direct("github", "create_issue")], "mcp"],
+		] as const) {
+			expect(computeCodeModeBindings(sources({ activeTools, mcpTools }))).toStrictEqual([
+				{
+					name: JSON.stringify(promoted),
+					path: promoted,
+					target: { kind: "mcp", server: "github", tool: "create_issue", toolName },
+				},
+			]);
 		}
+		// A tool the gateway does not make callable keeps its direct route.
+		expect(
+			computeCodeModeBindings(
+				sources({ activeTools: [builtin("mcp"), direct("github", "get_file")], mcpTools }),
+			).map((binding) => binding.target),
+		).toStrictEqual([
+			{ kind: "mcp", server: "github", tool: "create_issue", toolName: "mcp" },
+			{ kind: "mcp", server: "github", tool: "get_file", toolName: "mcp__github__get_file" },
+		]);
 	});
 
 	it("limits bindings in Plan mode to what the research profile authorizes", () => {

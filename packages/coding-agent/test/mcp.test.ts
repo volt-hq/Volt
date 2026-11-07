@@ -1,10 +1,20 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Tool as SdkTool } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, Tool as SdkTool } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { InMemoryAuthStorageBackend } from "../src/core/auth-storage.ts";
 import { cloneCanonicalData } from "../src/core/canonical-data.ts";
+import { McpAuditLogger } from "../src/core/mcp/audit.ts";
 import { getMcpServerAuthState } from "../src/core/mcp/auth.ts";
 import {
 	createEmptyMcpMergedConfig,
@@ -18,7 +28,7 @@ import { loadMcpConfig } from "../src/core/mcp/config-loader.ts";
 import { McpConfigWriter } from "../src/core/mcp/config-writer.ts";
 import { createMcpDirectToolDefinitions } from "../src/core/mcp/direct-tools.ts";
 import { createMcpTool, createMcpToolDefinition, type McpGatewayToolInput } from "../src/core/mcp/gateway-tool.ts";
-import { McpManager } from "../src/core/mcp/manager.ts";
+import { callToolResultToText, McpManager, McpToolUnavailableError } from "../src/core/mcp/manager.ts";
 import { McpMetadataCache } from "../src/core/mcp/metadata-cache.ts";
 import {
 	completeMcpOAuthBrowserAuth,
@@ -988,6 +998,192 @@ describe("MCP support", () => {
 				}),
 			]);
 		}
+	});
+
+	it("calls a tool for a script with callTool's checks, events, record, and audit, and returns the raw result", async () => {
+		const tempDir = makeTempDir();
+		tempDirs.push(tempDir);
+		const raw: CallToolResult = {
+			content: [
+				{ type: "text", text: "x".repeat(4000) },
+				{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+			],
+			structuredContent: { rows: [1, 2, 3] },
+		};
+		const manager = new McpManager({
+			config: createTestConfig(tempDir),
+			clientFactory: {
+				connect: async () =>
+					({
+						getServerVersion: () => ({ name: "fake", version: "1.0.0" }),
+						listTools: async () => ({
+							tools: [
+								{
+									name: "read_note",
+									inputSchema: { type: "object" },
+									annotations: { readOnlyHint: true },
+								},
+							],
+						}),
+						listResources: async () => ({ resources: [] }),
+						readResource: async () => ({ contents: [] }),
+						listPrompts: async () => ({ prompts: [] }),
+						getPrompt: async () => ({ messages: [] }),
+						callTool: async (_params, options) => {
+							options.onProgress?.({ progress: 1, total: 2 });
+							return structuredClone(raw);
+						},
+						close: async () => undefined,
+					}) as McpClientConnection,
+			},
+			metadataCache: new McpMetadataCache({ agentDir: tempDir }),
+			outputStore: new McpOutputStore({ agentDir: tempDir, maxOutputBytes: 1024, maxOutputLines: 10 }),
+			auditLogger: new McpAuditLogger(tempDir),
+		});
+		const { metadataHash } = await manager.listTools("fake");
+		const events: McpManagerEvent[] = [];
+		manager.subscribe((event) => events.push(event));
+		const outputDir = join(tempDir, "mcp", "output");
+		const cacheFiles = () => (existsSync(outputDir) ? readdirSync(outputDir) : []);
+
+		const called = await manager.callToolRaw(
+			"fake",
+			"read_note",
+			{ value: 1 },
+			{ surface: "model", caller: "model" },
+		);
+		expect(called).toStrictEqual({ result: raw, risk: "read", metadataHash });
+		expect(events.map((event) => event.type)).toEqual(["mcp_call_start", "mcp_call_update", "mcp_call_end"]);
+		const callEnd = events[2];
+		if (callEnd.type !== "mcp_call_end") throw new Error("expected the call to end last");
+		// The whole result is the caller's: nothing is truncated or cached.
+		expect(callEnd).not.toHaveProperty("cacheId");
+		expect(callEnd.call).toMatchObject({
+			server: "fake",
+			tool: "read_note",
+			status: "completed",
+			outputBytes: Buffer.byteLength(callToolResultToText(raw)),
+			truncated: false,
+		});
+		expect(manager.getServer("fake").recentCalls[0]).toStrictEqual(callEnd.call);
+		const audit = readFileSync(join(tempDir, "mcp", "audit.jsonl"), "utf-8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as Record<string, unknown>);
+		expect(audit).toEqual([
+			expect.objectContaining({
+				callerSurface: "model",
+				server: "fake",
+				item: "read_note",
+				kind: "tool",
+				risk: "read",
+				status: "completed",
+				arguments: { value: 1 },
+			}),
+		]);
+		expect(audit[0]).not.toHaveProperty("cacheId");
+		expect(cacheFiles()).toEqual([]);
+
+		// The gateway's call path caches the same result, which the model sees truncated.
+		const gateway = await manager.callTool(
+			{ action: "call", server: "fake", tool: "read_note", arguments: { value: 1 } },
+			{ surface: "model", caller: "model" },
+		);
+		expect(gateway.cache).toBeDefined();
+		expect(cacheFiles()).toHaveLength(1);
+		await manager.dispose();
+	});
+
+	it("fails a script's call as unavailable before sending it to a filtered tool, a disabled server, or a server that needs authentication", async () => {
+		const tempDir = makeTempDir();
+		tempDirs.push(tempDir);
+		let sent = 0;
+		let reachable = true;
+		const factory = createFakeFactory("output");
+		const countingFactory: McpClientFactory = {
+			connect: async (server, options) => {
+				if (!reachable) throw new Error("connection refused");
+				const connection = await factory.connect(server, options);
+				return {
+					...connection,
+					callTool: (params, requestOptions) => {
+						sent += 1;
+						return connection.callTool(params, requestOptions);
+					},
+				};
+			},
+		};
+		const createManager = (serverOverrides: Record<string, unknown>) =>
+			new McpManager({
+				config: createTestConfig(tempDir, serverOverrides),
+				clientFactory: countingFactory,
+				metadataCache: new McpMetadataCache({ agentDir: tempDir }),
+				outputStore: new McpOutputStore({ agentDir: tempDir, maxOutputBytes: 4096, maxOutputLines: 100 }),
+				configWriter: new McpConfigWriter({ cwd: tempDir, agentDir: tempDir, projectTrusted: true }),
+				oauthStore: McpOAuthStore.fromStorage(new InMemoryAuthStorageBackend()),
+			});
+		const context: McpGatewayExecutionContext = { surface: "model", caller: "model" };
+		const failure = (promise: Promise<unknown>) =>
+			promise.then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+		const expectUnavailable = async (promise: Promise<unknown>, message: string) => {
+			const error = await failure(promise);
+			expect(error).toBeInstanceOf(McpToolUnavailableError);
+			expect((error as Error).message).toBe(message);
+		};
+
+		const filtered = createManager({ excludeTools: ["update_note"] });
+		await expectUnavailable(
+			filtered.callToolRaw("fake", "update_note", {}, context),
+			"MCP tool not available: fake.update_note",
+		);
+		await expectUnavailable(
+			filtered.callToolRaw("missing", "read_note", {}, context),
+			"MCP server not found: missing",
+		);
+		await filtered.dispose();
+
+		const disabled = createManager({});
+		await disabled.connectServer("fake");
+		await disabled.setServerEnabled("fake", false);
+		await expectUnavailable(disabled.callToolRaw("fake", "read_note", {}, context), "MCP server is disabled: fake");
+		await disabled.dispose();
+
+		// Fresh metadata lets the call start; the server it would be sent to cannot be reached.
+		const unreachable = createManager({});
+		await unreachable.connectServer("fake");
+		await unreachable.disconnectServer("fake");
+		reachable = false;
+		await expectUnavailable(unreachable.callToolRaw("fake", "read_note", {}, context), "connection refused");
+		expect(unreachable.getServer("fake").recentCalls[0]).toMatchObject({ tool: "read_note", status: "failed" });
+		reachable = true;
+		await unreachable.dispose();
+
+		const oauth = createManager({
+			transport: "streamable-http",
+			url: "https://api.example/mcp",
+			auth: { type: "oauth", flow: "device", clientId: "volt-test" },
+		});
+		await expectUnavailable(
+			oauth.callToolRaw("fake", "read_note", {}, context),
+			"MCP server needs authentication: fake. Sign in with `volt mcp auth fake`.",
+		);
+		// The gateway's message is unchanged.
+		const gatewayFailure = await failure(
+			oauth.callTool({ action: "call", server: "fake", tool: "read_note" }, context),
+		);
+		expect((gatewayFailure as Error).message).toBe("MCP server needs authentication: fake");
+		await oauth.dispose();
+
+		const environment = createManager({ auth: { type: "env", env: "VOLT_TEST_UNSET_MCP_TOKEN" } });
+		await expectUnavailable(
+			environment.callToolRaw("fake", "read_note", {}, context),
+			"MCP server needs authentication: fake. Set the credentials its configuration reads from the environment.",
+		);
+		await environment.dispose();
+		expect(sent).toBe(0);
 	});
 
 	it("persists enablement overlays and exposes configured direct tools", async () => {

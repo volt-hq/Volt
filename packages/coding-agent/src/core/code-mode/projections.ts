@@ -75,9 +75,10 @@ export async function projectToolResult(
 }
 
 /**
- * The script value of an MCP tool call: `{ text, structured?, images }`. `text` joins the blocks other than
- * images as the gateway renders them for the model, `structured` is the result's structured content, and
- * `images` holds references to its image blocks. An error result rejects with `failed` and its text.
+ * The script value of a successful MCP tool call: `{ text, structured?, images }`. `text` joins the blocks other
+ * than images as the gateway renders them for the model, `structured` is the result's structured content, and
+ * `images` holds references to its image blocks. Dispatch rejects an error result with the text the tool-result
+ * policy reviewed, so it never reaches this projection.
  */
 export function projectMcpResult(result: CallToolResult, context: CodeModeProjectionContext): unknown {
 	const parts: unknown[] = Array.isArray(result.content) ? result.content : [];
@@ -91,12 +92,9 @@ export function projectMcpResult(result: CallToolResult, context: CodeModeProjec
 			if (text !== undefined) texts.push(text);
 		}
 	}
-	const text = texts.join("\n");
-	// An error result retains none of its images.
-	if (result.isError) throw failedCall(text);
 	const refs = context.images.add(images);
 	return {
-		text,
+		text: texts.join("\n"),
 		...(result.structuredContent === undefined ? {} : { structured: result.structuredContent }),
 		images: refs,
 	};

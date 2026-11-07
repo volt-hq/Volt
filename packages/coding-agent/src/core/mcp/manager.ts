@@ -23,10 +23,14 @@ import {
 	startMcpOAuthDeviceAuth,
 } from "./oauth-flow.ts";
 import type { McpOAuthStore } from "./oauth-store.ts";
-import type { McpOutputStore } from "./output-store.ts";
+import type { McpOutputStore, McpStoredOutputResult } from "./output-store.ts";
 import { classifyMcpToolRisk, isMcpToolTrustedReadCandidate } from "./safety.ts";
 import { McpSearchIndex } from "./search.ts";
-import { type McpMetadataRefreshOptions, McpServerSupervisor } from "./server-supervisor.ts";
+import {
+	type McpMetadataRefreshOptions,
+	McpServerAuthRequiredError,
+	McpServerSupervisor,
+} from "./server-supervisor.ts";
 import type {
 	McpCallerSurface,
 	McpClientFactory,
@@ -93,6 +97,23 @@ function requireString(value: string | undefined, label: string): string {
 		throw new Error(`MCP ${label} is required`);
 	}
 	return trimmed;
+}
+
+/**
+ * An MCP tool call that failed before its request was sent: the server is unknown, disabled, unreachable, or needs
+ * authentication, its tool metadata could not be read, or the tool is not available to the caller.
+ */
+export class McpToolUnavailableError extends Error {
+	constructor(message: string, options?: ErrorOptions) {
+		super(message, options);
+		this.name = "McpToolUnavailableError";
+	}
+}
+
+/** `error` as an unavailable tool, with the same message. */
+function toolUnavailable(error: unknown): McpToolUnavailableError {
+	if (error instanceof McpToolUnavailableError) return error;
+	return new McpToolUnavailableError(error instanceof Error ? error.message : String(error), { cause: error });
 }
 
 function makeCallId(): string {
@@ -192,7 +213,8 @@ export function contentPartToText(part: unknown): string | undefined {
 	return `[Unsupported MCP content: ${part.type}]`;
 }
 
-function callToolResultToText(result: CallToolResult): string {
+/** Renders an MCP tool result as text, in full, as the gateway does before it bounds the output. */
+export function callToolResultToText(result: CallToolResult): string {
 	const structuredText = result.structuredContent === undefined ? undefined : JSON.stringify(result.structuredContent);
 	const parts = result.content
 		.filter((part) => {
@@ -1159,13 +1181,85 @@ export class McpManager {
 		const serverId = requireString(input.server, "server");
 		const toolName = requireString(input.tool, "tool");
 		const args = parseArguments(input);
-		const supervisor = this.getSupervisor(serverId);
-		const metadata = context.restrictedTrustedRead
-			? await supervisor.refreshMetadata(signal, TOOLS_ONLY_METADATA_REFRESH)
-			: await this.getFreshToolMetadata(supervisor, signal);
+		const { result, risk, shaped } = await this.runToolCall(serverId, toolName, args, context, signal, (text, raw) =>
+			this.outputStore.shapeOutput(text, raw.structuredContent),
+		);
+		return {
+			action: "call",
+			server: serverId,
+			tool: toolName,
+			status: result.isError ? "failed" : "completed",
+			risk,
+			content: shaped.content,
+			...(result.isError ? { isError: true } : {}),
+			...(shaped.truncation ? { truncation: shaped.truncation } : {}),
+			...(shaped.cache ? { cache: shaped.cache } : {}),
+			...(shaped.cacheUnavailable ? { cacheUnavailable: true } : {}),
+		};
+	}
+
+	/**
+	 * Calls an MCP tool for a code mode script and returns its result as the server sent it, with the checks, events,
+	 * recent-call record, and audit entry of `callTool`. The output is neither bounded nor written to the output
+	 * store. A failure before the request is sent throws `McpToolUnavailableError`; a server that needs
+	 * authentication is reported with how to sign in.
+	 */
+	async callToolRaw(
+		serverId: string,
+		toolName: string,
+		args: Record<string, unknown>,
+		context: McpGatewayExecutionContext,
+		signal?: AbortSignal,
+	): Promise<{ result: CallToolResult; risk: McpRisk; metadataHash: string }> {
+		try {
+			const { result, risk, metadataHash } = await this.runToolCall(
+				serverId,
+				toolName,
+				args,
+				context,
+				signal,
+				() => undefined,
+			);
+			return { result, risk, metadataHash };
+		} catch (error) {
+			if (error instanceof McpToolUnavailableError && error.cause instanceof McpServerAuthRequiredError) {
+				const { server, oauth } = error.cause;
+				const signIn = oauth
+					? `Sign in with \`volt mcp auth ${server}\`.`
+					: "Set the credentials its configuration reads from the environment.";
+				throw new McpToolUnavailableError(`${error.cause.message}. ${signIn}`, { cause: error.cause });
+			}
+			throw error;
+		}
+	}
+
+	/**
+	 * The call path of `callTool` and `callToolRaw`: checks the tool against fresh metadata (revalidated as a trusted
+	 * read when restricted), calls it, and reports the call through events, the recent-call record, and the audit log.
+	 * `shape` makes the output the caller keeps from the result's full text. A failure before the request is sent
+	 * throws `McpToolUnavailableError` with the failure's message.
+	 */
+	private async runToolCall<S extends McpStoredOutputResult | undefined>(
+		serverId: string,
+		toolName: string,
+		args: Record<string, unknown>,
+		context: McpGatewayExecutionContext,
+		signal: AbortSignal | undefined,
+		shape: (text: string, result: CallToolResult) => S,
+	): Promise<{ result: CallToolResult; risk: McpRisk; metadataHash: string; shaped: S }> {
+		let supervisor: McpServerSupervisor;
+		let metadata: McpServerMetadata;
+		try {
+			supervisor = this.getSupervisor(serverId);
+			metadata = context.restrictedTrustedRead
+				? await supervisor.refreshMetadata(signal, TOOLS_ONLY_METADATA_REFRESH)
+				: await this.getFreshToolMetadata(supervisor, signal);
+		} catch (error) {
+			throw toolUnavailable(error);
+		}
 		const tool = metadata.tools.find((entry) => entry.name === toolName);
 		if (!tool || !serverMatchesToolFilters(supervisor.server, tool.name)) {
-			throw new Error(`MCP tool not available: ${serverId}.${toolName}`);
+			throw new McpToolUnavailableError(`MCP tool not available: ${serverId}.${toolName}`);
 		}
 		const risk = classifyMcpToolRisk(tool);
 		if (
@@ -1175,7 +1269,7 @@ export class McpManager {
 				tool.annotations?.readOnlyHint !== true ||
 				risk !== "read")
 		) {
-			throw new Error(`MCP tool is not an effectively trusted read: ${serverId}.${toolName}`);
+			throw new McpToolUnavailableError(`MCP tool is not an effectively trusted read: ${serverId}.${toolName}`);
 		}
 		const callId = makeCallId();
 		const startedAt = Date.now();
@@ -1192,6 +1286,12 @@ export class McpManager {
 			},
 		});
 		try {
+			// Connected here, so the call fails as unavailable when the server cannot be reached.
+			try {
+				await supervisor.connect(signal);
+			} catch (error) {
+				throw toolUnavailable(error);
+			}
 			const result = await supervisor.callTool(toolName, args, signal, (progress) =>
 				this.emit({
 					type: "mcp_call_update",
@@ -1200,7 +1300,7 @@ export class McpManager {
 				}),
 			);
 			const text = callToolResultToText(result);
-			const shaped = this.outputStore.shapeOutput(text, result.structuredContent);
+			const shaped = shape(text, result);
 			status = result.isError ? "failed" : "completed";
 			const outputBytes = byteLength(text);
 			const recent = {
@@ -1212,13 +1312,13 @@ export class McpManager {
 				status,
 				durationMs: Date.now() - startedAt,
 				outputBytes,
-				truncated: shaped.truncation?.truncated ?? false,
+				truncated: shaped?.truncation?.truncated ?? false,
 			};
 			supervisor.recordCall(recent);
 			this.emit({
 				type: "mcp_call_end",
 				call: recent,
-				...(shaped.cache ? { cacheId: shaped.cache.id } : {}),
+				...(shaped?.cache ? { cacheId: shaped.cache.id } : {}),
 			});
 			await this.writeAudit({
 				callerSurface: context.surface,
@@ -1229,21 +1329,10 @@ export class McpManager {
 				status,
 				durationMs: recent.durationMs,
 				resultSize: outputBytes,
-				cacheId: shaped.cache?.id,
+				cacheId: shaped?.cache?.id,
 				arguments: args,
 			});
-			return {
-				action: "call",
-				server: serverId,
-				tool: toolName,
-				status: result.isError ? "failed" : "completed",
-				risk,
-				content: shaped.content,
-				...(result.isError ? { isError: true } : {}),
-				...(shaped.truncation ? { truncation: shaped.truncation } : {}),
-				...(shaped.cache ? { cache: shaped.cache } : {}),
-				...(shaped.cacheUnavailable ? { cacheUnavailable: true } : {}),
-			};
+			return { result, risk, metadataHash: metadata.metadataHash, shaped };
 		} catch (error) {
 			status = signal?.aborted ? "cancelled" : "failed";
 			const durationMs = Date.now() - startedAt;

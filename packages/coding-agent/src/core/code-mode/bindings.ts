@@ -82,7 +82,13 @@ export interface CodeModeBindingSources {
 	mcpTools: readonly CodeModeMcpTool[];
 }
 
-export type CodeModeBindingTarget = { kind: "tool"; toolName: string } | { kind: "mcp"; server: string; tool: string };
+export type CodeModeBindingTarget =
+	| { kind: "tool"; toolName: string }
+	/**
+	 * An MCP tool, and the tool a model-issued call to it goes through: the built-in `mcp` gateway, or the MCP tool's
+	 * own direct tool.
+	 */
+	| { kind: "mcp"; server: string; tool: string; toolName: string };
 
 /** A binding and the call it makes. Its name, used in call messages, is the JSON text of its path. */
 export interface CodeModeBindingSpec extends CodeModeBinding {
@@ -92,7 +98,8 @@ export interface CodeModeBindingSpec extends CodeModeBinding {
 /**
  * The bindings of a script (section 5.12 of docs/code-mode-design.md): one for each call the model could make
  * directly in the session, excluding tools that are never bindable. MCP tools are bound through the built-in
- * `mcp` gateway or their own direct tool, once each, at `mcp.<server>.<tool>`. In a restricted mode, a binding
+ * `mcp` gateway or their own direct tool, once each, at `mcp.<server>.<tool>`; the gateway routes the calls of a
+ * tool both make callable. In a restricted mode, a binding
  * exists only for a tool the grant profile can authorize, and for an MCP tool only if it is a trusted read.
  *
  * Paths are unique and never a namespace of another path, because tool names are unique, `mcp` is never bound
@@ -111,7 +118,7 @@ export function computeCodeModeBindings(sources: CodeModeBindingSources): CodeMo
 		bindings.push({ name, path, target });
 	};
 
-	const mcpTargets = new Map<string, { server: string; tool: string }>();
+	const mcpTargets = new Map<string, { server: string; tool: string; toolName: string }>();
 	let gatewayActive = false;
 	for (const tool of sources.activeTools) {
 		if (NEVER_BINDABLE_TOOL_NAMES.has(tool.name)) {
@@ -132,7 +139,11 @@ export function computeCodeModeBindings(sources: CodeModeBindingSources): CodeMo
 			case "mcp_direct":
 				// Direct tools have no trusted resolver either.
 				if (grantProfile === undefined) {
-					mcpTargets.set(JSON.stringify([tool.server, tool.tool]), { server: tool.server, tool: tool.tool });
+					mcpTargets.set(JSON.stringify([tool.server, tool.tool]), {
+						server: tool.server,
+						tool: tool.tool,
+						toolName: tool.name,
+					});
 				}
 				break;
 		}
@@ -140,7 +151,12 @@ export function computeCodeModeBindings(sources: CodeModeBindingSources): CodeMo
 	if (gatewayActive) {
 		for (const tool of sources.mcpTools) {
 			if (grantProfile !== undefined && !tool.trustedRead) continue;
-			mcpTargets.set(JSON.stringify([tool.server, tool.tool]), { server: tool.server, tool: tool.tool });
+			// Replaces the tool's direct route: the gateway routes the calls of a tool both make callable.
+			mcpTargets.set(JSON.stringify([tool.server, tool.tool]), {
+				server: tool.server,
+				tool: tool.tool,
+				toolName: "mcp",
+			});
 		}
 	}
 	const sortedTargets = [...mcpTargets.values()].sort(

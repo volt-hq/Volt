@@ -6,7 +6,7 @@ import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../../src/core/agent-session.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
-import { computeCodeModeBindings } from "../../src/core/code-mode/bindings.ts";
+import { type CodeModeBindingSpec, computeCodeModeBindings } from "../../src/core/code-mode/bindings.ts";
 import {
 	createEmptyMcpMergedConfig,
 	finalizeMcpConfig,
@@ -134,16 +134,29 @@ describe("code mode bindings of a session", () => {
 		return session;
 	}
 
-	function bindingPaths(session: AgentSession): string[] {
+	function bindings(session: AgentSession): CodeModeBindingSpec[] {
 		const runtime = (session as unknown as { _tools: SessionToolRuntime })._tools;
-		return computeCodeModeBindings(runtime.codeModeBindingSources()).map((binding) => binding.path.join("."));
+		return computeCodeModeBindings(runtime.codeModeBindingSources());
+	}
+
+	function bindingPaths(session: AgentSession): string[] {
+		return bindings(session).map((binding) => binding.path.join("."));
+	}
+
+	/** The tool the calls of the MCP binding at `path` go through. */
+	function mcpRoute(session: AgentSession, path: string): string | undefined {
+		const target = bindings(session).find((binding) => binding.path.join(".") === path)?.target;
+		return target?.kind === "mcp" ? target.toolName : undefined;
 	}
 
 	it("binds active built-in, extension, and listed MCP tools in Build mode", async () => {
-		const paths = bindingPaths(await createSession({ agentMode: "build" }));
+		const session = await createSession({ agentMode: "build" });
+		const paths = bindingPaths(session);
 		expect(paths).toEqual(expect.arrayContaining(["read", "bash", "edit", "write", "deploy", "mcp.fake.write_note"]));
-		// The promoted tool is bound once, at its MCP path.
+		// The promoted tool is bound once, at its MCP path, and its calls go through the gateway.
 		expect(paths.filter((path) => path === "mcp.fake.read_note")).toHaveLength(1);
+		expect(mcpRoute(session, "mcp.fake.read_note")).toBe("mcp");
+		expect(mcpRoute(session, "mcp.fake.write_note")).toBe("mcp");
 		for (const absent of [
 			"jobs",
 			"request_user_input",
@@ -157,14 +170,18 @@ describe("code mode bindings of a session", () => {
 	});
 
 	it("keeps a promoted MCP tool bound through its direct tool when the gateway is excluded", async () => {
-		const paths = bindingPaths(await createSession({ agentMode: "build", excludeTools: ["mcp"] }));
+		const session = await createSession({ agentMode: "build", excludeTools: ["mcp"] });
+		const paths = bindingPaths(session);
 		expect(paths).toContain("mcp.fake.read_note");
+		expect(mcpRoute(session, "mcp.fake.read_note")).toBe("mcp__fake__read_note");
 		expect(paths).not.toContain("mcp.fake.write_note");
 	});
 
 	it("binds only tools the research profile authorizes in Plan mode", async () => {
-		const paths = bindingPaths(await createSession({ agentMode: "plan" }));
+		const session = await createSession({ agentMode: "plan" });
+		const paths = bindingPaths(session);
 		expect(paths).toEqual(expect.arrayContaining(["read", "mcp.fake.read_note"]));
+		expect(mcpRoute(session, "mcp.fake.read_note")).toBe("mcp");
 		for (const absent of ["bash", "edit", "write", "deploy", "mcp.fake.write_note"]) {
 			expect(paths, absent).not.toContain(absent);
 		}

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool, AgentToolResult } from "@hansjm10/volt-agent-core";
 import type { ImageContent, JsonObject, JsonValue, TextContent } from "@hansjm10/volt-ai";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { Type } from "typebox";
 import { afterAll, describe, expect, it } from "vitest";
 import type { CodeModeBindingSpec } from "../../src/core/code-mode/bindings.ts";
@@ -11,6 +12,7 @@ import { CodeModeImageStore } from "../../src/core/code-mode/images.ts";
 import { type CodeModeCall, CodeModeCallError } from "../../src/core/code-mode/runtime.ts";
 import { CodeModeCallScheduler, CodeModeServerLimiter } from "../../src/core/code-mode/scheduler.ts";
 import type { ExtensionOperationOrigin } from "../../src/core/extensions/index.ts";
+import { callToolResultToText, McpToolUnavailableError } from "../../src/core/mcp/manager.ts";
 import type { ToolCallDecision, TurnToolCall } from "../../src/core/session/turn-policy.ts";
 
 const cwd = mkdtempSync(join(tmpdir(), "volt-code-mode-dispatch-"));
@@ -41,6 +43,9 @@ interface FakeHostOptions {
 		signal: AbortSignal,
 	) => ToolCallDecision | undefined | Promise<ToolCallDecision | undefined>;
 	patchResult?: (event: ResultCall) => ToolResultPatch | undefined;
+	/** The session's MCP manager; without it, MCP calls fail as unavailable. */
+	mcp?: (server: string, tool: string, args: JsonObject, signal: AbortSignal) => Promise<CallToolResult>;
+	serverLimit?: number;
 }
 
 /** A session stand-in that records what reaches its policies. */
@@ -50,6 +55,8 @@ function fakeHost(options: FakeHostOptions) {
 	const trusted = new Set(options.trusted);
 	const policyCalls: PolicyCall[] = [];
 	const resultCalls: ResultCall[] = [];
+	const mcpCalls: Array<{ server: string; tool: string; args: JsonObject }> = [];
+	const limitRequests: string[] = [];
 	const host: CodeModeDispatchHost = {
 		cwd,
 		isToolActive: (name) => tools.has(name) && !inactive.has(name),
@@ -68,8 +75,17 @@ function fakeHost(options: FakeHostOptions) {
 			resultCalls.push(recorded);
 			return options.patchResult?.(recorded);
 		},
+		callMcpTool: async (server, tool, args, signal) => {
+			mcpCalls.push({ server, tool, args: structuredClone(args) });
+			if (!options.mcp) throw new McpToolUnavailableError("MCP is not available in this session");
+			return await options.mcp(server, tool, args, signal);
+		},
+		mcpServerLimit: (server) => {
+			limitRequests.push(server);
+			return options.serverLimit ?? 4;
+		},
 	};
-	return { host, tools, inactive, trusted, policyCalls, resultCalls };
+	return { host, tools, inactive, trusted, policyCalls, resultCalls, mcpCalls, limitRequests };
 }
 
 function tool(
@@ -95,6 +111,66 @@ const text = (value: string): AgentToolResult<unknown> => ({ content: [{ type: "
 
 function binding(toolName: string): CodeModeBindingSpec {
 	return { name: JSON.stringify([toolName]), path: [toolName], target: { kind: "tool", toolName } };
+}
+
+const PNG_1X1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg==";
+
+/** The built-in gateway as nested-call dispatch uses it: its schema. Dispatch never runs it. */
+function gateway(): AgentTool {
+	return {
+		name: "mcp",
+		label: "mcp",
+		description: "mcp",
+		parameters: Type.Object({
+			action: Type.String(),
+			server: Type.Optional(Type.String()),
+			tool: Type.Optional(Type.String()),
+			arguments: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+		}),
+		execute: async () => {
+			throw new Error("the gateway does not run nested calls");
+		},
+		executionMode: "sequential",
+	} as AgentTool;
+}
+
+/** The direct tool of `github.search`, with the MCP tool's schema. Dispatch never runs it. */
+function directTool(): AgentTool {
+	return {
+		name: "mcp__github__search",
+		label: "search",
+		description: "search",
+		parameters: Type.Object({ query: Type.String(), background: Type.Optional(Type.Boolean()) }),
+		execute: async () => {
+			throw new Error("the direct tool does not run nested calls");
+		},
+		executionMode: "sequential",
+	} as AgentTool;
+}
+
+function searchResult(): CallToolResult {
+	return {
+		content: [
+			{ type: "text", text: "found 2 issues" },
+			{ type: "image", data: PNG_1X1, mimeType: "image/png" },
+		],
+		structuredContent: { issues: [1, 2] },
+	};
+}
+
+function mcpBinding(server: string, tool: string, toolName: string): CodeModeBindingSpec {
+	const path = ["mcp", server, tool];
+	return { name: JSON.stringify(path), path, target: { kind: "mcp", server, tool, toolName } };
+}
+
+function mcpCall(
+	seq: number,
+	server: string,
+	tool: string,
+	args: Record<string, unknown>,
+	signal?: AbortSignal,
+): CodeModeCall {
+	return { ...call(seq, tool, args, signal), binding: JSON.stringify(["mcp", server, tool]) };
 }
 
 function handlerFor(host: CodeModeDispatchHost, bindings: CodeModeBindingSpec[]) {
@@ -401,14 +477,241 @@ describe("code mode call dispatch", () => {
 		expect(await pending).toBe("extension output");
 	});
 
-	it("rejects calls to MCP tools as unavailable until MCP dispatch exists", async () => {
-		const { host } = fakeHost({ tools: [] });
-		const mcp: CodeModeBindingSpec = {
-			name: '["mcp","github","x"]',
-			path: ["mcp", "github", "x"],
-			target: { kind: "mcp", server: "github", tool: "x" },
+	it("runs an MCP call through the gateway's policies and the session's MCP manager, with its nested call id and origin", async () => {
+		const raw = searchResult();
+		const { host, policyCalls, resultCalls, mcpCalls, limitRequests } = fakeHost({
+			tools: [gateway()],
+			mcp: async () => raw,
+		});
+		const value = await handlerFor(host, [mcpBinding("github", "search", "mcp")])(
+			mcpCall(4, "github", "search", { query: "bug" }),
+		);
+		const origin = { kind: "code_mode", parentToolCallId: "parent", seq: 4 };
+		const input = { action: "call", server: "github", tool: "search", arguments: { query: "bug" } };
+		expect(policyCalls).toStrictEqual([{ toolCallId: "parent:cm:4", toolName: "mcp", input, origin }]);
+		expect(mcpCalls).toStrictEqual([{ server: "github", tool: "search", args: { query: "bug" } }]);
+		expect(limitRequests).toStrictEqual(["github"]);
+		// The tool-result policy sees the complete result as text, without details.
+		expect(resultCalls).toHaveLength(1);
+		expect(resultCalls[0]).toMatchObject({
+			toolName: "mcp",
+			toolCallId: "parent:cm:4",
+			input,
+			content: [{ type: "text", text: callToolResultToText(raw) }],
+			isError: false,
+			origin,
+		});
+		expect(resultCalls[0]).not.toHaveProperty("details");
+		expect(value).toMatchObject({
+			text: "found 2 issues",
+			structured: { issues: [1, 2] },
+			images: [{ type: "image", mimeType: "image/png" }],
+		});
+	});
+
+	it("runs an MCP call through its direct tool's validation and policies when that tool is its route", async () => {
+		const { host, policyCalls, mcpCalls } = fakeHost({
+			tools: [directTool()],
+			mcp: async () => ({ content: [{ type: "text", text: "ok" }] }),
+		});
+		const handle = handlerFor(host, [mcpBinding("github", "search", "mcp__github__search")]);
+		expect(await handle(mcpCall(1, "github", "search", { query: "bug" }))).toStrictEqual({ text: "ok", images: [] });
+		expect(await rejection(handle(mcpCall(2, "github", "search", { query: { nested: true } })))).toMatchObject({
+			kind: "invalid_arguments",
+		});
+		expect(policyCalls).toStrictEqual([
+			{
+				toolCallId: "parent:cm:1",
+				toolName: "mcp__github__search",
+				input: { query: "bug" },
+				origin: { kind: "code_mode", parentToolCallId: "parent", seq: 1 },
+			},
+		]);
+		expect(mcpCalls).toStrictEqual([{ server: "github", tool: "search", args: { query: "bug" } }]);
+	});
+
+	it("schedules MCP calls with their server's limit", async () => {
+		const releases: Array<() => void> = [];
+		const { host, mcpCalls } = fakeHost({
+			tools: [gateway()],
+			serverLimit: 1,
+			mcp: () =>
+				new Promise((resolve) => {
+					releases.push(() => resolve({ content: [{ type: "text", text: "done" }] }));
+				}),
+		});
+		const handle = handlerFor(host, [mcpBinding("github", "search", "mcp")]);
+		const first = handle(mcpCall(1, "github", "search", {}));
+		const second = handle(mcpCall(2, "github", "search", {}));
+		await settle();
+		expect(mcpCalls).toHaveLength(1);
+		releases[0]!();
+		await first;
+		await settle();
+		expect(mcpCalls).toHaveLength(2);
+		releases[1]!();
+		expect(await second).toStrictEqual({ text: "done", images: [] });
+	});
+
+	it("rejects an MCP call whose routing tool is no longer active or was replaced, before any policy runs", async () => {
+		const { host, tools, inactive, policyCalls, mcpCalls } = fakeHost({
+			tools: [gateway()],
+			mcp: async () => ({ content: [] }),
+		});
+		const handle = handlerFor(host, [mcpBinding("github", "search", "mcp")]);
+		inactive.add("mcp");
+		expect(await rejection(handle(mcpCall(1, "github", "search", {})))).toMatchObject({
+			kind: "failed",
+			reason: "unavailable",
+			message: "mcp is no longer available in this session",
+		});
+		inactive.clear();
+		tools.set("mcp", gateway());
+		expect(await rejection(handle(mcpCall(2, "github", "search", {})))).toMatchObject({
+			kind: "failed",
+			reason: "unavailable",
+		});
+		expect([policyCalls, mcpCalls]).toStrictEqual([[], []]);
+	});
+
+	it("calls the binding's MCP tool with the checked arguments, whatever a policy does to its copy of the call", async () => {
+		const { host, mcpCalls } = fakeHost({
+			tools: [gateway(), directTool()],
+			decide: (decided) => {
+				const input = decided.input;
+				input.server = "other";
+				input.tool = "delete_repository";
+				input.query = "changed";
+				if (input.arguments !== null && typeof input.arguments === "object" && !Array.isArray(input.arguments)) {
+					input.arguments.query = "changed";
+				}
+				return undefined;
+			},
+			mcp: async () => ({ content: [{ type: "text", text: "ok" }] }),
+		});
+		await handlerFor(host, [mcpBinding("github", "search", "mcp")])(mcpCall(1, "github", "search", { query: "bug" }));
+		await handlerFor(host, [mcpBinding("github", "search", "mcp__github__search")])(
+			mcpCall(1, "github", "search", { query: "bug" }),
+		);
+		expect(mcpCalls).toStrictEqual([
+			{ server: "github", tool: "search", args: { query: "bug" } },
+			{ server: "github", tool: "search", args: { query: "bug" } },
+		]);
+	});
+
+	it("passes background through to an MCP tool and rejects BigInt arguments", async () => {
+		const { host, policyCalls, mcpCalls } = fakeHost({
+			tools: [directTool()],
+			mcp: async () => ({ content: [{ type: "text", text: "ok" }] }),
+		});
+		const handle = handlerFor(host, [mcpBinding("github", "search", "mcp__github__search")]);
+		expect(await handle(mcpCall(1, "github", "search", { query: "bug", background: true }))).toStrictEqual({
+			text: "ok",
+			images: [],
+		});
+		expect(mcpCalls).toStrictEqual([{ server: "github", tool: "search", args: { query: "bug", background: true } }]);
+		expect(await rejection(handle(mcpCall(2, "github", "search", { query: "bug", id: 2n ** 70n })))).toMatchObject({
+			kind: "invalid_arguments",
+			message: "args.id: a BigInt is not a valid tool argument",
+		});
+		expect(policyCalls.map((policyCall) => policyCall.toolCallId)).toStrictEqual(["parent:cm:1"]);
+	});
+
+	it("rejects an MCP call that fails before its request is sent as unavailable, after the tool-result policy sees the failure", async () => {
+		const failures: unknown[] = [
+			new McpToolUnavailableError("MCP server needs authentication: github. Sign in with `volt mcp auth github`."),
+			new Error("MCP error -32603: internal error"),
+		];
+		const { host, resultCalls } = fakeHost({
+			tools: [gateway()],
+			mcp: async () => {
+				const failure = failures.shift();
+				if (failure) throw failure;
+				return { content: [{ type: "text", text: "rate limited" }], isError: true };
+			},
+		});
+		const handle = handlerFor(host, [mcpBinding("github", "search", "mcp")]);
+		const unavailable = await rejection(handle(mcpCall(1, "github", "search", {})));
+		expect(unavailable).toMatchObject({
+			kind: "failed",
+			reason: "unavailable",
+			message: "MCP server needs authentication: github. Sign in with `volt mcp auth github`.",
+		});
+		// A failure after the request was sent, or an error result, has no reason.
+		const failed = await rejection(handle(mcpCall(2, "github", "search", {})));
+		expect([failed.kind, failed.reason, failed.message]).toStrictEqual([
+			"failed",
+			undefined,
+			"MCP error -32603: internal error",
+		]);
+		const errorResult = await rejection(handle(mcpCall(3, "github", "search", {})));
+		expect([errorResult.kind, errorResult.reason, errorResult.message]).toStrictEqual([
+			"failed",
+			undefined,
+			"rate limited",
+		]);
+		expect(resultCalls.map(({ content, isError }) => ({ content, isError }))).toStrictEqual([
+			{ content: [{ type: "text", text: unavailable.message }], isError: true },
+			{ content: [{ type: "text", text: "MCP error -32603: internal error" }], isError: true },
+			{ content: [{ type: "text", text: "rate limited" }], isError: true },
+		]);
+	});
+
+	it("projects an MCP result in full unless a hook changes it, then gives only the text the hook left", async () => {
+		const search = mcpBinding("github", "search", "mcp");
+		const valueWith = async (patchResult: FakeHostOptions["patchResult"]) => {
+			const { host } = fakeHost({ tools: [gateway()], mcp: async () => searchResult(), patchResult });
+			return await handlerFor(host, [search])(mcpCall(1, "github", "search", {}));
 		};
-		const error = await rejection(handlerFor(host, [mcp])({ ...call(1, "x", {}), binding: mcp.name }));
-		expect(error).toMatchObject({ kind: "failed", reason: "unavailable" });
+		// Hooks that ran and left the result as it was.
+		expect(await valueWith((event) => ({ content: event.content, isError: event.isError }))).toMatchObject({
+			text: "found 2 issues",
+			structured: { issues: [1, 2] },
+			images: [{ type: "image" }],
+		});
+		const redacted = { content: [{ type: "text" as const, text: "[redacted]" }], isError: false };
+		expect(await valueWith(() => redacted)).toStrictEqual({ text: "[redacted]", images: [] });
+		const denied = await rejection(
+			valueWith(() => ({ content: [{ type: "text", text: "denied by policy" }], isError: true })),
+		);
+		expect([denied.kind, denied.reason, denied.message]).toStrictEqual(["failed", undefined, "denied by policy"]);
+	});
+
+	it("rejects an MCP error result with the text the hooks saw, structured content included, keeping none of its images", async () => {
+		const rejected = async (result: CallToolResult, patchResult?: FakeHostOptions["patchResult"]) => {
+			const { host, resultCalls } = fakeHost({ tools: [gateway()], mcp: async () => result, patchResult });
+			const images = new CodeModeImageStore().stage();
+			const handle = handlerFor(host, [mcpBinding("github", "search", "mcp")]);
+			const error = await rejection(handle({ ...mcpCall(1, "github", "search", {}), images }));
+			return { error, reviewed: resultCalls.map(({ content }) => content), refs: images.refs };
+		};
+		const onlyStructured: CallToolResult = { content: [], structuredContent: { code: "E_QUOTA" }, isError: true };
+		// No hook saw the result, then hooks that left it as it was.
+		for (const patchResult of [
+			undefined,
+			(event: ResultCall) => ({ content: event.content, isError: event.isError }),
+		]) {
+			const { error, reviewed, refs } = await rejected(onlyStructured, patchResult);
+			expect([error.kind, error.reason, error.message]).toStrictEqual([
+				"failed",
+				undefined,
+				'Structured content:\n{"code":"E_QUOTA"}',
+			]);
+			expect(reviewed).toStrictEqual([[{ type: "text", text: error.message }]]);
+			expect(refs).toStrictEqual([]);
+		}
+		const { error, reviewed, refs } = await rejected({
+			content: [
+				{ type: "text", text: "quota error" },
+				{ type: "image", data: PNG_1X1, mimeType: "image/png" },
+			],
+			structuredContent: { code: "E_QUOTA", retryAfter: 60 },
+			isError: true,
+		});
+		expect(error.message).toBe(
+			`quota error\n\n[MCP image: image/png, ${PNG_1X1.length} base64 chars]\n\nStructured content:\n{"code":"E_QUOTA","retryAfter":60}`,
+		);
+		expect(reviewed).toStrictEqual([[{ type: "text", text: error.message }]]);
+		expect(refs).toStrictEqual([]);
 	});
 });

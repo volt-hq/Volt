@@ -55,6 +55,20 @@ export interface McpMetadataRefreshOptions {
 	strict?: boolean;
 }
 
+/** A server that cannot connect until it is authenticated. */
+export class McpServerAuthRequiredError extends Error {
+	readonly server: string;
+	/** Whether the server signs in through OAuth, rather than with credentials read from the environment. */
+	readonly oauth: boolean;
+
+	constructor(server: string, oauth: boolean) {
+		super(`MCP server needs authentication: ${server}`);
+		this.name = "McpServerAuthRequiredError";
+		this.server = server;
+		this.oauth = oauth;
+	}
+}
+
 function isAbortError(error: unknown): boolean {
 	return error instanceof Error && (error.name === "AbortError" || /aborted/i.test(error.message));
 }
@@ -179,7 +193,7 @@ export class McpServerSupervisor {
 		const preConnectAuthState = getMcpServerAuthState(this.server, process.env, this.oauthStore);
 		if (preConnectAuthState === "required") {
 			this.setState({ status: "needs_auth", authState: preConnectAuthState });
-			throw new Error(`MCP server needs authentication: ${this.server.id}`);
+			throw new McpServerAuthRequiredError(this.server.id, this.server.auth?.type === "oauth");
 		}
 		this.setState({ status: "connecting", authState: preConnectAuthState });
 		this.lastErrorValue = undefined;
