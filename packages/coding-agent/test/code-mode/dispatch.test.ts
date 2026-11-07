@@ -676,4 +676,42 @@ describe("code mode call dispatch", () => {
 		);
 		expect([denied.kind, denied.reason, denied.message]).toStrictEqual(["failed", undefined, "denied by policy"]);
 	});
+
+	it("rejects an MCP error result with the text the hooks saw, structured content included, keeping none of its images", async () => {
+		const rejected = async (result: CallToolResult, patchResult?: FakeHostOptions["patchResult"]) => {
+			const { host, resultCalls } = fakeHost({ tools: [gateway()], mcp: async () => result, patchResult });
+			const images = new CodeModeImageStore().stage();
+			const handle = handlerFor(host, [mcpBinding("github", "search", "mcp")]);
+			const error = await rejection(handle({ ...mcpCall(1, "github", "search", {}), images }));
+			return { error, reviewed: resultCalls.map(({ content }) => content), refs: images.refs };
+		};
+		const onlyStructured: CallToolResult = { content: [], structuredContent: { code: "E_QUOTA" }, isError: true };
+		// No hook saw the result, then hooks that left it as it was.
+		for (const patchResult of [
+			undefined,
+			(event: ResultCall) => ({ content: event.content, isError: event.isError }),
+		]) {
+			const { error, reviewed, refs } = await rejected(onlyStructured, patchResult);
+			expect([error.kind, error.reason, error.message]).toStrictEqual([
+				"failed",
+				undefined,
+				'Structured content:\n{"code":"E_QUOTA"}',
+			]);
+			expect(reviewed).toStrictEqual([[{ type: "text", text: error.message }]]);
+			expect(refs).toStrictEqual([]);
+		}
+		const { error, reviewed, refs } = await rejected({
+			content: [
+				{ type: "text", text: "quota error" },
+				{ type: "image", data: PNG_1X1, mimeType: "image/png" },
+			],
+			structuredContent: { code: "E_QUOTA", retryAfter: 60 },
+			isError: true,
+		});
+		expect(error.message).toBe(
+			`quota error\n\n[MCP image: image/png, ${PNG_1X1.length} base64 chars]\n\nStructured content:\n{"code":"E_QUOTA","retryAfter":60}`,
+		);
+		expect(reviewed).toStrictEqual([[{ type: "text", text: error.message }]]);
+		expect(refs).toStrictEqual([]);
+	});
 });

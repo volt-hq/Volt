@@ -128,8 +128,9 @@ export interface CodeModeCallHandlerOptions {
  *    as registered; an MCP tool runs through the session's MCP manager, limited per server, with the binding's
  *    server and tool and the validated arguments.
  * 10. The session's tool-result policy, whose hooks observe the call's signal, then the call's projection into a
- *     script value. Hooks see an MCP result as its complete text. Unless they change it, the value is the full
- *     MCP projection; once they do, it is the text they left, without structured content or images.
+ *     script value. Hooks see an MCP result as its complete text. Unless they change it, a successful result's value
+ *     is the full MCP projection; once they do, it is the text they left, without structured content or images. An
+ *     error result rejects with the text the hooks left, changed or not.
  *
  * Checks 6 to 8 run in submission order: a call's checks start once the earlier call's have finished, as the agent
  * loop prepares calls in order. A call cancelled before its tool starts rejects with `cancelled` (`not_started`),
@@ -232,7 +233,8 @@ export function createCodeModeCallHandler(
 			const outcome = await schedule(host.mcpServerLimit(target.server), () =>
 				callMcp(host, target.server, target.tool, args, call.signal),
 			);
-			// Hooks see the complete result as text; its images and structured content reach the value only unchanged.
+			// Hooks see the complete result as text; its images and structured content reach the value only unchanged. An
+			// error rejects with that text, structured content included, as the hooks left it.
 			const event = {
 				content: [
 					{
@@ -247,7 +249,7 @@ export function createCodeModeCallHandler(
 			const unchanged =
 				reviewed === undefined ||
 				(reviewed.isError === event.isError && isDeepStrictEqual(reviewed.content, event.content));
-			if (unchanged && "result" in outcome) {
+			if (unchanged && "result" in outcome && outcome.result.isError !== true) {
 				return projectMcpResult(outcome.result, {
 					cwd: host.cwd,
 					images: call.images,

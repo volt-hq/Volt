@@ -292,18 +292,8 @@ describe("code mode default and MCP projections", () => {
 		});
 	});
 
-	it("rejects an MCP error result or images over the limit, keeping none of their images", () => {
+	it("rejects MCP images over the limit, keeping none of them", () => {
 		const images = new CodeModeImageStore(10).stage();
-		const errorResult: CallToolResult = {
-			content: [
-				{ type: "text", text: "rate limited" },
-				{ type: "image", data: PNG_1X1, mimeType: "image/png" },
-			],
-			isError: true,
-		};
-		expect(() => projectMcpResult(errorResult, context({ images }))).toThrow(
-			expect.objectContaining({ kind: "failed", message: "rate limited" }),
-		);
 		const large: CallToolResult = { content: [{ type: "image", data: PNG_1X1, mimeType: "image/png" }] };
 		expect(() => projectMcpResult(large, context({ images }))).toThrow(
 			expect.objectContaining({ kind: "failed", reason: "limit_exceeded" }),
