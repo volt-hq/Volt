@@ -401,14 +401,18 @@ describe("code mode runtime", () => {
 	});
 
 	it("times out, keeps partial output, and records calls that may still apply", async () => {
+		// The timeout includes the wait for a worker. A cold start can take longer than the whole budget on a busy
+		// machine, so the script runs on a worker that has already started.
+		const warm = newPool({ maxWorkers: 1 });
+		expect(await run("return 1;", {}, warm)).toMatchObject({ ok: true, value: 1 });
 		const result = failed(
-			await run("text('before'); await tools.call({});", {
-				timeoutMs: 100,
-				limits: { drainMs: 50 },
-				onCall: (call) => never(call, false),
-			}),
+			await run(
+				"text('before'); await tools.call({});",
+				{ timeoutMs: 500, limits: { drainMs: 50 }, onCall: (call) => never(call, false) },
+				warm,
+			),
 		);
-		expect(result.failure).toStrictEqual({ kind: "timeout", timeoutMs: 100 });
+		expect(result.failure).toStrictEqual({ kind: "timeout", timeoutMs: 500 });
 		expect(result.started).toBe(true);
 		expect(texts(result)).toStrictEqual(["before"]);
 		expect(result.calls.map((call) => call.status)).toStrictEqual(["unsettled"]);
@@ -416,9 +420,9 @@ describe("code mode runtime", () => {
 
 	it("keeps an unsettled record unchanged when the call completes after the script returned", async () => {
 		const late = deferred<string>();
-		const result = failed(
-			await run("await tools.call({});", { timeoutMs: 100, limits: { drainMs: 50 }, onCall: () => late.promise }),
-		);
+		// The worker posts the call before the script's result, so the call is in flight when the script returns.
+		const result = await run("tools.call({}); return 1;", { limits: { drainMs: 50 }, onCall: () => late.promise });
+		expect(result).toMatchObject({ ok: true, value: 1 });
 		expect(result.calls[0]).toMatchObject({ status: "unsettled" });
 		late.resolve("late");
 		await new Promise((resolve) => setTimeout(resolve, 50));
