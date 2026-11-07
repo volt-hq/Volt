@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { extname } from "node:path";
+import { extname, join } from "node:path";
 import type { ImageContent, TextContent } from "@hansjm10/volt-ai";
 import fc from "fast-check";
 import { afterEach, describe, expect, it } from "vitest";
@@ -814,9 +814,13 @@ describe("code mode result rendering within the output limit", () => {
 	});
 
 	it("leaves out the file path when the full rendering cannot be written", async () => {
-		const previous = process.env.TMPDIR;
-		process.env.TMPDIR = "/nonexistent/volt-code-mode-render-test";
+		// `os.tmpdir()` reads TMPDIR on POSIX and TEMP, then TMP, on Windows.
+		const missing = join(tmpdir(), "volt-code-mode-render-missing", "nested");
+		const keys = ["TMPDIR", "TEMP", "TMP"] as const;
+		const previous = keys.map((key) => process.env[key]);
+		for (const key of keys) process.env[key] = missing;
 		try {
+			expect(tmpdir()).toBe(missing);
 			const rendered = await renderCodeModeResult({ result: succeeded(lines(6000)), calls: [], images: [] });
 			expect(rendered.truncated).toBe(true);
 			expect(rendered.fullOutputPath).toBeUndefined();
@@ -830,10 +834,13 @@ describe("code mode result rendering within the output limit", () => {
 				images: [],
 			});
 			expect(textOf(value).split("\n")).toHaveLength(2);
-			expect(existsSync("/nonexistent/volt-code-mode-render-test")).toBe(false);
+			expect(existsSync(missing)).toBe(false);
 		} finally {
-			if (previous === undefined) delete process.env.TMPDIR;
-			else process.env.TMPDIR = previous;
+			keys.forEach((key, index) => {
+				const value = previous[index];
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			});
 		}
 	});
 });
