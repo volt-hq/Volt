@@ -117,6 +117,24 @@ export function getRegisteredWorkingDirectoryForWorktree(
 		: posix.join(worktree.sourceRootRelativePath, worktreeRelativePath);
 }
 
+/**
+ * The directory a phone conversation in the workspace, or in its checkout
+ * `worktree`, loads its project resources from: settings, extensions, skills,
+ * prompts, MCP servers, and context files. A checkout that has held a pull
+ * request review holds content its author controls, so its conversations load
+ * them from the same repository in the workspace instead (#1034).
+ */
+export function getConversationProjectRoot(
+	workspace: Pick<IrohRemoteWorkspace, "path">,
+	worktree: Pick<IrohRemoteWorkspaceWorktree, "path" | "sourceRootRelativePath" | "prReviewLaunches"> | undefined,
+): string {
+	if (worktree === undefined) return workspace.path;
+	if (worktree.prReviewLaunches === undefined || worktree.prReviewLaunches.length === 0) return worktree.path;
+	return worktree.sourceRootRelativePath === undefined
+		? workspace.path
+		: join(workspace.path, ...worktree.sourceRootRelativePath.split("/"));
+}
+
 /** win32-aware "path is inside root" prefix check on resolved paths. */
 function isPathContained(root: string, path: string): boolean {
 	const resolvedRoot = resolve(root);

@@ -186,6 +186,7 @@ import {
 import { isPathInside, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
 import type { SessionPlacement, WorkspaceSession } from "./workspace-sessions.ts";
 import {
+	getConversationProjectRoot,
 	getWorkspaceWorktreesDir,
 	handleWorktreeControlRequest,
 	isWorktreeControlRequest,
@@ -1395,7 +1396,7 @@ class IrohDaemonService {
 					branch: request.gitContext.branch,
 					headOid: request.gitContext.headOid,
 					trusted: resolveIrohRemoteWorkspaceProjectTrusted(currentWorkspace, {
-						resourcesRoot: worktree?.path ?? currentWorkspace.path,
+						resourcesRoot: getConversationProjectRoot(currentWorkspace, worktree),
 						trustStore: this.trustStore,
 					}),
 					...(request.gitContext.baseRef === undefined ? {} : { baseBranches: [request.gitContext.baseRef] }),
@@ -3349,7 +3350,8 @@ class IrohDaemonService {
 
 	/**
 	 * What a phone conversation in the device's workspace, or its worktree checkout `worktreeId`, would load:
-	 * evaluated in the root such a conversation runs in, with the trust and profile it would run with.
+	 * evaluated in the root such a conversation loads its project resources from, with the trust and profile it
+	 * would run with.
 	 */
 	private async getExtensionInventory(
 		authorization: IrohRemoteClientAuthorizationSuccess,
@@ -3366,7 +3368,7 @@ class IrohDaemonService {
 			if (worktreeId !== undefined) {
 				const worktree = await this.worktrees.findWorktree(workspace.name, worktreeId);
 				if (!worktree || !existsSync(worktree.path)) throw new WorkspaceIntentError("worktree_not_found");
-				root = worktree.path;
+				root = getConversationProjectRoot(workspace, worktree);
 			}
 			return await inventories.get(
 				{

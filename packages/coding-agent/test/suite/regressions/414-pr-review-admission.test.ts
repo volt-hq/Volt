@@ -612,7 +612,8 @@ describe("#414 PR review admission and worker spawn", () => {
 			const opened = await first.attach(conversation);
 			const placement = opened.worker.conversation.session.sessionManager.getPrReviewBinding()!;
 			expect(opened.resolved.selection).toMatchObject({ kind: "created", sessionId: prepared.sessionId });
-			expect(opened.spec).toMatchObject({ cwd: placement.cwd, projectCwd: placement.cwd });
+			// It works in the checkout and loads project resources from the repository in the workspace (#1034).
+			expect(opened.spec).toMatchObject({ cwd: placement.cwd, projectCwd: f.source });
 			expect(opened.spec.session).toMatchObject({ sessionDirectory: f.sessionDir });
 			expect(opened.resolved.worktree).toMatchObject({ id: prepared.worktreeId, path: placement.cwd });
 			expect(opened.resolved.workingDirectory).toBe(prepared.workingDirectory);
