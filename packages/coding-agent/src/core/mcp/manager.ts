@@ -120,6 +120,11 @@ function makeCallId(): string {
 	return `mcpcall_${randomUUID().replace(/-/g, "")}`;
 }
 
+/** The audit field naming the `run_code` call a code mode script's nested call belongs to, if it is one. */
+function parentOf(context: McpGatewayExecutionContext): { parentToolCallId?: string } {
+	return context.parentToolCallId === undefined ? {} : { parentToolCallId: context.parentToolCallId };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1322,6 +1327,7 @@ export class McpManager {
 			});
 			await this.writeAudit({
 				callerSurface: context.surface,
+				...parentOf(context),
 				server: serverId,
 				item: toolName,
 				kind: "tool",
@@ -1349,6 +1355,7 @@ export class McpManager {
 			this.emit({ type: "mcp_call_end", call: recent });
 			await this.writeAudit({
 				callerSurface: context.surface,
+				...parentOf(context),
 				server: serverId,
 				item: toolName,
 				kind: "tool",
@@ -1421,6 +1428,7 @@ export class McpManager {
 
 	private async writeAudit(input: {
 		callerSurface: McpCallerSurface;
+		parentToolCallId?: string;
 		server: string;
 		item: string;
 		kind: "tool" | "resource" | "prompt" | "cache";

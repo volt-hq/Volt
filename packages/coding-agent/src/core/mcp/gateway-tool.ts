@@ -1,5 +1,6 @@
 import type { AgentTool } from "@hansjm10/volt-agent-core";
 import { type Static, Type } from "typebox";
+import { CODE_MODE_MCP_RESULT_SHAPE } from "../code-mode/bindings.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { presentMcp } from "../tools/query-presenters.ts";
 import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
@@ -67,6 +68,11 @@ export interface McpGatewayToolDetails {
 export interface McpGatewayToolOptions {
 	manager: McpManager;
 	isRestrictedTrustedRead?: () => boolean;
+	/**
+	 * How a `run_code` script calls the MCP tool, such as `tools.mcp.github.search(args)`, while `run_code` is active and
+	 * its scripts get a binding for the tool; otherwise undefined. A successful `describe` result carries it.
+	 */
+	codeModeBinding?: (server: string, tool: string) => string | undefined;
 }
 
 function isFailedGatewayCall(result: unknown): boolean {
@@ -77,6 +83,18 @@ function isFailedGatewayCall(result: unknown): boolean {
 		result.action === "call" &&
 		(("isError" in result && result.isError === true) || ("status" in result && result.status === "failed"))
 	);
+}
+
+/**
+ * A successful `describe` result with how a `run_code` script calls the tool, while scripts get a binding for it
+ * (section 5.14 of docs/code-mode-design.md). Any other result is returned unchanged.
+ */
+function withCodeModeBinding(result: unknown, codeModeBinding: McpGatewayToolOptions["codeModeBinding"]): unknown {
+	if (codeModeBinding === undefined || typeof result !== "object" || result === null) return result;
+	const { server, tool } = result as Record<string, unknown>;
+	if (typeof server !== "string" || typeof tool !== "string" || "status" in result) return result;
+	const call = codeModeBinding(server, tool);
+	return call === undefined ? result : { ...result, codeMode: { call, returns: CODE_MODE_MCP_RESULT_SHAPE } };
 }
 
 function createExecutionContext(isRestrictedTrustedRead: (() => boolean) | undefined): McpGatewayExecutionContext {
@@ -131,6 +149,7 @@ export function createMcpToolDefinition(
 					isError: true,
 				};
 			}
+			if (params.action === "describe") result = withCodeModeBinding(result, options.codeModeBinding);
 			const formatted = options.manager.formatGatewayResult(params.action, result);
 			return {
 				content: [{ type: "text", text: formatted.text }],
