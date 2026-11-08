@@ -1,5 +1,6 @@
 import { stripTypeScriptTypes } from "node:module";
 import type { AgentTool } from "@hansjm10/volt-agent-core";
+import type { TextContent } from "@hansjm10/volt-ai";
 import { type Static, Type } from "typebox";
 import {
 	CODE_MODE_MCP_RESULT_SHAPE,
@@ -28,12 +29,15 @@ import {
 	renderCodeModeResult,
 } from "../code-mode/render.ts";
 import {
+	CodeModeCallError,
 	type CodeModeCallStatus,
 	type CodeModeFailure,
+	type CodeModeOutputItem,
 	type CodeModeScriptResult,
 	runCodeModeScript,
 } from "../code-mode/runtime.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { presentRunCode } from "./run-code-presenter.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES } from "./truncate.ts";
 
@@ -91,6 +95,39 @@ export interface RunCodeDetails {
 	output: { truncated: boolean; fullOutputPath?: string; items: number; characters: number };
 	images: { shown: CodeModeImageRef[]; unshown: CodeModeImageRef[] };
 }
+
+/** A nested call as the live card shows it while the script runs (section 5.16). */
+export interface RunCodeProgressCall {
+	seq: number;
+	/** The tool the call went through, or `mcp.<server>.<tool>` for an MCP tool. */
+	tool: string;
+	argsPreview: string;
+	status: "running" | "completed" | "failed" | "cancelled";
+	/** When the call passed the runtime's checks, in epoch milliseconds. */
+	startedAt: number;
+	/** When it settled, in epoch milliseconds. */
+	endedAt?: number;
+	/** The error message of a failed or cancelled call, at most 256 characters. */
+	error?: string;
+}
+
+/**
+ * What a partial `run_code` result carries while the script runs, for the live card (section 5.16). Clients see it
+ * live; the session stores only the final result, whose `details` are a {@link RunCodeDetails}.
+ */
+export interface RunCodeProgress {
+	status: "running";
+	language: RunCodeDetails["language"];
+	/** The newest calls, at most 50, oldest first. */
+	calls: RunCodeProgressCall[];
+	/** Every call so far, by status. */
+	callTotals: Record<RunCodeProgressCall["status"], number>;
+	/** Lines of output the script has produced; the partial result's text holds the newest 100. */
+	outputLines: number;
+}
+
+/** The `details` of a `run_code` result: progress while the script runs, then the record of the run. */
+export type RunCodeToolDetails = RunCodeDetails | RunCodeProgress;
 
 export interface RunCodeToolOptions {
 	/** What the model could call directly now. A script's bindings are computed from it when the script starts. */
@@ -356,9 +393,132 @@ export function buildRunCodeDetails(input: {
 	return details;
 }
 
+/** The live card's updates come at most this often (section 5.16). */
+const PROGRESS_INTERVAL_MS = 250;
+const PROGRESS_CALLS = 50;
+const PROGRESS_OUTPUT_LINES = 100;
+/** Characters of one output line the live card carries; the final result keeps the whole output. */
+const PROGRESS_LINE_CHARS = 512;
+const PROGRESS_LINE_BREAKS = /\r\n|[\r\u2028\u2029]/g;
+
+/**
+ * Reports a running script to the live card (section 5.16): its newest calls, from when each passes the runtime's
+ * checks until it settles, and the newest lines of its output, as partial results at most every 250 ms, the last
+ * change always reported. Nothing is reported once it is closed.
+ */
+class RunCodeProgressReporter {
+	private readonly onUpdate: (update: { content: TextContent[]; details: RunCodeProgress }) => void;
+	private readonly language: RunCodeDetails["language"];
+	/** The newest calls by `seq`, in the order they started. */
+	private readonly calls = new Map<number, RunCodeProgressCall>();
+	private readonly callTotals: RunCodeProgress["callTotals"] = { running: 0, completed: 0, failed: 0, cancelled: 0 };
+	private lines: string[] = [];
+	private outputLines = 0;
+	private lastReportedAt = Number.NEGATIVE_INFINITY;
+	private timer: ReturnType<typeof setTimeout> | undefined;
+	private closed = false;
+
+	constructor(
+		onUpdate: (update: { content: TextContent[]; details: RunCodeProgress }) => void,
+		language: RunCodeDetails["language"],
+	) {
+		this.onUpdate = onUpdate;
+		this.language = language;
+	}
+
+	/** A call that passed the runtime's checks started; `settled` is its outcome. */
+	callStarted(seq: number, tool: string, args: Record<string, unknown>, settled: Promise<unknown>): void {
+		this.calls.set(seq, {
+			seq,
+			tool,
+			argsPreview: previewCodeModeArgs(args, MAX_DETAILS_ARGS_PREVIEW_CHARS),
+			status: "running",
+			startedAt: Date.now(),
+		});
+		if (this.calls.size > PROGRESS_CALLS) this.calls.delete(this.calls.keys().next().value as number);
+		this.callTotals.running++;
+		this.schedule();
+		settled.then(
+			() => this.callSettled(seq, "completed"),
+			(error: unknown) => {
+				const cancelled = error instanceof CodeModeCallError && error.kind === "cancelled";
+				const message = error instanceof Error ? error.message : String(error);
+				this.callSettled(seq, cancelled ? "cancelled" : "failed", message);
+			},
+		);
+	}
+
+	output(item: CodeModeOutputItem): void {
+		let text: string;
+		if (item.type === "image") text = `[image ${item.ref}]`;
+		else {
+			const prefix =
+				item.type === "console" && (item.level === "warn" || item.level === "error") ? `${item.level}: ` : "";
+			text = `${prefix}${item.text.replace(PROGRESS_LINE_BREAKS, "\n")}`;
+			if (text.endsWith("\n")) text = text.slice(0, -1);
+		}
+		const lines = text.split("\n");
+		this.outputLines += lines.length;
+		this.lines = [...this.lines, ...lines.slice(-PROGRESS_OUTPUT_LINES)]
+			.slice(-PROGRESS_OUTPUT_LINES)
+			.map((line) => capChars(line, PROGRESS_LINE_CHARS));
+		this.schedule();
+	}
+
+	/** Stops reporting: the script ended. */
+	close(): void {
+		this.closed = true;
+		clearTimeout(this.timer);
+		this.timer = undefined;
+	}
+
+	private callSettled(seq: number, status: "completed" | "failed" | "cancelled", error?: string): void {
+		this.callTotals.running--;
+		this.callTotals[status]++;
+		const call = this.calls.get(seq);
+		if (call) {
+			call.status = status;
+			call.endedAt = Date.now();
+			if (error !== undefined) call.error = capChars(error, MAX_DETAILS_ERROR_CHARS);
+		}
+		this.schedule();
+	}
+
+	private schedule(): void {
+		if (this.closed || this.timer !== undefined) return;
+		const wait = this.lastReportedAt + PROGRESS_INTERVAL_MS - Date.now();
+		if (wait <= 0) {
+			this.report();
+			return;
+		}
+		this.timer = setTimeout(() => {
+			this.timer = undefined;
+			this.report();
+		}, wait);
+	}
+
+	private report(): void {
+		if (this.closed) return;
+		this.lastReportedAt = Date.now();
+		const details: RunCodeProgress = {
+			status: "running",
+			language: this.language,
+			calls: [...this.calls.values()].map((call) => ({ ...call })),
+			callTotals: { ...this.callTotals },
+			outputLines: this.outputLines,
+		};
+		try {
+			this.onUpdate({ content: [{ type: "text", text: this.lines.join("\n") }], details });
+		} catch {
+			// Reported from a timer, where a throw would reach the process: a card that cannot update stops updating.
+			this.close();
+		}
+	}
+}
+
 export function createRunCodeToolDefinition(
 	options: RunCodeToolOptions,
-): ToolDefinition<typeof runCodeSchema, RunCodeDetails> {
+): ToolDefinition<typeof runCodeSchema, RunCodeToolDetails> {
 	return {
 		name: "run_code",
 		label: "run_code",
@@ -372,7 +532,8 @@ export function createRunCodeToolDefinition(
 		parameters: runCodeSchema,
 		// Sibling calls never run during a script, where a sibling MCP call would bypass the per-server limit.
 		executionMode: "sequential",
-		async execute(toolCallId, params, signal) {
+		present: presentRunCode,
+		async execute(toolCallId, params, signal, onUpdate) {
 			const startedAt = performance.now();
 			const prepared = prepareScript(params.code);
 			// Fixed when the script starts (section 5.9).
@@ -389,23 +550,36 @@ export function createRunCodeToolDefinition(
 					bindings,
 					parentToolCallId: toolCallId,
 				});
-				result = await runCodeModeScript(options.pool ?? getCodeModeWorkerPool(), {
-					code: prepared.code,
-					bindings,
-					signal,
-					...(params.timeoutMs === undefined ? {} : { timeoutMs: params.timeoutMs }),
-					images,
-					onCall: (call) => {
-						callArgs.set(call.seq, call.args);
-						const target = targets.get(call.binding);
-						return handle({
-							...call,
-							images: taggingImages(call.images, (ref) => {
-								if (target) imageSources.set(ref.ref, imageSource(target, call.args, ref));
-							}),
-						});
-					},
-				});
+				const progress = onUpdate && new RunCodeProgressReporter(onUpdate, prepared.language);
+				try {
+					result = await runCodeModeScript(options.pool ?? getCodeModeWorkerPool(), {
+						code: prepared.code,
+						bindings,
+						signal,
+						...(params.timeoutMs === undefined ? {} : { timeoutMs: params.timeoutMs }),
+						images,
+						onCall: (call) => {
+							callArgs.set(call.seq, call.args);
+							const target = targets.get(call.binding);
+							const handled = handle({
+								...call,
+								images: taggingImages(call.images, (ref) => {
+									if (target) imageSources.set(ref.ref, imageSource(target, call.args, ref));
+								}),
+							});
+							progress?.callStarted(
+								call.seq,
+								target === undefined ? call.binding : toolLabel(target),
+								call.args,
+								handled,
+							);
+							return handled;
+						},
+						...(progress ? { onOutput: (item: CodeModeOutputItem) => progress.output(item) } : {}),
+					});
+				} finally {
+					progress?.close();
+				}
 			} else {
 				result = {
 					ok: false,
@@ -448,6 +622,6 @@ export function createRunCodeToolDefinition(
 	};
 }
 
-export function createRunCodeTool(options: RunCodeToolOptions): AgentTool<typeof runCodeSchema, RunCodeDetails> {
+export function createRunCodeTool(options: RunCodeToolOptions): AgentTool<typeof runCodeSchema, RunCodeToolDetails> {
 	return wrapToolDefinition(createRunCodeToolDefinition(options));
 }
