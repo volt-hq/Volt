@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import { type Context, fauxAssistantMessage, fauxToolCall, type JsonObject } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
+import type { CompactionDetails } from "../../src/core/compaction/compaction.ts";
 import type { ExtensionOperationOrigin } from "../../src/core/extensions/index.ts";
 import type { RunCodeDetails } from "../../src/core/tools/run-code.ts";
 import { createHarness, getMessageText, type Harness, type HarnessOptions } from "./harness.ts";
@@ -140,6 +141,31 @@ describe("run_code in a session", () => {
 			{ tool: "write", path: "out.txt", status: "completed", readOnly: false },
 		]);
 		expect(readFileSync(join(harness.tempDir, "out.txt"), "utf8")).toBe("written");
+	});
+
+	it("lists the files a script read and edited in the next compaction", async () => {
+		const harness = await setup({ settings: { ...CODE_MODE.settings, compaction: { keepRecentTokens: 1 } } });
+		writeFileSync(join(harness.tempDir, "notes.txt"), "a = 2");
+		writeFileSync(join(harness.tempDir, "src.ts"), "const a = 1;\n");
+		harness.setResponses([
+			runCode(
+				"const notes = await tools.read({ path: 'notes.txt' });\nawait tools.edit({ path: 'src.ts', edits: [{ oldText: 'a = 1', newText: notes }] });",
+			),
+			fauxAssistantMessage("edited"),
+			fauxAssistantMessage("next"),
+		]);
+		await harness.session.prompt("apply the notes");
+		await harness.session.prompt("continue");
+		expect(readFileSync(join(harness.tempDir, "src.ts"), "utf8")).toBe("const a = 2;\n");
+
+		harness.setResponses([fauxAssistantMessage("checkpoint")]);
+		const result = await harness.session.compact();
+
+		const details = result.details as CompactionDetails;
+		expect(details.readFiles).toEqual(["notes.txt"]);
+		expect(details.modifiedFiles).toEqual(["src.ts"]);
+		expect(result.summary).toContain("<modified-files>\nsrc.ts\n</modified-files>");
+		expect(result.summary).toContain("<read-files>\nnotes.txt\n</read-files>");
 	});
 
 	it("binds only read-only tools in Plan mode, where only nested reads count as research", async () => {
