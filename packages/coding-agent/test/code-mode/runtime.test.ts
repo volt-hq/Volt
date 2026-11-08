@@ -497,7 +497,7 @@ describe("code mode runtime", () => {
 		const result = failed(
 			await run("text('small'); text('\\u00e9'.repeat(600)); return 1;", { limits: { maxFrameBytes: 1_000 } }),
 		);
-		expect(result.failure).toStrictEqual({ kind: "output_limit" });
+		expect(result.failure).toStrictEqual({ kind: "output_limit", cause: "output_item" });
 		expect(texts(result)).toStrictEqual(["small"]);
 	});
 
@@ -506,7 +506,7 @@ describe("code mode runtime", () => {
 		const payload = JSON.stringify({ ok: true, value: "x".repeat(2_000) });
 		const forging = forgingPool((id) => [{ type: "done", id, payload }]);
 		const result = failed(await runForged(forging, { limits: { maxFrameBytes: 1_000 } }));
-		expect(result.failure).toStrictEqual({ kind: "output_limit" });
+		expect(result.failure).toStrictEqual({ kind: "output_limit", cause: "return_value" });
 		expect(forging.returned).toStrictEqual(["released"]);
 	});
 
@@ -905,7 +905,7 @@ describe("code mode runtime", () => {
 
 	it("fails with an output limit and keeps the output retained until then", async () => {
 		const result = failed(await run("for (let i = 0; i < 10; i++) text(i);", { limits: { maxOutputItems: 5 } }));
-		expect(result.failure).toStrictEqual({ kind: "output_limit" });
+		expect(result.failure).toStrictEqual({ kind: "output_limit", cause: "retained_output" });
 		expect(texts(result)).toStrictEqual(["0", "1", "2", "3", "4"]);
 	});
 
@@ -913,7 +913,14 @@ describe("code mode runtime", () => {
 		expect(failed(await run("await new Promise(() => {});")).failure).toMatchObject({
 			kind: "script_error",
 			error: { name: "stalled" },
+			stalled: true,
 		});
+		// Only the host marks a script as stalled; an error the script names "stalled" is an ordinary error.
+		const forged = failed(
+			await run('const error = new Error("nothing can settle"); error.name = "stalled"; throw error;'),
+		).failure;
+		expect(forged).toMatchObject({ kind: "script_error", phase: "run", error: { name: "stalled" } });
+		expect(forged).not.toHaveProperty("stalled");
 		expect(failed(await run("let = ;")).failure).toMatchObject({
 			kind: "script_error",
 			phase: "evaluate",
