@@ -185,6 +185,10 @@ const SCRIPT_API_CALLS = [
 	"new tools.call($)",
 	"new ToolCallError($, $, $, $)",
 	'String(new ToolCallError($, "tool", "failed", $))',
+	'store("key", $)',
+	"store($, $)",
+	"load($)",
+	'load("key")',
 ];
 
 /**
@@ -555,6 +559,7 @@ describe("code mode runtime", () => {
 			id,
 			payload: `{"seq":${seq},"binding":${JSON.stringify(binding)},"args":${args}}`,
 		});
+		const store = (id: number, payload: string): ForgedMessage => ({ type: "store", id, payload });
 		const failedDone = (error: Record<string, unknown>) =>
 			JSON.stringify({
 				ok: false,
@@ -589,6 +594,40 @@ describe("code mode runtime", () => {
 				0,
 			],
 			[(id) => [{ type: "done", id, payload: "done" }], "protocol violation: invalid done frame", 0],
+			[(id) => [store(id, '{"key":1,"value":1}')], "protocol violation: invalid store frame", 0],
+			[(id) => [store(id, '{"key":"k","value":1,"extra":2}')], "protocol violation: invalid store frame", 0],
+			[(id) => [store(id, '{"key":"k","value":1n}')], "protocol violation: invalid store frame", 0],
+			[
+				(id) => [store(id, '{"key":"k","value":0.1000000000000000055511151231257827}')],
+				"protocol violation: invalid store frame",
+				0,
+			],
+			[
+				(id) => [store(id, `{"key":"${"k".repeat(257)}","value":1}`)],
+				"protocol violation: an invalid stored key",
+				0,
+			],
+			[(id) => [store(id, '{"key":"\\ud800","value":1}')], "protocol violation: an invalid stored key", 0],
+			[
+				(id) => [store(id, '{"key":"k","delete":true}')],
+				"protocol violation: a deletion of a key that is not stored",
+				0,
+			],
+			[
+				(id) => [store(id, `{"key":"k","value":"${"x".repeat(262143)}"}`)],
+				"protocol violation: stored values exceed their limits",
+				0,
+			],
+			[
+				(id) => [store(id, `{"key":"k","value":"${"x".repeat(270000)}"}`)],
+				"protocol violation: a stored value exceeds the value limit",
+				0,
+			],
+			[
+				(id) => ["a", "b", "c", "d"].map((key) => store(id, `{"key":"${key}","value":"${"x".repeat(262142)}"}`)),
+				"protocol violation: stored values exceed their limits",
+				0,
+			],
 		];
 		for (const [messagesFor, reason, expectedCalls] of cases) {
 			const forging = forgingPool(messagesFor);
@@ -712,6 +751,44 @@ describe("code mode runtime", () => {
 		});
 		const source = failed(await run(`return ${"[".repeat(100_000)}${"]".repeat(100_000)};`));
 		expect(source.failure).toMatchObject({ kind: "script_error", phase: "evaluate", error: { name: "RangeError" } });
+	});
+
+	it("applies a script's writes to the stored values and reports its net writes, also when it fails", async () => {
+		const stored: [string, string][] = [
+			["kept", "1"],
+			["dropped", '"old"'],
+		];
+		const succeeded = await run(
+			`
+			store("cursor", { page: 3, id: 2n ** 70n + 1n });
+			store("dropped", undefined);
+			store("temporary", 1);
+			store("temporary", undefined);
+			store("kept", load("kept") + 1);
+			return { cursor: load("cursor"), dropped: load("dropped") };
+		`,
+			{ stored },
+		);
+		expect(succeeded).toMatchObject({ ok: true, value: { cursor: { page: 3, id: 2n ** 70n + 1n } } });
+		expect(succeeded.storeWrites).toStrictEqual({
+			set: [
+				["cursor", '{"page":3,"id":1180591620717411303425}'],
+				["kept", "2"],
+			],
+			delete: ["dropped"],
+		});
+
+		const stopped = failed(
+			await run("store('progress', 41); store('progress', 42); while (true) {}", {
+				stored,
+				limits: { computeBudgetMs: 200 },
+			}),
+		);
+		expect(stopped.failure.kind).toBe("compute_budget");
+		expect(stopped.storeWrites).toStrictEqual({ set: [["progress", "42"]], delete: [] });
+
+		const thrown = failed(await run("store('kept', undefined); throw new Error('after the write');", { stored }));
+		expect(thrown.storeWrites).toStrictEqual({ set: [], delete: ["kept"] });
 	});
 
 	it("never ends a script as a sandbox failure, whatever it passes to the script API", async () => {
@@ -1026,6 +1103,9 @@ describe("code mode worker pool", () => {
 			maxErrorSummaryChars: 1,
 			maxImageRefLength: 1,
 			maxShownImages: 1,
+			maxStoredKeyChars: 1,
+			maxStoredValueBytes: 1,
+			maxStoredBytes: 1,
 			scriptFilename: "script.js",
 			scriptPrefixLength: 0,
 			preludeFilename: "prelude.js",

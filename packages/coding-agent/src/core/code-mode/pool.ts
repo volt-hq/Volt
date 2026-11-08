@@ -13,6 +13,9 @@ import {
 	MAX_SCRIPT_ERROR_NAME_CHARS,
 	MAX_SCRIPT_ERROR_SUMMARY_CHARS,
 	MAX_SHOWN_IMAGES,
+	MAX_STORED_BYTES,
+	MAX_STORED_KEY_CHARS,
+	MAX_STORED_VALUE_BYTES,
 } from "./limits.ts";
 import { PRELUDE_FILENAME, type PreludeConfig, SCRIPT_FILENAME, SCRIPT_PREFIX } from "./prelude.ts";
 import {
@@ -291,6 +294,9 @@ export class CodeModeWorkerPool {
 				maxErrorSummaryChars: MAX_SCRIPT_ERROR_SUMMARY_CHARS,
 				maxImageRefLength: MAX_IMAGE_REF_LENGTH,
 				maxShownImages: MAX_SHOWN_IMAGES,
+				maxStoredKeyChars: MAX_STORED_KEY_CHARS,
+				maxStoredValueBytes: MAX_STORED_VALUE_BYTES,
+				maxStoredBytes: MAX_STORED_BYTES,
 				scriptFilename: SCRIPT_FILENAME,
 				scriptPrefixLength: SCRIPT_PREFIX.length,
 				preludeFilename: PRELUDE_FILENAME,

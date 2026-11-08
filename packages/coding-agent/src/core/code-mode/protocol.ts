@@ -19,7 +19,7 @@ import type { CodeModeBinding, CodeModeErrorDescription, PreludeConfig } from ".
  * A worker whose protocol version differs fails closed; this catches stale worker files, not old clients. Bump it
  * whenever a message shape or the prelude's script API changes.
  */
-export const CODE_MODE_PROTOCOL_VERSION = 2;
+export const CODE_MODE_PROTOCOL_VERSION = 3;
 
 /**
  * Shared memory between the host and one worker. The host writes the id of a script it wants stopped;
@@ -59,6 +59,8 @@ export type HostToWorkerMessage =
 			computeBudgetMs: number;
 			maxReportedRejections: number;
 			maxArgumentBytes: number;
+			/** The conversation's stored values when the script starts: keys and the codec text of their values. */
+			stored: [string, string][];
 	  }
 	/** `imageRefs` lists the images the host issued with the value, which the script may then pass to `image()`. */
 	| { type: "result"; id: number; seq: number; ok: boolean; payload: string; imageRefs: string[] }
@@ -69,6 +71,8 @@ export type WorkerToHostMessage =
 	| { type: "call"; id: number; payload: string }
 	| { type: "output"; id: number; payload: string }
 	| { type: "done"; id: number; payload: string }
+	/** A write to the conversation's stored values (section 5.17). */
+	| { type: "store"; id: number; payload: string }
 	| { type: "stopped"; id: number; reason: "stop" | "compute_budget" }
 	| { type: "stalled"; id: number }
 	| { type: "crash"; id: number; reason: string };
@@ -98,6 +102,7 @@ export function parseWorkerMessage(value: unknown): WorkerToHostMessage | undefi
 		case "call":
 		case "output":
 		case "done":
+		case "store":
 			return isId(value.id) && typeof value.payload === "string"
 				? { type: value.type, id: value.id, payload: value.payload }
 				: undefined;
@@ -183,6 +188,37 @@ export function parseOutputPayload(payload: string): CodeModeOutputItem {
 		return { type: "image", ref: item.ref };
 	}
 	throw new CodeModeProtocolError("invalid output frame");
+}
+
+/** A write to the conversation's stored values: a key and the codec text of its value, or the key's deletion. */
+export type ParsedStore = { key: string; value: string } | { key: string; deleted: true };
+
+/**
+ * Parses the payload of a `store` message, as the prelude writes it: `{"key":...,"value":...}` with the value as
+ * codec text, or `{"key":...,"delete":true}`. The value is kept as the exact text the prelude encoded, whose bytes
+ * the prelude counted, after checking it decodes on its own. Anything else is a protocol violation.
+ */
+export function parseStorePayload(payload: string): ParsedStore {
+	let envelope: unknown;
+	try {
+		envelope = decodeBridgeValue(payload, MAX_BRIDGE_JSON_DEPTH + 1);
+	} catch (error) {
+		throw new CodeModeProtocolError(`invalid store frame: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	if (!isRecord(envelope) || typeof envelope.key !== "string") throw new CodeModeProtocolError("invalid store frame");
+	const key = JSON.stringify(envelope.key);
+	if (payload === `{"key":${key},"delete":true}`) return { key: envelope.key, deleted: true };
+	const prefix = `{"key":${key},"value":`;
+	if (!payload.startsWith(prefix) || !payload.endsWith("}") || Object.keys(envelope).length !== 2) {
+		throw new CodeModeProtocolError("invalid store frame");
+	}
+	const value = payload.slice(prefix.length, -1);
+	try {
+		decodeBridgeValue(value);
+	} catch {
+		throw new CodeModeProtocolError("invalid store frame: the value is not codec text");
+	}
+	return { key: envelope.key, value };
 }
 
 export type ParsedDone =

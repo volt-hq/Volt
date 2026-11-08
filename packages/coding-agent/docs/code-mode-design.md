@@ -282,10 +282,11 @@ The prelude calls one host function with two primitive strings: a kind (`call`, 
 | Worker to host | `call` | `seq`, `binding`, `args` (codec text) |
 | Worker to host | `output` | One output item: text, console text, or an image reference |
 | Worker to host | `done` | `ok` with the return value (codec text), or the script error and the phase it occurred in (`evaluate` for syntax errors, `run` otherwise) |
+| Worker to host | `store` | One write to the stored values: a key and the codec text of its value, or the key's deletion (section 5.17) |
 | Worker to host | `stopped` | `reason`: the host's stop request, or the compute budget |
 | Worker to host | `stalled` | none; the script awaits a promise nothing can settle (section 5.11) |
 | Worker to host | `crash` | `reason` |
-| Host to worker | `start` | `script`, bindings, limits |
+| Host to worker | `start` | `script`, bindings, limits, and the stored values |
 | Host to worker | `result` | `seq` with a script value (codec text) and the image references the host issued with it, or a `ToolCallError` description |
 | Host to worker | `stop` | none |
 
@@ -688,7 +689,7 @@ Guidelines:
 - In run_code scripts, print counts, summaries, and selected fields rather than whole tool results.
 - When a run_code script fails, check which nested calls completed before running it again.
 
-The text above is the description of a session where every binding is available. A binding line appears only for a bound tool: the shapes of `bash`, `read`, and `image_gen` only for the trusted built-in tools, every other bound tool on the combined `Promise<string>` line, and the MCP line only while the built-in `mcp` gateway is active and authorized, or a direct MCP tool is bound. The shell-command advice appears only when `bash` is bound. A session with no bindings says `No tools are available to scripts in this session.` instead of the call and error paragraphs. The store line appears once `store()` and `load()` ship (section 5.17). The description is generated when the session stages its active tools, from those tools, and the registered tool keeps a generic description.
+The text above is the description of a session where every binding is available. A binding line appears only for a bound tool: the shapes of `bash`, `read`, and `image_gen` only for the trusted built-in tools, every other bound tool on the combined `Promise<string>` line, and the MCP line only while the built-in `mcp` gateway is active and authorized, or a direct MCP tool is bound. The shell-command advice appears only when `bash` is bound. A session with no bindings says `No tools are available to scripts in this session.` instead of the call and error paragraphs. The store line ends every description, since scripts keep values whether or not they get bindings (section 5.17). The description is generated when the session stages its active tools, from those tools, and the registered tool keeps a generic description.
 
 The description measures about 470 tokens, plus about 20 for the store line that section 5.17 added; with the snippet, guidelines, and parameter schema, the contract adds about 650 tokens per request, comparable to the roughly 2,600 characters of guidance Pydantic reports.
 
@@ -806,7 +807,7 @@ Models split work across several scripts and read each result before writing the
 
 #### Storage
 
-- Writes are recorded as `custom` session entries (`customType: "volt-run-code-store"`, data `{ set, delete }`), one entry per script that wrote anything, appended when the script ends. `custom` is an existing public log-entry type (`packages/protocol/src/entries.ts:560`), so no protocol change is needed, and extensions already append such entries.
+- Writes are recorded as `custom` session entries (`customType: "volt-run-code-store"`, data `{ set, delete }`), one entry per script that wrote anything, appended when the script ends. `set` holds `[key, codec text]` pairs and `delete` the stored keys the script deleted: the values stay codec text, because session JSON rejects some values the codec keeps, such as BigInt and `-0`. `custom` is an existing public log-entry type (`packages/protocol/src/entries.ts:560`), so no protocol change is needed, and extensions already append such entries.
 - A conversation's values are the fold of those entries along the current branch, so a branch or fork sees the values written on its own path, and the state survives restarts and resumption. Compaction does not remove log entries, so it does not affect the values.
 - This keeps the state in the session log, which answers DeepSeek's objection.
 - Each conversation has its own values; a subagent's scripts use the subagent's conversation.
@@ -818,7 +819,7 @@ Writes made before a failure are kept, and the failed result lists the keys writ
 #### Limits
 
 - Values pass through the bridge codec (section 5.9).
-- A key is at most 256 characters. A value is at most 256 KiB of encoded JSON, and all values together at most 1 MiB, Pi's limits. A write past either limit throws a `RangeError` in the script.
+- A key is a string of 1 to 256 characters without lone surrogates; any other key throws a `TypeError`. A value is at most 256 KiB of encoded JSON, and all keys and values together at most 1 MiB in UTF-8, Pi's limits. A write past either limit throws a `RangeError` in the script.
 - Passing a full 1 MiB of values into a VM costs about 14 to 42 ms with the codec's fast and slow paths (section 11).
 
 #### What the model sees
@@ -928,7 +929,7 @@ Each step is its own pull request. None changes the protocol contract, so none s
 2. **Bridge and scheduling.** Binding-set computation (no escalation, eligibility, grant profiles), the host checks with tool-call and tool-result policy and the `code_mode` origin, script-value projections, `ToolCallError`, image references, the scheduler, and per-server MCP limits with `maxConcurrentCalls`.
 3. **The `run_code` tool.** Input and TypeScript stripping, result rendering, truncation and spill, failure rendering, `store()`/`load()` session entries, the generated description, snippet, and guidelines, the presenter and `details`, compaction file tracking, the gateway `describe` addition, MCP audit attribution, the `codeMode.enabled` setting, user documentation (a code-mode page in `docs.json` and `docs/settings.md`), and the changeset. This step ships as several pull requests:
    - Merged first: the `run_code` tool end to end, with TypeScript stripping, the generated description, snippet, and guidelines, the rendered result and `details`, the `codeMode.enabled` setting with its `docs/settings.md` row, the trusted resolver, the Plan-mode rule, and the changeset. From this pull request on, the CLI imports the runtime, so step 4 must merge before any release that contains it.
-   - Remaining: `store()`/`load()` session entries, compaction file tracking, the gateway `describe` addition, MCP audit attribution (`parentToolCallId`), and the code-mode page in `docs.json`.
+   - Remaining: compaction file tracking, the gateway `describe` addition, MCP audit attribution (`parentToolCallId`), and the code-mode page in `docs.json`.
 4. **Packaging.** Bundle the worker entry and load `quickjs.wasm` in the bundled npm CLI and the standalone binary, add the WASM's third-party notices to the standalone archive, and verify on all six targets. The npm package needs no notice of its own: npm installs `quickjs-wasi` as a dependency with its license file.
 
 ### Verification
@@ -1126,6 +1127,16 @@ The `run_code` tool supplies each call's tool name, arguments, and read-only cla
 | Images the script did not show are listed with the call that returned them: `read <path>`, `image_gen <path>`, or `MCP <server>.<tool>`. | `src/core/tools/run-code.ts` `imageSource`, `taggingImages` | run-code: "labels the images a script did not show by the call that returned them" |
 | While a script runs, partial results carry its newest 50 calls, each from passing the runtime's checks until it settles, with start and end times; totals of every call; and its newest 100 output lines with the count of all of them. They come at most every 250 ms, the last change always reported, and none after the script ends; the final `details` keep their shape. | `src/core/tools/run-code.ts` `RunCodeProgressReporter` | run-code: "reports progress at most every 250 ms, always reports the last change, and stops when the script returns"; "keeps the newest 50 calls and 100 output lines, counting every call and line" |
 | The card is built only from existing node types and reads only the fields of `details` it checks: titled by the description, else the script's first line; while running, the activity counts calls, and the newest calls and output show; once ended, a status line, and the calls with their durations and errors. It lists the newest calls within 8 KiB and at most 16 KiB of the script and 256 characters per output line, so it fits the paired-device bound whatever the calls hold, trimming only the script and the output. | `src/core/tools/run-code-presenter.ts` `presentRunCode`; `src/core/tools/presenters.ts` `BUILTIN_TOOL_PRESENTERS` | run-code-presenter: "is the built-in presenter of run_code calls"; "titles a call by its description, else the first line of its script"; "shows a running script's newest calls with their times, and its newest output"; "summarizes a run that ended, with its calls' durations and errors and its result's newest lines"; "lists at most the newest 50 calls and counts every call in its title"; "falls back to the result when details are missing or malformed, and keeps step keys unique"; "fits the paired-device bound whatever the calls hold, trimming only the script and the output" |
+
+#### Stored values
+
+| Guarantee | Enforced in | Test |
+|---|---|---|
+| `load()` returns a copy of a stored value, decoded with the codec; `store(key, undefined)` deletes a stored key; every write reaches the host as it happens. A key that is not a string of 1 to 256 characters without lone surrogates, a value the codec rejects, and a value over 256 KiB or values over 1 MiB in all throw errors the script can catch, and post nothing. | `prelude.ts` `store`, `load`, `storageKey` | vm: "loads copies of stored values, posts each write, and deletes with undefined"; "rejects invalid keys and values over the limits catchably, without posting a write"; "keeps the whole bridge working in a realm the script has made hostile" |
+| The host checks each `store` frame as untrusted: a frame not shaped as the prelude writes it, a value that is not codec text, a key or size past its limit, or a deletion of a key that is not stored is a protocol violation. The value is kept as the exact text the prelude encoded and counted. Nothing a script passes to `store()` or `load()` ends it as a `sandbox` failure. | `protocol.ts` `parseStorePayload`; `runtime.ts` `onStore` | runtime: "treats hostile worker frames as protocol violations and discards the worker"; "never ends a script as a sandbox failure, whatever it passes to the script API" |
+| A script's result carries its net writes, whether it succeeded or failed: the keys it left set, and the keys stored when it started that it deleted. | `runtime.ts` `storeWrites` | runtime: "applies a script's writes to the stored values and reports its net writes, also when it fails" |
+| A script starts with the fold of the `volt-run-code-store` entries along the session's current branch, skipping entries, keys, and values the prelude could not have written, and each script that wrote anything appends one entry with its net writes before its result, failed or not. Values follow branches and survive reopening the session, and each conversation, a subagent's included, has its own. | `store.ts` `foldCodeModeStore`; `src/core/tools/run-code.ts` `createRunCodeToolDefinition`; `src/core/session/tool-runtime.ts` (`storedValues`, `recordStoreWrites`) | suite/run-code: "keeps stored values across scripts and when the session is reopened"; "gives a branch the values written on its own path"; "keeps each conversation's values to itself, as a subagent's conversation is its own"; run-code: "records a script's writes to stored values, also when it fails, and ends its result with the keys" |
+| Every description ends with the store line, and a result whose script wrote values ends with a `Stored keys:` line naming at most 20 keys, deleted ones as such, kept within the output budget and in the full output file. | `src/core/tools/run-code.ts` `describeRunCode`; `render.ts` `storedKeysLine` | run-code: "lists the default Build tools' bindings, with the shapes of bash, read, and image_gen"; "says no tools are available when nothing is bound"; render: "ends with the keys the script stored and deleted, bounded on one line"; "keeps the stored keys within the output budget when the output is cut, also for a failed script" |
 
 #### Packaging
 

@@ -6,6 +6,9 @@ import {
 	MAX_BINDING_NAME_LENGTH,
 	MAX_CODE_MODE_SCRIPT_TIMEOUT_MS,
 	MAX_SHOWN_IMAGES,
+	MAX_STORED_BYTES,
+	MAX_STORED_KEY_CHARS,
+	MAX_STORED_VALUE_BYTES,
 } from "./limits.ts";
 import { CodeModePoolBusyError, type CodeModeWorker, type CodeModeWorkerPool } from "./pool.ts";
 import type { CodeModeBinding, CodeModeErrorDescription } from "./prelude.ts";
@@ -19,6 +22,7 @@ import {
 	parseCallPayload,
 	parseDonePayload,
 	parseOutputPayload,
+	parseStorePayload,
 	type WorkerToHostMessage,
 } from "./protocol.ts";
 
@@ -78,6 +82,11 @@ export interface CodeModeScriptRequest {
 	 * caller reads the images the script shows from it. One store serves one script.
 	 */
 	images: CodeModeImageStore;
+	/**
+	 * The conversation's stored values when the script starts (section 5.17): keys and the codec text of their values.
+	 * The script reads them with `load()` and changes them with `store()`.
+	 */
+	stored?: ReadonlyArray<readonly [string, string]>;
 }
 
 export type CodeModeCallStatus = "completed" | "failed" | "cancelled" | "unsettled";
@@ -114,10 +123,21 @@ export type CodeModeFailure =
 	  }
 	| { kind: "sandbox"; reason: string };
 
+/**
+ * The script's net writes to the conversation's stored values (section 5.17): each key it left set, with the codec
+ * text of its value, and each stored key it deleted, in the order it first wrote them.
+ */
+export interface CodeModeStoreWrites {
+	set: Array<[string, string]>;
+	delete: string[];
+}
+
 interface ScriptResultBase {
 	output: CodeModeOutputItem[];
 	calls: CodeModeCallRecord[];
 	durationMs: number;
+	/** Kept whether the script succeeded or failed: writes made before a failure stay. */
+	storeWrites: CodeModeStoreWrites;
 }
 
 export interface CodeModeScriptSuccess extends ScriptResultBase {
@@ -176,6 +196,13 @@ const WATCHDOG_INTERVAL_MS = 50;
 const HOLD_INTERVAL_MS = 0x7fffffff;
 // Room for the seq, the binding name escaped in the worst case, and the envelope keys.
 const CALL_ENVELOPE_BYTES = 2048;
+// Room for a key of the longest length, escaped in the worst case, and the envelope keys.
+const STORE_ENVELOPE_BYTES = 2048;
+
+/** The UTF-8 bytes a stored value takes, key included, as the prelude counts them. */
+function storedEntryBytes(key: string, value: string): number {
+	return Buffer.byteLength(key) + Buffer.byteLength(value);
+}
 
 let lastScriptId = 0;
 
@@ -237,6 +264,12 @@ class ScriptRun {
 	private readonly limits: CodeModeScriptLimits;
 	private readonly id = nextScriptId();
 	private readonly bindingNames: Set<string>;
+	/** The conversation's stored values as the script has left them so far, as codec text. */
+	private readonly stored: Map<string, string>;
+	/** The UTF-8 bytes of the stored keys and values, as the prelude counts them. */
+	private storedBytes = 0;
+	/** Keys the script wrote, in the order it first wrote them. */
+	private readonly storeWritten = new Set<string>();
 	private readonly startedAt = performance.now();
 	private readonly output: CodeModeOutputItem[] = [];
 	private readonly calls: CallState[] = [];
@@ -270,6 +303,8 @@ class ScriptRun {
 		this.request = request;
 		this.limits = { ...DEFAULT_CODE_MODE_SCRIPT_LIMITS, ...request.limits };
 		this.bindingNames = new Set(request.bindings.map((binding) => binding.name));
+		this.stored = new Map(request.stored ?? []);
+		for (const [key, value] of this.stored) this.storedBytes += storedEntryBytes(key, value);
 		this.settled = new Promise((resolve) => {
 			this.resolveSettled = resolve;
 		});
@@ -345,6 +380,7 @@ class ScriptRun {
 			computeBudgetMs: this.limits.computeBudgetMs,
 			maxReportedRejections: this.limits.maxReportedRejections,
 			maxArgumentBytes: this.limits.maxArgumentBytes,
+			stored: [...this.stored].map(([key, value]): [string, string] => [key, value]),
 		});
 		this.watchdog = setInterval(() => this.contain(() => this.checkWatchdog()), WATCHDOG_INTERVAL_MS);
 		this.watchdog.unref();
@@ -446,6 +482,9 @@ class ScriptRun {
 				return;
 			case "done":
 				this.onDone(message.payload);
+				return;
+			case "store":
+				this.onStore(message.payload);
 				return;
 			case "stopped":
 				this.failure ??=
@@ -682,6 +721,53 @@ class ScriptRun {
 		}
 	}
 
+	/**
+	 * Applies a write to the stored values (section 5.17). The prelude enforces the key and size limits and posts only
+	 * writes it applied to its own copy, which mirrors this one, so a frame beyond them, or a deletion of a key that is
+	 * not stored, was not produced by the prelude.
+	 */
+	private onStore(payload: string): void {
+		if (Buffer.byteLength(payload) > MAX_STORED_VALUE_BYTES + STORE_ENVELOPE_BYTES) {
+			this.protocolViolation("a stored value exceeds the value limit");
+			return;
+		}
+		let write: ReturnType<typeof parseStorePayload>;
+		try {
+			write = parseStorePayload(payload);
+		} catch (error) {
+			this.protocolViolation(errorMessage(error));
+			return;
+		}
+		const { key } = write;
+		if (key.length === 0 || key.length > MAX_STORED_KEY_CHARS || Buffer.from(key).toString() !== key) {
+			this.protocolViolation("an invalid stored key");
+			return;
+		}
+		const previous = this.stored.get(key);
+		if ("deleted" in write) {
+			if (previous === undefined) {
+				this.protocolViolation("a deletion of a key that is not stored");
+				return;
+			}
+			this.stored.delete(key);
+			this.storedBytes -= storedEntryBytes(key, previous);
+		} else {
+			const valueBytes = Buffer.byteLength(write.value);
+			const total =
+				this.storedBytes -
+				(previous === undefined ? 0 : storedEntryBytes(key, previous)) +
+				Buffer.byteLength(key) +
+				valueBytes;
+			if (valueBytes > MAX_STORED_VALUE_BYTES || total > MAX_STORED_BYTES) {
+				this.protocolViolation("stored values exceed their limits");
+				return;
+			}
+			this.stored.set(key, write.value);
+			this.storedBytes = total;
+		}
+		this.storeWritten.add(key);
+	}
+
 	private onDone(payload: string): void {
 		if (Buffer.byteLength(payload) > this.limits.maxFrameBytes) {
 			this.failure ??= { kind: "output_limit", cause: "return_value" };
@@ -699,6 +785,18 @@ class ScriptRun {
 		if (this.failure) return;
 		if (done.ok) this.completion = done.hasValue ? { hasValue: true, value: done.value } : { hasValue: false };
 		else this.failure = { kind: "script_error", phase: done.phase, error: done.error };
+	}
+
+	/** The script's net writes: keys it left set, and keys stored when it started that it deleted. */
+	private storeWrites(): CodeModeStoreWrites {
+		const initial = new Set((this.request.stored ?? []).map(([key]) => key));
+		const writes: CodeModeStoreWrites = { set: [], delete: [] };
+		for (const key of this.storeWritten) {
+			const value = this.stored.get(key);
+			if (value !== undefined) writes.set.push([key, value]);
+			else if (initial.has(key)) writes.delete.push(key);
+		}
+		return writes;
 	}
 
 	/** Ends the script: aborts nested calls still in flight and waits briefly for them (section 5.9). */
@@ -721,6 +819,7 @@ class ScriptRun {
 			output: this.output,
 			calls: this.calls.map((state) => state.record),
 			durationMs: performance.now() - this.startedAt,
+			storeWrites: this.storeWrites(),
 		};
 		if (this.failure) return { ok: false, failure: this.failure, started: this.started, ...base };
 		if (this.completion) return { ok: true, ...this.completion, ...base };

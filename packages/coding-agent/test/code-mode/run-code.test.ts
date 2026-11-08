@@ -13,7 +13,7 @@ import type {
 import type { CodeModeDispatchHost } from "../../src/core/code-mode/dispatch.ts";
 import { CodeModeWorkerPool } from "../../src/core/code-mode/pool.ts";
 import type { CodeModeRenderCall } from "../../src/core/code-mode/render.ts";
-import type { CodeModeScriptResult } from "../../src/core/code-mode/runtime.ts";
+import type { CodeModeScriptResult, CodeModeStoreWrites } from "../../src/core/code-mode/runtime.ts";
 import {
 	getTrustedToolOperationResolver,
 	type IntegrationReadAuthority,
@@ -79,6 +79,8 @@ const BASH_LINE =
 const READ_LINE = "- tools.read(args): Promise<string | ImageRef>";
 const MCP_LINE_START = "- MCP tools: tools.mcp.<server>.<tool>(args)";
 const NO_TOOLS = "No tools are available to scripts in this session.";
+const STORE_LINE =
+	"store(key, value) and load(key) keep small JSON values across scripts in this conversation; up to 1 MiB in total.";
 
 describe("run_code description", () => {
 	it("lists the default Build tools' bindings, with the shapes of bash, read, and image_gen", () => {
@@ -95,6 +97,7 @@ describe("run_code description", () => {
 		expect(description).toContain("A failed call rejects with ToolCallError");
 		expect(description).toContain("Limits: 30 s of computation, 200 tool calls, and 64 MiB of memory per script.");
 		expect(description).toContain(`Write shell commands with String.raw\`...\` and $VAR instead of \${VAR}.`);
+		expect(description.endsWith(`\n\n${STORE_LINE}`)).toBe(true);
 	});
 
 	it("lists only the bindings the research profile authorizes in Plan mode", () => {
@@ -157,6 +160,8 @@ describe("run_code description", () => {
 		expect(bindingLines(description)).toStrictEqual([]);
 		expect(description).not.toContain("Call tools as");
 		expect(description).not.toContain("ToolCallError");
+		// Scripts without tools can still keep values.
+		expect(description.endsWith(`\n\n${STORE_LINE}`)).toBe(true);
 	});
 });
 
@@ -216,6 +221,9 @@ const READ_ONLY = new Set(["read", "grep"]);
 /** Tools that stand in for extension tools: no trusted resolver, and bound only by name. */
 const EXTENSION_TOOLS = new Set(["broken", "wait", "slow"]);
 
+/** The stand-in session's stored values, and the writes each script recorded. */
+const storeState = { values: new Map<string, string>(), recorded: [] as CodeModeStoreWrites[] };
+
 /** A `run_code` tool over a session stand-in with every policy allowing every call. */
 function runCode(target: CodeModeWorkerPool = pool) {
 	const tools = new Map(TOOLS.map((registered) => [registered.name, registered]));
@@ -243,6 +251,12 @@ function runCode(target: CodeModeWorkerPool = pool) {
 		callIsReadOnly: (bindingTarget: CodeModeBindingTarget) =>
 			bindingTarget.kind === "tool" && READ_ONLY.has(bindingTarget.toolName),
 		autoResizeImages: true,
+		storedValues: () => [...storeState.values],
+		recordStoreWrites: async (writes) => {
+			storeState.recorded.push(writes);
+			for (const [key, value] of writes.set) storeState.values.set(key, value);
+			for (const key of writes.delete) storeState.values.delete(key);
+		},
 		pool: target,
 	});
 }
@@ -408,6 +422,25 @@ describe("run_code", () => {
 		);
 		expect(details.images.unshown.map((ref) => ref.ref)).toStrictEqual(["img_1", "img_2", "img_3"]);
 	});
+
+	it("records a script's writes to stored values, also when it fails, and ends its result with the keys", async () => {
+		storeState.values.clear();
+		storeState.recorded.length = 0;
+		storeState.values.set("old", '"x"');
+		const first = await run("store('cursor', 2); store('old', undefined); return load('cursor');");
+		expect(first.output).toMatch(/\nReturn value: 2\nStored keys: cursor, old \(deleted\)$/);
+		expect(storeState.recorded).toStrictEqual([{ set: [["cursor", "2"]], delete: ["old"] }]);
+
+		const failing = await run("store('cursor', load('cursor') + 1); throw new Error('boom');");
+		expect(failing.isError).toBe(true);
+		expect(failing.output.split("\n").at(-1)).toBe("Stored keys: cursor");
+		expect(storeState.values.get("cursor")).toBe("3");
+
+		// A script that writes nothing records nothing.
+		const reading = await run("return load('cursor');");
+		expect(reading.output).toMatch(/Return value: 3$/);
+		expect(storeState.recorded).toHaveLength(2);
+	});
 });
 
 /** Runs a script, recording the partial results the live card receives and when each arrived. */
@@ -506,7 +539,14 @@ describe("run_code details", () => {
 	const rendered = { content: [], isError: false, truncated: false, shownImages: [], unshownImages: [] };
 
 	function details(calls: CodeModeRenderCall[]): RunCodeDetails {
-		const result: CodeModeScriptResult = { ok: true, hasValue: false, output: [], calls, durationMs: 5 };
+		const result: CodeModeScriptResult = {
+			ok: true,
+			hasValue: false,
+			output: [],
+			calls,
+			durationMs: 5,
+			storeWrites: { set: [], delete: [] },
+		};
 		return buildRunCodeDetails({ result, calls, rendered, language: "javascript" });
 	}
 
