@@ -540,6 +540,17 @@ A cursor belongs to one server and metadata snapshot. If the catalog changes, re
 
 Large descriptions and schemas produce a bounded preview with a cache reference. Retrieve the complete result with `read_cache`; schema constraints are not simplified or discarded.
 
+While the [`run_code`](settings.md#code-mode) tool is active and its scripts can call the tool, the result also says how a script calls it and what the call resolves with:
+
+```json
+"codeMode": {
+  "call": "tools.mcp.github.search_issues(args)",
+  "returns": "Promise<{ text: string; structured?: unknown; images: ImageRef[] }>"
+}
+```
+
+In Plan mode that is only for tools configured as `trustedReads`, the only MCP tools scripts can call there.
+
 ### Call result
 
 ```json
@@ -800,6 +811,7 @@ Fields:
 - timestamp
 - workspace/session id
 - caller surface
+- `parentToolCallId`: the `run_code` call whose script made the call, only for a script's calls
 - server id
 - tool/resource/prompt id
 - risk class

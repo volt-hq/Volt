@@ -61,9 +61,16 @@ export interface CodeModeDispatchHost {
 	/**
 	 * Calls an MCP tool through the session's MCP manager, as the model's call to it would be, limited to trusted
 	 * reads while a grant profile restricts the session. Resolves with the result as the server sent it. A failure
-	 * before the request is sent, including a session without MCP, rejects with `McpToolUnavailableError`.
+	 * before the request is sent, including a session without MCP, rejects with `McpToolUnavailableError`. The MCP
+	 * audit entry names `parentToolCallId`, the code-mode tool call running the script.
 	 */
-	callMcpTool(server: string, tool: string, args: JsonObject, signal: AbortSignal): Promise<CallToolResult>;
+	callMcpTool(
+		server: string,
+		tool: string,
+		args: JsonObject,
+		parentToolCallId: string,
+		signal: AbortSignal,
+	): Promise<CallToolResult>;
 	/** Calls to the MCP server from scripts that may run at once, across the process. */
 	mcpServerLimit(server: string): number;
 }
@@ -83,7 +90,7 @@ export function codeModeDispatchHostOf(
 		},
 		toolCallPolicies: (signal, origin) => turnPolicy.toolCallPolicies(signal, origin),
 		toolResult: (event, signal, origin) => turnPolicy.toolResult(event, { signal, origin }),
-		callMcpTool: async (server, tool, args, signal) => {
+		callMcpTool: async (server, tool, args, parentToolCallId, signal) => {
 			const manager = tools.getMcpManager();
 			if (!manager) throw new McpToolUnavailableError("MCP is not available in this session");
 			// Read at call time, as the gateway reads it: the session may have entered a restricted mode since.
@@ -92,7 +99,12 @@ export function codeModeDispatchHostOf(
 				server,
 				tool,
 				args,
-				{ surface: "model", caller: "model", ...(restricted ? { restrictedTrustedRead: true } : {}) },
+				{
+					surface: "model",
+					caller: "model",
+					parentToolCallId,
+					...(restricted ? { restrictedTrustedRead: true } : {}),
+				},
 				signal,
 			);
 			return called.result;
@@ -231,7 +243,7 @@ export function createCodeModeCallHandler(
 		if (target.kind === "mcp") {
 			const args = isGatewayRoute(target) ? objectField(input, "arguments") : input;
 			const outcome = await schedule(host.mcpServerLimit(target.server), () =>
-				callMcp(host, target.server, target.tool, args, call.signal),
+				callMcp(host, target.server, target.tool, args, parentToolCallId, call.signal),
 			);
 			// Hooks see the complete result as text; its images and structured content reach the value only unchanged. An
 			// error rejects with that text, structured content included, as the hooks left it.
@@ -310,10 +322,13 @@ async function callMcp(
 	server: string,
 	tool: string,
 	args: JsonObject,
+	parentToolCallId: string,
 	signal: AbortSignal,
 ): Promise<McpCallOutcome> {
 	try {
-		return { result: await withoutBackgroundJobs(() => host.callMcpTool(server, tool, args, signal)) };
+		return {
+			result: await withoutBackgroundJobs(() => host.callMcpTool(server, tool, args, parentToolCallId, signal)),
+		};
 	} catch (error) {
 		return { error };
 	}

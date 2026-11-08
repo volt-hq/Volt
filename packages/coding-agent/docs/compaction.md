@@ -266,7 +266,7 @@ After navigation with summary:
 ### Cumulative File Tracking
 
 Both compaction and branch summarization track files cumulatively, whether Volt or an extension wrote the earlier summaries. Volt counts the files of a run of entries from:
-- The paths of `read`, `write`, and `edit` tool calls in its messages
+- The paths of `read`, `write`, and `edit` tool calls in its messages, including the calls a [`run_code`](settings.md#code-mode) script made, which its result records
 - The `readFiles` and `modifiedFiles` of each branch summary in it
 
 A compaction counts the whole branch before its boundary, including the history earlier compactions summarized: that history stays on the branch, so no compaction needs to record it. A branch summary counts every entry of the branch it leaves, including entries too old to fit the summary request, and records the result on its entry: the branch it leaves is not part of the new branch, and forks and imports do not copy it.
