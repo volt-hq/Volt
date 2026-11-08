@@ -40,6 +40,10 @@
           "path": "mcp.md"
         },
         {
+          "title": "Code Mode",
+          "path": "code-mode.md"
+        },
+        {
           "title": "LSP Diagnostics & Navigation",
           "path": "lsp.md"
         },

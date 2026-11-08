@@ -394,7 +394,7 @@ See [LSP Diagnostics](lsp.md) for the full reference, including built-in server 
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `codeMode.enabled` | boolean | `false` | Adds `run_code` to the default active tools. `run_code` runs a sandboxed script that calls the conversation's other active tools and returns only what the script prints or returns. `--tools`, `--exclude-tools`, and `remote.allowTools` apply to it like any other tool |
+| `codeMode.enabled` | boolean | `false` | Adds `run_code` to the default active tools. `run_code` runs a sandboxed script that calls the conversation's other active tools and returns only what the script prints or returns; see [Code Mode](code-mode.md). `--tools`, `--exclude-tools`, and `remote.allowTools` apply to it like any other tool |
 
 ### Remote Access (daemon)
 
