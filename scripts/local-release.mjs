@@ -4,6 +4,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symli
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { smokeCodeMode } from "./code-mode-smoke.mjs";
 
 const packages = [
 	{ directory: "packages/ai", name: "@hansjm10/volt-ai" },
@@ -285,6 +286,10 @@ if (!options.skipInstall) {
 
 	run("npm", ["install", "--omit=dev", "--ignore-scripts"], { cwd: nodeInstallDirectory });
 	createVoltShim(nodeInstallDirectory);
+	await smokeCodeMode(process.execPath, [
+		join(nodeInstallDirectory, "node_modules", "@hansjm10", "volt-coding-agent", "dist", "core", "npm", "cli.js"),
+	]);
+	console.log("Packed npm install code mode smoke passed");
 	smokePackedDaemon(nodeInstallDirectory, outDir, repoRoot);
 
 }

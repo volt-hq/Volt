@@ -1,0 +1,73 @@
+{
+	"schemaVersion": 1,
+	"package": "quickjs-wasi",
+	"version": "3.6.3",
+	"tarball": "https://registry.npmjs.org/quickjs-wasi/-/quickjs-wasi-3.6.3.tgz",
+	"wasm": {
+		"path": "quickjs.wasm",
+		"sha256": "d4c9375f2b1ca4dc95f72c8aa2982a7a9951ac8011490d79c6582df732b4bbd9"
+	},
+	"build": "quickjs.wasm links quickjs.c, dtoa.c, libregexp.c, and libunicode.c from the quickjs-ng submodule, c/interface.c, and, from the wasi-sdk 32 sysroot (wasi-libc 2fc32bc81b9f07f8d9525edea59bfbaf760c06d6, llvm-project 4434dabb69916856b824f68a64b029c67175e532), libc with the emulated process-clock and signal libraries and the compiler-rt builtins clang links by default (Makefile at https://github.com/vercel-labs/quickjs-wasi/blob/quickjs-wasi%403.6.3/Makefile).",
+	"licenses": [
+		{
+			"component": "quickjs-wasi interface layer (c/interface.c)",
+			"path": "compliance/quickjs-wasi-3.6.3/quickjs-wasi-LICENSE",
+			"source": "https://github.com/vercel-labs/quickjs-wasi/blob/quickjs-wasi%403.6.3/LICENSE",
+			"sha256": "f7735da3b2531ddf451937117343cfadb853fd8054b499e7a70695dc57ffd184"
+		},
+		{
+			"component": "QuickJS-NG 6d46d07 (quickjs.c, dtoa.c, libregexp.c, libunicode.c)",
+			"path": "compliance/quickjs-wasi-3.6.3/quickjs-ng-LICENSE",
+			"source": "https://github.com/quickjs-ng/quickjs/blob/6d46d07d04041b40f4f49eaa7fdebe44c314c699/LICENSE",
+			"sha256": "96f73f9d2a16c21a36b418f06073be26e7d6d5e7c1bc99756b21a4f2c74ef171"
+		},
+		{
+			"component": "Unicode 17.0.0 data tables in QuickJS-NG's libunicode-table.h (the notice at the top of that file)",
+			"path": "compliance/quickjs-wasi-3.6.3/unicode-LICENSE",
+			"source": "https://github.com/quickjs-ng/quickjs/blob/6d46d07d04041b40f4f49eaa7fdebe44c314c699/libunicode-table.h",
+			"sha256": "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96"
+		},
+		{
+			"component": "wasi-libc",
+			"path": "compliance/quickjs-wasi-3.6.3/wasi-libc-LICENSE",
+			"source": "https://github.com/WebAssembly/wasi-libc/blob/2fc32bc81b9f07f8d9525edea59bfbaf760c06d6/LICENSE",
+			"sha256": "2711a8b5a5cdfef0e639f96c1aca12ae23d7d64a02d0507f1bdf14d2b27bbc3a"
+		},
+		{
+			"component": "wasi-libc",
+			"path": "compliance/quickjs-wasi-3.6.3/wasi-libc-LICENSE-APACHE",
+			"source": "https://github.com/WebAssembly/wasi-libc/blob/2fc32bc81b9f07f8d9525edea59bfbaf760c06d6/LICENSE-APACHE",
+			"sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+		},
+		{
+			"component": "wasi-libc",
+			"path": "compliance/quickjs-wasi-3.6.3/wasi-libc-LICENSE-APACHE-LLVM",
+			"source": "https://github.com/WebAssembly/wasi-libc/blob/2fc32bc81b9f07f8d9525edea59bfbaf760c06d6/LICENSE-APACHE-LLVM",
+			"sha256": "268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5"
+		},
+		{
+			"component": "wasi-libc",
+			"path": "compliance/quickjs-wasi-3.6.3/wasi-libc-LICENSE-MIT",
+			"source": "https://github.com/WebAssembly/wasi-libc/blob/2fc32bc81b9f07f8d9525edea59bfbaf760c06d6/LICENSE-MIT",
+			"sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+		},
+		{
+			"component": "musl, in wasi-libc's libc-top-half",
+			"path": "compliance/quickjs-wasi-3.6.3/musl-COPYRIGHT",
+			"source": "https://github.com/WebAssembly/wasi-libc/blob/2fc32bc81b9f07f8d9525edea59bfbaf760c06d6/libc-top-half/musl/COPYRIGHT",
+			"sha256": "f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af"
+		},
+		{
+			"component": "cloudlibc, in wasi-libc's libc-bottom-half",
+			"path": "compliance/quickjs-wasi-3.6.3/cloudlibc-LICENSE",
+			"source": "https://github.com/WebAssembly/wasi-libc/blob/2fc32bc81b9f07f8d9525edea59bfbaf760c06d6/libc-bottom-half/cloudlibc/LICENSE",
+			"sha256": "c8b789cf5a746611e6300a0cc7750dbf92b61912a709d04e639245f7290656d0"
+		},
+		{
+			"component": "compiler-rt builtins",
+			"path": "compliance/quickjs-wasi-3.6.3/compiler-rt-LICENSE.TXT",
+			"source": "https://github.com/llvm/llvm-project/blob/4434dabb69916856b824f68a64b029c67175e532/compiler-rt/LICENSE.TXT",
+			"sha256": "1a8f1058753f1ba890de984e48f0242a3a5c29a6a8f2ed9fd813f36985387e8d"
+		}
+	]
+}
