@@ -778,7 +778,7 @@ interface RunCodeDetails {
 #### Session records, compaction, and audit
 
 - The session stores the `run_code` call (with the script in its arguments) and its result like any tool call.
-- Compaction counts files that nested `read`, `write`, and `edit` calls touched, from `details.calls[].path`. Today it extracts files only from assistant tool calls with those names (`src/core/compaction/utils.ts:30-57`), so edits made in scripts would otherwise be missing from its file lists; Pi uses its nested-call records the same way.
+- Compaction and branch summaries count files that nested `read`, `write`, and `edit` calls touched, whatever their status, from `details.calls[].path` (`collectFileOps` in `src/core/compaction/utils.ts`), as they count the paths of assistant tool calls with those names; Pi uses its nested-call records the same way.
 - Nested MCP calls write MCP audit entries as gateway calls do, with caller surface `model` and a new optional `parentToolCallId`.
 - The HTML export renders the card from its presentation.
 - Code mode adds no telemetry.
@@ -928,7 +928,7 @@ Each step is its own pull request. None changes the protocol contract, so none s
 2. **Bridge and scheduling.** Binding-set computation (no escalation, eligibility, grant profiles), the host checks with tool-call and tool-result policy and the `code_mode` origin, script-value projections, `ToolCallError`, image references, the scheduler, and per-server MCP limits with `maxConcurrentCalls`.
 3. **The `run_code` tool.** Input and TypeScript stripping, result rendering, truncation and spill, failure rendering, `store()`/`load()` session entries, the generated description, snippet, and guidelines, the presenter and `details`, compaction file tracking, the gateway `describe` addition, MCP audit attribution, the `codeMode.enabled` setting, user documentation (a code-mode page in `docs.json` and `docs/settings.md`), and the changeset. This step ships as several pull requests:
    - Merged first: the `run_code` tool end to end, with TypeScript stripping, the generated description, snippet, and guidelines, the rendered result and `details`, the `codeMode.enabled` setting with its `docs/settings.md` row, the trusted resolver, the Plan-mode rule, and the changeset. From this pull request on, the CLI imports the runtime, so step 4 must merge before any release that contains it.
-   - Remaining: the presenter and live card, `store()`/`load()` session entries, compaction file tracking, the gateway `describe` addition, MCP audit attribution (`parentToolCallId`), and the code-mode page in `docs.json`.
+   - Remaining: the presenter and live card, `store()`/`load()` session entries, the gateway `describe` addition, MCP audit attribution (`parentToolCallId`), and the code-mode page in `docs.json`.
 4. **Packaging.** Bundle the worker entry and load `quickjs.wasm` in the bundled npm CLI and the standalone binary, add the WASM's third-party notices to the standalone archive, and verify on all six targets. The npm package needs no notice of its own: npm installs `quickjs-wasi` as a dependency with its license file.
 
 ### Verification
@@ -947,7 +947,7 @@ The invariants below tie each guarantee to the test that fails when it breaks.
 
 Each guarantee the runtime makes, where it is enforced, and the test that fails when it breaks. Section 5 records the decisions; these tables are how they are kept. A pull request that adds a guarantee adds its row, and a guarantee without a test says why. Every row describes merged code. A planned guarantee gets a row in a planned table, naming the test to write before the implementation, until the pull request that lands it moves the row into a table of its own. Steps 3 and 4 add their rows in their own pull requests.
 
-Sources are in `src/core/code-mode/` unless a path says otherwise. Tests are cited as `file: "test name"`, where `file` names a test file in `test/code-mode/` without `.test.ts`, except `mcp`, which is `test/mcp.test.ts`, `operation-authorization`, which is `test/operation-authorization.test.ts`, `suite/run-code`, which is `test/suite/run-code.test.ts`, and `release-security`, which is the repository's `scripts/release-security.test.mjs`.
+Sources are in `src/core/code-mode/` unless a path says otherwise. Tests are cited as `file: "test name"`, where `file` names a test file in `test/code-mode/` without `.test.ts`, except `mcp`, which is `test/mcp.test.ts`, `operation-authorization`, which is `test/operation-authorization.test.ts`, `compaction-file-ops`, which is `test/compaction-file-ops.test.ts`, `suite/run-code`, which is `test/suite/run-code.test.ts`, and `release-security`, which is the repository's `scripts/release-security.test.mjs`.
 
 #### Isolation and the engine
 
@@ -1124,6 +1124,7 @@ The `run_code` tool supplies each call's tool name, arguments, and read-only cla
 | The script's `timeoutMs` and the call's signal reach the runtime. | `src/core/tools/run-code.ts` `createRunCodeToolDefinition` | run-code: "names MCP calls by server and tool and passes the script's timeout to the runtime" |
 | `details` records each call's tool (`mcp.<server>.<tool>` for MCP tools), argument preview, the path of a `read`, `write`, or `edit` call, status, read-only classification, and error, with exact totals. It stays within 64 KB by dropping the previews of read-only calls, then the oldest read-only records, never a state-changing record. | `src/core/tools/run-code.ts` `buildRunCodeDetails`; `src/core/session/tool-runtime.ts` `codeModeCallIsReadOnly` | run-code: "records each call's tool, arguments, and path, with exact totals and output statistics"; "names MCP calls by server and tool and passes the script's timeout to the runtime"; "drops the argument previews of the oldest read-only calls first to fit 64 KB"; "then drops the oldest read-only records, never a state-changing one"; "keeps every record of a run that fits, and caps errors at 256 characters" |
 | Images the script did not show are listed with the call that returned them: `read <path>`, `image_gen <path>`, or `MCP <server>.<tool>`. | `src/core/tools/run-code.ts` `imageSource`, `taggingImages` | run-code: "labels the images a script did not show by the call that returned them" |
+| Compaction and branch summaries count the `path` of every `read`, `write`, and `edit` record in a `run_code` result's `details`, whatever its status, together with the paths of direct calls; other tools' results and malformed records add nothing. | `src/core/compaction/utils.ts` `extractFileOpsFromMessage`, `extractRunCodeFileOps` | compaction-file-ops: "counts the files a run_code script's nested read, write, and edit calls touched, whatever their status"; "merges nested paths with the paths of direct calls"; "ignores other tools' results and records that are not well-formed"; suite/run-code: "lists the files a script read and edited in the next compaction" |
 
 #### Packaging
 
