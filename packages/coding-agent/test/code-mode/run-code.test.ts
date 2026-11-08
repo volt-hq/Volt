@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -260,54 +259,29 @@ async function run(code: string, options: { timeoutMs?: number; pool?: CodeModeW
 }
 
 describe("run_code", () => {
-	it("strips TypeScript annotations around top-level await and return", async () => {
+	// First to strip in this file's process: Node warns only for the first strip in a process. The test runner filters
+	// warning events, so the test watches the calls that would emit one.
+	it("strips TypeScript annotations around top-level await and return, emitting no warning", async () => {
 		const emitWarning = process.emitWarning;
-		const { output, isError, details } = await run(
-			"const contents: string = await tools.read({ path: 'a.txt' });\nreturn contents.toUpperCase() as string;",
-		);
-		expect(isError).toBe(false);
-		expect(output).toMatch(/^Script completed in \S+ \(1 tool call\)\nReturn value: CONTENTS OF A\.TXT$/);
-		expect(details.language).toBe("typescript");
-		expect(process.emitWarning).toBe(emitWarning);
+		const warned: string[] = [];
+		const watching = (...args: unknown[]): void => {
+			warned.push(String(args[0] instanceof Error ? args[0].message : args[0]));
+			Reflect.apply(emitWarning, process, args);
+		};
+		process.emitWarning = watching as typeof process.emitWarning;
+		try {
+			const { output, isError, details } = await run(
+				"const contents: string = await tools.read({ path: 'a.txt' });\nreturn contents.toUpperCase() as string;",
+			);
+			expect(isError).toBe(false);
+			expect(output).toMatch(/^Script completed in \S+ \(1 tool call\)\nReturn value: CONTENTS OF A\.TXT$/);
+			expect(details.language).toBe("typescript");
+			expect(warned.filter((message) => /stripTypeScriptTypes|type stripping/i.test(message))).toStrictEqual([]);
+			expect(process.emitWarning).toBe(watching);
+		} finally {
+			process.emitWarning = emitWarning;
+		}
 	});
-
-	it("emits no warning when it strips TypeScript", () => {
-		// Node warns only for the first strip in a process, and the test runner filters warnings, so the script runs in a
-		// fresh process.
-		const runCodeUrl = new URL("../../src/core/tools/run-code.ts", import.meta.url).href;
-		const poolUrl = new URL("../../src/core/code-mode/pool.ts", import.meta.url).href;
-		const program = `
-			const { createRunCodeTool } = await import(${JSON.stringify(runCodeUrl)});
-			const { CodeModeWorkerPool } = await import(${JSON.stringify(poolUrl)});
-			const warnings = [];
-			process.on("warning", (warning) => warnings.push(warning.message));
-			const pool = new CodeModeWorkerPool();
-			const tool = createRunCodeTool({
-				bindingSources: () => ({ activeTools: [], grantProfile: undefined, mcpTools: [] }),
-				dispatchHost: () => ({}),
-				callIsReadOnly: () => false,
-				autoResizeImages: true,
-				pool,
-			});
-			const result = await tool.execute("call-1", { code: "const answer: number = 42;\\nreturn answer;" });
-			await new Promise((resolve) => setImmediate(resolve));
-			pool.close();
-			console.log(JSON.stringify({
-				language: result.details.language,
-				warnings: warnings.filter((message) => /stripTypeScriptTypes|type stripping/i.test(message)),
-			}));
-		`;
-		const child = spawnSync(process.execPath, ["--conditions=volt-source", "--input-type=module", "-e", program], {
-			encoding: "utf8",
-			timeout: 20_000,
-		});
-		expect(child.status, child.stderr).toBe(0);
-		expect(JSON.parse(child.stdout.trim().split("\n").at(-1) ?? "")).toStrictEqual({
-			language: "typescript",
-			warnings: [],
-		});
-		expect(child.stderr).not.toContain("stripTypeScriptTypes");
-	}, 30_000);
 
 	it("keeps the script's line numbers in stack traces of stripped TypeScript", async () => {
 		const { output, isError } = await run(
