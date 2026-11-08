@@ -2,8 +2,10 @@ import { stripTypeScriptTypes } from "node:module";
 import type { AgentTool } from "@hansjm10/volt-agent-core";
 import { type Static, Type } from "typebox";
 import {
+	CODE_MODE_MCP_RESULT_SHAPE,
 	type CodeModeBindingSources,
 	type CodeModeBindingTarget,
+	codeModeCallExpression,
 	codeModeCallsMcpTools,
 	computeCodeModeBindings,
 } from "../code-mode/bindings.ts";
@@ -104,7 +106,6 @@ export interface RunCodeToolOptions {
 }
 
 const MIB = 1024 * 1024;
-const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
 
 const INTRO =
 	"Run a JavaScript script in a sandbox. The script calls tools and only what it prints or returns comes back to you, so use it to fan out calls, loop, and filter large results instead of making many separate calls.";
@@ -112,8 +113,7 @@ const LANGUAGE =
 	"The script is the body of an async function: top-level await and return work. Erasable TypeScript annotations are allowed. The sandbox has no file system, network, process, timers, or modules; tools are its only way out.";
 const CALLS = "Call tools as `await tools.<name>(args)` with the same arguments as the tool itself";
 const NO_TOOLS = "No tools are available to scripts in this session.";
-const MCP_LINE =
-	'- MCP tools: tools.mcp.<server>.<tool>(args): Promise<{ text: string; structured?: unknown; images: ImageRef[] }>. Find them and their arguments with the mcp tool\'s search and describe actions first. Use brackets for names that are not identifiers: tools.mcp["my-server"]["get-file"](args).';
+const MCP_LINE = `- MCP tools: tools.mcp.<server>.<tool>(args): ${CODE_MODE_MCP_RESULT_SHAPE}. Find them and their arguments with the mcp tool's search and describe actions first. Use brackets for names that are not identifiers: tools.mcp["my-server"]["get-file"](args).`;
 const ERRORS =
 	'A failed call rejects with ToolCallError { tool; kind: "invalid_arguments" | "blocked" | "failed" | "cancelled"; reason?; message }. Use Promise.allSettled for independent calls so one failure does not lose the others.';
 const OUTPUT = `Output: text(value), console.log/warn/error(...), image(ref), and the return value appear in order. ImageRef = { type: "image"; ref; mimeType; width?; height?; bytes; path? }; only images passed to image(ref) reach you. Output is limited to ${DEFAULT_MAX_BYTES / 1024} KB, with the full output saved to a file you can read.`;
@@ -129,10 +129,6 @@ const RESULT_SHAPES = new Map([
 	["read", "Promise<string | ImageRef>"],
 	["image_gen", "Promise<ImageRef>"],
 ]);
-
-function callExpression(name: string): string {
-	return IDENTIFIER.test(name) ? `tools.${name}(args)` : `tools[${JSON.stringify(name)}](args)`;
-}
 
 /**
  * The `run_code` description for a session (section 5.14): the bindings scripts get and the result shapes that are
@@ -151,8 +147,11 @@ export function describeRunCode(sources: CodeModeBindingSources): string {
 		else plain.push(target.toolName);
 	}
 	const lines: string[] = [];
-	for (const [name, shape] of RESULT_SHAPES) if (shaped.has(name)) lines.push(`- ${callExpression(name)}: ${shape}`);
-	if (plain.length > 0) lines.push(`- ${plain.map(callExpression).join(", ")}: Promise<string>`);
+	for (const [name, shape] of RESULT_SHAPES) {
+		if (shaped.has(name)) lines.push(`- ${codeModeCallExpression([name])}: ${shape}`);
+	}
+	if (plain.length > 0)
+		lines.push(`- ${plain.map((name) => codeModeCallExpression([name])).join(", ")}: Promise<string>`);
 	if (codeModeCallsMcpTools(sources)) lines.push(MCP_LINE);
 	const limits = shaped.has("bash") ? `${LIMITS} ${SHELL}` : LIMITS;
 	if (lines.length === 0) return [INTRO, LANGUAGE, NO_TOOLS, OUTPUT, limits].join("\n\n");

@@ -387,4 +387,6 @@ export interface McpGatewayExecutionContext {
 	surface: McpCallerSurface;
 	caller?: "model" | "user";
 	restrictedTrustedRead?: boolean;
+	/** The `run_code` call whose script made the call; set only for a code mode script's nested call. */
+	parentToolCallId?: string;
 }

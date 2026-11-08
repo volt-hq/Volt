@@ -9,6 +9,8 @@ export interface McpAuditEventInput {
 	workspaceId?: string;
 	sessionId?: string;
 	callerSurface: McpCallerSurface;
+	/** The `run_code` call whose script made the call; set only for a code mode script's nested call. */
+	parentToolCallId?: string;
 	server: string;
 	item: string;
 	kind: "tool" | "resource" | "prompt" | "cache";
@@ -26,6 +28,8 @@ export interface McpAuditEntry {
 	workspaceId?: string;
 	sessionId?: string;
 	callerSurface: McpCallerSurface;
+	/** The `run_code` call whose script made the call; set only for a code mode script's nested call. */
+	parentToolCallId?: string;
 	server: string;
 	item: string;
 	kind: "tool" | "resource" | "prompt" | "cache";
