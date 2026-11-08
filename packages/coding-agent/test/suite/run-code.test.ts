@@ -187,6 +187,34 @@ describe("run_code in a session", () => {
 		expect(session.planningState.plan?.phase).toBe("ready");
 	});
 
+	it("stays inactive in Plan mode while it would bind nothing, so submit_plan reports research is impossible", async () => {
+		const harness = await setup({ ...CODE_MODE, allowedToolNames: ["run_code", "edit", "bash"] });
+		const { session } = harness;
+		expect(session.getActiveToolNames()).toContain("run_code");
+		await session.setAgentMode("plan");
+		expect(session.getActiveToolNames()).not.toContain("run_code");
+
+		const draft = await session.updatePlan({
+			title: "Plan without reads",
+			summary: "Plan the change without any read tool.",
+			steps: [{ text: "Make the change" }],
+		});
+		harness.setResponses([
+			toolResponse("submit_plan", {
+				planId: draft.id,
+				expectedRevision: draft.revision,
+				title: draft.title!,
+				summary: draft.summary!,
+			}),
+			fauxAssistantMessage("cannot submit"),
+		]);
+		await session.prompt("plan it");
+
+		const [blocked] = toolResults(harness, "submit_plan");
+		expect(blocked.isError).toBe(true);
+		expect(getMessageText(blocked)).toContain("exposes no research-capable tools");
+	});
+
 	it("describes the bindings of the tools active when the tool set is staged", async () => {
 		const harness = await setup(CODE_MODE);
 		const offered: string[][] = [];
