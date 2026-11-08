@@ -329,9 +329,10 @@ packages/coding-agent/src/core/mcp/
 
 `metadata-cache.ts`
 
-- Caches tools/resources/prompts per server.
+- Caches tools/resources/prompts per server: in memory for the running session, and in one owner-only file per server under `~/.volt/agent/mcp/metadata/`.
 - Stores metadata hash, server version, last seen time, and schema snippets.
 - Supports search without connecting at startup.
+- Keeps an entry too large to persist (over 8 MiB) usable for the session; the next session fetches it again. One server's size never evicts another server's metadata.
 
 `search.ts`
 

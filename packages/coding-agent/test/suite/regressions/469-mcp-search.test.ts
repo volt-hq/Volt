@@ -201,24 +201,28 @@ describe("#469 MCP discovery search", () => {
 		expect(cache.getTool("missing", "read_note")).toBeUndefined();
 	});
 
-	it("rebuilds projections on reload and discards evicted catalogs", async () => {
+	it("rebuilds projections on reload and keeps catalogs evicted from disk in memory", async () => {
 		const { harness, cache } = await createFixture({ fake: [tool("read_note")] }, { maxServers: 1 });
 		const projected = cache.getDiscovery("fake");
 		const reloaded = new McpMetadataCache({ agentDir: harness.tempDir });
 		expect(reloaded.getDiscovery("fake")).toEqual(projected);
 		cache.set("other", { server: "other", tools: [], resources: [], prompts: [] }, ["tools"]);
-		expect(cache.getDiscovery("fake")).toBeUndefined();
+		expect(cache.getDiscovery("fake")).toEqual(projected);
 		expect(cache.getDiscovery("other")?.tools).toEqual([]);
+		const afterEviction = new McpMetadataCache({ agentDir: harness.tempDir, maxServers: 1 });
+		expect(afterEviction.getDiscovery("fake")).toBeUndefined();
+		expect(afterEviction.getDiscovery("other")?.tools).toEqual([]);
 	});
 
-	it("can project an unretained catalog without losing selected-tool metadata", async () => {
-		const { cache } = await createFixture({ fake: [] }, { maxBytes: 240 });
+	it("projects a catalog too large to persist without losing selected-tool metadata", async () => {
+		const { harness, cache } = await createFixture({ fake: [] }, { maxEntryBytes: 240 });
 		const metadata = cache.set(
 			"fake",
 			{ server: "fake", tools: [tool("read_note", "Read a note")], resources: [], prompts: [] },
 			["tools"],
 		);
-		expect(cache.getDiscovery("fake")).toBeUndefined();
+		expect(cache.getDiscovery("fake")).toEqual(toMcpDiscoveryMetadata(metadata));
+		expect(new McpMetadataCache({ agentDir: harness.tempDir }).getDiscovery("fake")).toBeUndefined();
 		expect(toMcpDiscoveryMetadata(metadata).tools).toEqual([
 			{ name: "read_note", description: "Read a note", annotations: { readOnlyHint: true } },
 		]);

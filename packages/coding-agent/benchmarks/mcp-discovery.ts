@@ -160,7 +160,7 @@ export function createDiscoveryBenchmarkFixture(catalog: DiscoveryCatalog, state
 	);
 	const config = finalizeMcpConfig(merged);
 	let cacheTime = Date.now() - (state === "stale" ? 2 * 24 * 60 * 60 * 1000 : 0);
-	const cache = new McpMetadataCache({ agentDir: directory, maxBytes: 64 * 1024 * 1024, now: () => cacheTime });
+	const cache = new McpMetadataCache({ agentDir: directory, maxEntryBytes: 64 * 1024 * 1024, now: () => cacheTime });
 	if (state !== "cold") {
 		for (const server of catalog.servers) {
 			cache.set(

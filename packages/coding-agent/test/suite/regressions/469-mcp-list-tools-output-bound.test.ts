@@ -118,7 +118,7 @@ async function createFixture(
 	const clock = { now: Date.now() };
 	const metadataCache = new McpMetadataCache({
 		agentDir: directory,
-		maxBytes: options.metadataBytes,
+		maxEntryBytes: options.metadataBytes,
 		now: () => clock.now,
 	});
 	const manager = new McpManager({
@@ -464,7 +464,7 @@ describe("#469 bounded MCP model output", () => {
 		expect(list).toHaveBeenCalledTimes(1);
 	});
 
-	it("continues a transient catalog when full metadata cannot be retained", async () => {
+	it("continues a catalog that is too large to persist", async () => {
 		const tools: Tool[] = Array.from({ length: 4 }, (_, index) => ({
 			name: `read_${index}`,
 			inputSchema: { type: "object" },
@@ -472,7 +472,7 @@ describe("#469 bounded MCP model output", () => {
 		const { execute, metadataCache } = await createFixture({ tools, metadataBytes: 128 });
 		const first = await execute({ action: "list_tools", server: "fake", limit: 2 });
 		expect(first.data.tools?.map((tool) => tool.name)).toEqual(["read_0", "read_1"]);
-		expect(metadataCache.getDiscovery("fake")).toBeUndefined();
+		expect(metadataCache.getDiscovery("fake")?.tools).toHaveLength(tools.length);
 		const second = await execute({ action: "list_tools", server: "fake", cursor: first.data.nextCursor, limit: 2 });
 		expect(second.result.isError).not.toBe(true);
 		expect(second.data.tools?.map((tool) => tool.name)).toEqual(["read_2", "read_3"]);
