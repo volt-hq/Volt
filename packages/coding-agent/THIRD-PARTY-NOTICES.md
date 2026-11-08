@@ -44,6 +44,19 @@ package carries all eight supported prebuilds and this complete license tree;
 each standalone archive carries only its matching addon plus the same native
 license inventory and texts under `LICENSES/workspace-fs-rust/`.
 
+Code mode runs scripts in `quickjs.wasm`, the WebAssembly engine of the MIT
+`quickjs-wasi@3.6.3` npm package. The npm CLI loads it from that installed
+dependency, whose package carries Vercel's license for its wrapper. Each
+standalone archive carries the engine as `quickjs.wasm`, checksum-pinned in
+`compliance/quickjs-wasi.json` and the only WebAssembly file the archive ships.
+The engine embeds QuickJS-NG (MIT) with Unicode data tables (Unicode License
+V3), the package's interface layer (MIT), and, from the wasi-sdk 32 sysroot,
+wasi-libc (Apache-2.0 WITH LLVM-exception, Apache-2.0, or MIT) including musl
+(MIT) and cloudlibc (BSD-2-Clause), and LLVM compiler-rt builtins
+(Apache-2.0 WITH LLVM-exception). Those notices are not in the npm package;
+the archive carries their checksum-pinned texts under `LICENSES/quickjs-wasi/`,
+and `compliance/quickjs-wasi.json` records the commit each was taken from.
+
 The npm CLI requires `@hansjm10/volt-iroh@1.1.1-volt.2`, Volt's
 MIT/Apache-2.0 fork of Iroh FFI 1.1.0; npm selects its optional native platform
 package. The wrapper and platform packages ship their own license texts and

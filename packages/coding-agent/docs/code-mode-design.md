@@ -1,6 +1,6 @@
 # Code mode
 
-- Status: Design complete, ready for review. Every decision is recorded in section 5; section 8 lists the approvals for implementation, granted on 2026-11-04, and the follow-ups, and section 9 the delivery plan. Sections 5.1 to 5.14 were reviewed with the maintainer; sections 5.15 to 5.18 were decided without a separate review round. Delivery steps 1 and 2 are merged. Step 3 ships as several pull requests; the first wires a minimal `run_code` tool end to end, and section 9 lists what remains.
+- Status: Design complete, ready for review. Every decision is recorded in section 5; section 8 lists the approvals for implementation, granted on 2026-11-04, and the follow-ups, and section 9 the delivery plan. Sections 5.1 to 5.14 were reviewed with the maintainer; sections 5.15 to 5.18 were decided without a separate review round. Delivery steps 1 and 2 are merged. Step 3 ships as several pull requests; the first wires a minimal `run_code` tool end to end, and section 9 lists what remains. Step 4 packages the runtime for the bundled npm CLI and the standalone binary right after that first pull request.
 - Date: 2026-11-04
 - Audience: Volt maintainers.
 - Scope: A sandboxed script tool that lets the model call Volt tools programmatically, so intermediate results stay out of the model context. This document covers the runtime that executes scripts, how it is supervised, and the constraints Volt places on it.
@@ -132,7 +132,7 @@ Decided: create a fresh VM for every script and evaluate the prelude in it, behi
 
 - The prelude captures private references to the built-ins it depends on (primordials) before any script code runs, instead of freezing the whole realm. Scripts may patch globals without affecting the bridge, and boot is cheaper.
 - The VM's `Math.random()` seed is set explicitly. During context creation QuickJS reads the realtime clock (WASI clock 0) to seed its generator and the monotonic clock (clock 1) to set `performance.timeOrigin`; with the shim's coarse clock, two VMs created back to back produced identical sequences in testing. The worker serves the realtime clock from `Date.now()`, returning a seed from `crypto.randomInt()` instead while the VM is created, and the monotonic clock from `process.hrtime.bigint()`, so `performance.now()` measures time since the VM booted and never follows wall-clock steps. Seeding in the worker lets it boot the next VM before the next script arrives.
-- `maxStackSize` is always set (512 KiB, `MAX_STACK_SIZE`), and workers run with `resourceLimits.stackSizeMb: 32`. QuickJS's stack guard measures the stack it keeps in linear memory, but WebAssembly call frames also use the worker's native stack, which the guard does not see, so the native stack must be deep enough for the guard to fire first. Without the guard, deep recursion overflowed the host stack. With the guard, recursion and a 100,000-level `JSON.parse` ended in a catchable guest `RangeError` from 8 MB up, but parsing deeply nested source (the script itself, `eval`, or `new Function`) needed 11 MB on Node 24.20 and 13 MB on Node 25.2 (section 11). Newer V8 versions use more native stack per WebAssembly frame, so the default leaves about 2.5 times the most measured. Stack pages become resident only as a script recurses, but on Windows each worker commits its whole stack when it starts: 4 workers at 32 MB committed 96 MB more than at 8 MB on Node 24.20, so a process commits up to 128 MB of worker stack while its workers are alive. A host-side `RangeError` from a VM operation is still treated as a sandbox failure that discards the VM (section 5.11).
+- `maxStackSize` is always set (512 KiB, `MAX_STACK_SIZE`), and workers run with `resourceLimits.stackSizeMb: 32`. QuickJS's stack guard measures the stack it keeps in linear memory, but WebAssembly call frames also use the worker's native stack, which the guard does not see, so the native stack must be deep enough for the guard to fire first. Without the guard, deep recursion overflowed the host stack. With the guard, recursion and a 100,000-level `JSON.parse` ended in a catchable guest `RangeError` from 8 MB up, but parsing deeply nested source (the script itself, `eval`, or `new Function`) needed 11 MB on Node 24.20 and 13 MB on Node 25.2 on Windows, and 8 MB on Node 22.23.1 (macOS and Linux) and 10 MB on Node 26.4 (macOS) (section 11). Newer V8 versions use more native stack per WebAssembly frame, so the default leaves about 2.5 times the most measured. Stack pages become resident only as a script recurses, but on Windows each worker commits its whole stack when it starts: 4 workers at 32 MB committed 96 MB more than at 8 MB on Node 24.20, so a process commits up to 128 MB of worker stack while its workers are alive. A host-side `RangeError` from a VM operation is still treated as a sandbox failure that discards the VM (section 5.11).
 
 Rejected for now:
 
@@ -938,7 +938,8 @@ Each step is its own pull request. None changes the protocol contract, so none s
 - **Bridge:** hostile and malformed frames from a test worker, every host check in order, and bounded outstanding arguments.
 - **Scheduling:** ordering guarantees, exclusive barriers, and per-server limits, with a fake MCP server that records overlapping requests.
 - **Integration:** `packages/coding-agent/test/suite/` scenarios with the faux provider: policy and hooks on nested calls, Plan mode bindings and research evidence, failure summaries, spill files, state across branches, and compaction file lists.
-- **Measurements:** repeat the runtime and stack measurements on the standalone Node 22.23.1 runtime and on Linux and macOS before step 4 ships.
+- **Measurements:** the runtime and stack measurements were repeated on Node 22.23.1, the standalone runtime's version, on macOS and Linux (section 11).
+- **Packaging:** a model-free smoke (`scripts/code-mode-smoke.mjs`) runs one `run_code` call against a local mock provider in the bundled npm CLI on every pull request (`npm run build`), in the packed npm install of `release:local`, and in the standalone binary on all six targets of Build Standalone Candidate.
 
 The invariants below tie each guarantee to the test that fails when it breaks.
 
@@ -946,7 +947,7 @@ The invariants below tie each guarantee to the test that fails when it breaks.
 
 Each guarantee the runtime makes, where it is enforced, and the test that fails when it breaks. Section 5 records the decisions; these tables are how they are kept. A pull request that adds a guarantee adds its row, and a guarantee without a test says why. Every row describes merged code. A planned guarantee gets a row in a planned table, naming the test to write before the implementation, until the pull request that lands it moves the row into a table of its own. Steps 3 and 4 add their rows in their own pull requests.
 
-Sources are in `src/core/code-mode/` unless a path says otherwise. Tests are cited as `file: "test name"`, where `file` names a test file in `test/code-mode/` without `.test.ts`, except `mcp`, which is `test/mcp.test.ts`, `operation-authorization`, which is `test/operation-authorization.test.ts`, and `suite/run-code`, which is `test/suite/run-code.test.ts`.
+Sources are in `src/core/code-mode/` unless a path says otherwise. Tests are cited as `file: "test name"`, where `file` names a test file in `test/code-mode/` without `.test.ts`, except `mcp`, which is `test/mcp.test.ts`, `operation-authorization`, which is `test/operation-authorization.test.ts`, `suite/run-code`, which is `test/suite/run-code.test.ts`, and `release-security`, which is the repository's `scripts/release-security.test.mjs`.
 
 #### Isolation and the engine
 
@@ -1124,6 +1125,17 @@ The `run_code` tool supplies each call's tool name, arguments, and read-only cla
 | `details` records each call's tool (`mcp.<server>.<tool>` for MCP tools), argument preview, the path of a `read`, `write`, or `edit` call, status, read-only classification, and error, with exact totals. It stays within 64 KB by dropping the previews of read-only calls, then the oldest read-only records, never a state-changing record. | `src/core/tools/run-code.ts` `buildRunCodeDetails`; `src/core/session/tool-runtime.ts` `codeModeCallIsReadOnly` | run-code: "records each call's tool, arguments, and path, with exact totals and output statistics"; "names MCP calls by server and tool and passes the script's timeout to the runtime"; "drops the argument previews of the oldest read-only calls first to fit 64 KB"; "then drops the oldest read-only records, never a state-changing one"; "keeps every record of a run that fits, and caps errors at 256 characters" |
 | Images the script did not show are listed with the call that returned them: `read <path>`, `image_gen <path>`, or `MCP <server>.<tool>`. | `src/core/tools/run-code.ts` `imageSource`, `taggingImages` | run-code: "labels the images a script did not show by the call that returned them" |
 
+#### Packaging
+
+Paths in this table are relative to the repository root, except `pool.ts`.
+
+| Guarantee | Enforced in | Test |
+|---|---|---|
+| Every install form runs scripts: the source and `dist` forms load `worker.ts` or `worker.js` beside `pool.ts`, the bundled npm CLI loads `code-mode-worker.js` beside its bundle, and the standalone binary loads `code-mode-worker.cjs` next to the executable. The engine is the installed `quickjs-wasi` package's `quickjs.wasm`, except in the standalone binary, which loads the copy next to the executable. The standalone binary is detected first, because its bundle has no `import.meta.url`. | `pool.ts` `workerUrl`, `wasmPath`; the `code-mode-worker` entries of `scripts/build-coding-agent-npm-cli.mjs` and `scripts/build-standalone.mjs` | `scripts/code-mode-smoke.mjs`: one `run_code` call that reads a file, against a local mock provider. The bundled npm CLI build, `scripts/local-release.mjs` (the packed npm install), and the standalone build run it and fail when it fails |
+| The npm bundle embeds no WebAssembly: the engine stays in the `quickjs-wasi` dependency, which npm installs with its license. | `scripts/build-coding-agent-npm-cli.mjs` metafile check | Build-time check: the bundled npm CLI build fails on a `.node` or `.wasm` input |
+| The standalone archive holds exactly one WebAssembly file, `quickjs.wasm`, whose package version and SHA-256 match `compliance/quickjs-wasi.json`; any other WASM file, or a missing `quickjs.wasm`, fails the build. | `scripts/build-standalone.mjs` `copyQuickjsWasm`, `assertStagedBinarySidecars` | release-security: "published packages and binary build include the repository license and notices" |
+| The notices of every component `quickjs.wasm` embeds (QuickJS-NG, its Unicode tables, the `quickjs-wasi` interface layer, wasi-libc with musl and cloudlibc, and compiler-rt) ship in `LICENSES/quickjs-wasi/`, copied from committed texts whose sources and SHA-256 digests `compliance/quickjs-wasi.json` pins; the committed tree must match the list exactly. | `scripts/build-standalone.mjs` `copyQuickjsWasm`; `compliance/quickjs-wasi.json` | release-security: "published packages and binary build include the repository license and notices" |
+
 ## 10. Risks
 
 - **Engine vulnerabilities without CVEs.** Mitigated by WebAssembly containment, the single-bridge rule, host-side validation of every call, exact pinning, and tracking QuickJS-NG releases.
@@ -1201,9 +1213,23 @@ Parsing nested source needs a deeper native stack, and how much deeper depends o
 
 | Node | Smallest worker native stack at which every probe ended in a guest error |
 |---|---|
-| 22.20.0 | 8 MB or less |
-| 24.20.0 | 11 MB |
-| 25.2.1 | 13 MB |
+| 22.20.0 (Windows) | 8 MB or less |
+| 22.23.1 (macOS arm64; Linux arm64 and x64) | 8 MB |
+| 24.20.0 (Windows) | 11 MB |
+| 25.2.1 (Windows) | 13 MB |
+| 26.4.0 (macOS arm64) | 10 MB |
+
+The 22.23.1 and 26.4.0 rows were measured through Volt's runtime (`CodeModeWorkerPool` with `workerStackSizeMb` varied, `maxStackSize` at 512 KiB), Linux in containers on an Apple silicon Mac (x64 under emulation). Smallest worker native stack per probe, from which every larger size also ended in a guest error; below it, the worker's native stack overflowed and the script ended as a sandbox failure:
+
+| Probe | 22.23.1, macOS and Linux | 26.4.0, macOS |
+|---|---|---|
+| Recursion | 2 MB | 2 MB |
+| Async recursion | 2 MB | 2 MB |
+| 100,000-level `JSON.parse` | 5 MB | 5 MB |
+| `eval` of 5,000 nested template literals | 6 MB | 7 MB |
+| `eval` of a 100,000-level array literal | 7 MB | 9 MB |
+| Script source that is a 100,000-level array literal | 7 MB | 9 MB |
+| `new Function` with 100,000 levels of parentheses | 8 MB | 10 MB |
 
 At every size from 8 MB, these ended in a guest error or completed: getter, async, and generator recursion; proxy, `bind`, and prototype chains 100,000 deep; `JSON.stringify`, `String`, and `flat` on a 100,000-level array; and deeply nested regular expressions.
 
@@ -1266,6 +1292,15 @@ Fixed per-request overhead of a default session, from the built system prompt an
 
 Runtime implementation (delivery step 1, Node 24.20, Windows): the first script in a process took 104 ms end to end, including compiling `quickjs.wasm`, starting the worker, and booting the VM; the next script took 3 ms on the prepared VM. With a 200 ms compute budget and 250 ms grace, the interrupt stopped `while (true) {}` after 204 ms, and the watchdog terminated a worker blocked in `String.prototype.indexOf` after 489 ms.
 
+The same runtime on Node 22.23.1, the standalone runtime's version, with the same budgets (prepared script: median of 20):
+
+| Host | First script | Prepared script | Interrupt stop | Watchdog stop |
+|---|---|---|---|---|
+| macOS arm64 | 51 ms | 2.4 ms | 203 ms | 467 ms |
+| Linux arm64 (container on the same Mac) | 62 ms | 2.6 ms | 204 ms | 501 ms |
+
+The standalone binary and the bundled npm CLI load the worker entry and `quickjs.wasm` from their own locations; the code mode smoke completes a `run_code` call in both (section 9).
+
 QuickJS heap for nested-call results (`getMemoryUsage().memoryUsedSize`, results of 1 MiB of JSON rows):
 
 | State | Heap |
@@ -1278,11 +1313,11 @@ QuickJS heap for nested-call results (`getMemoryUsage().memoryUsedSize`, results
 
 Parsed 1 MiB results held before out-of-memory: 9 with a 32 MiB limit, 18 with 64 MiB, and 38 with 128 MiB.
 
+License notices embedded in `quickjs.wasm`, from the `quickjs-wasi` 3.6.3 `Makefile` at tag `quickjs-wasi@3.6.3`: QuickJS-NG at submodule commit `6d46d07` (`quickjs.c`, `dtoa.c`, `libregexp.c`, `libunicode.c`; MIT, with the Unicode License V3 for the tables in `libunicode-table.h`), Vercel's `c/interface.c` (MIT), and, linked statically from the wasi-sdk 32 sysroot, wasi-libc (with musl and cloudlibc) and its emulated process-clock and signal libraries, plus compiler-rt's builtins, which musl's `printf` and `strtod` need for 128-bit `long double`. The package's own `LICENSE` covers only Vercel's code. `compliance/quickjs-wasi.json` lists each text with its pinned source.
+
 Gaps:
 
-- Repeat the runtime measurements on Node 22.23.1, the standalone runtime, and on Linux and macOS, including the stack-guard table, which depends on native stack usage. The codec primitives are confirmed on Node 22.20.
-- Verify loading `quickjs.wasm` and the worker entry from the standalone binary.
-- Derive the license notices embedded in the WASM binary. Inputs for `quickjs-wasi` 3.6.3, from its `Makefile` at tag `quickjs-wasi@3.6.3`: QuickJS-NG at submodule commit `6d46d07` (`quickjs.c`, `dtoa.c`, `libregexp.c`, `libunicode.c`; MIT), Vercel's `c/interface.c` (MIT), and the wasi-sdk 32 sysroot's libc and emulated process-clock and signal libraries, linked statically. The package's own `LICENSE` covers only Vercel's code.
+- The stack-guard table on Windows has not been repeated on Node 22.23.1; CI's Windows tests run on Node 22.23.1 and include the stack test at the 32 MB default.
 
 ## 12. References
 

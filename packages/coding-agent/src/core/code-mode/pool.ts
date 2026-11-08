@@ -1,6 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
+import { isBundledCli, isStandaloneBinary } from "../../config.ts";
 import {
 	type CodeModePoolOptions,
 	DEFAULT_CODE_MODE_POOL_OPTIONS,
@@ -326,9 +329,7 @@ export class CodeModeWorkerPool {
 
 	private loadWasm(): Promise<CompiledWasm> {
 		if (!this.wasm) {
-			const pending = readFile(createRequire(import.meta.url).resolve("quickjs-wasi/quickjs.wasm")).then((bytes) =>
-				wasmApi.compile(bytes),
-			);
+			const pending = readFile(wasmPath()).then((bytes) => wasmApi.compile(bytes));
 			pending.catch(() => {
 				if (this.wasm === pending) this.wasm = undefined;
 			});
@@ -361,9 +362,21 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal | undefined): 
 	});
 }
 
+/**
+ * The worker entry: next to the executable in the standalone binary, beside the bundle in the bundled npm CLI, and
+ * beside this module otherwise. The standalone binary is checked first: its bundle has no `import.meta.url`.
+ */
 function workerUrl(): URL {
+	if (isStandaloneBinary) return new URL("./code-mode-worker.cjs", pathToFileURL(process.execPath));
 	const moduleUrl = import.meta.url;
+	if (isBundledCli) return new URL("./code-mode-worker.js", moduleUrl);
 	return new URL(moduleUrl.endsWith(".ts") ? "./worker.ts" : "./worker.js", moduleUrl);
+}
+
+/** The engine: next to the executable in the standalone binary, and the `quickjs-wasi` package's file otherwise. */
+function wasmPath(): string {
+	if (isStandaloneBinary) return join(dirname(process.execPath), "quickjs.wasm");
+	return createRequire(import.meta.url).resolve("quickjs-wasi/quickjs.wasm");
 }
 
 let processPool: CodeModeWorkerPool | undefined;

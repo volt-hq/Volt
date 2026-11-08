@@ -2137,6 +2137,43 @@ test("published packages and binary build include the repository license and not
 			);
 		}
 	}
+	const quickjsCompliance = JSON.parse(readFileSync("compliance/quickjs-wasi.json", "utf8"));
+	assert.equal(quickjsCompliance.schemaVersion, 1);
+	assert.equal(quickjsCompliance.package, "quickjs-wasi");
+	assert.equal(
+		JSON.parse(readFileSync("node_modules/quickjs-wasi/package.json", "utf8")).version,
+		quickjsCompliance.version,
+	);
+	assert.equal(quickjsCompliance.wasm.path, "quickjs.wasm");
+	assert.equal(
+		createHash("sha256").update(readFileSync("node_modules/quickjs-wasi/quickjs.wasm")).digest("hex"),
+		quickjsCompliance.wasm.sha256,
+	);
+	const quickjsLicenseRoot = `compliance/quickjs-wasi-${quickjsCompliance.version}`;
+	assert.deepEqual(
+		readdirSync(quickjsLicenseRoot)
+			.map((name) => `${quickjsLicenseRoot}/${name}`)
+			.sort(),
+		quickjsCompliance.licenses.map(({ path }) => path).sort(),
+	);
+	for (const license of quickjsCompliance.licenses) {
+		assert.match(license.source, /^https:\/\/github\.com\//);
+		assert.equal(createHash("sha256").update(readFileSync(license.path)).digest("hex"), license.sha256);
+	}
+	assert.match(standaloneBuild, /"code-mode-worker": join\(codingAgentRoot, "src", "core", "code-mode", "worker\.ts"\)/);
+	assert.match(standaloneBuild, /copyFileSync\(join\(scratchDirectory, "code-mode-worker\.cjs"\)/);
+	assert.match(standaloneBuild, /compliance", "quickjs-wasi\.json"/);
+	assert.match(standaloneBuild, /quickjs\.wasm checksum mismatch/);
+	assert.match(standaloneBuild, /quickjs-wasi license checksum mismatch/);
+	assert.match(standaloneBuild, /does not exactly match compliance\/quickjs-wasi\.json/);
+	assert.match(standaloneBuild, /"LICENSES", "quickjs-wasi"/);
+	assert.match(standaloneBuild, /wasmFiles\.filter\(\(path\) => path !== QUICKJS_WASM\)/);
+	assert.match(standaloneBuild, /Standalone staging is missing \$\{QUICKJS_WASM\}/);
+	assert.match(standaloneBuild, /await smokeCodeMode\(standaloneExecutable\)/);
+	assert.match(
+		readFileSync("scripts/build-coding-agent-npm-cli.mjs", "utf8"),
+		/await smokeCodeMode\(process\.execPath, \[cliOutputPath\]\)/,
+	);
 	assert.match(standaloneBuild, /remote\/firebase-push-relay\/functions\/node_modules/);
 	assert.match(standaloneBuild, /Standalone staging contains unexpected WASM files/);
 	assert.match(standaloneBuild, /Standalone staging contains unexpected binary files/);

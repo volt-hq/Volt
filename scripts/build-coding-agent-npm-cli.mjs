@@ -6,6 +6,7 @@ import { isBuiltin } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import esbuild from "esbuild";
+import { smokeCodeMode } from "./code-mode-smoke.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const codingAgentRoot = join(repoRoot, "packages", "coding-agent");
@@ -81,6 +82,7 @@ async function build() {
 		{ in: join(codingAgentRoot, "dist", "cli.js"), out: "cli" },
 		{ in: join(codingAgentRoot, "dist", "utils", "image-resize-worker.js"), out: "image-resize-worker" },
 		{ in: join(codingAgentRoot, "dist", "core", "session-store", "worker.js"), out: "session-store-worker" },
+		{ in: join(codingAgentRoot, "dist", "core", "code-mode", "worker.js"), out: "code-mode-worker" },
 		{ in: join(repoRoot, "packages", "ai", "dist", "providers", "amazon-bedrock.js"), out: "amazon-bedrock" },
 	];
 	for (const entryPoint of entryPoints) assertRequiredFile(entryPoint.in);
@@ -115,6 +117,8 @@ async function build() {
 	assertRequiredFile(cliOutputPath);
 	chmodSync(cliOutputPath, 0o755);
 	smokeTestCli();
+	await smokeCodeMode(process.execPath, [cliOutputPath]);
+	console.log("Bundled npm CLI code mode smoke passed");
 }
 
 build().catch((error) => {

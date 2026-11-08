@@ -24,6 +24,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import esbuild from "esbuild";
 import postject from "postject";
+import { smokeCodeMode } from "./code-mode-smoke.mjs";
 import { readPeCertificateTable, stripPeCertificateTable } from "./pe-certificate.mjs";
 
 const SEA_SENTINEL_FUSE = "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2";
@@ -34,6 +35,9 @@ const codingAgentRoot = join(repoRoot, "packages", "coding-agent");
 const workspaceFsRoot = join(codingAgentRoot, "native", "workspace-fs");
 const defaultOutputDirectory = join(codingAgentRoot, "binaries");
 const runtimeConfigPath = join(repoRoot, "compliance", "standalone-runtime.json");
+const quickjsConfigPath = join(repoRoot, "compliance", "quickjs-wasi.json");
+// The code mode engine, loaded next to the executable; the only WASM file the standalone binary ships.
+const QUICKJS_WASM = "quickjs.wasm";
 const pythonCommand = process.env.VOLT_PYTHON || (process.platform === "win32" ? "python" : "python3");
 const cjsRequire = createRequire(import.meta.url);
 
@@ -309,6 +313,65 @@ function copyWorkspaceFsAssets(stageDirectory, target) {
 	}
 }
 
+/**
+ * Stages the code mode engine as quickjs.wasm after checking the installed quickjs-wasi package's version and the
+ * engine's bytes against compliance/quickjs-wasi.json, and the notices of the components the engine embeds, which
+ * the npm package does not carry, as LICENSES/quickjs-wasi/.
+ */
+function copyQuickjsWasm(stageDirectory) {
+	const config = JSON.parse(readFileSync(quickjsConfigPath, "utf8"));
+	if (
+		config.schemaVersion !== 1 ||
+		config.package !== "quickjs-wasi" ||
+		typeof config.version !== "string" ||
+		config.wasm?.path !== QUICKJS_WASM ||
+		!/^[0-9a-f]{64}$/.test(config.wasm?.sha256 ?? "") ||
+		!Array.isArray(config.licenses)
+	) {
+		throw new Error("compliance/quickjs-wasi.json is malformed");
+	}
+	const packageRoot = dirname(cjsRequire.resolve("quickjs-wasi/package.json"));
+	const installedVersion = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8")).version;
+	if (installedVersion !== config.version) {
+		throw new Error(`quickjs-wasi ${installedVersion} is installed, but compliance/quickjs-wasi.json pins ${config.version}`);
+	}
+	const source = join(packageRoot, config.wasm.path);
+	assertRequiredFile(source);
+	const digest = createHash("sha256").update(readFileSync(source)).digest("hex");
+	if (digest !== config.wasm.sha256) {
+		throw new Error(`quickjs.wasm checksum mismatch: expected ${config.wasm.sha256}, received ${digest}`);
+	}
+	const destination = join(stageDirectory, QUICKJS_WASM);
+	copyFileSync(source, destination);
+	chmodSync(destination, 0o644);
+
+	const licenseRoot = join(repoRoot, "compliance", `quickjs-wasi-${config.version}`);
+	const expectedLicenseFiles = new Set();
+	for (const license of config.licenses) {
+		const prefix = `compliance/quickjs-wasi-${config.version}/`;
+		if (
+			typeof license.path !== "string" ||
+			!license.path.startsWith(prefix) ||
+			license.path.slice(prefix.length).includes("/") ||
+			!/^https:\/\/github\.com\//.test(license.source ?? "") ||
+			!/^[0-9a-f]{64}$/.test(license.sha256 ?? "")
+		) {
+			throw new Error(`compliance/quickjs-wasi.json has a malformed license record: ${license.path}`);
+		}
+		const name = license.path.slice(prefix.length);
+		const licenseDigest = createHash("sha256").update(readFileSync(join(licenseRoot, name))).digest("hex");
+		if (licenseDigest !== license.sha256) throw new Error(`quickjs-wasi license checksum mismatch: ${license.path}`);
+		expectedLicenseFiles.add(name);
+	}
+	const licenseFiles = collectRegularFiles(licenseRoot);
+	if (licenseFiles.length === 0 || JSON.stringify(licenseFiles) !== JSON.stringify([...expectedLicenseFiles].sort())) {
+		throw new Error(`compliance/quickjs-wasi-${config.version} does not exactly match compliance/quickjs-wasi.json`);
+	}
+	const destinationLicenses = join(stageDirectory, "LICENSES", "quickjs-wasi");
+	mkdirSync(destinationLicenses, { recursive: true, mode: 0o755 });
+	for (const name of licenseFiles) copyFileSync(join(licenseRoot, name), join(destinationLicenses, name));
+}
+
 function assertStagedWorkspaceFsAddon(stageDirectory, target) {
 	const nativeTarget = workspaceFsTarget(target);
 	const prebuilds = join(stageDirectory, "native", "workspace-fs", "prebuilds");
@@ -424,6 +487,7 @@ function copyReleaseAssets(stageDirectory, target) {
 		copyFileSync(helper, join(destination, "win32-console-mode.node"));
 	}
 	copyWorkspaceFsAssets(stageDirectory, target);
+	copyQuickjsWasm(stageDirectory);
 }
 
 function assertNoSymlinks(directory) {
@@ -494,7 +558,11 @@ function assertStagedBinarySidecars(stageDirectory, target) {
 		}
 	};
 	visit(stageDirectory);
-	if (wasmFiles.length > 0) throw new Error(`Standalone staging contains unexpected WASM files:\n${wasmFiles.sort().join("\n")}`);
+	const unexpectedWasmFiles = wasmFiles.filter((path) => path !== QUICKJS_WASM);
+	if (unexpectedWasmFiles.length > 0) {
+		throw new Error(`Standalone staging contains unexpected WASM files:\n${unexpectedWasmFiles.sort().join("\n")}`);
+	}
+	if (!wasmFiles.includes(QUICKJS_WASM)) throw new Error(`Standalone staging is missing ${QUICKJS_WASM}`);
 	if (unexpectedBinaryFiles.length > 0) {
 		throw new Error(`Standalone staging contains unexpected binary files:\n${unexpectedBinaryFiles.sort().join("\n")}`);
 	}
@@ -552,6 +620,7 @@ async function bundleStandalone(scratchDirectory, stageDirectory) {
 			volt: entryPoint,
 			"image-resize-worker": join(codingAgentRoot, "src", "utils", "image-resize-worker.ts"),
 			"session-store-worker": join(codingAgentRoot, "src", "core", "session-store", "worker.ts"),
+			"code-mode-worker": join(codingAgentRoot, "src", "core", "code-mode", "worker.ts"),
 		},
 		outdir: scratchDirectory,
 		outExtension: { ".js": ".cjs" },
@@ -575,6 +644,7 @@ async function bundleStandalone(scratchDirectory, stageDirectory) {
 	writeFileSync(metafilePath, `${JSON.stringify(result.metafile, null, 2)}\n`, { mode: 0o644 });
 	copyFileSync(join(scratchDirectory, "image-resize-worker.cjs"), join(stageDirectory, "image-resize-worker.cjs"));
 	copyFileSync(join(scratchDirectory, "session-store-worker.cjs"), join(stageDirectory, "session-store-worker.cjs"));
+	copyFileSync(join(scratchDirectory, "code-mode-worker.cjs"), join(stageDirectory, "code-mode-worker.cjs"));
 
 	const licenseDirectory = join(stageDirectory, "LICENSES");
 	mkdirSync(licenseDirectory, { recursive: true, mode: 0o755 });
@@ -760,6 +830,8 @@ async function build() {
 		if (standaloneVersion !== packageJson.version) {
 			throw new Error(`Standalone smoke test reported version ${standaloneVersion}, expected ${packageJson.version}`);
 		}
+		await smokeCodeMode(standaloneExecutable);
+		console.log("Standalone code mode smoke passed");
 
 		const buildManifest = {
 			schemaVersion: 1,
