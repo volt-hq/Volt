@@ -13,7 +13,7 @@ import type {
 import type { CodeModeDispatchHost } from "../../src/core/code-mode/dispatch.ts";
 import { CodeModeWorkerPool } from "../../src/core/code-mode/pool.ts";
 import type { CodeModeRenderCall } from "../../src/core/code-mode/render.ts";
-import type { CodeModeScriptResult } from "../../src/core/code-mode/runtime.ts";
+import type { CodeModeScriptResult, CodeModeStoreWrites } from "../../src/core/code-mode/runtime.ts";
 import {
 	getTrustedToolOperationResolver,
 	type IntegrationReadAuthority,
@@ -24,6 +24,7 @@ import {
 	createRunCodeTool,
 	describeRunCode,
 	type RunCodeDetails,
+	type RunCodeProgress,
 } from "../../src/core/tools/run-code.ts";
 
 const cwd = mkdtempSync(join(tmpdir(), "volt-run-code-"));
@@ -78,6 +79,8 @@ const BASH_LINE =
 const READ_LINE = "- tools.read(args): Promise<string | ImageRef>";
 const MCP_LINE_START = "- MCP tools: tools.mcp.<server>.<tool>(args)";
 const NO_TOOLS = "No tools are available to scripts in this session.";
+const STORE_LINE =
+	"store(key, value) and load(key) keep small JSON values across scripts in this conversation; up to 1 MiB in total.";
 
 describe("run_code description", () => {
 	it("lists the default Build tools' bindings, with the shapes of bash, read, and image_gen", () => {
@@ -94,6 +97,7 @@ describe("run_code description", () => {
 		expect(description).toContain("A failed call rejects with ToolCallError");
 		expect(description).toContain("Limits: 30 s of computation, 200 tool calls, and 64 MiB of memory per script.");
 		expect(description).toContain(`Write shell commands with String.raw\`...\` and $VAR instead of \${VAR}.`);
+		expect(description.endsWith(`\n\n${STORE_LINE}`)).toBe(true);
 	});
 
 	it("lists only the bindings the research profile authorizes in Plan mode", () => {
@@ -156,6 +160,8 @@ describe("run_code description", () => {
 		expect(bindingLines(description)).toStrictEqual([]);
 		expect(description).not.toContain("Call tools as");
 		expect(description).not.toContain("ToolCallError");
+		// Scripts without tools can still keep values.
+		expect(description.endsWith(`\n\n${STORE_LINE}`)).toBe(true);
 	});
 });
 
@@ -208,11 +214,15 @@ const TOOLS = [
 		throw new Error("the tool broke");
 	}),
 	tool("wait", (_args, signal) => new Promise((_resolve, reject) => signal?.addEventListener("abort", reject))),
+	tool("slow", (args) => new Promise((resolve) => setTimeout(() => resolve(text("slow")), Number(args.ms ?? 0)))),
 	gateway(),
 ];
 const READ_ONLY = new Set(["read", "grep"]);
 /** Tools that stand in for extension tools: no trusted resolver, and bound only by name. */
-const EXTENSION_TOOLS = new Set(["broken", "wait"]);
+const EXTENSION_TOOLS = new Set(["broken", "wait", "slow"]);
+
+/** The stand-in session's stored values, and the writes each script recorded. */
+const storeState = { values: new Map<string, string>(), recorded: [] as CodeModeStoreWrites[] };
 
 /** A `run_code` tool over a session stand-in with every policy allowing every call. */
 function runCode(target: CodeModeWorkerPool = pool) {
@@ -241,6 +251,12 @@ function runCode(target: CodeModeWorkerPool = pool) {
 		callIsReadOnly: (bindingTarget: CodeModeBindingTarget) =>
 			bindingTarget.kind === "tool" && READ_ONLY.has(bindingTarget.toolName),
 		autoResizeImages: true,
+		storedValues: () => [...storeState.values],
+		recordStoreWrites: async (writes) => {
+			storeState.recorded.push(writes);
+			for (const [key, value] of writes.set) storeState.values.set(key, value);
+			for (const key of writes.delete) storeState.values.delete(key);
+		},
 		pool: target,
 	});
 }
@@ -406,13 +422,131 @@ describe("run_code", () => {
 		);
 		expect(details.images.unshown.map((ref) => ref.ref)).toStrictEqual(["img_1", "img_2", "img_3"]);
 	});
+
+	it("records a script's writes to stored values, also when it fails, and ends its result with the keys", async () => {
+		storeState.values.clear();
+		storeState.recorded.length = 0;
+		storeState.values.set("old", '"x"');
+		const first = await run("store('cursor', 2); store('old', undefined); return load('cursor');");
+		expect(first.output).toMatch(/\nReturn value: 2\nStored keys: cursor, old \(deleted\)$/);
+		expect(storeState.recorded).toStrictEqual([{ set: [["cursor", "2"]], delete: ["old"] }]);
+
+		const failing = await run("store('cursor', load('cursor') + 1); throw new Error('boom');");
+		expect(failing.isError).toBe(true);
+		expect(failing.output.split("\n").at(-1)).toBe("Stored keys: cursor");
+		expect(storeState.values.get("cursor")).toBe("3");
+
+		// A script that writes nothing records nothing.
+		const reading = await run("return load('cursor');");
+		expect(reading.output).toMatch(/Return value: 3$/);
+		expect(storeState.recorded).toHaveLength(2);
+	});
+});
+
+/** Runs a script, recording the partial results the live card receives and when each arrived. */
+async function runWithProgress(code: string) {
+	const updates: Array<{ at: number; lines: string[]; details: RunCodeProgress }> = [];
+	const result = await runCode().execute("call-1", { code }, undefined, (update) => {
+		const text = update.content
+			.filter((part): part is TextContent => part.type === "text")
+			.map((part) => part.text)
+			.join("\n");
+		updates.push({ at: performance.now(), lines: text.split("\n"), details: update.details as RunCodeProgress });
+	});
+	return { result, details: result.details as RunCodeDetails, updates };
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+describe("run_code progress", () => {
+	it("reports progress at most every 250 ms, always reports the last change, and stops when the script returns", async () => {
+		const { details, updates } = await runWithProgress(
+			[
+				"await Promise.allSettled([tools.broken({})]);",
+				"for (let i = 0; i < 30; i++) { await tools.read({ path: 'f' + i + '.txt' }); console.log('line ' + i); }",
+				"await tools.slow({ ms: 800 });",
+				"console.warn('after');",
+				"await tools.slow({ ms: 700 });",
+				"return 'done';",
+			].join("\n"),
+		);
+		expect(updates.length).toBeGreaterThanOrEqual(2);
+		for (let index = 1; index < updates.length; index++) {
+			expect(updates[index].at - updates[index - 1].at).toBeGreaterThanOrEqual(240);
+		}
+		for (const { details: progress } of updates) {
+			expect(progress.status).toBe("running");
+			expect(progress.language).toBe("javascript");
+			for (const call of progress.calls) {
+				if (call.endedAt !== undefined) expect(call.endedAt).toBeGreaterThanOrEqual(call.startedAt);
+			}
+		}
+		// The trailing report of the reads and the first wait, then of the second wait.
+		const first = updates.find(
+			({ details: progress }) => progress.callTotals.running === 1 && progress.calls.at(-1)?.seq === 32,
+		);
+		expect(first?.details).toMatchObject({
+			callTotals: { running: 1, completed: 30, failed: 1, cancelled: 0 },
+			outputLines: 30,
+		});
+		expect(first?.details.calls.at(-1)).toMatchObject({ tool: "slow", argsPreview: "ms=800", status: "running" });
+		expect(first?.lines.at(-1)).toBe("line 29");
+		const second = updates.find(({ details: progress }) => progress.calls.at(-1)?.seq === 33);
+		expect(second?.details).toMatchObject({ callTotals: { running: 1, completed: 31, failed: 1 }, outputLines: 31 });
+		expect(second?.lines.at(-1)).toBe("warn: after");
+		expect(
+			updates.some(({ details: progress }) =>
+				progress.calls.some(
+					(call) => call.seq === 1 && call.status === "failed" && call.error === "the tool broke",
+				),
+			),
+		).toBe(true);
+
+		const reported = updates.length;
+		await sleep(400);
+		expect(updates).toHaveLength(reported);
+		// The final details are the record of the run, not progress.
+		expect(details).toMatchObject({ status: "completed", callTotals: { completed: 32, failed: 1 }, complete: true });
+		expect(details).not.toHaveProperty("outputLines");
+		expect(details.calls[0]).not.toHaveProperty("startedAt");
+	});
+
+	it("keeps the newest 50 calls and 100 output lines, counting every call and line", async () => {
+		const { updates } = await runWithProgress(
+			[
+				"for (let i = 0; i < 60; i++) await tools.read({ path: 'f' + i + '.txt' });",
+				"for (let i = 0; i < 150; i++) console.log('line ' + i);",
+				"text('a\\r\\nb\\n');",
+				"await tools.slow({ ms: 800 });",
+			].join("\n"),
+		);
+		// Reported while the last call runs.
+		const last = updates.find(
+			({ details: progress }) => progress.callTotals.running === 1 && progress.calls.at(-1)?.seq === 61,
+		);
+		expect(last?.details.calls).toHaveLength(50);
+		expect(last?.details.calls[0]?.seq).toBe(12);
+		expect(last?.details.calls.at(-1)).toMatchObject({ seq: 61, tool: "slow", status: "running" });
+		expect(last?.details.callTotals).toStrictEqual({ running: 1, completed: 60, failed: 0, cancelled: 0 });
+		expect(last?.details.outputLines).toBe(152);
+		expect(last?.lines).toHaveLength(100);
+		expect(last?.lines[0]).toBe("line 52");
+		expect(last?.lines.slice(-2)).toStrictEqual(["a", "b"]);
+	});
 });
 
 describe("run_code details", () => {
 	const rendered = { content: [], isError: false, truncated: false, shownImages: [], unshownImages: [] };
 
 	function details(calls: CodeModeRenderCall[]): RunCodeDetails {
-		const result: CodeModeScriptResult = { ok: true, hasValue: false, output: [], calls, durationMs: 5 };
+		const result: CodeModeScriptResult = {
+			ok: true,
+			hasValue: false,
+			output: [],
+			calls,
+			durationMs: 5,
+			storeWrites: { set: [], delete: [] },
+		};
 		return buildRunCodeDetails({ result, calls, rendered, language: "javascript" });
 	}
 

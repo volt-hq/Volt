@@ -95,6 +95,15 @@ export const MAX_SHOWN_IMAGES = 10;
 /** Decoded image bytes the host retains for one script, including those of calls in flight (section 5.9). */
 export const MAX_RETAINED_IMAGE_BYTES = 64 * MIB;
 
+/** Length of a stored value's key, in characters (section 5.17). */
+export const MAX_STORED_KEY_CHARS = 256;
+
+/** A stored value's codec text, in UTF-8 bytes (section 5.17). */
+export const MAX_STORED_VALUE_BYTES = 256 * KIB;
+
+/** All stored values of a conversation: the UTF-8 bytes of their keys and codec text (section 5.17). */
+export const MAX_STORED_BYTES = 1 * MIB;
+
 /** Length of the error block a script failure reports, in characters, truncation marker included. */
 export const MAX_SCRIPT_ERROR_CHARS = 8 * KIB;
 

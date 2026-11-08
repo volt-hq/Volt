@@ -22,6 +22,7 @@ import type {
 	CodeModeFailure,
 	CodeModeOutputItem,
 	CodeModeScriptResult,
+	CodeModeStoreWrites,
 } from "./runtime.ts";
 
 /**
@@ -194,6 +195,8 @@ interface Sections {
 	unshown: Line[];
 	/** The error block and the nested-call summary of a failed script, each after a blank line. */
 	failure: Line[];
+	/** The keys the script stored or deleted, which end the rendering (section 5.17). */
+	stored: Line[];
 }
 
 function textLines(text: string): Line[] {
@@ -229,13 +232,16 @@ export async function renderCodeModeResult(input: CodeModeRenderInput): Promise<
 					{ text: "" },
 					...callSummary(input.calls).map((text): Line => ({ text })),
 				],
+		stored: storedKeysLine(result.storeWrites),
 	};
 	// The whole rendering, as the spill file holds it.
 	const full: Block[] = [
 		blockOf(sections.status.text),
 		...stream,
 		...(returned === undefined ? [] : [returned.block]),
-		...[...sections.noOutput, ...sections.unshown, ...sections.failure].map((line) => blockOf(line.text)),
+		...[...sections.noOutput, ...sections.unshown, ...sections.failure, ...sections.stored].map((line) =>
+			blockOf(line.text),
+		),
 	];
 	const fullSize = blocksSize(full);
 	const truncated = !fits(fullSize, OUTPUT_BUDGET);
@@ -337,7 +343,10 @@ function layOutSuccessWith(
 	marker: OmissionMarker,
 	notice: Line[],
 ): { lines: Line[]; returnCut: boolean; streamFits: boolean } {
-	const room = minus(OUTPUT_BUDGET, sizeOf([sections.status, ...sections.noOutput, ...sections.unshown]));
+	const room = minus(
+		OUTPUT_BUDGET,
+		sizeOf([sections.status, ...sections.noOutput, ...sections.unshown, ...sections.stored]),
+	);
 	const available = minus(room, sizeOf(notice));
 	const streamSize = blocksSize(sections.stream);
 	const returnSize = sections.returned?.block.size ?? { bytes: 0, lines: 0 };
@@ -362,6 +371,7 @@ function layOutSuccessWith(
 		...(returnCut && streamFits ? notice : []),
 		...sections.noOutput,
 		...sections.unshown,
+		...sections.stored,
 	];
 	return { lines, returnCut, streamFits };
 }
@@ -371,7 +381,7 @@ function layOutSuccessWith(
  * summary are kept, and the output stream uses what they leave.
  */
 function layOutFailure(sections: Sections, marker: OmissionMarker): Line[] {
-	const after = [...sections.unshown, ...sections.failure];
+	const after = [...sections.unshown, ...sections.failure, ...sections.stored];
 	const streamBudget = minus(OUTPUT_BUDGET, sizeOf([sections.status, ...after]));
 	const stream = fits(blocksSize(sections.stream), streamBudget)
 		? linesOf(sections.stream)
@@ -808,6 +818,23 @@ function outputLimitSentence(
 }
 
 /** State-changing calls a failure summary lists; the totals stay exact (section 5.11). */
+/** Keys the stored-keys line names, and characters of each; the rest are counted. */
+const MAX_LISTED_STORED_KEYS = 20;
+const MAX_STORED_KEY_LABEL_CHARS = 60;
+
+/**
+ * `Stored keys: cursor, done_ids, old (deleted)`: what the script left in the conversation's stored values, so the
+ * model knows they exist when it writes the next script (section 5.17). None when the script wrote nothing.
+ */
+function storedKeysLine(writes: CodeModeStoreWrites): Line[] {
+	const label = (key: string) => capChars(oneLine(key), MAX_STORED_KEY_LABEL_CHARS);
+	const keys = [...writes.set.map(([key]) => label(key)), ...writes.delete.map((key) => `${label(key)} (deleted)`)];
+	if (keys.length === 0) return [];
+	const more = keys.length - MAX_LISTED_STORED_KEYS;
+	const listed = keys.slice(0, MAX_LISTED_STORED_KEYS).join(", ");
+	return [{ text: `Stored keys: ${listed}${more > 0 ? `, and ${plural(more, "more key")}` : ""}` }];
+}
+
 const MAX_SUMMARY_ENTRIES = 20;
 /** Read-only tools a failure summary names. */
 const MAX_SUMMARY_READ_ONLY_TOOLS = 20;

@@ -649,6 +649,7 @@ export class AgentSession {
 				hostActions: this._hostActions,
 				conversation: () => this._conversation,
 				turnPolicy: () => this._turnPolicy,
+				sessionWriter: () => this._sessionWriter,
 				extensions: () => this._extensions,
 				extensionServices: () => this._extensionServices,
 				jobs: () => this._jobs,

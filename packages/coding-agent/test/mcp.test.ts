@@ -380,6 +380,48 @@ describe("MCP support", () => {
 		await manager.dispose();
 	});
 
+	it("adds how a script calls a tool to describe results only for tools code mode binds", async () => {
+		const tempDir = makeTempDir();
+		tempDirs.push(tempDir);
+		const manager = new McpManager({
+			config: createTestConfig(tempDir),
+			clientFactory: createFakeFactory("output"),
+			metadataCache: new McpMetadataCache({ agentDir: tempDir }),
+			outputStore: new McpOutputStore({ agentDir: tempDir, maxOutputBytes: 4096, maxOutputLines: 100 }),
+		});
+		const asked: string[][] = [];
+		const gateway = createMcpToolDefinition({
+			manager,
+			codeModeBinding: (server, tool) => {
+				asked.push([server, tool]);
+				return tool === "read_note" ? `tools.mcp.${server}.${tool}(args)` : undefined;
+			},
+		});
+		const run = (params: McpGatewayToolInput) =>
+			gateway.execute("describe", params, undefined, undefined, undefined as never);
+
+		const bound = await run({ action: "describe", server: "fake", tool: "read_note" });
+		expect(bound.details.result).toMatchObject({
+			server: "fake",
+			tool: "read_note",
+			codeMode: {
+				call: "tools.mcp.fake.read_note(args)",
+				returns: "Promise<{ text: string; structured?: unknown; images: ImageRef[] }>",
+			},
+		});
+		expect(bound.content[0]).toMatchObject({ text: expect.stringContaining('"codeMode":{"call"') });
+		const unbound = await run({ action: "describe", server: "fake", tool: "update_note" });
+		expect(unbound.details.result).not.toHaveProperty("codeMode");
+		// Only describe asks.
+		await run({ action: "call", server: "fake", tool: "read_note" });
+		await run({ action: "list_tools", server: "fake" });
+		expect(asked).toEqual([
+			["fake", "read_note"],
+			["fake", "update_note"],
+		]);
+		await manager.dispose();
+	});
+
 	it("requires explicit trusted-read config plus non-conflicting server annotations", async () => {
 		const tempDir = makeTempDir();
 		tempDirs.push(tempDir);
@@ -998,6 +1040,57 @@ describe("MCP support", () => {
 				}),
 			]);
 		}
+	});
+
+	it("names the run_code call in the audit entries of a script's calls, completed or failed, and only theirs", async () => {
+		const tempDir = makeTempDir();
+		tempDirs.push(tempDir);
+		const manager = new McpManager({
+			config: createTestConfig(tempDir),
+			clientFactory: {
+				connect: async () =>
+					({
+						getServerVersion: () => ({ name: "fake", version: "1.0.0" }),
+						listTools: async () => ({
+							tools: [
+								{ name: "read_note", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
+							],
+						}),
+						listResources: async () => ({ resources: [] }),
+						readResource: async () => ({ contents: [] }),
+						listPrompts: async () => ({ prompts: [] }),
+						getPrompt: async () => ({ messages: [] }),
+						callTool: async (params) => {
+							if (params.arguments?.fail === true) throw new Error("server failed");
+							return { content: [{ type: "text", text: "note" }] };
+						},
+						close: async () => undefined,
+					}) as McpClientConnection,
+			},
+			metadataCache: new McpMetadataCache({ agentDir: tempDir }),
+			outputStore: new McpOutputStore({ agentDir: tempDir, maxOutputBytes: 1024, maxOutputLines: 10 }),
+			auditLogger: new McpAuditLogger(tempDir),
+		});
+		const script: McpGatewayExecutionContext = { surface: "model", caller: "model", parentToolCallId: "call-7" };
+
+		await manager.callToolRaw("fake", "read_note", {}, script);
+		await expect(manager.callToolRaw("fake", "read_note", { fail: true }, script)).rejects.toThrow("server failed");
+		await manager.callTool(
+			{ action: "call", server: "fake", tool: "read_note" },
+			{ surface: "model", caller: "model" },
+		);
+
+		const audit = readFileSync(join(tempDir, "mcp", "audit.jsonl"), "utf-8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as Record<string, unknown>);
+		expect(audit).toMatchObject([
+			{ callerSurface: "model", parentToolCallId: "call-7", item: "read_note", status: "completed" },
+			{ callerSurface: "model", parentToolCallId: "call-7", item: "read_note", status: "failed" },
+			{ callerSurface: "model", item: "read_note", status: "completed" },
+		]);
+		expect(audit[2]).not.toHaveProperty("parentToolCallId");
+		await manager.dispose();
 	});
 
 	it("calls a tool for a script with callTool's checks, events, record, and audit, and returns the raw result", async () => {

@@ -35,7 +35,14 @@ it("captions an image that cannot be resized below the inline limits and sends n
 	for (const { image, format, caption } of cases) {
 		vi.mocked(resizeImage).mockClear();
 		const rendered = await renderCodeModeResult({
-			result: { ok: true, hasValue: false, output: [{ type: "image", ref: "img_1" }], calls: [], durationMs: 5 },
+			result: {
+				ok: true,
+				hasValue: false,
+				output: [{ type: "image", ref: "img_1" }],
+				calls: [],
+				durationMs: 5,
+				storeWrites: { set: [], delete: [] },
+			},
 			calls: [],
 			images: [image],
 		});

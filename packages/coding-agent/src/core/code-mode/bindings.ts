@@ -165,6 +165,20 @@ export function computeCodeModeBindings(sources: CodeModeBindingSources): CodeMo
 	return bindings;
 }
 
+const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
+
+/** What a script's call to an MCP tool resolves with (section 5.9 of docs/code-mode-design.md). */
+export const CODE_MODE_MCP_RESULT_SHAPE = "Promise<{ text: string; structured?: unknown; images: ImageRef[] }>";
+
+/**
+ * How a script calls the binding at `path` (section 5.14 of docs/code-mode-design.md): `tools.<segment>...(args)`, with
+ * brackets for segments that are not JavaScript identifiers, as in `tools.mcp["my-server"]["get-file"](args)`.
+ */
+export function codeModeCallExpression(path: readonly string[]): string {
+	const access = path.map((segment) => (IDENTIFIER.test(segment) ? `.${segment}` : `[${JSON.stringify(segment)}]`));
+	return `tools${access.join("")}(args)`;
+}
+
 /**
  * Whether scripts can call MCP tools in a session with these sources, whichever tools are listed: the built-in `mcp`
  * gateway is active and the grant profile, if any, authorizes it, or a direct MCP tool is bound.

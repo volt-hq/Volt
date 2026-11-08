@@ -47,6 +47,7 @@ import {
 	presentWebFetch,
 	presentWebSearch,
 } from "./query-presenters.ts";
+import { presentRunCode } from "./run-code-presenter.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "./truncate.ts";
 import { presentJobs, presentSubagent, presentSubagentRegistry } from "./work-presenters.ts";
 
@@ -632,6 +633,7 @@ export const BUILTIN_TOOL_PRESENTERS: ReadonlyMap<string, ToolPresenter> = new M
 	["web_search", presentWebSearch],
 	["web_fetch", presentWebFetch],
 	["mcp", presentMcp],
+	["run_code", presentRunCode],
 	["request_user_input", presentRequestUserInput],
 	["jobs", presentJobs],
 	["subagent", presentBackground(presentSubagent)],

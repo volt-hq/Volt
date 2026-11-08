@@ -6,6 +6,7 @@ import {
 	type CodeModeBindingSources,
 	type CodeModeBindingSpec,
 	type CodeModeBindingTarget,
+	codeModeCallExpression,
 	computeCodeModeBindings,
 	NEVER_BINDABLE_TOOL_NAMES,
 } from "../../src/core/code-mode/bindings.ts";
@@ -315,5 +316,13 @@ describe("code mode bindings", () => {
 			}),
 		);
 		expect(bindings).toStrictEqual([]);
+	});
+
+	it("writes how a script calls a binding, with brackets for segments that are not identifiers", () => {
+		expect(codeModeCallExpression(["read"])).toBe("tools.read(args)");
+		expect(codeModeCallExpression(["mcp", "github", "search_issues"])).toBe("tools.mcp.github.search_issues(args)");
+		expect(codeModeCallExpression(["mcp", "my-server", "get-file"])).toBe('tools.mcp["my-server"]["get-file"](args)');
+		expect(codeModeCallExpression(["mcp", "s", '1"\\x'])).toBe('tools.mcp.s["1\\"\\\\x"](args)');
+		expect(codeModeCallExpression(["$tool_2"])).toBe("tools.$tool_2(args)");
 	});
 });

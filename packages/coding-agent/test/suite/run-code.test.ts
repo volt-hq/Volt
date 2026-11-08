@@ -3,7 +3,9 @@ import { join } from "node:path";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import { type Context, fauxAssistantMessage, fauxToolCall, type JsonObject } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
+import type { CompactionDetails } from "../../src/core/compaction/compaction.ts";
 import type { ExtensionOperationOrigin } from "../../src/core/extensions/index.ts";
+import { SessionManager } from "../../src/core/session-manager.ts";
 import type { RunCodeDetails } from "../../src/core/tools/run-code.ts";
 import { createHarness, getMessageText, type Harness, type HarnessOptions } from "./harness.ts";
 
@@ -140,6 +142,92 @@ describe("run_code in a session", () => {
 			{ tool: "write", path: "out.txt", status: "completed", readOnly: false },
 		]);
 		expect(readFileSync(join(harness.tempDir, "out.txt"), "utf8")).toBe("written");
+	});
+
+	it("keeps stored values across scripts and when the session is reopened", async () => {
+		const harness = await setup({ ...CODE_MODE, log: "sqlite" });
+		harness.setResponses([
+			runCode("store('cursor', { page: 2, id: 2n ** 70n + 1n }); return 'saved';"),
+			fauxAssistantMessage("saved"),
+			runCode(
+				"const cursor = load('cursor'); store('cursor', { ...cursor, page: cursor.page + 1 }); return cursor.page;",
+			),
+			fauxAssistantMessage("advanced"),
+		]);
+		await harness.session.prompt("save");
+		await harness.session.prompt("advance");
+		const [saved, advanced] = toolResults(harness, "run_code");
+		expect(getMessageText(saved)).toMatch(/\nStored keys: cursor$/);
+		expect(getMessageText(advanced)).toContain("Return value: 2\nStored keys: cursor");
+		const entries = harness.sessionManager
+			.getBranch()
+			.filter((entry) => entry.type === "custom" && entry.customType === "volt-run-code-store");
+		expect(entries.map((entry) => (entry.type === "custom" ? entry.data : undefined))).toStrictEqual([
+			{ set: [["cursor", '{"page":2,"id":1180591620717411303425}']], delete: [] },
+			{ set: [["cursor", '{"page":3,"id":1180591620717411303425}']], delete: [] },
+		]);
+
+		const ref = harness.session.sessionRef!;
+		harness.session.dispose();
+		await harness.session.waitForClosed();
+		const reopened = await setup({ ...CODE_MODE, sessionManager: await SessionManager.open(ref) });
+		reopened.setResponses([runCode("return load('cursor');"), fauxAssistantMessage("loaded")]);
+		await reopened.session.prompt("load");
+		expect(getMessageText(toolResults(reopened, "run_code").at(-1)!)).toContain(
+			'Return value: {"page":3,"id":1180591620717411303425}',
+		);
+	});
+
+	it("gives a branch the values written on its own path", async () => {
+		const harness = await setup(CODE_MODE);
+		harness.setResponses([
+			fauxAssistantMessage("ready"),
+			runCode("store('cursor', 1);"),
+			fauxAssistantMessage("stored"),
+			runCode("return String(load('cursor'));"),
+			fauxAssistantMessage("checked"),
+		]);
+		await harness.session.prompt("start");
+		const ready = harness.sessionManager.getLeafId()!;
+		await harness.session.prompt("store");
+		await harness.session.navigateTree(ready);
+		await harness.session.prompt("check");
+		expect(getMessageText(toolResults(harness, "run_code").at(-1)!)).toContain("Return value: undefined");
+	});
+
+	it("keeps each conversation's values to itself, as a subagent's conversation is its own", async () => {
+		const first = await setup(CODE_MODE);
+		const second = await setup(CODE_MODE);
+		first.setResponses([runCode("store('owner', 'first');"), fauxAssistantMessage("stored")]);
+		second.setResponses([runCode("return String(load('owner'));"), fauxAssistantMessage("checked")]);
+		await first.session.prompt("store");
+		await second.session.prompt("check");
+		expect(getMessageText(toolResults(second, "run_code")[0])).toContain("Return value: undefined");
+	});
+
+	it("lists the files a script read and edited in the next compaction", async () => {
+		const harness = await setup({ settings: { ...CODE_MODE.settings, compaction: { keepRecentTokens: 1 } } });
+		writeFileSync(join(harness.tempDir, "notes.txt"), "a = 2");
+		writeFileSync(join(harness.tempDir, "src.ts"), "const a = 1;\n");
+		harness.setResponses([
+			runCode(
+				"const notes = await tools.read({ path: 'notes.txt' });\nawait tools.edit({ path: 'src.ts', edits: [{ oldText: 'a = 1', newText: notes }] });",
+			),
+			fauxAssistantMessage("edited"),
+			fauxAssistantMessage("next"),
+		]);
+		await harness.session.prompt("apply the notes");
+		await harness.session.prompt("continue");
+		expect(readFileSync(join(harness.tempDir, "src.ts"), "utf8")).toBe("const a = 2;\n");
+
+		harness.setResponses([fauxAssistantMessage("checkpoint")]);
+		const result = await harness.session.compact();
+
+		const details = result.details as CompactionDetails;
+		expect(details.readFiles).toEqual(["notes.txt"]);
+		expect(details.modifiedFiles).toEqual(["src.ts"]);
+		expect(result.summary).toContain("<modified-files>\nsrc.ts\n</modified-files>");
+		expect(result.summary).toContain("<read-files>\nnotes.txt\n</read-files>");
 	});
 
 	it("binds only read-only tools in Plan mode, where only nested reads count as research", async () => {

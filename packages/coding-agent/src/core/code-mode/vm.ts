@@ -24,6 +24,7 @@ export type ScriptVmMessage =
 	| { type: "call"; payload: string }
 	| { type: "output"; payload: string }
 	| { type: "done"; payload: string }
+	| { type: "store"; payload: string }
 	| { type: "stopped"; reason: "stop" | "compute_budget" }
 	| { type: "stalled" }
 	| { type: "crash"; reason: string };
@@ -46,6 +47,8 @@ export interface ScriptVmStart {
 	computeBudgetMs: number;
 	maxReportedRejections: number;
 	maxArgumentBytes: number;
+	/** The conversation's stored values: keys and the codec text of their values. */
+	stored: [string, string][];
 }
 
 type HaltReason = "done" | "stop" | "compute_budget" | "crash";
@@ -208,7 +211,11 @@ export class ScriptVm {
 		this.maxReportedRejections = request.maxReportedRejections;
 		const vm = this.quickjs;
 
-		const install: PreludeInstall = { bindings: request.bindings, maxArgumentBytes: request.maxArgumentBytes };
+		const install: PreludeInstall = {
+			bindings: request.bindings,
+			maxArgumentBytes: request.maxArgumentBytes,
+			stored: request.stored,
+		};
 		const bindings = vm.newString(JSON.stringify(install));
 		try {
 			this.execute(() => vm.callFunction(this.api.install, vm.undefined, bindings).dispose());
@@ -412,6 +419,9 @@ export class ScriptVm {
 				return;
 			case "output":
 				this.emit({ type: "output", payload: payloadText });
+				return;
+			case "store":
+				this.emit({ type: "store", payload: payloadText });
 				return;
 			case "done":
 				this.pendingDone = payloadText;

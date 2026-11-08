@@ -14,10 +14,12 @@ import {
 	type CodeModeActiveTool,
 	type CodeModeBindingSources,
 	type CodeModeBindingTarget,
+	codeModeCallExpression,
 	codeModeCallsMcpTools,
 	computeCodeModeBindings,
 } from "../code-mode/bindings.ts";
 import { codeModeDispatchHostOf } from "../code-mode/dispatch.ts";
+import { CODE_MODE_STORE_ENTRY_TYPE, codeModeStoreEntryData, foldCodeModeStore } from "../code-mode/store.ts";
 import { type ToolDefinition, type ToolInfo, wrapRegisteredTools } from "../extensions/index.ts";
 import type { LiveState } from "../host/live-state.ts";
 import { resolveLspConfig } from "../lsp/config.ts";
@@ -39,6 +41,7 @@ import type { Personality } from "../personality.ts";
 import { formatPlanPolicy, type PlanningState } from "../planning.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
 import type { SessionManager } from "../session-manager.ts";
+import type { SessionWriter } from "../session-writer.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "../source-info.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
@@ -163,6 +166,8 @@ export interface SessionToolRuntimeHost {
 	conversation(): Conversation<AgentTool>;
 	/** The session's turn policy, whose tool-call and tool-result policies a code mode script's nested calls pass. */
 	turnPolicy(): SessionTurnPolicy;
+	/** The session's writer, where code mode records scripts' writes to the stored values. */
+	sessionWriter(): SessionWriter;
 	extensions(): SessionExtensionBinding;
 	extensionServices(): SessionExtensionServices;
 	jobs(): SessionJobs;
@@ -377,6 +382,21 @@ export class SessionToolRuntime {
 			grantProfile: this.host.operationGrantProfile(),
 			mcpTools: this.mcpManager?.getCallableTools() ?? [],
 		};
+	}
+
+	/**
+	 * How a script calls an MCP tool, while the trusted `run_code` is active and a script starting now would get a
+	 * binding for the tool (section 5.14 of docs/code-mode-design.md); otherwise undefined. `server` is matched as the
+	 * MCP manager looks servers up.
+	 */
+	codeModeMcpBinding(server: string, tool: string): string | undefined {
+		if (!this.stagedRunCode) return undefined;
+		const normalized = server.trim().toLowerCase();
+		const bindings = computeCodeModeBindings(this.codeModeBindingSources());
+		const binding =
+			bindings.find(({ target }) => target.kind === "mcp" && target.server === normalized && target.tool === tool) ??
+			bindings.find(({ target }) => target.kind === "mcp" && target.server === server && target.tool === tool);
+		return binding === undefined ? undefined : codeModeCallExpression(binding.path);
 	}
 
 	/** The registered tools of these names, as code mode classifies them for bindings. */
@@ -1062,6 +1082,7 @@ export class SessionToolRuntime {
 								mcp: {
 									manager: this.mcpManager,
 									isRestrictedTrustedRead: () => this.host.operationGrantProfile() !== undefined,
+									codeModeBinding: (server, tool) => this.codeModeMcpBinding(server, tool),
 								},
 							}
 						: {}),
@@ -1070,6 +1091,12 @@ export class SessionToolRuntime {
 						dispatchHost: () => codeModeDispatchHostOf(this, this.host.turnPolicy(), this.host.cwd),
 						callIsReadOnly: (target, args) => this.codeModeCallIsReadOnly(target, args),
 						autoResizeImages,
+						storedValues: () => foldCodeModeStore(this.host.sessionManager.getBranch()),
+						recordStoreWrites: async (writes) => {
+							await this.host
+								.sessionWriter()
+								.appendCustomEntry(CODE_MODE_STORE_ENTRY_TYPE, codeModeStoreEntryData(writes));
+						},
 					},
 				});
 
