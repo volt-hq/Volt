@@ -40,12 +40,12 @@ async function render(input: Partial<CodeModeRenderInput> & Pick<CodeModeRenderI
 
 function succeeded(output: CodeModeOutputItem[], value?: unknown, durationMs = 3240): CodeModeScriptSuccess {
 	return value === undefined
-		? { ok: true, hasValue: false, output, calls: [], durationMs }
-		: { ok: true, hasValue: true, value, output, calls: [], durationMs };
+		? { ok: true, hasValue: false, output, calls: [], durationMs, storeWrites: { set: [], delete: [] } }
+		: { ok: true, hasValue: true, value, output, calls: [], durationMs, storeWrites: { set: [], delete: [] } };
 }
 
 function failed(failure: CodeModeFailure, output: CodeModeOutputItem[] = [], started = true): CodeModeScriptFailure {
-	return { ok: false, failure, started, output, calls: [], durationMs: 6400 };
+	return { ok: false, failure, started, output, calls: [], durationMs: 6400, storeWrites: { set: [], delete: [] } };
 }
 
 const text = (value: string): CodeModeOutputItem => ({ type: "text", text: value });
@@ -1160,6 +1160,53 @@ describe("code mode result rendering within the output limit", () => {
 				if (value === undefined) delete process.env[key];
 				else process.env[key] = value;
 			});
+		}
+	});
+});
+
+describe("code mode result rendering of stored keys", () => {
+	const KEYS_LINE = /^Stored keys: /;
+
+	it("ends with the keys the script stored and deleted, bounded on one line", async () => {
+		const short = await render({
+			result: {
+				...succeeded([text("done")], 3),
+				storeWrites: { set: [["cursor", "2"]], delete: ["old"] },
+			},
+		});
+		expect(textOf(short).split("\n").at(-1)).toBe("Stored keys: cursor, old (deleted)");
+
+		const keys = Array.from({ length: 25 }, (_, index): [string, string] => [`key${index}`, "1"]);
+		keys[0] = [`line\nbreak${"k".repeat(100)}`, "1"];
+		const many = await render({ result: { ...succeeded([]), storeWrites: { set: keys, delete: [] } } });
+		const last = textOf(many).split("\n").at(-1) ?? "";
+		expect(last).toMatch(KEYS_LINE);
+		expect(last).toContain("line\\nbreak");
+		expect(last).toContain("key19, and 5 more keys");
+		expect(last).not.toContain("key20");
+
+		const none = await render({ result: succeeded([text("done")]) });
+		expect(textOf(none)).not.toMatch(/Stored keys/);
+	});
+
+	it("keeps the stored keys within the output budget when the output is cut, also for a failed script", async () => {
+		const flood = Array.from({ length: 5000 }, (_, index) => text(`line ${index} ${"x".repeat(40)}`));
+		const storeWrites = { set: [["cursor", "2"]] as [string, string][], delete: [] };
+		for (const result of [
+			{ ...succeeded(flood, "x".repeat(60_000)), storeWrites },
+			{ ...failed({ kind: "timeout", timeoutMs: 1000 }, flood), storeWrites },
+		]) {
+			const rendered = await render({ result });
+			const output = textOf(rendered);
+			expect(rendered.truncated).toBe(true);
+			expect(Buffer.byteLength(output)).toBeLessThanOrEqual(50 * 1024);
+			expect(output.split("\n").length).toBeLessThanOrEqual(2000);
+			expect(output.split("\n").at(-1)).toBe("Stored keys: cursor");
+			expect(
+				readFileSync(rendered.fullOutputPath ?? "", "utf8")
+					.split("\n")
+					.at(-1),
+			).toBe("Stored keys: cursor");
 		}
 	});
 });

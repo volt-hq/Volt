@@ -16,6 +16,9 @@ export interface PreludeConfig {
 	maxErrorSummaryChars: number;
 	maxImageRefLength: number;
 	maxShownImages: number;
+	maxStoredKeyChars: number;
+	maxStoredValueBytes: number;
+	maxStoredBytes: number;
 	scriptFilename: string;
 	scriptPrefixLength: number;
 	preludeFilename: string;
@@ -62,6 +65,8 @@ export interface PreludeApi {
 export interface PreludeInstall {
 	bindings: CodeModeBinding[];
 	maxArgumentBytes: number;
+	/** The conversation's stored values: keys and the codec text of their values (section 5.17). */
+	stored: [string, string][];
 }
 
 type Bridge = (kind: string, payload: string) => void;
@@ -160,6 +165,9 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 		/** Image references the script received in call results; only these can be shown. */
 		const receivedImageRefs = new SetCtor<string>();
 		let shownImages = 0;
+		/** The conversation's stored values as codec text, and their size: UTF-8 bytes of keys and values. */
+		let stored = new MapCtor<string, string>();
+		let storedBytes = 0;
 
 		/**
 		 * A data property descriptor without a prototype. defineProperty reads descriptor fields with [[Get]], so
@@ -416,6 +424,77 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 			});
 		}
 
+		/** Whether `text` has no lone surrogates, so its UTF-8 length is the same on both sides of the bridge. */
+		function isWellFormed(text: string): boolean {
+			for (let i = 0; i < text.length; i++) {
+				const code = StringPrototypeCharCodeAt(text, i);
+				if (code >= 0xdc00 && code <= 0xdfff) return false;
+				if (code >= 0xd800 && code <= 0xdbff) {
+					const next = StringPrototypeCharCodeAt(text, i + 1);
+					if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+					i++;
+				}
+			}
+			return true;
+		}
+
+		function storageKey(key: unknown, fn: string): string {
+			if (
+				typeof key !== "string" ||
+				key.length === 0 ||
+				key.length > config.maxStoredKeyChars ||
+				!isWellFormed(key)
+			) {
+				throw new TypeErrorCtor(`${fn}(): the key must be a string of 1 to ${config.maxStoredKeyChars} characters`);
+			}
+			return key;
+		}
+
+		function storedEntryBytes(key: string, value: string): number {
+			return utf8Length(key) + utf8Length(value);
+		}
+
+		/**
+		 * Keeps `value` under `key` for later scripts in the conversation, or deletes the key when `value` is
+		 * undefined (section 5.17). Each write reaches the host as it happens, so writes before a failure are kept.
+		 */
+		function store(key: unknown, value: unknown): void {
+			const name = storageKey(key, "store");
+			const previous = MapPrototypeGet(stored, name);
+			if (value === undefined) {
+				if (previous === undefined) return;
+				const payload = `{"key":${JSONStringify(name)},"delete":true}`;
+				MapPrototypeDelete(stored, name);
+				storedBytes -= storedEntryBytes(name, previous);
+				bridge("store", payload);
+				return;
+			}
+			const encoded = codec.encode(value, "value");
+			const bytes = utf8Length(encoded);
+			if (bytes > config.maxStoredValueBytes) {
+				throw new RangeErrorCtor(
+					`store(): the value is ${bytes} bytes encoded, more than the limit of ${config.maxStoredValueBytes}`,
+				);
+			}
+			const total =
+				storedBytes - (previous === undefined ? 0 : storedEntryBytes(name, previous)) + utf8Length(name) + bytes;
+			if (total > config.maxStoredBytes) {
+				throw new RangeErrorCtor(
+					`store(): stored values would take ${total} bytes, more than the limit of ${config.maxStoredBytes}`,
+				);
+			}
+			const payload = `{"key":${JSONStringify(name)},"value":${encoded}}`;
+			MapPrototypeSet(stored, name, encoded);
+			storedBytes = total;
+			bridge("store", payload);
+		}
+
+		/** A copy of the value stored under `key`, or undefined. */
+		function load(key: unknown): unknown {
+			const value = MapPrototypeGet(stored, storageKey(key, "load"));
+			return value === undefined ? undefined : codec.decode(value);
+		}
+
 		function makeBinding(name: string, displayName: string) {
 			const binding = (args?: unknown): Promise<unknown> => callTool(name, args);
 			ObjectDefineProperty(binding, "name", dataDescriptor(displayName, false, false));
@@ -425,6 +504,13 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 		function install(installText: string): void {
 			const request = JSONParse(installText) as PreludeInstall;
 			maxArgumentBytes = request.maxArgumentBytes;
+			stored = new MapCtor<string, string>();
+			storedBytes = 0;
+			for (let i = 0; i < request.stored.length; i++) {
+				const pair = request.stored[i];
+				MapPrototypeSet(stored, pair[0], pair[1]);
+				storedBytes += storedEntryBytes(pair[0], pair[1]);
+			}
 			const bindings = request.bindings;
 			const root = ObjectCreate(null) as object;
 			for (let i = 0; i < bindings.length; i++) {
@@ -642,6 +728,8 @@ function codeModePrelude(createCodec: typeof createLosslessCodec) {
 		defineHidden(globalObject, "text", text);
 		defineHidden(globalObject, "image", image);
 		defineHidden(globalObject, "ToolCallError", ToolCallError);
+		defineHidden(globalObject, "store", store);
+		defineHidden(globalObject, "load", load);
 
 		const api = ObjectCreate(null) as PreludeApi;
 		api.install = install;

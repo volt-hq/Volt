@@ -84,6 +84,7 @@ async function start(message: Extract<HostToWorkerMessage, { type: "start" }>): 
 			computeBudgetMs: message.computeBudgetMs,
 			maxReportedRejections: message.maxReportedRejections,
 			maxArgumentBytes: message.maxArgumentBytes,
+			stored: message.stored,
 		},
 		(vmMessage) => forward(message.id, vmMessage),
 	);

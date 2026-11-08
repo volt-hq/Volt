@@ -18,6 +18,7 @@ import {
 	MAX_CODE_MODE_SCRIPT_TIMEOUT_MS,
 	MAX_SCRIPT_ERROR_CHARS,
 	MAX_SCRIPT_ERROR_SUMMARY_CHARS,
+	MAX_STORED_BYTES,
 } from "../code-mode/limits.ts";
 import { type CodeModeWorkerPool, getCodeModeWorkerPool } from "../code-mode/pool.ts";
 import { type CodeModeErrorDescription, SCRIPT_FILENAME, SCRIPT_PREFIX, SCRIPT_SUFFIX } from "../code-mode/prelude.ts";
@@ -34,6 +35,7 @@ import {
 	type CodeModeFailure,
 	type CodeModeOutputItem,
 	type CodeModeScriptResult,
+	type CodeModeStoreWrites,
 	runCodeModeScript,
 } from "../code-mode/runtime.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
@@ -138,6 +140,13 @@ export interface RunCodeToolOptions {
 	callIsReadOnly(target: CodeModeBindingTarget, args: Record<string, unknown>): boolean;
 	/** Whether shown images are resized to fit providers' inline limits, as `read` resizes its images. */
 	autoResizeImages: boolean;
+	/**
+	 * The conversation's stored values along its current branch (section 5.17): keys and the codec text of their
+	 * values. Read when a script starts.
+	 */
+	storedValues(): Array<[string, string]>;
+	/** Records a script's net writes to the stored values; called once for each script that wrote anything. */
+	recordStoreWrites(writes: CodeModeStoreWrites): Promise<void>;
 	/** The worker pool scripts run on; the process's pool by default. */
 	pool?: CodeModeWorkerPool;
 }
@@ -155,6 +164,7 @@ const ERRORS =
 	'A failed call rejects with ToolCallError { tool; kind: "invalid_arguments" | "blocked" | "failed" | "cancelled"; reason?; message }. Use Promise.allSettled for independent calls so one failure does not lose the others.';
 const OUTPUT = `Output: text(value), console.log/warn/error(...), image(ref), and the return value appear in order. ImageRef = { type: "image"; ref; mimeType; width?; height?; bytes; path? }; only images passed to image(ref) reach you. Output is limited to ${DEFAULT_MAX_BYTES / 1024} KB, with the full output saved to a file you can read.`;
 const LIMITS = `Limits: ${DEFAULT_CODE_MODE_SCRIPT_LIMITS.computeBudgetMs / 1000} s of computation, ${DEFAULT_CODE_MODE_SCRIPT_LIMITS.callBudget} tool calls, and ${DEFAULT_CODE_MODE_POOL_OPTIONS.memoryLimitBytes / MIB} MiB of memory per script. Tool calls made before a failure are not undone; a failed result lists them.`;
+const STORE = `store(key, value) and load(key) keep small JSON values across scripts in this conversation; up to ${MAX_STORED_BYTES / MIB} MiB in total.`;
 const SHELL = `Write shell commands with String.raw\`...\` and $VAR instead of \${VAR}.`;
 
 /** Result shapes of the trusted built-in tools whose script values are not plain text, in the order they are listed. */
@@ -191,12 +201,12 @@ export function describeRunCode(sources: CodeModeBindingSources): string {
 		lines.push(`- ${plain.map((name) => codeModeCallExpression([name])).join(", ")}: Promise<string>`);
 	if (codeModeCallsMcpTools(sources)) lines.push(MCP_LINE);
 	const limits = shaped.has("bash") ? `${LIMITS} ${SHELL}` : LIMITS;
-	if (lines.length === 0) return [INTRO, LANGUAGE, NO_TOOLS, OUTPUT, limits].join("\n\n");
-	return [INTRO, LANGUAGE, `${CALLS}:\n${lines.join("\n")}`, ERRORS, OUTPUT, limits].join("\n\n");
+	if (lines.length === 0) return [INTRO, LANGUAGE, NO_TOOLS, OUTPUT, limits, STORE].join("\n\n");
+	return [INTRO, LANGUAGE, `${CALLS}:\n${lines.join("\n")}`, ERRORS, OUTPUT, limits, STORE].join("\n\n");
 }
 
 /** The description of the registered tool, before a session stages the one that lists its bindings. */
-const REGISTERED_DESCRIPTION = [INTRO, LANGUAGE, `${CALLS}.`, ERRORS, OUTPUT, LIMITS].join("\n\n");
+const REGISTERED_DESCRIPTION = [INTRO, LANGUAGE, `${CALLS}.`, ERRORS, OUTPUT, LIMITS, STORE].join("\n\n");
 
 type PreparedScript =
 	| { ok: true; code: string; language: "javascript" | "typescript" }
@@ -558,6 +568,7 @@ export function createRunCodeToolDefinition(
 						signal,
 						...(params.timeoutMs === undefined ? {} : { timeoutMs: params.timeoutMs }),
 						images,
+						stored: options.storedValues(),
 						onCall: (call) => {
 							callArgs.set(call.seq, call.args);
 							const target = targets.get(call.binding);
@@ -588,7 +599,12 @@ export function createRunCodeToolDefinition(
 					output: [],
 					calls: [],
 					durationMs: performance.now() - startedAt,
+					storeWrites: { set: [], delete: [] },
 				};
+			}
+			// Kept when the script failed too: its side effects stay, and a script that records progress can resume.
+			if (result.storeWrites.set.length > 0 || result.storeWrites.delete.length > 0) {
+				await options.recordStoreWrites(result.storeWrites);
 			}
 			const calls = result.calls.map((record): CodeModeRenderCall => {
 				const target = targets.get(record.binding);

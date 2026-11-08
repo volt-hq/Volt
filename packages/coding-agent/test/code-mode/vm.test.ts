@@ -9,6 +9,9 @@ import {
 	MAX_SCRIPT_ERROR_NAME_CHARS,
 	MAX_SCRIPT_ERROR_SUMMARY_CHARS,
 	MAX_SHOWN_IMAGES,
+	MAX_STORED_BYTES,
+	MAX_STORED_KEY_CHARS,
+	MAX_STORED_VALUE_BYTES,
 } from "../../src/core/code-mode/limits.ts";
 import {
 	type CodeModeBinding,
@@ -36,6 +39,9 @@ const PRELUDE: PreludeConfig = {
 	maxErrorSummaryChars: MAX_SCRIPT_ERROR_SUMMARY_CHARS,
 	maxImageRefLength: MAX_IMAGE_REF_LENGTH,
 	maxShownImages: MAX_SHOWN_IMAGES,
+	maxStoredKeyChars: MAX_STORED_KEY_CHARS,
+	maxStoredValueBytes: MAX_STORED_VALUE_BYTES,
+	maxStoredBytes: MAX_STORED_BYTES,
 	scriptFilename: SCRIPT_FILENAME,
 	scriptPrefixLength: SCRIPT_PREFIX.length,
 	preludeFilename: PRELUDE_FILENAME,
@@ -61,6 +67,8 @@ interface RunOptions {
 	lastInFirstOut?: boolean;
 	/** Image references every successful result carries. */
 	imageRefs?: string[];
+	/** The conversation's stored values when the script starts. */
+	stored?: [string, string][];
 }
 
 interface RunResult {
@@ -85,6 +93,7 @@ async function runScript(code: string, options: RunOptions = {}): Promise<RunRes
 				computeBudgetMs: options.computeBudgetMs ?? 30_000,
 				maxReportedRejections: 10,
 				maxArgumentBytes: options.maxArgumentBytes ?? MIB,
+				stored: options.stored ?? [],
 			},
 			(message) => {
 				messages.push(message);
@@ -120,6 +129,11 @@ async function runScript(code: string, options: RunOptions = {}): Promise<RunRes
 
 function texts(result: RunResult): string[] {
 	return result.output.map((item) => (item.type === "image" ? `[image ${item.ref}]` : item.text));
+}
+
+/** The payloads of the writes to stored values the VM posted. */
+function storeWrites(result: RunResult): string[] {
+	return result.messages.flatMap((message) => (message.type === "store" ? [message.payload] : []));
 }
 
 function failure(result: RunResult) {
@@ -516,6 +530,9 @@ describe("code mode VM bindings", () => {
 			let outcome = "no error";
 			try { await tools.fail({}); } catch (error) { outcome = error instanceof ToolCallError ? error.kind + ": " + error.message : "wrong error"; }
 			text(outcome);
+			store("cursor", { page: 2, big: 2n ** 70n + 1n });
+			store("seed", undefined);
+			text([load("cursor"), load("seed")]);
 			Promise.reject(new Error("unhandled in a hostile realm"));
 			throw new Error("hostile done", { cause });
 		`,
@@ -528,8 +545,13 @@ describe("code mode VM bindings", () => {
 					if (binding === "fail") throw new Error("nope");
 					return args;
 				},
+				stored: [["seed", '"x"']],
 			},
 		);
+		expect(storeWrites(result)).toStrictEqual([
+			'{"key":"cursor","value":{"page":2,"big":1180591620717411303425}}',
+			'{"key":"seed","delete":true}',
+		]);
 		expect(result.calls.map((call) => call.args)).toStrictEqual([
 			{ list: [1, { deep: [true, null] }], big: 2n ** 70n + 1n, text: "line" },
 			{},
@@ -539,6 +561,7 @@ describe("code mode VM bindings", () => {
 			'warned Map(1) {"k" => [1,2]}',
 			'{"list":[1,{"deep":[true,null]}],"big":1180591620717411303425n,"text":"line"}',
 			"failed: nope",
+			'[{"page":2,"big":1180591620717411303425n},undefined]',
 			"unhandled rejection: Error: unhandled in a hostile realm",
 		]);
 		const error = failure(result).error;
@@ -557,6 +580,79 @@ describe("code mode VM bindings", () => {
 			expect(result.done).toStrictEqual({ ok: true, hasValue: true, value: 5 });
 			expect(texts(result)).toStrictEqual([]);
 		}
+	});
+});
+
+describe("code mode VM stored values", () => {
+	it("loads copies of stored values, posts each write, and deletes with undefined", async () => {
+		const result = await runScript(
+			`
+			const first = load("cursor");
+			first.page = 99;
+			store("done", ["a", -0]);
+			store("done", ["a", "b"]);
+			store("cursor", undefined);
+			store("never stored", undefined);
+			return { first, again: load("cursor"), done: load("done"), missing: load("missing") };
+		`,
+			{ stored: [["cursor", '{"page":1,"id":12345678901234567890}']] },
+		);
+		expect(result.done).toStrictEqual({
+			ok: true,
+			hasValue: true,
+			value: { first: { page: 99, id: 12345678901234567890n }, done: ["a", "b"] },
+		});
+		// Deleting a key that is not stored posts nothing.
+		expect(storeWrites(result)).toStrictEqual([
+			'{"key":"done","value":["a",-0]}',
+			'{"key":"done","value":["a","b"]}',
+			'{"key":"cursor","delete":true}',
+		]);
+	});
+
+	it("rejects invalid keys and values over the limits catchably, without posting a write", async () => {
+		const result = await runScript(
+			`
+			const errors = [];
+			const attempts = [
+				() => store(1, 1),
+				() => store("", 1),
+				() => store("k".repeat(257), 1),
+				() => store("\uD800", 1),
+				() => load({}),
+				() => store("date", new Date(0)),
+				() => store("big", "x".repeat(262143)),
+				// Each takes 262145 bytes with its key: three fit in 1 MiB, a fourth does not.
+				() => store("a", "x".repeat(262142)),
+				() => store("b", "x".repeat(262142)),
+				() => store("c", "x".repeat(262142)),
+				() => store("d", "x".repeat(262142)),
+			];
+			for (const attempt of attempts) {
+				try { attempt(); errors.push("stored"); } catch (error) { errors.push(error.constructor.name + ": " + error.message); }
+			}
+			return errors;
+		`,
+		);
+		const keyError = "TypeError: store(): the key must be a string of 1 to 256 characters";
+		expect(result.done).toStrictEqual({
+			ok: true,
+			hasValue: true,
+			value: [
+				keyError,
+				keyError,
+				keyError,
+				keyError,
+				"TypeError: load(): the key must be a string of 1 to 256 characters",
+				"TypeError: value: Date is not JSON; use .toISOString()",
+				"RangeError: store(): the value is 262145 bytes encoded, more than the limit of 262144",
+				"stored",
+				"stored",
+				"stored",
+				"RangeError: store(): stored values would take 1048580 bytes, more than the limit of 1048576",
+			],
+		});
+		expect(storeWrites(result)).toHaveLength(3);
 	});
 });
 
