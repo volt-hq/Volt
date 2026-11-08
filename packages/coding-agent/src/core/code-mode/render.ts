@@ -548,7 +548,7 @@ function truncateReturnValue(value: unknown, budget: Size): Line[] {
 	return [header, ...truncateLines(lineWindow([body]), inner, marker), footer];
 }
 
-/** A capped copy of a value, and the UTF-8 bytes of its compact JSON as the codec writes it. */
+/** A capped copy of a value, and the UTF-8 bytes of its compact JSON as `returnValueJson` writes it. */
 interface Capped {
 	value: unknown;
 	bytes: number;
@@ -564,11 +564,11 @@ interface Capped {
  */
 function capValue(value: unknown, stringCap: number, arrayCap: number): Capped {
 	if (typeof value === "string") {
-		const whole: Capped = { value, bytes: encodedStringBytes(value) + 2 };
+		const whole: Capped = { value, bytes: jsonStringBytes(value) + 2 };
 		if (value.length <= stringCap) return whole;
 		const end = isHighSurrogate(value.charCodeAt(stringCap - 1)) ? stringCap - 1 : stringCap;
 		const capped = `${value.slice(0, end)}... [${value.length - end} more chars]`;
-		const bytes = encodedStringBytes(capped) + 2;
+		const bytes = jsonStringBytes(capped) + 2;
 		return bytes < whole.bytes ? { value: capped, bytes } : whole;
 	}
 	if (Array.isArray(value)) {
@@ -583,7 +583,7 @@ function capValue(value: unknown, stringCap: number, arrayCap: number): Capped {
 		}
 		if (value.length > kept) {
 			const marker = `[${value.length - kept} more items]`;
-			const markerBytes = encodedStringBytes(marker) + 2;
+			const markerBytes = jsonStringBytes(marker) + 2;
 			// The items left out, each with a comma. The marker shortens the JSON once they take more than it and its
 			// comma, the whole array having one comma too many; later items only add to them.
 			let restBytes = 0;
@@ -612,7 +612,7 @@ function capValue(value: unknown, stringCap: number, arrayCap: number): Capped {
 			entries.push([key, capped.value]);
 			// The codec leaves out properties holding undefined.
 			if (item === undefined) continue;
-			bytes += encodedStringBytes(key) + 2 + 1 + capped.bytes + 1;
+			bytes += jsonStringBytes(key) + 2 + 1 + capped.bytes + 1;
 			written++;
 		}
 		if (written > 0) bytes--;
@@ -906,11 +906,25 @@ const MAX_PREVIEW_STRING_CHARS = 60;
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
 const JSON_LINE_SEPARATORS = /[\u2028\u2029]/g;
 
-/** JSON text of a string. `JSON.stringify` escapes `\n` and `\r` but not U+2028 and U+2029, which this escapes too. */
+/** Escapes U+2028 and U+2029 in JSON text. `JSON.stringify` escapes `\n` and `\r` but writes these as they are. */
+function escapeLineSeparators(json: string): string {
+	return json.replace(JSON_LINE_SEPARATORS, (separator) => (separator === "\u2028" ? "\\u2028" : "\\u2029"));
+}
+
+/** JSON text of a string, with U+2028 and U+2029 escaped. */
 function jsonString(text: string): string {
-	return JSON.stringify(text).replace(JSON_LINE_SEPARATORS, (separator) =>
-		separator === "\u2028" ? "\\u2028" : "\\u2029",
-	);
+	return escapeLineSeparators(JSON.stringify(text));
+}
+
+/** UTF-8 bytes of a string in JSON as the codec writes it with U+2028 and U+2029 escaped, without its quotes. */
+function jsonStringBytes(text: string): number {
+	let bytes = encodedStringBytes(text);
+	// An escape takes 6 bytes where the separator takes 3.
+	for (let index = 0; index < text.length; index++) {
+		const code = text.charCodeAt(index);
+		if (code === 0x2028 || code === 0x2029) bytes += 3;
+	}
+	return bytes;
 }
 
 function numberText(value: number): string {
@@ -1165,9 +1179,13 @@ function returnBlock(value: unknown): Block {
 	return blockOf(`${RETURN_VALUE_LABEL}${returnValueJson(value)}`);
 }
 
+/**
+ * A return value as the codec writes it, with exact numbers, and with U+2028 and U+2029 escaped so that its strings
+ * cannot start lines of their own.
+ */
 function returnValueJson(value: unknown): string {
 	try {
-		return encodeBridgeValue(value, "return value");
+		return escapeLineSeparators(encodeBridgeValue(value, "return value"));
 	} catch {
 		// The runtime decoded the value with the codec, so it always encodes; a value from elsewhere might not.
 		return "[unprintable value]";

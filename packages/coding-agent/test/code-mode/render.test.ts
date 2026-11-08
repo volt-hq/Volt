@@ -210,6 +210,18 @@ describe("code mode result rendering of a successful script", () => {
 		expect(await returned(0)).toStrictEqual(["Return value: 0"]);
 	});
 
+	it("escapes U+2028 and U+2029 in a return value's JSON and counts the escapes when it truncates the value", async () => {
+		const shown = textOf(await render({ result: succeeded([], { "a\u2028b": ["c\u2029d"] }) })).split("\n");
+		expect(shown.slice(1)).toStrictEqual(['Return value: {"a\\u2028b":["c\\u2029d"]}']);
+		// Escaped, each string is longer than when cut at 64 characters, so it is cut and more items fit.
+		const value = Array.from({ length: 2000 }, () => `${"a".repeat(64)}${"\u2028".repeat(5)}`);
+		const { lines: truncated } = await renderBounded({ result: succeeded([], value) });
+		const returned = truncated.find((line) => line.startsWith("Return value: ")) as string;
+		const parsed = JSON.parse(returned.slice("Return value: ".length)) as string[];
+		expect(parsed[0]).toBe(`${"a".repeat(64)}... [5 more chars]`);
+		expect(parsed.at(-1)).toMatch(/^\[\d+ more items\]$/);
+	});
+
 	it("says (no output) when the script printed and returned nothing, and counts one tool call", async () => {
 		const rendered = await render({
 			result: succeeded([], undefined, 59),
