@@ -74,19 +74,12 @@ describe("operation authorization", () => {
 		});
 	});
 
-	it("makes run_code visible to the research profile without authorizing an operation of its own", () => {
+	it("gives run_code no capabilities of its own, advertised or resolved", () => {
 		const runCode = getTrustedToolOperationResolver("run_code");
-		// It advertises what scripts may call: the bindable built-in tools' operations and trusted MCP reads.
-		expect(runCode?.advertisedCapabilitySets).toEqual(
-			expect.arrayContaining([
-				["workspace.read"],
-				["network.read"],
-				["workspace.write"],
-				["process.execute"],
-				["integration.read"],
-			]),
-		);
-		expect(isToolVisibleUnderGrant(runCode, RESEARCH_OPERATION_GRANT_PROFILE)).toBe(true);
+		// What a script can reach depends on the session's active tools, so the resolver shows it under no profile.
+		expect(runCode?.advertisedCapabilitySets).toEqual([]);
+		expect(isToolVisibleUnderGrant(runCode, RESEARCH_OPERATION_GRANT_PROFILE)).toBe(false);
+		expect(resolverCanProvideResearchEvidence(runCode, RESEARCH_OPERATION_GRANT_PROFILE)).toBe(false);
 		const decision = authorizeToolOperation(runCode, { code: "return 1" }, RESEARCH_OPERATION_GRANT_PROFILE);
 		expect(decision).toMatchObject({
 			allowed: true,

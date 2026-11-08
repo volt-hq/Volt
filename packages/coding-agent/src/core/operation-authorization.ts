@@ -1,4 +1,3 @@
-import { BINDABLE_BUILTIN_TOOL_NAMES } from "./code-mode/bindings.ts";
 import { type InspectionToolInput, resolveInspectionCommand } from "./tools/inspect.ts";
 
 export const OPERATION_CAPABILITIES = [
@@ -205,30 +204,18 @@ function createMcpResolver(authority: IntegrationReadAuthority): ToolOperationRe
 	};
 }
 
-let runCodeResolver: ToolOperationResolver | undefined;
-
 /**
- * The resolver of `run_code` (section 5.12 of docs/code-mode-design.md). It advertises the capability sets of the
- * tools scripts may call, the bindable built-in tools and MCP tools configured as trusted reads, so a grant profile
- * that authorizes any of them makes `run_code` visible. A call resolves to no capabilities, because the script itself
- * performs no operation: each nested call is authorized as its own call under the same profile, and a script's
- * bindings are narrowed to what that profile authorizes. The outer call therefore provides no research evidence;
- * only its successful nested reads do.
+ * The resolver of `run_code` (section 5.12 of docs/code-mode-design.md). A call resolves to no capabilities, because
+ * the script itself performs no operation: each nested call is authorized as its own call under the same profile, and
+ * a script's bindings are narrowed to what that profile authorizes. The outer call therefore provides no research
+ * evidence; only its successful nested reads do. It advertises no capability sets either: what a script can reach
+ * depends on the session's active tools, so no grant profile shows `run_code` by its resolver. Plan mode activates it
+ * only while its scripts would get a binding (`SessionToolRuntime.syncPlanningRuntime`).
  */
-function getRunCodeResolver(): ToolOperationResolver {
-	// Built on first use: the bindings module imports this one.
-	if (!runCodeResolver) {
-		const sets = new Map<string, readonly OperationCapability[]>();
-		for (const name of BINDABLE_BUILTIN_TOOL_NAMES) {
-			for (const capabilities of getTrustedToolOperationResolver(name)?.advertisedCapabilitySets ?? []) {
-				sets.set([...capabilities].sort().join(" "), capabilities);
-			}
-		}
-		sets.set("integration.read", ["integration.read"]);
-		runCodeResolver = { advertisedCapabilitySets: [...sets.values()], resolve: () => resolved() };
-	}
-	return runCodeResolver;
-}
+const RUN_CODE_RESOLVER: ToolOperationResolver = {
+	advertisedCapabilitySets: [],
+	resolve: () => resolved(),
+};
 
 export const RESEARCH_OPERATION_GRANT_PROFILE: OperationGrantProfile = Object.freeze({
 	id: "research",
@@ -249,7 +236,7 @@ export function getTrustedToolOperationResolver(
 ): ToolOperationResolver | undefined {
 	if (toolName === "lsp") return LSP_RESOLVER;
 	if (toolName === "inspect") return INSPECTION_RESOLVER;
-	if (toolName === "run_code") return getRunCodeResolver();
+	if (toolName === "run_code") return RUN_CODE_RESOLVER;
 	if (toolName === "mcp" && options.integrationReadAuthority) {
 		return createMcpResolver(options.integrationReadAuthority);
 	}

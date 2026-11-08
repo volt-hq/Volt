@@ -10,7 +10,13 @@ import { join } from "node:path";
 import type { AgentMessage, AgentTool, Conversation } from "@hansjm10/volt-agent-core";
 import type { Api, ImageContent, JsonValue, Model } from "@hansjm10/volt-ai";
 import type { AgentSessionConfig, AgentSessionEvent } from "../agent-session.ts";
-import type { CodeModeActiveTool, CodeModeBindingSources, CodeModeBindingTarget } from "../code-mode/bindings.ts";
+import {
+	type CodeModeActiveTool,
+	type CodeModeBindingSources,
+	type CodeModeBindingTarget,
+	codeModeCallsMcpTools,
+	computeCodeModeBindings,
+} from "../code-mode/bindings.ts";
 import { codeModeDispatchHostOf } from "../code-mode/dispatch.ts";
 import { type ToolDefinition, type ToolInfo, wrapRegisteredTools } from "../extensions/index.ts";
 import type { LiveState } from "../host/live-state.ts";
@@ -366,7 +372,16 @@ export class SessionToolRuntime {
 	 * docs/code-mode-design.md).
 	 */
 	codeModeBindingSources(): CodeModeBindingSources {
-		const activeTools = this.getActiveToolNames().map((name): CodeModeActiveTool => {
+		return {
+			activeTools: this.codeModeActiveTools(this.getActiveToolNames()),
+			grantProfile: this.host.operationGrantProfile(),
+			mcpTools: this.mcpManager?.getCallableTools() ?? [],
+		};
+	}
+
+	/** The registered tools of these names, as code mode classifies them for bindings. */
+	private codeModeActiveTools(names: readonly string[]): CodeModeActiveTool[] {
+		return names.map((name): CodeModeActiveTool => {
 			if (this.isTrustedBuiltin(name))
 				return { name, kind: "builtin", resolver: this.trustedOperationResolver(name) };
 			const direct = this.directMcpTools.get(name);
@@ -376,11 +391,6 @@ export class SessionToolRuntime {
 			}
 			return { name, kind: "other" };
 		});
-		return {
-			activeTools,
-			grantProfile: this.host.operationGrantProfile(),
-			mcpTools: this.mcpManager?.getCallableTools() ?? [],
-		};
 	}
 
 	/**
@@ -573,15 +583,7 @@ export class SessionToolRuntime {
 		const effective = [
 			...new Set(
 				planningState.mode === "plan"
-					? Array.from(this.toolRegistry.keys()).filter(
-							(name) =>
-								isToolVisibleUnderGrant(
-									this.trustedOperationResolver(name),
-									RESEARCH_OPERATION_GRANT_PROFILE,
-								) &&
-								// Plan mode offers every tool the profile authorizes, but code mode only where Build mode would.
-								(name !== "run_code" || this.requestedBuildToolNames.includes(name)),
-						)
+					? this.planToolNames()
 					: planningState.plan?.phase === "active"
 						? [...this.requestedBuildToolNames, "update_plan_progress", "request_replan"]
 						: [...this.requestedBuildToolNames],
@@ -599,6 +601,29 @@ export class SessionToolRuntime {
 			this.setEffectiveToolsByName(effective);
 		}
 		this.applyTrustedPlanningInstructions();
+	}
+
+	/**
+	 * The tools Plan mode activates, in registry order: every registered tool the research profile shows, and the
+	 * trusted `run_code` where Build mode would activate it and its scripts would get a binding among those tools
+	 * (section 5.12 of docs/code-mode-design.md). Its resolver shows it under no profile, because what a script can
+	 * reach depends on the other active tools.
+	 */
+	private planToolNames(): string[] {
+		const names = Array.from(this.toolRegistry.keys());
+		const shown = names.filter(
+			(name) =>
+				this.isToolAvailableToCurrentModel(name) &&
+				isToolVisibleUnderGrant(this.trustedOperationResolver(name), RESEARCH_OPERATION_GRANT_PROFILE),
+		);
+		if (!this.requestedBuildToolNames.includes("run_code") || !this.isTrustedBuiltin("run_code")) return shown;
+		const sources = { activeTools: this.codeModeActiveTools(shown), grantProfile: RESEARCH_OPERATION_GRANT_PROFILE };
+		// As the description counts bindings: whichever MCP tools are listed when a script starts.
+		const bindsTools =
+			computeCodeModeBindings({ ...sources, mcpTools: [] }).length > 0 || codeModeCallsMcpTools(sources);
+		if (!bindsTools) return shown;
+		const shownNames = new Set(shown);
+		return names.filter((name) => name === "run_code" || shownNames.has(name));
 	}
 
 	/** Start the MCP servers and restore their direct tools before Build mode runs unrestricted. */
