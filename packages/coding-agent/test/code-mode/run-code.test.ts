@@ -23,6 +23,7 @@ import {
 	buildRunCodeDetails,
 	createRunCodeTool,
 	describeRunCode,
+	type RunCodeCallDetails,
 	type RunCodeDetails,
 	type RunCodeProgress,
 } from "../../src/core/tools/run-code.ts";
@@ -356,6 +357,7 @@ describe("run_code", () => {
 				path: "a.txt",
 				status: "completed",
 				readOnly: true,
+				startMs: expect.any(Number),
 				durationMs: expect.any(Number),
 			},
 			{
@@ -365,6 +367,7 @@ describe("run_code", () => {
 				path: "b.txt",
 				status: "completed",
 				readOnly: false,
+				startMs: expect.any(Number),
 				durationMs: expect.any(Number),
 			},
 			{
@@ -373,6 +376,7 @@ describe("run_code", () => {
 				argsPreview: 'pattern="TODO" path="src"',
 				status: "completed",
 				readOnly: true,
+				startMs: expect.any(Number),
 				durationMs: expect.any(Number),
 			},
 			{
@@ -381,6 +385,7 @@ describe("run_code", () => {
 				argsPreview: 'path="c.txt"',
 				status: "failed",
 				readOnly: false,
+				startMs: expect.any(Number),
 				durationMs: expect.any(Number),
 				error: "the tool broke",
 			},
@@ -393,6 +398,22 @@ describe("run_code", () => {
 			images: { shown: [], unshown: [] },
 		});
 		expect(details.wallMs).toBeGreaterThanOrEqual(0);
+	});
+
+	it("records when the script issued each call, so calls it had in flight at once overlap", async () => {
+		const { details } = await run(
+			"await Promise.all([tools.slow({ ms: 80 }), tools.slow({ ms: 80 })]);\nawait tools.slow({ ms: 20 });",
+		);
+		const [first, second, third] = details.calls;
+		const end = (call: RunCodeCallDetails) => call.startMs + call.durationMs;
+		// Issued together: the second starts before the first ends.
+		expect(second.startMs).toBeLessThan(end(first));
+		// Awaited after both: it starts once they end, give or take rounding.
+		expect(third.startMs).toBeGreaterThanOrEqual(Math.max(end(first), end(second)) - 1);
+		for (const call of details.calls) {
+			expect(call.startMs).toBeGreaterThanOrEqual(0);
+			expect(end(call)).toBeLessThanOrEqual(details.wallMs + 1);
+		}
 	});
 
 	it("names MCP calls by server and tool and passes the script's timeout to the runtime", async () => {
@@ -558,6 +579,7 @@ describe("run_code details", () => {
 				seq: index + 1,
 				binding: JSON.stringify([writes ? "write" : "read"]),
 				status: "completed",
+				startMs: index,
 				durationMs: 1,
 				tool: writes ? "write" : "read",
 				args: { path: `${"p".repeat(pathChars)}${index}`, content: "c".repeat(100) },

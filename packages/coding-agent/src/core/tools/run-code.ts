@@ -78,6 +78,9 @@ export interface RunCodeCallDetails {
 	status: CodeModeCallStatus;
 	/** Whether the call's trusted operation resolution holds only read capabilities (section 5.11). */
 	readOnly: boolean;
+	/** When the script issued the call, in milliseconds since the run started, the origin of `wallMs`. */
+	startMs: number;
+	/** From when the script issued the call, including any wait to be scheduled, until it settled. */
 	durationMs: number;
 	/** The error message of a failed or cancelled call, at most 256 characters. */
 	error?: string;
@@ -360,6 +363,7 @@ export function buildRunCodeDetails(input: {
 			...(path === undefined ? {} : { path }),
 			status: call.status,
 			readOnly: call.readOnly,
+			startMs: Math.round(call.startMs),
 			durationMs: Math.round(call.durationMs),
 			...(call.error === undefined ? {} : { error: capChars(call.error.message, MAX_DETAILS_ERROR_CHARS) }),
 		};

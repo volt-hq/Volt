@@ -762,7 +762,8 @@ interface RunCodeDetails {
 		path?: string; // exact `path` argument of read, write, and edit calls
 		status: "completed" | "failed" | "cancelled" | "unsettled";
 		readOnly: boolean;
-		durationMs: number;
+		startMs: number; // when the script issued the call, since the run started (the origin of wallMs)
+		durationMs: number; // from issue, including any wait to be scheduled, until it settled
 		error?: string; // at most 256 characters
 	}>;
 	callTotals: { completed: number; failed: number; cancelled: number; unsettled: number };
@@ -774,7 +775,7 @@ interface RunCodeDetails {
 
 - Nested results are never stored in `details`; what the model saw is in the result's content, and the full output is in the spill file.
 - `details` is at most 64 KB. The call budget (200) bounds the records; if they still do not fit, argument previews of read-only calls are dropped first, then the oldest read-only records, and `complete` becomes `false`. State-changing records are kept, so a run whose state-changing records alone exceed the bound keeps all of them.
-- The runtime does not measure compute time per script, so `details` has no `computeMs`. Start times of nested calls come with the card, which shows them; the records carry durations.
+- The runtime does not measure compute time per script, so `details` has no `computeMs`. The card carries nested calls' epoch start and end times; the records carry each call's issue time relative to the run (`startMs`) and its duration, so which calls a script had in flight at once can be read from the session.
 
 #### Session records, compaction, and audit
 
@@ -782,7 +783,7 @@ interface RunCodeDetails {
 - Compaction and branch summaries count files that nested `read`, `write`, and `edit` calls touched, whatever their status, from `details.calls[].path` (`collectFileOps` in `src/core/compaction/utils.ts`), as they count the paths of assistant tool calls with those names; Pi uses its nested-call records the same way.
 - Nested MCP calls write MCP audit entries as gateway calls do, with caller surface `model` and a new optional `parentToolCallId`.
 - The HTML export renders the card from its presentation.
-- Code mode adds no telemetry.
+- Code mode adds no telemetry. `scripts/run-code-stats.mjs` summarizes how models used code mode from a local session store: how often they chose `run_code`, and whether their scripts issued independent calls concurrently.
 
 Rejected:
 
