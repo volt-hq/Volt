@@ -209,8 +209,12 @@ export async function renderCodeModeResult(input: CodeModeRenderInput): Promise<
 	const { result } = input;
 	const images = await showImages(result.output, input.images, input.autoResizeImages ?? true);
 	const stream = streamBlocks(result.output, images.captions);
-	const returned =
-		result.ok && result.hasValue ? { value: result.value, block: returnBlock(result.value) } : undefined;
+	let returned: Sections["returned"];
+	if (result.ok && result.hasValue) {
+		// Normalized once, so a truncated string return value is cut from the text its block holds.
+		const value = typeof result.value === "string" ? normalizeLineBreaks(result.value) : result.value;
+		returned = { value, block: returnBlock(value) };
+	}
 	const sections: Sections = {
 		status: { text: statusLine(result, input.calls.length) },
 		stream,
@@ -552,7 +556,9 @@ interface Capped {
  * A copy of `value` with strings longer than `stringCap` and arrays longer than `arrayCap` cut, with markers, and its
  * size. A marker replaces what it stands for only when that makes the JSON shorter, so the JSON of a value never gets
  * shorter as either cap grows: each element or character a larger cap keeps takes at least one byte, more than the
- * marker's count can lose by having one digit fewer.
+ * marker's count can lose by having one digit fewer. The items an array leaves out are capped only until they take
+ * more bytes than its marker, which settles that the marker replaces them, so a cap costs what it keeps, not the whole
+ * array.
  */
 function capValue(value: unknown, stringCap: number, arrayCap: number): Capped {
 	if (typeof value === "string") {
@@ -564,23 +570,35 @@ function capValue(value: unknown, stringCap: number, arrayCap: number): Capped {
 		return bytes < whole.bytes ? { value: capped, bytes } : whole;
 	}
 	if (Array.isArray(value)) {
-		const items = value.map((item) => capValue(item, stringCap, arrayCap));
-		// The brackets, and each item with a comma, one comma too many unless the array is empty.
-		let wholeBytes = 2;
-		for (const item of items) wholeBytes += item.bytes + 1;
-		if (items.length > 0) wholeBytes--;
-		if (value.length > arrayCap) {
-			const marker = `[${value.length - arrayCap} more items]`;
-			// The brackets, and the kept items each with the comma before the next item or the marker.
-			let bytes = 2 + encodedStringBytes(marker) + 2;
-			for (let index = 0; index < arrayCap; index++) bytes += items[index].bytes + 1;
-			if (bytes < wholeBytes) {
-				const kept = items.slice(0, arrayCap).map((item) => item.value);
-				kept.push(marker);
-				return { value: kept, bytes };
-			}
+		const kept = Math.min(value.length, arrayCap);
+		const items: Capped[] = [];
+		// The brackets, and each kept item with the comma before the next item or the marker.
+		let keptBytes = 2;
+		for (let index = 0; index < kept; index++) {
+			const item = capValue(value[index], stringCap, arrayCap);
+			items.push(item);
+			keptBytes += item.bytes + 1;
 		}
-		return { value: items.map((item) => item.value), bytes: wholeBytes };
+		if (value.length > kept) {
+			const marker = `[${value.length - kept} more items]`;
+			const markerBytes = encodedStringBytes(marker) + 2;
+			// The items left out, each with a comma. The marker shortens the JSON once they take more than it and its
+			// comma, the whole array having one comma too many; later items only add to them.
+			let restBytes = 0;
+			for (let index = kept; index < value.length; index++) {
+				const item = capValue(value[index], stringCap, arrayCap);
+				items.push(item);
+				restBytes += item.bytes + 1;
+				if (restBytes > markerBytes + 1) {
+					const shown = items.slice(0, kept).map((entry) => entry.value);
+					shown.push(marker);
+					return { value: shown, bytes: keptBytes + markerBytes };
+				}
+			}
+			return { value: items.map((item) => item.value), bytes: keptBytes + restBytes - 1 };
+		}
+		// One comma too many unless the array is empty.
+		return { value: items.map((item) => item.value), bytes: items.length > 0 ? keptBytes - 1 : keptBytes };
 	}
 	if (value !== null && typeof value === "object") {
 		const entries: Array<[string, unknown]> = [];
@@ -741,7 +759,7 @@ function errorBlock(input: CodeModeRenderInput, failure: CodeModeFailure, starte
 	const limits = { ...DEFAULT_CODE_MODE_SCRIPT_LIMITS, ...input.limits };
 	switch (failure.kind) {
 		case "script_error": {
-			let text = failure.error.text;
+			let text = normalizeLineBreaks(failure.error.text);
 			if (failure.error.outOfMemory) {
 				const memory = formatMemory(input.memoryLimitBytes ?? DEFAULT_CODE_MODE_POOL_OPTIONS.memoryLimitBytes);
 				const hint = `The script exceeded its memory limit (${memory}). Filter or aggregate data instead of accumulating it.`;
@@ -953,6 +971,16 @@ export function previewCodeModeArgs(args: Record<string, unknown>, maxChars: num
 	return capChars(text, maxChars);
 }
 
+const CARRIAGE_RETURNS = /\r\n?/g;
+
+/**
+ * Writes `\r\n` and a lone `\r` as `\n`, the only line break the rendering splits lines on, so text from Windows tools
+ * or progress output is counted and fenced by the lines it shows and leaves no carriage returns behind.
+ */
+function normalizeLineBreaks(text: string): string {
+	return text.replace(CARRIAGE_RETURNS, "\n");
+}
+
 /** Drops one trailing line break, which `console.log` habits and command output often end with. */
 function withoutTrailingNewline(text: string): string {
 	return text.endsWith("\n") ? text.slice(0, -1) : text;
@@ -981,11 +1009,22 @@ interface ShownImages {
 	unshownLine: Line | undefined;
 }
 
+/**
+ * Extensions of saved images by MIME type. Only the first four formats can reach the model; the others name the file
+ * of an image declared as one of them, which is saved but not shown. Any other type is saved as `.bin`.
+ */
 const IMAGE_EXTENSIONS = new Map([
 	["image/png", "png"],
 	["image/jpeg", "jpg"],
 	["image/gif", "gif"],
 	["image/webp", "webp"],
+	["image/svg+xml", "svg"],
+	["image/bmp", "bmp"],
+	["image/tiff", "tiff"],
+	["image/avif", "avif"],
+	["image/heic", "heic"],
+	["image/x-icon", "ico"],
+	["image/vnd.microsoft.icon", "ico"],
 ]);
 
 function dimensions(width: number | undefined, height: number | undefined): string {
@@ -1053,7 +1092,8 @@ async function showImages(
 		const format = detectSupportedImageMimeType(bytes);
 		// An image without a file (from MCP) is saved as it came, so a later turn can pass it to tools that take image
 		// paths.
-		const extension = IMAGE_EXTENSIONS.get(format ?? stored.ref.mimeType.toLowerCase()) ?? "bin";
+		const declaredType = stored.ref.mimeType.split(";")[0].trim().toLowerCase();
+		const extension = IMAGE_EXTENSIONS.get(format ?? declaredType) ?? "bin";
 		const path = stored.ref.path ?? (await writeTempFile(extension, bytes));
 		const ref: CodeModeImageRef = path === undefined ? { ...stored.ref } : { ...stored.ref, path };
 		const where = path === undefined ? "" : `, ${oneLine(path)}`;
@@ -1102,17 +1142,22 @@ function streamBlocks(output: readonly CodeModeOutputItem[], captions: ReadonlyM
 		}
 		const prefix =
 			item.type === "console" && (item.level === "warn" || item.level === "error") ? `${item.level}: ` : "";
-		blocks.push(itemBlock(`${prefix}${withoutTrailingNewline(item.text)}`, `output #${index + 1}`));
+		blocks.push(
+			itemBlock(`${prefix}${withoutTrailingNewline(normalizeLineBreaks(item.text))}`, `output #${index + 1}`),
+		);
 	}
 	return blocks;
 }
 
-/** A string return value as it is, and any other value as compact JSON with exact numbers. */
+/**
+ * A string return value as text with one trailing line break dropped, as items are, and any other value as compact
+ * JSON with exact numbers. A string with no text left renders as JSON, so `""` and `"\n"` stay distinct.
+ */
 function returnBlock(value: unknown): Block {
 	if (typeof value === "string") {
 		const text = withoutTrailingNewline(value);
 		if (text.includes("\n")) return itemBlock(text, "return value");
-		return blockOf(`${RETURN_VALUE_LABEL}${text === "" ? '""' : text}`);
+		return blockOf(`${RETURN_VALUE_LABEL}${text === "" ? jsonString(value) : text}`);
 	}
 	return blockOf(`${RETURN_VALUE_LABEL}${returnValueJson(value)}`);
 }

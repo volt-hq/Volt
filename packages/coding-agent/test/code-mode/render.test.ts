@@ -142,13 +142,50 @@ describe("code mode result rendering of a successful script", () => {
 		expect(textOf(rendered).split("\n").slice(1)).toStrictEqual(["<<< output #1, 3 lines", "a", ">>>", "b", ">>>"]);
 	});
 
-	it("renders a string return value as it is, fenced when it has several lines, and other values as exact JSON", async () => {
+	it("normalizes CRLF and lone CR line breaks in items and string return values, leaving no carriage returns", async () => {
+		const rendered = textOf(
+			await render({
+				result: succeeded(
+					[text("done\r\n"), log("warn", "first\r\nsecond\r\n"), text("10%\r50%\r100%")],
+					"row 1\r\nrow 2\r\n",
+				),
+			}),
+		);
+		expect(rendered).not.toContain("\r");
+		expect(rendered.split("\n").slice(1)).toStrictEqual([
+			"done",
+			"<<< output #2, 2 lines",
+			"warn: first",
+			"second",
+			">>>",
+			"<<< output #3, 3 lines",
+			"10%",
+			"50%",
+			"100%",
+			">>>",
+			"<<< return value, 2 lines",
+			"row 1",
+			"row 2",
+			">>>",
+		]);
+		// A string return value too long for the output limit is truncated from the same normalized text.
+		const rows = Array.from({ length: 5000 }, (_, index) => `row ${index}`);
+		const truncated = textOf(await render({ result: succeeded([], rows.join("\r\n")) }));
+		expect(truncated).not.toContain("\r");
+		const shown = truncated.split("\n");
+		expect(shown[1]).toBe("<<< return value, 5000 lines");
+		expect(shown).toContain("row 4999");
+	});
+
+	it("renders a string return value as text without one trailing line break, as JSON when that leaves nothing, fenced when it has several lines, and other values as exact JSON", async () => {
 		const returned = async (value: unknown) =>
 			textOf(await render({ result: succeeded([], value) }))
 				.split("\n")
 				.slice(1);
 		expect(await returned("plain text")).toStrictEqual(["Return value: plain text"]);
 		expect(await returned("")).toStrictEqual(['Return value: ""']);
+		expect(await returned("\n")).toStrictEqual(['Return value: "\\n"']);
+		expect(await returned("a\n")).toStrictEqual(["Return value: a"]);
 		expect(await returned("first\nsecond\n")).toStrictEqual(["<<< return value, 2 lines", "first", "second", ">>>"]);
 		expect(
 			await returned({ big: 2n ** 60n + 1n, exact: 2 ** 60, negativeZero: -0, list: [1.5, null, true] }),
@@ -269,6 +306,29 @@ describe("code mode result rendering of shown images", () => {
 		]);
 		expect(rendered.shownImages).toStrictEqual([]);
 		expect(rendered.unshownImages).toStrictEqual([]);
+	});
+
+	it("saves an image that is not a model format with the extension of its declared type, and as .bin when the type is unknown", async () => {
+		const notShown = "; not shown: not a PNG, JPEG, GIF, or WebP image]";
+		const cases: Array<[mimeType: string, extension: string]> = [
+			["image/svg+xml", ".svg"],
+			["image/svg+xml; charset=utf-8", ".svg"],
+			["Image/BMP", ".bmp"],
+			["image/x-foo", ".bin"],
+		];
+		for (const [mimeType, extension] of cases) {
+			const rendered = await show(received("PHN2Zy8+", mimeType));
+			const caption = textOf(rendered).split("\n")[1];
+			const prefix = `[image img_1: ${mimeType}, `;
+			expect(caption.startsWith(prefix)).toBe(true);
+			expect(caption.endsWith(notShown)).toBe(true);
+			const path = caption.slice(prefix.length, -notShown.length);
+			written.add(path);
+			expect(path.startsWith(tmpdir())).toBe(true);
+			expect(extname(path)).toBe(extension);
+			expect(readFileSync(path).toString("base64")).toBe("PHN2Zy8+");
+			expect(rendered.shownImages).toStrictEqual([]);
+		}
 	});
 
 	it("sends an image as the format its bytes hold and saves it with that format's extension", async () => {
@@ -456,6 +516,30 @@ describe("code mode result rendering of a failed script", () => {
 			"InternalError: out of memory",
 			"The script exceeded its memory limit (32 MiB). Filter or aggregate data instead of accumulating it.",
 		]);
+	});
+
+	it("normalizes CRLF line breaks in a script error's text", async () => {
+		const failure: CodeModeFailure = {
+			kind: "script_error",
+			phase: "run",
+			error: {
+				name: "Error",
+				summary: "Error: bad input",
+				text: "Error: bad input\r\n    at parse (script.js:2:10)\r\nCaused by: Error: inner",
+				outOfMemory: false,
+			},
+		};
+		expect(textOf(await render({ result: failed(failure) }))).toBe(
+			[
+				"Script failed after 6.4s (0 tool calls): uncaught Error",
+				"",
+				"Error: bad input",
+				"    at parse (script.js:2:10)",
+				"Caused by: Error: inner",
+				"",
+				"No tool calls were made.",
+			].join("\n"),
+		);
 	});
 
 	it("summarizes nested calls: exact totals, read-only calls per tool, and state-changing calls with their outcome", async () => {
@@ -679,7 +763,7 @@ const lines = (count: number, make: (index: number) => string = (index) => `line
 	Array.from({ length: count }, (_, index) => text(make(index)));
 
 const unit = fc.oneof(
-	fc.constantFrom("a", "b", " ", "\u00e9", "\u4e2d", "\u{1F600}", "\n", "\u2028", "\\", '"'),
+	fc.constantFrom("a", "b", " ", "\u00e9", "\u4e2d", "\u{1F600}", "\n", "\r", "\u2028", "\\", '"'),
 	fc.integer({ min: 0, max: 0xffff }).map((code) => String.fromCharCode(code)),
 );
 const short = fc.string({ unit, maxLength: 24 });
@@ -763,6 +847,8 @@ describe("code mode result rendering within the output limit", () => {
 					expect(rendered[0]).toMatch(
 						failureCase === undefined ? /^Script completed in / : /^Script failed after /,
 					);
+					// Carriage returns are line breaks or escapes, never raw text.
+					for (const line of rendered) expect(line).not.toContain("\r");
 					if (spilled !== undefined) expect(spilled.split("\n")[0]).toBe(rendered[0]);
 					if (failureCase === undefined) return;
 					// The error block and the summary follow the output, each after a blank line, and are never cut.
@@ -811,6 +897,19 @@ describe("code mode result rendering within the output limit", () => {
 			expect(parsed.k2499).toStrictEqual(small);
 			expect(parsed.big.at(-1)).toMatch(/^\[\d+ more items\]$/);
 		}
+	});
+
+	it("caps a large array of numbers to valid JSON that keeps its first items and counts the rest exactly", async () => {
+		const value = Array.from({ length: 1_000_000 }, (_, index) => index * 7);
+		const { lines: shown } = await renderBounded({ result: succeeded([], value) });
+		const returned = shown.find((line) => line.startsWith("Return value: ")) as string;
+		const parsed = JSON.parse(returned.slice("Return value: ".length)) as unknown[];
+		const match = /^\[(\d+) more items\]$/.exec(String(parsed.at(-1))) as RegExpExecArray;
+		expect(match).not.toBeNull();
+		const kept = parsed.slice(0, -1);
+		expect(kept.length).toBeGreaterThan(1000);
+		expect(kept).toStrictEqual(value.slice(0, kept.length));
+		expect(Number(match[1])).toBe(value.length - kept.length);
 	});
 
 	it("gives the return value the room a short stream leaves", async () => {
