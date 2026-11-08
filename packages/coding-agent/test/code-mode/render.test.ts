@@ -142,16 +142,22 @@ describe("code mode result rendering of a successful script", () => {
 		expect(textOf(rendered).split("\n").slice(1)).toStrictEqual(["<<< output #1, 3 lines", "a", ">>>", "b", ">>>"]);
 	});
 
-	it("normalizes CRLF and lone CR line breaks in items and string return values, leaving no carriage returns", async () => {
+	it("normalizes CRLF, lone CR, U+2028, and U+2029 line breaks in items and string return values, leaving no other line breaks", async () => {
 		const rendered = textOf(
 			await render({
 				result: succeeded(
-					[text("done\r\n"), log("warn", "first\r\nsecond\r\n"), text("10%\r50%\r100%")],
-					"row 1\r\nrow 2\r\n",
+					[
+						text("done\r\n"),
+						log("warn", "first\r\nsecond\r\n"),
+						text("10%\r50%\r100%"),
+						text("a\u2028b"),
+						text("x\u2029>>>"),
+					],
+					"row 1\r\nrow 2\u2028row 3\r\n",
 				),
 			}),
 		);
-		expect(rendered).not.toContain("\r");
+		expect(rendered).not.toMatch(/[\r\u2028\u2029]/);
 		expect(rendered.split("\n").slice(1)).toStrictEqual([
 			"done",
 			"<<< output #2, 2 lines",
@@ -163,9 +169,18 @@ describe("code mode result rendering of a successful script", () => {
 			"50%",
 			"100%",
 			">>>",
-			"<<< return value, 2 lines",
+			"<<< output #4, 2 lines",
+			"a",
+			"b",
+			">>>",
+			"<<< output #5, 2 lines",
+			"x",
+			">>>",
+			">>>",
+			"<<< return value, 3 lines",
 			"row 1",
 			"row 2",
+			"row 3",
 			">>>",
 		]);
 		// A string return value too long for the output limit is truncated from the same normalized text.
@@ -518,14 +533,14 @@ describe("code mode result rendering of a failed script", () => {
 		]);
 	});
 
-	it("normalizes CRLF line breaks in a script error's text", async () => {
+	it("normalizes CRLF and U+2028 line breaks in a script error's text", async () => {
 		const failure: CodeModeFailure = {
 			kind: "script_error",
 			phase: "run",
 			error: {
 				name: "Error",
 				summary: "Error: bad input",
-				text: "Error: bad input\r\n    at parse (script.js:2:10)\r\nCaused by: Error: inner",
+				text: "Error: bad input\r\n    at parse (script.js:2:10)\u2028Caused by: Error: inner",
 				outOfMemory: false,
 			},
 		};
@@ -1021,6 +1036,19 @@ describe("code mode result rendering within the output limit", () => {
 		expect(shown).toHaveLength(2000);
 		expect(shown.filter((line) => STREAM_MARKER.test(line))).toHaveLength(1);
 		expect(shown.at(-1)).toBe('Return value: {"ok":true}');
+		expect(shown.some((line) => line.startsWith("[Return value truncated"))).toBe(false);
+	});
+
+	it("gives the notice's room to a stream it would cut, whose marker names the full output instead", async () => {
+		// The return value keeps half the lines with or without the notice, so making room for it would cut the stream.
+		const value = Array.from({ length: 5000 }, (_, index) => `r${index}`).join("\n");
+		const { rendered, lines: shown } = await renderBounded({ result: succeeded(lines(1000), value) });
+		expect(shown).toHaveLength(2000);
+		const markers = shown.filter((line) => STREAM_MARKER.test(line));
+		expect(markers).toHaveLength(1);
+		const match = STREAM_MARKER.exec(markers[0]) as RegExpExecArray;
+		expect(match[1]).toBe("1");
+		expect(match[3]).toBe(rendered.fullOutputPath);
 		expect(shown.some((line) => line.startsWith("[Return value truncated"))).toBe(false);
 	});
 

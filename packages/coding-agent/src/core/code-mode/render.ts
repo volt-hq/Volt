@@ -320,7 +320,7 @@ function omissionMarker(fullSize: Size, path: string | undefined): OmissionMarke
  * Lays out a successful script's result within the budget. The status line and the list of unshown images are kept.
  * The return value may use up to half of the rest, or more when the stream leaves room; the stream uses what the
  * return value leaves. When only the return value is cut, the notice after it names the full output, and room is
- * made for it; if the stream then no longer fits, its marker names the full output instead.
+ * made for it; if the stream then no longer fits, its marker names the full output instead and takes that room.
  */
 function layOutSuccess(sections: Sections, marker: OmissionMarker): Line[] {
 	const plain = layOutSuccessWith(sections, marker, []);
@@ -328,16 +328,17 @@ function layOutSuccess(sections: Sections, marker: OmissionMarker): Line[] {
 	return layOutSuccessWith(sections, marker, [marker.notice]).lines;
 }
 
-/** A successful script's layout with room for `notice`, which follows a cut return value when the stream fits. */
+/**
+ * A successful script's layout with room for `notice`, which follows a cut return value when the stream fits. A cut
+ * stream takes the notice's room instead.
+ */
 function layOutSuccessWith(
 	sections: Sections,
 	marker: OmissionMarker,
 	notice: Line[],
 ): { lines: Line[]; returnCut: boolean; streamFits: boolean } {
-	const available = minus(
-		OUTPUT_BUDGET,
-		sizeOf([sections.status, ...sections.noOutput, ...sections.unshown, ...notice]),
-	);
+	const room = minus(OUTPUT_BUDGET, sizeOf([sections.status, ...sections.noOutput, ...sections.unshown]));
+	const available = minus(room, sizeOf(notice));
 	const streamSize = blocksSize(sections.stream);
 	const returnSize = sections.returned?.block.size ?? { bytes: 0, lines: 0 };
 	const returnBudget = share(available, returnSize, streamSize);
@@ -348,11 +349,12 @@ function layOutSuccessWith(
 			: returnCut
 				? truncateReturnValue(sections.returned.value, returnBudget)
 				: linesOf([sections.returned.block]);
-	const streamBudget = minus(available, sizeOf(returned));
-	const streamFits = fits(streamSize, streamBudget);
+	const streamFits = fits(streamSize, minus(available, sizeOf(returned)));
+	// The stream's marker names the full output in place of the notice. It reserves at least the notice's room, one
+	// line and more bytes, so the stream is still cut and the marker printed.
 	const stream = streamFits
 		? linesOf(sections.stream)
-		: truncateLines(lineWindow(sections.stream), streamBudget, marker.stream);
+		: truncateLines(lineWindow(sections.stream), minus(room, sizeOf(returned)), marker.stream);
 	const lines = [
 		sections.status,
 		...stream,
@@ -971,14 +973,15 @@ export function previewCodeModeArgs(args: Record<string, unknown>, maxChars: num
 	return capChars(text, maxChars);
 }
 
-const CARRIAGE_RETURNS = /\r\n?/g;
+const OTHER_LINE_BREAKS = /\r\n?|[\u2028\u2029]/g;
 
 /**
- * Writes `\r\n` and a lone `\r` as `\n`, the only line break the rendering splits lines on, so text from Windows tools
- * or progress output is counted and fenced by the lines it shows and leaves no carriage returns behind.
+ * Writes `\r\n`, a lone `\r`, U+2028, and U+2029 as `\n`, the only line break the rendering splits lines on, so text
+ * from Windows tools, progress output, or a script is counted and fenced by the lines it shows and leaves no other
+ * line breaks behind.
  */
 function normalizeLineBreaks(text: string): string {
-	return text.replace(CARRIAGE_RETURNS, "\n");
+	return text.replace(OTHER_LINE_BREAKS, "\n");
 }
 
 /** Drops one trailing line break, which `console.log` habits and command output often end with. */
