@@ -4,7 +4,7 @@ import { extname, join } from "node:path";
 import type { ImageContent, TextContent } from "@hansjm10/volt-ai";
 import fc from "fast-check";
 import { afterEach, describe, expect, it } from "vitest";
-import type { CodeModeImageRef } from "../../src/core/code-mode/images.ts";
+import { type CodeModeImageRef, imageDimensions } from "../../src/core/code-mode/images.ts";
 import {
 	type CodeModeRenderCall,
 	type CodeModeRenderedResult,
@@ -19,6 +19,7 @@ import type {
 	CodeModeScriptFailure,
 	CodeModeScriptSuccess,
 } from "../../src/core/code-mode/runtime.ts";
+import { decodeImage, encodeJpeg, encodePng, resizeDecodedImage } from "../../src/utils/image-codec.ts";
 import { bridgeValue } from "./values.ts";
 
 const PNG_1X1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg==";
@@ -234,10 +235,68 @@ describe("code mode result rendering of a successful script", () => {
 			images: [sizeless],
 		});
 		expect(textOf(rendered).split("\n").slice(1)).toStrictEqual([
-			"[image img_1: image/svg+xml, /x.svg]",
+			"[image img_1: image/svg+xml, /x.svg; not shown: not a PNG, JPEG, GIF, or WebP image]",
 			"[image img_9: unavailable]",
 		]);
-		expect(rendered.shownImages.map((ref) => ref.ref)).toStrictEqual(["img_1"]);
+		expect(rendered.shownImages).toStrictEqual([]);
+	});
+});
+
+describe("code mode result rendering of shown images", () => {
+	const received = (data: string, mimeType: string, ref: Partial<CodeModeImageRef> = {}): CodeModeRenderImage => ({
+		stored: {
+			ref: { type: "image", ref: "img_1", mimeType, bytes: Buffer.from(data, "base64").length, ...ref },
+			data,
+		},
+		source: "MCP browser.screenshot",
+	});
+	const show = (image: CodeModeRenderImage, autoResizeImages?: boolean) =>
+		render({
+			result: succeeded([{ type: "image", ref: "img_1" }]),
+			images: [image],
+			...(autoResizeImages === undefined ? {} : { autoResizeImages }),
+		});
+	const imageBlock = (rendered: CodeModeRenderedResult) =>
+		rendered.content.find((block): block is ImageContent => block.type === "image");
+
+	it("captions an image that is not a PNG, JPEG, GIF, or WebP and sends no image block", async () => {
+		const rendered = await show(received("PHN2Zy8+", "image/svg+xml", { path: "/x.svg" }));
+		expect(rendered.content).toStrictEqual([
+			{
+				type: "text",
+				text: "Script completed in 3.2s (0 tool calls)\n[image img_1: image/svg+xml, /x.svg; not shown: not a PNG, JPEG, GIF, or WebP image]",
+			},
+		]);
+		expect(rendered.shownImages).toStrictEqual([]);
+		expect(rendered.unshownImages).toStrictEqual([]);
+	});
+
+	it("sends an image as the format its bytes hold and saves it with that format's extension", async () => {
+		const jpeg = await encodeJpeg(await decodeImage(Buffer.from(PNG_1X1, "base64")), 80);
+		const data = Buffer.from(jpeg).toString("base64");
+		const rendered = await show(received(data, "image/png"));
+		expect(imageBlock(rendered)).toStrictEqual({ type: "image", data, mimeType: "image/jpeg" });
+		const path = rendered.shownImages[0]?.path as string;
+		expect(extname(path)).toBe(".jpg");
+		expect(readFileSync(path).toString("base64")).toBe(data);
+		expect(textOf(rendered).split("\n")[1]).toBe(`[image img_1: image/jpeg 1x1, ${path}]`);
+	});
+
+	it("resizes an image beyond the inline limits, and sends it unchanged when resizing is off", async () => {
+		const wide = await encodePng(resizeDecodedImage(await decodeImage(Buffer.from(PNG_1X1, "base64")), 2500, 10));
+		const data = Buffer.from(wide).toString("base64");
+		const image = received(data, "image/png", { width: 2500, height: 10, path: "/wide.png" });
+		const resized = await show(image);
+		const block = imageBlock(resized) as ImageContent;
+		const size = imageDimensions(Buffer.from(block.data, "base64")) as { width: number; height: number };
+		expect(size.width).toBeLessThanOrEqual(2000);
+		expect(textOf(resized).split("\n")[1]).toBe(
+			`[image img_1: ${block.mimeType} ${size.width}x${size.height} (resized from 2500x10), /wide.png]`,
+		);
+		expect(resized.shownImages).toStrictEqual([image.stored.ref]);
+		const unchanged = await show(image, false);
+		expect(imageBlock(unchanged)).toStrictEqual({ type: "image", data, mimeType: "image/png" });
+		expect(textOf(unchanged).split("\n")[1]).toBe("[image img_1: image/png 2500x10, /wide.png]");
 	});
 });
 
@@ -318,9 +377,19 @@ describe("code mode result rendering of a failed script", () => {
 				block: "The script was aborted. Nested calls in flight were cancelled.",
 			},
 			{
-				failure: { kind: "output_limit" },
+				failure: { kind: "output_limit", cause: "retained_output" },
 				ending: "output limit exceeded",
 				block: "The script printed more than 16 Mi characters or 100,000 items. Print summaries and return selected fields instead of whole results.",
+			},
+			{
+				failure: { kind: "output_limit", cause: "output_item" },
+				ending: "output limit exceeded",
+				block: "An output item was larger than the 8 MiB message limit. Print summaries and return selected fields instead of whole results.",
+			},
+			{
+				failure: { kind: "output_limit", cause: "return_value" },
+				ending: "output limit exceeded",
+				block: "The return value was larger than the 8 MiB message limit. Return selected fields instead of whole results.",
 			},
 			{
 				failure: { kind: "sandbox", reason: "protocol violation: malformed message" },
@@ -345,11 +414,19 @@ describe("code mode result rendering of a failed script", () => {
 	});
 
 	it("names the limits the script ran with", async () => {
-		const outputLimit = await render({
-			result: failed({ kind: "output_limit" }),
-			limits: { maxRetainedOutputChars: 1000, maxOutputItems: 5 },
+		const limits = { maxRetainedOutputChars: 1000, maxOutputItems: 5, maxFrameBytes: 1000 };
+		const outputLimit = async (cause: "retained_output" | "output_item" | "return_value") =>
+			textOf(await render({ result: failed({ kind: "output_limit", cause }), limits })).split("\n")[2];
+		expect(await outputLimit("retained_output")).toMatch(
+			/^The script printed more than 1,000 characters or 5 items\./,
+		);
+		expect(await outputLimit("output_item")).toMatch(/^An output item was larger than the 1000B message limit\./);
+		expect(await outputLimit("return_value")).toMatch(/^The return value was larger than the 1000B message limit\./);
+		const mebibytes = await render({
+			result: failed({ kind: "output_limit", cause: "return_value" }),
+			limits: { maxFrameBytes: 2 * 1024 * 1024 },
 		});
-		expect(textOf(outputLimit)).toContain("The script printed more than 1,000 characters or 5 items.");
+		expect(textOf(mebibytes)).toContain("The return value was larger than the 2 MiB message limit.");
 		const compute = await render({ result: failed({ kind: "compute_budget", budgetMs: 1500 }) });
 		expect(textOf(compute)).toContain("compute budget of 1.5s exhausted");
 	});
@@ -460,6 +537,20 @@ describe("code mode result rendering of a failed script", () => {
 		]);
 	});
 
+	it("counts read-only tools whose long names share a shortened label separately", async () => {
+		const prefix = `mcp__${"s".repeat(72)}__`;
+		const first = `${prefix}${"a".repeat(90 - prefix.length)}`;
+		const second = `${prefix}${"b".repeat(90 - prefix.length)}`;
+		const calls = [
+			call(first, { readOnly: true }),
+			call(first, { readOnly: true }),
+			call(second, { readOnly: true, status: "failed", error: { kind: "failed", message: "x" } }),
+		];
+		const lines = textOf(await render({ result: failed({ kind: "aborted" }), calls })).split("\n");
+		const label = `${first.slice(0, 77)}...`;
+		expect(lines.at(-1)).toBe(`Read-only: ${label} \u00d72, ${label} \u00d71 (1 failed)`);
+	});
+
 	it("lists at most 20 state-changing calls and keeps the totals exact", async () => {
 		const calls = Array.from({ length: 25 }, (_, index) =>
 			call("write", { args: { path: `f${index}` }, status: "failed", error: { kind: "failed", message: "denied" } }),
@@ -493,17 +584,26 @@ describe("code mode result rendering of a failed script", () => {
 				images: [
 					{
 						stored: {
-							ref: { type: "image", ref: "img_1", mimeType: "image/png\nforged", bytes: 70, path: "/a\nb.png" },
-							data: PNG_1X1,
+							// An image that is not shown, so its caption names the MIME type it declares.
+							ref: {
+								type: "image",
+								ref: "img_1",
+								mimeType: "image/svg+xml\nforged",
+								bytes: 5,
+								path: "/a\nb.svg",
+							},
+							data: "PHN2Zy8+",
 						},
-						source: "read a.png",
+						source: "read a.svg",
 					},
 					image("img_2", "MCP evil\nsource"),
 				],
 			}),
 		).split("\n");
 		expect(lines[0]).toBe("Script failed after 6.4s (1 tool call): uncaught Evil\\nNested tool calls: 0");
-		expect(lines[1]).toBe("[image img_1: image/png\\nforged, /a\\nb.png]");
+		expect(lines[1]).toBe(
+			"[image img_1: image/svg+xml\\nforged, /a\\nb.svg; not shown: not a PNG, JPEG, GIF, or WebP image]",
+		);
 		expect(lines[2]).toBe("1 image not shown: img_2 (MCP evil\\nsource)");
 		const entry = lines.at(-1) as string;
 		expect(
@@ -555,7 +655,7 @@ describe("code mode argument previews", () => {
 const MAX_BYTES = 50 * 1024;
 const MAX_LINES = 2000;
 const STREAM_MARKER =
-	/^\[\.\.\. (\d+) lines? omitted \((\d+) lines, [\d.]+K?B total\)\. Full output: (.+) \(read with offset\/limit\)\]$/;
+	/^\[\.\.\. (\d+) lines? omitted \((\d+) lines, [\d.]+[KM]?B total\)\. Full output: (.+) \(read with offset\/limit\)\]$/;
 
 /** Renders, checks the rendering against the output limit, and removes what it wrote before the next run. */
 async function renderBounded(input: Partial<CodeModeRenderInput> & Pick<CodeModeRenderInput, "result">) {
@@ -565,6 +665,8 @@ async function renderBounded(input: Partial<CodeModeRenderInput> & Pick<CodeMode
 		expect(Buffer.byteLength(value)).toBeLessThanOrEqual(MAX_BYTES);
 		expect(value.split("\n").length).toBeLessThanOrEqual(MAX_LINES);
 		expect(rendered.fullOutputPath !== undefined).toBe(rendered.truncated);
+		// A file the model is never told about is no use to it.
+		if (rendered.fullOutputPath !== undefined) expect(value).toContain(rendered.fullOutputPath);
 		const spilled = rendered.fullOutputPath === undefined ? undefined : readFileSync(rendered.fullOutputPath, "utf8");
 		return { rendered, text: value, lines: value.split("\n"), spilled };
 	} finally {
@@ -615,7 +717,9 @@ const failure: fc.Arbitrary<CodeModeFailure> = fc.oneof(
 		(value): CodeModeFailure => ({ kind: "script_error", phase: "run", error: scriptError("Error", value) }),
 	),
 	fc.constant<CodeModeFailure>({ kind: "aborted" }),
-	fc.constant<CodeModeFailure>({ kind: "output_limit" }),
+	fc
+		.constantFrom("retained_output", "output_item", "return_value" as const)
+		.map((cause): CodeModeFailure => ({ kind: "output_limit", cause })),
 	fc.constant<CodeModeFailure>({ kind: "call_budget", budget: 200 }),
 	short.map((reason): CodeModeFailure => ({ kind: "sandbox", reason })),
 );
@@ -692,6 +796,23 @@ describe("code mode result rendering within the output limit", () => {
 		);
 	});
 
+	it("keeps a return value valid JSON when a marker would lengthen its small arrays", async () => {
+		// A marker such as "[1 more items]" is longer than [null] or [0,0,0], so those arrays stay whole at every cap.
+		for (const small of [[null], [0, 0, 0]]) {
+			const value: Record<string, unknown> = {};
+			for (let index = 0; index < 2500; index++) value[`k${index}`] = small;
+			value.big = Array.from({ length: 8000 }, (_, index) => index);
+			const { lines: shown } = await renderBounded({ result: succeeded([], value) });
+			const returned = shown.find((line) => line.startsWith("Return value: ")) as string;
+			expect(returned).toContain('more items]"');
+			const parsed = JSON.parse(returned.slice("Return value: ".length)) as Record<string, unknown> & {
+				big: unknown[];
+			};
+			expect(parsed.k2499).toStrictEqual(small);
+			expect(parsed.big.at(-1)).toMatch(/^\[\d+ more items\]$/);
+		}
+	});
+
 	it("gives the return value the room a short stream leaves", async () => {
 		const value = { items: Array.from({ length: 5000 }, (_, index) => ({ id: index, name: `item ${index}` })) };
 		const { lines: rendered } = await renderBounded({ result: succeeded([text("one line")], value) });
@@ -725,6 +846,57 @@ describe("code mode result rendering within the output limit", () => {
 		);
 	});
 
+	it("renders an item of a million lines and counts the lines it leaves out exactly", async () => {
+		// One trailing line break is dropped: 1,000,000 empty lines, fenced.
+		const {
+			rendered,
+			lines: shown,
+			spilled,
+		} = await renderBounded({ result: succeeded([text("\n".repeat(1_000_000))]) });
+		expect(shown[1]).toBe("<<< output #1, 1000000 lines");
+		expect(shown.at(-1)).toBe(">>>");
+		const markers = shown.filter((line) => STREAM_MARKER.test(line));
+		expect(markers).toHaveLength(1);
+		const match = STREAM_MARKER.exec(markers[0]) as RegExpExecArray;
+		// The stream is the fence's header, 1,000,000 lines, and its end; the status line and the marker are not kept lines.
+		expect(Number(match[1])).toBe(1_000_002 - (shown.length - 2));
+		expect(Number(match[2])).toBe(1_000_003);
+		expect(match[3]).toBe(rendered.fullOutputPath);
+		expect(spilled?.split("\n")).toHaveLength(1_000_003);
+	});
+
+	it("counts the lines of many multi-line items in the marker as the full output file has them", async () => {
+		const { lines: shown, spilled } = await renderBounded({
+			result: succeeded(lines(50_000, (index) => `item ${index}\nb\nc\nd`)),
+		});
+		const match = STREAM_MARKER.exec(shown.find((line) => STREAM_MARKER.test(line)) as string) as RegExpExecArray;
+		// Each item is fenced: a header, 4 lines, and the end.
+		expect(Number(match[2])).toBe(1 + 50_000 * 6);
+		expect(spilled?.split("\n")).toHaveLength(Number(match[2]));
+		expect(Number(match[1])).toBe(50_000 * 6 - (shown.length - 2));
+		expect(shown[1]).toBe("<<< output #1, 4 lines");
+		expect(shown.at(-1)).toBe(">>>");
+	});
+
+	it("writes the full output file whenever it leaves anything out, even when the rendering ends in an empty line", async () => {
+		// 2001 lines: the status line, 1999 lines of x, and the empty line of the last item.
+		const {
+			rendered,
+			lines: shown,
+			spilled,
+		} = await renderBounded({
+			result: succeeded([...lines(1999, () => "x"), text("\n")]),
+		});
+		expect(rendered.truncated).toBe(true);
+		expect(rendered.fullOutputPath).toBeDefined();
+		const match = STREAM_MARKER.exec(shown.find((line) => STREAM_MARKER.test(line)) as string) as RegExpExecArray;
+		expect(match[3]).toBe(rendered.fullOutputPath);
+		expect(Number(match[2])).toBe(2001);
+		expect(spilled).toBe(
+			["Script completed in 3.2s (0 tool calls)", ...Array<string>(1999).fill("x"), ""].join("\n"),
+		);
+	});
+
 	it("writes the full rendering, fences and return value included, to the file it names", async () => {
 		const items = lines(4000, (index) => `multi ${index}\nsecond`);
 		const { spilled } = await renderBounded({ result: succeeded(items, { done: true }) });
@@ -743,6 +915,14 @@ describe("code mode result rendering within the output limit", () => {
 		expect(shown[2]).toBe(
 			`[Return value truncated to fit the output limit. Full output: ${rendered.fullOutputPath} (read with offset/limit)]`,
 		);
+	});
+
+	it("gives a cut stream every line beside a whole return value, reserving nothing for the notice", async () => {
+		const { lines: shown } = await renderBounded({ result: succeeded(lines(3000), { ok: true }) });
+		expect(shown).toHaveLength(2000);
+		expect(shown.filter((line) => STREAM_MARKER.test(line))).toHaveLength(1);
+		expect(shown.at(-1)).toBe('Return value: {"ok":true}');
+		expect(shown.some((line) => line.startsWith("[Return value truncated"))).toBe(false);
 	});
 
 	it("keeps the first and last lines of a long multi-line return value inside its fence", async () => {

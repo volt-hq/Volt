@@ -3,10 +3,11 @@ import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ImageContent, TextContent } from "@hansjm10/volt-ai";
-import { OutputAccumulator } from "../tools/output-accumulator.ts";
+import { resizeImage } from "../../utils/image-resize.ts";
+import { detectSupportedImageMimeType } from "../../utils/mime.ts";
 import { formatDuration } from "../tools/render-utils.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "../tools/truncate.ts";
-import { encodeBridgeValue } from "./codec.ts";
+import { encodeBridgeValue, encodedStringBytes } from "./codec.ts";
 import type { CodeModeImageRef, CodeModeStoredImage } from "./images.ts";
 import {
 	type CodeModeScriptLimits,
@@ -55,6 +56,11 @@ export interface CodeModeRenderInput {
 	limits?: Partial<CodeModeScriptLimits>;
 	/** The VM memory limit, which the out-of-memory hint names. Defaults to the pool's default. */
 	memoryLimitBytes?: number;
+	/**
+	 * Whether shown images are resized to fit providers' inline limits before they reach the model, as `read` resizes
+	 * the images it reads (the image auto-resize setting). Defaults to true.
+	 */
+	autoResizeImages?: boolean;
 }
 
 export interface CodeModeRenderedResult {
@@ -77,6 +83,98 @@ interface Line {
 	image?: { block: ImageContent; ref: CodeModeImageRef };
 }
 
+/**
+ * Lines of the rendering kept as one text, such as an output item and its fence, so that an item of many lines is
+ * measured without being split. Only the lines a layout keeps are split out (`lineWindow`). A caption is a block of
+ * one line that carries its image.
+ */
+interface Block {
+	/** The lines, joined with `\n`. */
+	text: string;
+	size: Size;
+	image?: Line["image"];
+}
+
+function blockOf(text: string, image?: Line["image"]): Block {
+	let lines = 1;
+	for (let index = text.indexOf("\n"); index !== -1; index = text.indexOf("\n", index + 1)) lines++;
+	const size = { bytes: Buffer.byteLength(text) + 1, lines };
+	return image === undefined ? { text, size } : { text, size, image };
+}
+
+function blocksSize(blocks: readonly Block[]): Size {
+	let bytes = 0;
+	let lines = 0;
+	for (const block of blocks) {
+		bytes += block.size.bytes;
+		lines += block.size.lines;
+	}
+	return { bytes, lines };
+}
+
+/** The first `count` lines of a block, or all of them. */
+function headLines(block: Block, count: number): Line[] {
+	if (block.image) return [{ text: block.text, image: block.image }];
+	const lines: Line[] = [];
+	let start = 0;
+	while (lines.length < count) {
+		const end = block.text.indexOf("\n", start);
+		lines.push({ text: block.text.slice(start, end === -1 ? undefined : end) });
+		if (end === -1) break;
+		start = end + 1;
+	}
+	return lines;
+}
+
+/** The last `count` lines of a block, or all of them. */
+function tailLines(block: Block, count: number): Line[] {
+	if (block.image) return [{ text: block.text, image: block.image }];
+	const lines: Line[] = [];
+	let end = block.text.length;
+	while (lines.length < count) {
+		const start = end === 0 ? -1 : block.text.lastIndexOf("\n", end - 1);
+		lines.push({ text: block.text.slice(start + 1, end) });
+		if (start === -1) break;
+		end = start;
+	}
+	return lines.reverse();
+}
+
+/** All lines of blocks small enough to split, such as a rendering or a part that fits the output limit. */
+function linesOf(blocks: readonly Block[]): Line[] {
+	return blocks.flatMap((block) => headLines(block, Number.POSITIVE_INFINITY));
+}
+
+/**
+ * The lines of `blocks` a truncation can keep: the first and last `OUTPUT_BUDGET.lines` lines, or all lines when
+ * there are at most twice that many. Lines between them are counted without being split.
+ */
+interface LineWindow {
+	head: Line[];
+	/** Lines left out between the head and the tail; 0 when the head holds every line and the tail is empty. */
+	gap: number;
+	tail: Line[];
+}
+
+function lineWindow(blocks: readonly Block[]): LineWindow {
+	const max = OUTPUT_BUDGET.lines;
+	const total = blocksSize(blocks).lines;
+	if (total <= 2 * max) return { head: linesOf(blocks), gap: 0, tail: [] };
+	const head: Line[] = [];
+	for (let index = 0; index < blocks.length && head.length < max; index++) {
+		for (const line of headLines(blocks[index], max - head.length)) head.push(line);
+	}
+	const tailParts: Line[][] = [];
+	let tailCount = 0;
+	for (let index = blocks.length - 1; index >= 0 && tailCount < max; index--) {
+		const lines = tailLines(blocks[index], max - tailCount);
+		tailParts.push(lines);
+		tailCount += lines.length;
+	}
+	const tail = tailParts.reverse().flat();
+	return { head, gap: total - head.length - tail.length, tail };
+}
+
 /** Images a script shows: at most 10 references (section 5.9). Unshown images are listed up to the same number. */
 const MAX_LISTED_UNSHOWN_IMAGES = 10;
 /** Characters of an image's source in the list of unshown images. */
@@ -87,9 +185,10 @@ const MAX_MIME_TYPE_CHARS = 100;
 /** The parts of a rendering, in the order they appear. */
 interface Sections {
 	status: Line;
-	stream: Line[];
+	/** One block for each item. */
+	stream: Block[];
 	/** The return value of a successful script that returned one. */
-	returned: { value: unknown; lines: Line[] } | undefined;
+	returned: { value: unknown; block: Block } | undefined;
 	/** `(no output)`, for a successful script that printed and returned nothing. */
 	noOutput: Line[];
 	unshown: Line[];
@@ -108,10 +207,10 @@ function textLines(text: string): Line[] {
  */
 export async function renderCodeModeResult(input: CodeModeRenderInput): Promise<CodeModeRenderedResult> {
 	const { result } = input;
-	const images = await showImages(result.output, input.images);
-	const stream = streamLines(result.output, images.captions);
+	const images = await showImages(result.output, input.images, input.autoResizeImages ?? true);
+	const stream = streamBlocks(result.output, images.captions);
 	const returned =
-		result.ok && result.hasValue ? { value: result.value, lines: returnLines(result.value) } : undefined;
+		result.ok && result.hasValue ? { value: result.value, block: returnBlock(result.value) } : undefined;
 	const sections: Sections = {
 		status: { text: statusLine(result, input.calls.length) },
 		stream,
@@ -127,27 +226,27 @@ export async function renderCodeModeResult(input: CodeModeRenderInput): Promise<
 					...callSummary(input.calls).map((text): Line => ({ text })),
 				],
 	};
-	const full = [
-		sections.status,
+	// The whole rendering, as the spill file holds it.
+	const full: Block[] = [
+		blockOf(sections.status.text),
 		...stream,
-		...(returned?.lines ?? []),
-		...sections.noOutput,
-		...sections.unshown,
-		...sections.failure,
+		...(returned === undefined ? [] : [returned.block]),
+		...[...sections.noOutput, ...sections.unshown, ...sections.failure].map((line) => blockOf(line.text)),
 	];
-	const fullSize = sizeOf(full);
-	let lines = full;
+	const fullSize = blocksSize(full);
+	const truncated = !fits(fullSize, OUTPUT_BUDGET);
+	let lines: Line[];
 	let fullOutputPath: string | undefined;
-	if (!fits(fullSize, OUTPUT_BUDGET)) {
-		fullOutputPath = await spill(full.map((line) => line.text).join("\n"));
+	if (truncated) {
+		fullOutputPath = await writeTempFile("log", full.map((block) => block.text).join("\n"));
 		const marker = omissionMarker(fullSize, fullOutputPath);
 		const laidOut = result.ok ? layOutSuccess(sections, marker) : layOutFailure(sections, marker);
 		lines = withinBudget(laidOut, marker);
-	}
+	} else lines = linesOf(full);
 	return {
 		content: assemble(lines),
 		isError: !result.ok,
-		truncated: lines !== full,
+		truncated,
 		...(fullOutputPath === undefined ? {} : { fullOutputPath }),
 		shownImages: shownImagesOf(lines),
 		unshownImages: images.unshown,
@@ -214,34 +313,51 @@ function omissionMarker(fullSize: Size, path: string | undefined): OmissionMarke
 }
 
 /**
- * Lays out a successful script's result within the budget. The status line, the list of unshown images, and the
- * notice are kept. The return value may use up to half of the rest, or more when the stream leaves room; the
- * stream uses what the return value leaves.
+ * Lays out a successful script's result within the budget. The status line and the list of unshown images are kept.
+ * The return value may use up to half of the rest, or more when the stream leaves room; the stream uses what the
+ * return value leaves. When only the return value is cut, the notice after it names the full output, and room is
+ * made for it; if the stream then no longer fits, its marker names the full output instead.
  */
 function layOutSuccess(sections: Sections, marker: OmissionMarker): Line[] {
-	const notice = marker.notice === undefined || sections.returned === undefined ? [] : [marker.notice];
+	const plain = layOutSuccessWith(sections, marker, []);
+	if (marker.notice === undefined || !plain.returnCut || !plain.streamFits) return plain.lines;
+	return layOutSuccessWith(sections, marker, [marker.notice]).lines;
+}
+
+/** A successful script's layout with room for `notice`, which follows a cut return value when the stream fits. */
+function layOutSuccessWith(
+	sections: Sections,
+	marker: OmissionMarker,
+	notice: Line[],
+): { lines: Line[]; returnCut: boolean; streamFits: boolean } {
 	const available = minus(
 		OUTPUT_BUDGET,
 		sizeOf([sections.status, ...sections.noOutput, ...sections.unshown, ...notice]),
 	);
-	const full = sections.returned?.lines ?? [];
-	const returnSize = sizeOf(full);
-	const returnBudget = share(available, returnSize, sizeOf(sections.stream));
+	const streamSize = blocksSize(sections.stream);
+	const returnSize = sections.returned?.block.size ?? { bytes: 0, lines: 0 };
+	const returnBudget = share(available, returnSize, streamSize);
+	const returnCut = sections.returned !== undefined && !fits(returnSize, returnBudget);
 	const returned =
-		sections.returned === undefined || fits(returnSize, returnBudget)
-			? full
-			: truncateReturnValue(sections.returned.value, returnBudget);
+		sections.returned === undefined
+			? []
+			: returnCut
+				? truncateReturnValue(sections.returned.value, returnBudget)
+				: linesOf([sections.returned.block]);
 	const streamBudget = minus(available, sizeOf(returned));
-	const streamFits = fits(sizeOf(sections.stream), streamBudget);
-	const stream = streamFits ? sections.stream : truncateLines(sections.stream, streamBudget, marker.stream);
-	return [
+	const streamFits = fits(streamSize, streamBudget);
+	const stream = streamFits
+		? linesOf(sections.stream)
+		: truncateLines(lineWindow(sections.stream), streamBudget, marker.stream);
+	const lines = [
 		sections.status,
 		...stream,
 		...returned,
-		...(returned !== full && streamFits ? notice : []),
+		...(returnCut && streamFits ? notice : []),
 		...sections.noOutput,
 		...sections.unshown,
 	];
+	return { lines, returnCut, streamFits };
 }
 
 /**
@@ -251,9 +367,9 @@ function layOutSuccess(sections: Sections, marker: OmissionMarker): Line[] {
 function layOutFailure(sections: Sections, marker: OmissionMarker): Line[] {
 	const after = [...sections.unshown, ...sections.failure];
 	const streamBudget = minus(OUTPUT_BUDGET, sizeOf([sections.status, ...after]));
-	const stream = fits(sizeOf(sections.stream), streamBudget)
-		? sections.stream
-		: truncateLines(sections.stream, streamBudget, marker.stream);
+	const stream = fits(blocksSize(sections.stream), streamBudget)
+		? linesOf(sections.stream)
+		: truncateLines(lineWindow(sections.stream), streamBudget, marker.stream);
 	return [sections.status, ...stream, ...after];
 }
 
@@ -276,17 +392,15 @@ function withinBudget(lines: Line[], marker: OmissionMarker): Line[] {
 }
 
 /**
- * Writes the full rendering to a temp file only the user can read, as bash writes its full output, and returns
- * its path, or undefined when the file could not be written. Temp files are left for the OS to clean up.
+ * Writes `data` to a new temp file only the user can read, `volt-run-code-<random>.<extension>`, and returns its
+ * path, or undefined when the file could not be written. The full rendering of a truncated result and shown images
+ * without a file go here. Temp files are left for the OS to clean up, as bash's are.
  */
-async function spill(text: string): Promise<string | undefined> {
-	const accumulator = new OutputAccumulator({ tempFilePrefix: "volt-run-code" });
+async function writeTempFile(extension: string, data: string | Buffer): Promise<string | undefined> {
+	const path = join(tmpdir(), `volt-run-code-${randomBytes(8).toString("hex")}.${extension}`);
 	try {
-		accumulator.append(Buffer.from(text, "utf-8"));
-		accumulator.finish();
-		const { fullOutputPath } = accumulator.snapshot({ persistIfTruncated: true });
-		await accumulator.closeTempFile();
-		return fullOutputPath;
+		await writeFile(path, data, { mode: 0o600, flag: "wx" });
+		return path;
 	} catch {
 		return undefined;
 	}
@@ -347,18 +461,21 @@ function cutMiddle(text: string, maxBytes: number): string {
 }
 
 /**
- * Keeps the head and tail of `lines` around one marker, within `budget`. The head and the tail each get half of the
- * room the marker leaves, and either uses what the other leaves. A line longer than half that room is first cut in
- * the middle, so neither end is empty because of one long line; a lone line may use all of it. An image whose caption is left out is dropped with
- * it.
+ * Keeps the head and tail of a window's lines around one marker, within `budget`. The head and the tail each get
+ * half of the room the marker leaves, and either uses what the other leaves. A line longer than half that room is
+ * first cut in the middle, so neither end is empty because of one long line; a lone line may use all of it. An image
+ * whose caption is left out is dropped with it. The budget holds fewer lines than either side of a window's gap, so
+ * the head and the tail never reach it.
  */
-function truncateLines(lines: readonly Line[], budget: Size, marker: (omitted: number) => string): Line[] {
+function truncateLines(window: LineWindow, budget: Size, marker: (omitted: number) => string): Line[] {
+	const lines = [...window.head, ...window.tail];
+	const total = lines.length + window.gap;
 	// Sized for any count of omitted lines up to all of them, or for no line omitted.
-	const reserved = Math.max(lineCost(marker(lines.length)), lineCost(marker(0)));
+	const reserved = Math.max(lineCost(marker(total)), lineCost(marker(0)));
 	const room = { bytes: budget.bytes - reserved, lines: budget.lines - 1 };
-	if (room.bytes <= 0 || room.lines <= 0) return [{ text: marker(lines.length) }];
+	if (room.bytes <= 0 || room.lines <= 0) return [{ text: marker(total) }];
 	// A lone line needs no room for another one.
-	const maxLineBytes = (lines.length === 1 ? room.bytes : Math.floor(room.bytes / 2)) - 1;
+	const maxLineBytes = (total === 1 ? room.bytes : Math.floor(room.bytes / 2)) - 1;
 	let shortened = false;
 	const candidates = lines.map((line): Line => {
 		if (Buffer.byteLength(line.text) <= maxLineBytes) return line;
@@ -367,28 +484,35 @@ function truncateLines(lines: readonly Line[], budget: Size, marker: (omitted: n
 	});
 	const costs = candidates.map((line) => lineCost(line.text));
 	const half: Size = { bytes: Math.floor(room.bytes / 2), lines: Math.floor(room.lines / 2) };
+	// With a gap, the head stays in the window's head and the tail in its tail.
+	const headLimit = window.gap > 0 ? window.head.length : lines.length;
+	const tailLimit = window.gap > 0 ? window.head.length : 0;
 	let headEnd = 0;
 	let head: Size = { bytes: 0, lines: 0 };
 	const extendHead = (limit: Size) => {
-		while (headEnd < tailStart && head.bytes + costs[headEnd] <= limit.bytes && head.lines + 1 <= limit.lines) {
+		while (
+			headEnd < Math.min(tailStart, headLimit) &&
+			head.bytes + costs[headEnd] <= limit.bytes &&
+			head.lines + 1 <= limit.lines
+		) {
 			head = { bytes: head.bytes + costs[headEnd], lines: head.lines + 1 };
 			headEnd++;
 		}
 	};
 	let tailStart = candidates.length;
 	extendHead(half);
-	const tailLimit = minus(room, head);
+	const tailRoom = minus(room, head);
 	let tail: Size = { bytes: 0, lines: 0 };
 	while (
-		tailStart > headEnd &&
-		tail.bytes + costs[tailStart - 1] <= tailLimit.bytes &&
-		tail.lines + 1 <= tailLimit.lines
+		tailStart > Math.max(headEnd, tailLimit) &&
+		tail.bytes + costs[tailStart - 1] <= tailRoom.bytes &&
+		tail.lines + 1 <= tailRoom.lines
 	) {
 		tail = { bytes: tail.bytes + costs[tailStart - 1], lines: tail.lines + 1 };
 		tailStart--;
 	}
 	extendHead(minus(room, tail));
-	const omitted = tailStart - headEnd;
+	const omitted = tailStart - headEnd + window.gap;
 	if (omitted === 0) return shortened ? [...candidates, { text: marker(0) }] : candidates;
 	return [...candidates.slice(0, headEnd), { text: marker(omitted) }, ...candidates.slice(tailStart)];
 }
@@ -409,31 +533,78 @@ function truncateReturnValue(value: unknown, budget: Size): Line[] {
 	if (!text.includes("\n")) {
 		return [{ text: `${RETURN_VALUE_LABEL}${cutMiddle(text, budget.bytes - lineCost(RETURN_VALUE_LABEL))}` }];
 	}
-	const [header, ...rest] = itemLines(text, "return value");
-	const footer = rest.pop() as Line;
+	const body = blockOf(text);
+	const header: Line = { text: fenceHeader("return value", body.size.lines) };
+	const footer: Line = { text: FENCE_END };
 	const inner = minus(budget, sizeOf([header, footer]));
 	const marker = (omitted: number) =>
 		`[... ${omitted > 0 ? `${plural(omitted, "line")} omitted` : "long lines shortened"}]`;
-	return [header, ...truncateLines(rest, inner, marker), footer];
+	return [header, ...truncateLines(lineWindow([body]), inner, marker), footer];
 }
 
-/** A copy of `value` with strings longer than `stringCap` and arrays longer than `arrayCap` cut, with markers. */
-function capValue(value: unknown, stringCap: number, arrayCap: number): unknown {
+/** A capped copy of a value, and the UTF-8 bytes of its compact JSON as the codec writes it. */
+interface Capped {
+	value: unknown;
+	bytes: number;
+}
+
+/**
+ * A copy of `value` with strings longer than `stringCap` and arrays longer than `arrayCap` cut, with markers, and its
+ * size. A marker replaces what it stands for only when that makes the JSON shorter, so the JSON of a value never gets
+ * shorter as either cap grows: each element or character a larger cap keeps takes at least one byte, more than the
+ * marker's count can lose by having one digit fewer.
+ */
+function capValue(value: unknown, stringCap: number, arrayCap: number): Capped {
 	if (typeof value === "string") {
-		if (value.length <= stringCap) return value;
+		const whole: Capped = { value, bytes: encodedStringBytes(value) + 2 };
+		if (value.length <= stringCap) return whole;
 		const end = isHighSurrogate(value.charCodeAt(stringCap - 1)) ? stringCap - 1 : stringCap;
 		const capped = `${value.slice(0, end)}... [${value.length - end} more chars]`;
-		return capped.length < value.length ? capped : value;
+		const bytes = encodedStringBytes(capped) + 2;
+		return bytes < whole.bytes ? { value: capped, bytes } : whole;
 	}
 	if (Array.isArray(value)) {
-		const capped = value.slice(0, arrayCap).map((item) => capValue(item, stringCap, arrayCap));
-		if (value.length > arrayCap) capped.push(`[${value.length - arrayCap} more items]`);
-		return capped;
+		const items = value.map((item) => capValue(item, stringCap, arrayCap));
+		// The brackets, and each item with a comma, one comma too many unless the array is empty.
+		let wholeBytes = 2;
+		for (const item of items) wholeBytes += item.bytes + 1;
+		if (items.length > 0) wholeBytes--;
+		if (value.length > arrayCap) {
+			const marker = `[${value.length - arrayCap} more items]`;
+			// The brackets, and the kept items each with the comma before the next item or the marker.
+			let bytes = 2 + encodedStringBytes(marker) + 2;
+			for (let index = 0; index < arrayCap; index++) bytes += items[index].bytes + 1;
+			if (bytes < wholeBytes) {
+				const kept = items.slice(0, arrayCap).map((item) => item.value);
+				kept.push(marker);
+				return { value: kept, bytes };
+			}
+		}
+		return { value: items.map((item) => item.value), bytes: wholeBytes };
 	}
 	if (value !== null && typeof value === "object") {
-		return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, capValue(item, stringCap, arrayCap)]));
+		const entries: Array<[string, unknown]> = [];
+		// The braces, and each property with a comma, one comma too many unless there is none.
+		let bytes = 2;
+		let written = 0;
+		for (const [key, item] of Object.entries(value)) {
+			const capped = capValue(item, stringCap, arrayCap);
+			entries.push([key, capped.value]);
+			// The codec leaves out properties holding undefined.
+			if (item === undefined) continue;
+			bytes += encodedStringBytes(key) + 2 + 1 + capped.bytes + 1;
+			written++;
+		}
+		if (written > 0) bytes--;
+		return { value: Object.fromEntries(entries), bytes };
 	}
-	return value;
+	const text =
+		typeof value === "number"
+			? numberText(value)
+			: typeof value === "bigint" || typeof value === "boolean"
+				? String(value)
+				: "null";
+	return { value, bytes: text.length };
 }
 
 /** The length of the longest string and the longest array in `value`. */
@@ -451,8 +622,8 @@ function longest(value: unknown): { string: number; array: number } {
 }
 
 /**
- * The largest cap in `[low, high]` for which `attempt` returns text, and that text, assuming larger caps produce
- * larger text. Undefined when even `low` does not fit.
+ * The largest cap in `[low, high]` for which `attempt` returns text, and that text, assuming larger caps never
+ * produce shorter text, which `capValue` ensures. Undefined when even `low` does not fit, and so no cap does.
  */
 function largestFitting(low: number, high: number, attempt: (cap: number) => string | undefined): string | undefined {
 	let best = attempt(low);
@@ -479,7 +650,9 @@ function largestFitting(low: number, high: number, attempt: (cap: number) => str
  */
 function truncateJson(value: unknown, maxBytes: number): string {
 	const attempt = (stringCap: number, arrayCap: number) => {
-		const text = returnValueJson(capValue(value, stringCap, arrayCap));
+		const capped = capValue(value, stringCap, arrayCap);
+		if (capped.bytes > maxBytes) return undefined;
+		const text = returnValueJson(capped.value);
 		return Buffer.byteLength(text) <= maxBytes ? text : undefined;
 	};
 	const sizes = longest(value);
@@ -489,7 +662,7 @@ function truncateJson(value: unknown, maxBytes: number): string {
 	if (byStrings !== undefined) return byStrings;
 	const byArrays = largestFitting(0, Math.min(sizes.array, maxBytes), (cap) => attempt(MIN_STRING_CAP, cap));
 	if (byArrays !== undefined) return byArrays;
-	const text = returnValueJson(capValue(value, MIN_STRING_CAP, Number.POSITIVE_INFINITY));
+	const text = returnValueJson(capValue(value, MIN_STRING_CAP, Number.POSITIVE_INFINITY).value);
 	const head = utf8Prefix(text, maxBytes - Buffer.byteLength(`... [${text.length} more chars]`));
 	return `${head}... [${text.length - head.length} more chars]`;
 }
@@ -589,13 +762,28 @@ function errorBlock(input: CodeModeRenderInput, failure: CodeModeFailure, starte
 				? "The script was aborted. Nested calls in flight were cancelled."
 				: "The script did not start. It was aborted while it waited for the sandbox.";
 		case "output_limit":
-			return `The script printed more than ${formatCount(limits.maxRetainedOutputChars)} characters or ${formatCount(limits.maxOutputItems)} items. Print summaries and return selected fields instead of whole results.`;
+			return outputLimitSentence(failure.cause, limits);
 		case "sandbox": {
 			const reason = reasonText(failure.reason);
 			if (!started) return `The script did not start. The sandbox could not run it: ${reason}.`;
 			const calls = input.calls.length > 0 ? " Calls listed below may have taken effect." : "";
 			return `The sandbox failed: ${reason}.${calls}`;
 		}
+	}
+}
+
+/** The error block of an output-limit failure, naming the limit the script exceeded. */
+function outputLimitSentence(
+	cause: Extract<CodeModeFailure, { kind: "output_limit" }>["cause"],
+	limits: CodeModeScriptLimits,
+): string {
+	switch (cause) {
+		case "retained_output":
+			return `The script printed more than ${formatCount(limits.maxRetainedOutputChars)} characters or ${formatCount(limits.maxOutputItems)} items. Print summaries and return selected fields instead of whole results.`;
+		case "output_item":
+			return `An output item was larger than the ${formatMemory(limits.maxFrameBytes)} message limit. Print summaries and return selected fields instead of whole results.`;
+		case "return_value":
+			return `The return value was larger than the ${formatMemory(limits.maxFrameBytes)} message limit. Return selected fields instead of whole results.`;
 	}
 }
 
@@ -650,11 +838,11 @@ function callSummary(calls: readonly CodeModeRenderCall[]): string[] {
 	const readOnly = new Map<string, Record<CodeModeCallStatus, number>>();
 	for (const call of calls) {
 		if (!call.readOnly) continue;
-		const tool = toolLabel(call.tool);
-		let group = readOnly.get(tool);
+		// Grouped by name, not by label: distinct long names can share a shortened label.
+		let group = readOnly.get(call.tool);
 		if (!group) {
 			group = { completed: 0, failed: 0, cancelled: 0, unsettled: 0 };
-			readOnly.set(tool, group);
+			readOnly.set(call.tool, group);
 		}
 		group[call.status]++;
 	}
@@ -666,7 +854,7 @@ function callSummary(calls: readonly CodeModeRenderCall[]): string[] {
 				group.cancelled > 0 ? `${group.cancelled} cancelled` : "",
 				group.unsettled > 0 ? `${group.unsettled} still running` : "",
 			].filter((note) => note !== "");
-			return `${tool} \u00d7${count}${notes.length > 0 ? ` (${notes.join(", ")})` : ""}`;
+			return `${toolLabel(tool)} \u00d7${count}${notes.length > 0 ? ` (${notes.join(", ")})` : ""}`;
 		});
 		const more = readOnly.size - groups.length;
 		lines.push(`Read-only: ${groups.join(", ")}${more > 0 ? `, and ${plural(more, "more tool")}` : ""}`);
@@ -771,22 +959,24 @@ function withoutTrailingNewline(text: string): string {
 }
 
 /**
- * The lines of one item: the item itself when it is one line, or its lines fenced with a header that counts them,
+ * The block of one item: the item itself when it is one line, or its lines fenced with a header that counts them,
  * so the end of the item is unambiguous even when it contains the closing fence.
  */
-function itemLines(text: string, label: string): Line[] {
-	const parts = text.split("\n");
-	if (parts.length === 1) return [{ text }];
-	return [
-		{ text: `<<< ${label}, ${parts.length} lines` },
-		...parts.map((part): Line => ({ text: part })),
-		{ text: ">>>" },
-	];
+function itemBlock(text: string, label: string): Block {
+	const block = blockOf(text);
+	if (block.size.lines === 1) return block;
+	return blockOf(`${fenceHeader(label, block.size.lines)}\n${text}\n${FENCE_END}`);
 }
 
+function fenceHeader(label: string, lines: number): string {
+	return `<<< ${label}, ${lines} lines`;
+}
+
+const FENCE_END = ">>>";
+
 interface ShownImages {
-	/** The caption line of each image the script showed, carrying its image block. */
-	captions: ReadonlyMap<string, Line>;
+	/** The caption of each image the script showed, carrying its image block. */
+	captions: ReadonlyMap<string, Block>;
 	unshown: CodeModeImageRef[];
 	unshownLine: Line | undefined;
 }
@@ -798,51 +988,85 @@ const IMAGE_EXTENSIONS = new Map([
 	["image/webp", "webp"],
 ]);
 
+function dimensions(width: number | undefined, height: number | undefined): string {
+	return width !== undefined && height !== undefined ? ` ${width}x${height}` : "";
+}
+
 /**
- * Saves an image that came without a file (from MCP) to a temp file only the user can read, so a later turn can
- * pass it to tools that take image paths. Temp files are left for the OS to clean up, as bash's are.
+ * What reaches the model for a shown image: an image block and the size it is shown at, or why it is not shown. Only
+ * PNG, JPEG, GIF, and WebP reach the model, as with `read`, and only within the inline limits that `resizeImage`
+ * keeps images to, unless resizing is off.
  */
-async function saveImage(image: CodeModeStoredImage): Promise<string | undefined> {
-	const extension = IMAGE_EXTENSIONS.get(image.ref.mimeType.toLowerCase()) ?? "bin";
-	const path = join(tmpdir(), `volt-run-code-${randomBytes(8).toString("hex")}.${extension}`);
-	try {
-		await writeFile(path, Buffer.from(image.data, "base64"), { mode: 0o600, flag: "wx" });
-		return path;
-	} catch {
-		return undefined;
-	}
-}
+type ModelImage = { block: ImageContent; size: string } | { notShown: string };
 
-function captionText(ref: CodeModeImageRef): string {
-	const size = ref.width !== undefined && ref.height !== undefined ? ` ${ref.width}x${ref.height}` : "";
-	const path = ref.path === undefined ? "" : `, ${oneLine(ref.path)}`;
-	return `[image ${ref.ref}: ${capChars(oneLine(ref.mimeType), MAX_MIME_TYPE_CHARS)}${size}${path}]`;
+async function modelImage(
+	stored: CodeModeStoredImage,
+	bytes: Buffer,
+	format: string | null,
+	autoResizeImages: boolean,
+): Promise<ModelImage> {
+	if (format === null) return { notShown: "not a PNG, JPEG, GIF, or WebP image" };
+	if (!autoResizeImages) {
+		return {
+			block: { type: "image", data: stored.data, mimeType: format },
+			size: dimensions(stored.ref.width, stored.ref.height),
+		};
+	}
+	const resized = await resizeImage(bytes, format);
+	if (!resized) {
+		return {
+			notShown:
+				format === "image/webp"
+					? "WebP exceeds the inline limits and Volt does not include a local WebP resize codec"
+					: "it could not be resized below the inline image size limit",
+		};
+	}
+	const from = resized.wasResized ? ` (resized from ${resized.originalWidth}x${resized.originalHeight})` : "";
+	return {
+		block: { type: "image", data: resized.data, mimeType: resized.mimeType },
+		size: `${dimensions(resized.width, resized.height)}${from}`,
+	};
 }
 
 /**
- * Prepares the images the script passed to `image()`: a caption and an image block for each, saving those without
- * a file to temp files, and the line listing the images it received but never showed.
+ * Prepares the images the script passed to `image()`: a caption for each, with the image block the model receives or
+ * why it receives none, saving those without a file to temp files, and the line listing the images it received but
+ * never showed.
  */
 async function showImages(
 	output: readonly CodeModeOutputItem[],
 	received: readonly CodeModeRenderImage[],
+	autoResizeImages: boolean,
 ): Promise<ShownImages> {
 	const byRef = new Map(received.map((image) => [image.stored.ref.ref, image]));
-	const captions = new Map<string, Line>();
+	const captions = new Map<string, Block>();
 	for (const item of output) {
 		if (item.type !== "image" || captions.has(item.ref)) continue;
 		const image = byRef.get(item.ref);
 		if (!image) {
-			captions.set(item.ref, { text: `[image ${oneLine(item.ref)}: unavailable]` });
+			captions.set(item.ref, blockOf(`[image ${oneLine(item.ref)}: unavailable]`));
 			continue;
 		}
 		const { stored } = image;
-		const path = stored.ref.path ?? (await saveImage(stored));
+		const bytes = Buffer.from(stored.data, "base64");
+		// The format the bytes hold, which a declared MIME type may misstate.
+		const format = detectSupportedImageMimeType(bytes);
+		// An image without a file (from MCP) is saved as it came, so a later turn can pass it to tools that take image
+		// paths.
+		const extension = IMAGE_EXTENSIONS.get(format ?? stored.ref.mimeType.toLowerCase()) ?? "bin";
+		const path = stored.ref.path ?? (await writeTempFile(extension, bytes));
 		const ref: CodeModeImageRef = path === undefined ? { ...stored.ref } : { ...stored.ref, path };
-		captions.set(item.ref, {
-			text: captionText(ref),
-			image: { block: { type: "image", data: stored.data, mimeType: stored.ref.mimeType }, ref },
-		});
+		const where = path === undefined ? "" : `, ${oneLine(path)}`;
+		const shown = await modelImage(stored, bytes, format, autoResizeImages);
+		if ("block" in shown) {
+			captions.set(
+				item.ref,
+				blockOf(`[image ${ref.ref}: ${shown.block.mimeType}${shown.size}${where}]`, { block: shown.block, ref }),
+			);
+			continue;
+		}
+		const declared = `${capChars(oneLine(ref.mimeType), MAX_MIME_TYPE_CHARS)}${dimensions(ref.width, ref.height)}`;
+		captions.set(item.ref, blockOf(`[image ${ref.ref}: ${declared}${where}; not shown: ${shown.notShown}]`));
 	}
 	const unshownImages = received.filter((image) => !captions.has(image.stored.ref.ref));
 	const unshown = unshownImages.map((image) => ({ ...image.stored.ref }));
@@ -866,31 +1090,31 @@ function shownImagesOf(lines: readonly Line[]): CodeModeImageRef[] {
 	return [...shown.values()];
 }
 
-/** The output stream in the order the script produced it. Items are numbered from 1, images included. */
-function streamLines(output: readonly CodeModeOutputItem[], captions: ReadonlyMap<string, Line>): Line[] {
-	const lines: Line[] = [];
+/** The output stream in the order the script produced it, one block per item, numbered from 1, images included. */
+function streamBlocks(output: readonly CodeModeOutputItem[], captions: ReadonlyMap<string, Block>): Block[] {
+	const blocks: Block[] = [];
 	for (let index = 0; index < output.length; index++) {
 		const item = output[index];
 		if (item.type === "image") {
 			const caption = captions.get(item.ref);
-			if (caption) lines.push(caption);
+			if (caption) blocks.push(caption);
 			continue;
 		}
 		const prefix =
 			item.type === "console" && (item.level === "warn" || item.level === "error") ? `${item.level}: ` : "";
-		lines.push(...itemLines(`${prefix}${withoutTrailingNewline(item.text)}`, `output #${index + 1}`));
+		blocks.push(itemBlock(`${prefix}${withoutTrailingNewline(item.text)}`, `output #${index + 1}`));
 	}
-	return lines;
+	return blocks;
 }
 
 /** A string return value as it is, and any other value as compact JSON with exact numbers. */
-function returnLines(value: unknown): Line[] {
+function returnBlock(value: unknown): Block {
 	if (typeof value === "string") {
 		const text = withoutTrailingNewline(value);
-		if (text.includes("\n")) return itemLines(text, "return value");
-		return [{ text: `${RETURN_VALUE_LABEL}${text === "" ? '""' : text}` }];
+		if (text.includes("\n")) return itemBlock(text, "return value");
+		return blockOf(`${RETURN_VALUE_LABEL}${text === "" ? '""' : text}`);
 	}
-	return [{ text: `${RETURN_VALUE_LABEL}${returnValueJson(value)}` }];
+	return blockOf(`${RETURN_VALUE_LABEL}${returnValueJson(value)}`);
 }
 
 function returnValueJson(value: unknown): string {

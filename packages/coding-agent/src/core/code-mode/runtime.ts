@@ -104,7 +104,14 @@ export type CodeModeFailure =
 	| { kind: "call_budget"; budget: number }
 	| { kind: "timeout"; timeoutMs: number }
 	| { kind: "aborted" }
-	| { kind: "output_limit" }
+	| {
+			kind: "output_limit";
+			/**
+			 * The limit exceeded: the output the host retains (characters or items), or the message frame, by one output
+			 * item or by the return value.
+			 */
+			cause: "retained_output" | "output_item" | "return_value";
+	  }
 	| { kind: "sandbox"; reason: string };
 
 interface ScriptResultBase {
@@ -635,7 +642,7 @@ class ScriptRun {
 		if (this.failure?.kind === "output_limit" || this.failure?.kind === "sandbox") return;
 		// One item larger than a message frame fails like output past the retained-output limit.
 		if (Buffer.byteLength(payload) > this.limits.maxFrameBytes) {
-			this.terminate({ kind: "output_limit" });
+			this.terminate({ kind: "output_limit", cause: "output_item" });
 			return;
 		}
 		let item: CodeModeOutputItem;
@@ -662,7 +669,7 @@ class ScriptRun {
 			this.output.length >= this.limits.maxOutputItems ||
 			this.retainedChars + chars > this.limits.maxRetainedOutputChars
 		) {
-			this.terminate({ kind: "output_limit" });
+			this.terminate({ kind: "output_limit", cause: "retained_output" });
 			return;
 		}
 		this.output.push(item);
@@ -677,7 +684,7 @@ class ScriptRun {
 
 	private onDone(payload: string): void {
 		if (Buffer.byteLength(payload) > this.limits.maxFrameBytes) {
-			this.failure ??= { kind: "output_limit" };
+			this.failure ??= { kind: "output_limit", cause: "return_value" };
 			this.settleWorker();
 			return;
 		}
