@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getModel } from "@hansjm10/volt-ai";
@@ -126,8 +126,14 @@ describe("code mode MCP dispatch in a session", () => {
 		return manager;
 	}
 
-	/** A session with an extension that records the tool hooks it sees. */
-	async function createSession(options: { agentMode: AgentMode; excludeTools?: string[] }): Promise<AgentSession> {
+	/** A session with an extension that records the tool hooks it sees, and `run_code` active with `codeMode`. */
+	async function createSession(options: {
+		agentMode: AgentMode;
+		excludeTools?: string[];
+		codeMode?: boolean;
+	}): Promise<AgentSession> {
+		if (options.codeMode)
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ codeMode: { enabled: true } }));
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey("anthropic", "test-api-key");
@@ -228,6 +234,7 @@ describe("code mode MCP dispatch in a session", () => {
 		expect(auditEntries()).toEqual([
 			expect.objectContaining({
 				callerSurface: "model",
+				parentToolCallId: "run-1",
 				server: "fake",
 				item: "read_note",
 				kind: "tool",
@@ -264,5 +271,43 @@ describe("code mode MCP dispatch in a session", () => {
 			["tool_result", "mcp"],
 		]);
 		expect(internals._planning.hasResearch()).toBe(true);
+	});
+
+	/** What the session's `mcp` gateway's describe action says about a tool. */
+	async function describeTool(session: AgentSession, server: string, tool: string): Promise<Record<string, unknown>> {
+		const gateway = (session as unknown as SessionInternals)._tools.registeredTool("mcp");
+		if (!gateway) throw new Error("the session has no mcp gateway");
+		const result = await gateway.execute("describe", { action: "describe", server, tool });
+		return (result.details as { result: Record<string, unknown> }).result;
+	}
+
+	const MCP_RESULT = "Promise<{ text: string; structured?: unknown; images: ImageRef[] }>";
+
+	it("describes how a script calls an MCP tool while run_code is active, and only then", async () => {
+		const without = await createSession({ agentMode: "build" });
+		expect(without.getActiveToolNames()).not.toContain("run_code");
+		expect(await describeTool(without, "fake", "read_note")).not.toHaveProperty("codeMode");
+
+		const withCodeMode = await createSession({ agentMode: "build", codeMode: true });
+		expect(withCodeMode.getActiveToolNames()).toContain("run_code");
+		expect(await describeTool(withCodeMode, "fake", "write_note")).toMatchObject({
+			tool: "write_note",
+			codeMode: { call: "tools.mcp.fake.write_note(args)", returns: MCP_RESULT },
+		});
+		// Matched as the manager looks the server up.
+		expect(await describeTool(withCodeMode, "FAKE", "read_note")).toMatchObject({
+			codeMode: { call: "tools.mcp.fake.read_note(args)", returns: MCP_RESULT },
+		});
+	});
+
+	it("describes only the MCP tools a script could call in Plan mode", async () => {
+		const session = await createSession({ agentMode: "plan", codeMode: true });
+		expect(session.getActiveToolNames()).toContain("run_code");
+		expect(await describeTool(session, "fake", "read_note")).toMatchObject({
+			codeMode: { call: "tools.mcp.fake.read_note(args)", returns: MCP_RESULT },
+		});
+		const unbound = await describeTool(session, "fake", "write_note");
+		expect(unbound).toMatchObject({ tool: "write_note" });
+		expect(unbound).not.toHaveProperty("codeMode");
 	});
 });

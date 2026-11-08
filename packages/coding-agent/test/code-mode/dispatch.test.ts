@@ -55,7 +55,7 @@ function fakeHost(options: FakeHostOptions) {
 	const trusted = new Set(options.trusted);
 	const policyCalls: PolicyCall[] = [];
 	const resultCalls: ResultCall[] = [];
-	const mcpCalls: Array<{ server: string; tool: string; args: JsonObject }> = [];
+	const mcpCalls: Array<{ server: string; tool: string; args: JsonObject; parentToolCallId: string }> = [];
 	const limitRequests: string[] = [];
 	const host: CodeModeDispatchHost = {
 		cwd,
@@ -75,8 +75,8 @@ function fakeHost(options: FakeHostOptions) {
 			resultCalls.push(recorded);
 			return options.patchResult?.(recorded);
 		},
-		callMcpTool: async (server, tool, args, signal) => {
-			mcpCalls.push({ server, tool, args: structuredClone(args) });
+		callMcpTool: async (server, tool, args, parentToolCallId, signal) => {
+			mcpCalls.push({ server, tool, args: structuredClone(args), parentToolCallId });
 			if (!options.mcp) throw new McpToolUnavailableError("MCP is not available in this session");
 			return await options.mcp(server, tool, args, signal);
 		},
@@ -489,7 +489,9 @@ describe("code mode call dispatch", () => {
 		const origin = { kind: "code_mode", parentToolCallId: "parent", seq: 4 };
 		const input = { action: "call", server: "github", tool: "search", arguments: { query: "bug" } };
 		expect(policyCalls).toStrictEqual([{ toolCallId: "parent:cm:4", toolName: "mcp", input, origin }]);
-		expect(mcpCalls).toStrictEqual([{ server: "github", tool: "search", args: { query: "bug" } }]);
+		expect(mcpCalls).toStrictEqual([
+			{ server: "github", tool: "search", args: { query: "bug" }, parentToolCallId: "parent" },
+		]);
 		expect(limitRequests).toStrictEqual(["github"]);
 		// The tool-result policy sees the complete result as text, without details.
 		expect(resultCalls).toHaveLength(1);
@@ -527,7 +529,9 @@ describe("code mode call dispatch", () => {
 				origin: { kind: "code_mode", parentToolCallId: "parent", seq: 1 },
 			},
 		]);
-		expect(mcpCalls).toStrictEqual([{ server: "github", tool: "search", args: { query: "bug" } }]);
+		expect(mcpCalls).toStrictEqual([
+			{ server: "github", tool: "search", args: { query: "bug" }, parentToolCallId: "parent" },
+		]);
 	});
 
 	it("schedules MCP calls with their server's limit", async () => {
@@ -594,8 +598,8 @@ describe("code mode call dispatch", () => {
 			mcpCall(1, "github", "search", { query: "bug" }),
 		);
 		expect(mcpCalls).toStrictEqual([
-			{ server: "github", tool: "search", args: { query: "bug" } },
-			{ server: "github", tool: "search", args: { query: "bug" } },
+			{ server: "github", tool: "search", args: { query: "bug" }, parentToolCallId: "parent" },
+			{ server: "github", tool: "search", args: { query: "bug" }, parentToolCallId: "parent" },
 		]);
 	});
 
@@ -609,7 +613,9 @@ describe("code mode call dispatch", () => {
 			text: "ok",
 			images: [],
 		});
-		expect(mcpCalls).toStrictEqual([{ server: "github", tool: "search", args: { query: "bug", background: true } }]);
+		expect(mcpCalls).toStrictEqual([
+			{ server: "github", tool: "search", args: { query: "bug", background: true }, parentToolCallId: "parent" },
+		]);
 		expect(await rejection(handle(mcpCall(2, "github", "search", { query: "bug", id: 2n ** 70n })))).toMatchObject({
 			kind: "invalid_arguments",
 			message: "args.id: a BigInt is not a valid tool argument",

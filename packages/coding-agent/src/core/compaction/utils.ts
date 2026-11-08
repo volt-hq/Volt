@@ -25,9 +25,14 @@ export function createFileOps(): FileOperations {
 }
 
 /**
- * Extract file operations from tool calls in an assistant message.
+ * Extract file operations from the tool calls of an assistant message, and from the nested calls a `run_code`
+ * result records.
  */
 export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOperations): void {
+	if (message.role === "toolResult") {
+		if (message.toolName === "run_code") extractRunCodeFileOps(message.details, fileOps);
+		return;
+	}
 	if (message.role !== "assistant") return;
 	if (!("content" in message) || !Array.isArray(message.content)) return;
 
@@ -42,25 +47,47 @@ export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOp
 		const path = typeof args.path === "string" ? args.path : undefined;
 		if (!path) continue;
 
-		switch (block.name) {
-			case "read":
-				fileOps.read.add(path);
-				break;
-			case "write":
-				fileOps.written.add(path);
-				break;
-			case "edit":
-				fileOps.edited.add(path);
-				break;
-		}
+		addFileOp(fileOps, block.name, path);
 	}
 }
 
 /**
+ * The paths of the `read`, `write`, and `edit` calls a `run_code` script made, from the call records in its result's
+ * `details` (section 5.16 of docs/code-mode-design.md), whatever each call's status: a call that failed or was still
+ * running when the script ended may have touched its file, as a direct call that failed may have.
+ */
+function extractRunCodeFileOps(details: unknown, fileOps: FileOperations): void {
+	if (!isRecord(details) || !Array.isArray(details.calls)) return;
+	for (const call of details.calls) {
+		if (!isRecord(call) || typeof call.tool !== "string" || typeof call.path !== "string" || !call.path) continue;
+		addFileOp(fileOps, call.tool, call.path);
+	}
+}
+
+function addFileOp(fileOps: FileOperations, toolName: string, path: string): void {
+	switch (toolName) {
+		case "read":
+			fileOps.read.add(path);
+			break;
+		case "write":
+			fileOps.written.add(path);
+			break;
+		case "edit":
+			fileOps.edited.add(path);
+			break;
+	}
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
  * The file operations `entries` record: the path of each read, write, and
- * edit tool call, and the files each branch summary records of the branch it
- * left behind. A compaction records none: the history it summarized precedes
- * it on the same branch, so a scan of the whole branch counts that history.
+ * edit tool call, including those a `run_code` script made, and the files
+ * each branch summary records of the branch it left behind. A compaction
+ * records none: the history it summarized precedes it on the same branch, so
+ * a scan of the whole branch counts that history.
  */
 export function collectFileOps(entries: Iterable<SessionEntry>): FileOperations {
 	const fileOps = createFileOps();

@@ -14,6 +14,7 @@ import {
 	type CodeModeActiveTool,
 	type CodeModeBindingSources,
 	type CodeModeBindingTarget,
+	codeModeCallExpression,
 	codeModeCallsMcpTools,
 	computeCodeModeBindings,
 } from "../code-mode/bindings.ts";
@@ -381,6 +382,21 @@ export class SessionToolRuntime {
 			grantProfile: this.host.operationGrantProfile(),
 			mcpTools: this.mcpManager?.getCallableTools() ?? [],
 		};
+	}
+
+	/**
+	 * How a script calls an MCP tool, while the trusted `run_code` is active and a script starting now would get a
+	 * binding for the tool (section 5.14 of docs/code-mode-design.md); otherwise undefined. `server` is matched as the
+	 * MCP manager looks servers up.
+	 */
+	codeModeMcpBinding(server: string, tool: string): string | undefined {
+		if (!this.stagedRunCode) return undefined;
+		const normalized = server.trim().toLowerCase();
+		const bindings = computeCodeModeBindings(this.codeModeBindingSources());
+		const binding =
+			bindings.find(({ target }) => target.kind === "mcp" && target.server === normalized && target.tool === tool) ??
+			bindings.find(({ target }) => target.kind === "mcp" && target.server === server && target.tool === tool);
+		return binding === undefined ? undefined : codeModeCallExpression(binding.path);
 	}
 
 	/** The registered tools of these names, as code mode classifies them for bindings. */
@@ -1066,6 +1082,7 @@ export class SessionToolRuntime {
 								mcp: {
 									manager: this.mcpManager,
 									isRestrictedTrustedRead: () => this.host.operationGrantProfile() !== undefined,
+									codeModeBinding: (server, tool) => this.codeModeMcpBinding(server, tool),
 								},
 							}
 						: {}),
