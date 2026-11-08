@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
-import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { lstatSync, readdirSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Prompt, Resource, Tool as SdkTool } from "@modelcontextprotocol/sdk/types.js";
 import { writeDurableAtomicFileSync } from "../../utils/durable-atomic-write.ts";
@@ -7,20 +8,26 @@ import { ensurePrivateDirectorySync, hardenPrivateRegularFileSync } from "../../
 import { hashMcpMetadata } from "./config.ts";
 import type { McpMetadataCategory, McpServerMetadata } from "./types.ts";
 
-const DEFAULT_METADATA_CACHE_MAX_BYTES = 8 * 1024 * 1024;
+const DEFAULT_METADATA_CACHE_MAX_ENTRY_BYTES = 8 * 1024 * 1024;
 const DEFAULT_METADATA_CACHE_MAX_SERVERS = 64;
 const DEFAULT_METADATA_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const RESET_METADATA_FRESHNESS = new Date(0).toISOString();
+/** A persisted entry's file name: the SHA-256 hex digest of its server id. */
+const METADATA_FILE_PATTERN = /^[0-9a-f]{64}\.json$/;
 
+/** The content of one server's persisted metadata file. */
 interface MetadataCacheFile {
-	version: 2;
-	servers: Record<string, McpServerMetadata>;
+	version: 3;
+	metadata: McpServerMetadata;
 }
 
 export interface McpMetadataCacheOptions {
 	agentDir: string;
-	maxBytes?: number;
+	/** Largest persisted entry, in bytes of its file. A larger entry stays usable in memory but is not persisted. */
+	maxEntryBytes?: number;
+	/** Most persisted entries; the least recently refreshed beyond it are removed from disk, never from memory. */
 	maxServers?: number;
+	/** Persisted entries not refreshed for longer are removed from disk and not loaded. */
 	maxAgeMs?: number;
 	now?: () => number;
 }
@@ -108,57 +115,53 @@ function parseMetadata(value: unknown): McpServerMetadata | undefined {
 	};
 }
 
-function parseCacheFile(value: unknown): MetadataCacheFile {
-	if (!isRecord(value) || value.version !== 2 || !isRecord(value.servers)) {
-		return { version: 2, servers: {} };
+function parseCacheFile(value: unknown): McpServerMetadata | undefined {
+	if (!isRecord(value) || value.version !== 3) {
+		return undefined;
 	}
-	const servers: Record<string, McpServerMetadata> = {};
-	for (const [server, entry] of Object.entries(value.servers)) {
-		const parsed = parseMetadata(entry);
-		if (parsed) {
-			servers[server] = parsed;
-		}
-	}
-	return { version: 2, servers };
+	return parseMetadata(value.metadata);
 }
 
-function latestSeenAt(metadata: McpServerMetadata): number {
-	const timestamps = [metadata.toolsLastSeenAt, metadata.resourcesLastSeenAt, metadata.promptsLastSeenAt]
-		.map((value) => Date.parse(value))
-		.filter(Number.isFinite);
-	return timestamps.length > 0 ? Math.max(...timestamps) : Number.NaN;
-}
-
+/**
+ * Tool, resource, and prompt metadata per MCP server.
+ *
+ * Memory is authoritative for the running session: an entry stays usable once stored or loaded, whatever its
+ * size, until it is deleted. Each server persists to its own owner-only file under `<agentDir>/mcp/metadata/`,
+ * read the first time the server is asked for, so one server's size or a damaged file never affects another
+ * server. Persistence is best effort: an entry larger than `maxEntryBytes` is not persisted, and a failed write
+ * leaves the entry usable in memory. A file's modification time is its last refresh on this cache's clock;
+ * files older than `maxAgeMs`, and the least recently refreshed beyond `maxServers`, are removed from disk.
+ */
 export class McpMetadataCache {
-	private path: string;
-	private servers: Map<string, McpServerMetadata>;
+	private dir: string;
+	/** Stored or loaded entries. `undefined` marks a server with no usable persisted entry or a deleted one. */
+	private servers = new Map<string, McpServerMetadata | undefined>();
 	private discovery = new Map<string, McpDiscoveryMetadata>();
-	private maxBytes: number;
+	private maxEntryBytes: number;
 	private maxServers: number;
 	private maxAgeMs: number;
 	private now: () => number;
 
 	constructor(options: McpMetadataCacheOptions) {
-		this.path = join(options.agentDir, "mcp", "metadata-cache.json");
-		this.servers = new Map();
-		this.maxBytes = Math.max(1, options.maxBytes ?? DEFAULT_METADATA_CACHE_MAX_BYTES);
+		this.dir = join(options.agentDir, "mcp", "metadata");
+		this.maxEntryBytes = Math.max(1, options.maxEntryBytes ?? DEFAULT_METADATA_CACHE_MAX_ENTRY_BYTES);
 		this.maxServers = Math.max(1, options.maxServers ?? DEFAULT_METADATA_CACHE_MAX_SERVERS);
 		this.maxAgeMs = Math.max(1, options.maxAgeMs ?? DEFAULT_METADATA_CACHE_MAX_AGE_MS);
 		this.now = options.now ?? Date.now;
-		this.load();
 	}
 
 	get(server: string): McpServerMetadata | undefined {
-		const metadata = this.servers.get(server);
+		const metadata = this.entry(server);
 		return metadata ? structuredClone(metadata) : undefined;
 	}
 
+	/** The entries this cache has stored or loaded; persisted entries of servers never asked for are not read. */
 	getAll(): McpServerMetadata[] {
-		return Array.from(this.servers.values(), (metadata) => structuredClone(metadata));
+		return Array.from(this.servers.values()).flatMap((metadata) => (metadata ? [structuredClone(metadata)] : []));
 	}
 
 	getTool(server: string, toolName: string): SdkTool | undefined {
-		const tool = this.servers.get(server)?.tools.find((candidate) => candidate.name === toolName);
+		const tool = this.entry(server)?.tools.find((candidate) => candidate.name === toolName);
 		return tool ? structuredClone(tool) : undefined;
 	}
 
@@ -188,7 +191,7 @@ export class McpMetadataCache {
 	}
 
 	getDiscovery(server: string): McpDiscoveryMetadata | undefined {
-		const metadata = this.servers.get(server);
+		const metadata = this.entry(server);
 		if (!metadata) return undefined;
 		let discovery = this.discovery.get(server);
 		if (!discovery) {
@@ -210,12 +213,13 @@ export class McpMetadataCache {
 			throw new Error("MCP metadata writes require at least one refreshed category");
 		}
 		const refreshed = new Set(refreshedCategories);
-		const current = this.servers.get(server);
+		const current = this.entry(server);
 		const identityMatches =
 			current !== undefined &&
 			current.serverVersion === metadata.serverVersion &&
 			current.configHash === metadata.configHash;
-		const refreshedAt = new Date(this.now()).toISOString();
+		const refreshedAtMs = this.now();
+		const refreshedAt = new Date(refreshedAtMs).toISOString();
 		const next: McpServerMetadata = {
 			...metadata,
 			server,
@@ -244,78 +248,94 @@ export class McpMetadataCache {
 		};
 		this.servers.set(server, next);
 		this.discovery.delete(server);
-		this.save();
+		this.persist(server, next, refreshedAtMs);
 		return structuredClone(next);
 	}
 
 	delete(server: string): void {
-		this.servers.delete(server);
+		this.servers.set(server, undefined);
 		this.discovery.delete(server);
-		this.save();
+		try {
+			rmSync(this.pathFor(server), { force: true });
+		} catch {
+			// Persistence is best effort; the entry is already gone from memory.
+		}
 	}
 
-	private load(): void {
-		if (!existsSync(this.path)) {
-			return;
+	private pathFor(server: string): string {
+		return join(this.dir, `${createHash("sha256").update(server).digest("hex")}.json`);
+	}
+
+	/** The server's entry, read from its persisted file the first time the server is asked for. */
+	private entry(server: string): McpServerMetadata | undefined {
+		if (this.servers.has(server)) {
+			return this.servers.get(server);
 		}
+		const metadata = this.read(server);
+		this.servers.set(server, metadata);
+		return metadata;
+	}
+
+	private read(server: string): McpServerMetadata | undefined {
+		const path = this.pathFor(server);
 		try {
-			hardenPrivateRegularFileSync(this.path);
-			if (lstatSync(this.path).size > this.maxBytes) {
+			const stat = hardenPrivateRegularFileSync(path);
+			if (stat.size > this.maxEntryBytes || stat.mtimeMs < this.now() - this.maxAgeMs) {
+				rmSync(path, { force: true });
+				return undefined;
+			}
+			const metadata = parseCacheFile(JSON.parse(readFileSync(path, "utf-8")) as unknown);
+			return metadata?.server === server ? metadata : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * Writes the server's file, or removes it when the entry is too large to persist so an older entry cannot
+	 * outlive it, then prunes the other files. Failures leave the entry usable in memory.
+	 */
+	private persist(server: string, metadata: McpServerMetadata, refreshedAtMs: number): void {
+		const path = this.pathFor(server);
+		try {
+			const serialized = JSON.stringify({ version: 3, metadata } satisfies MetadataCacheFile);
+			if (Buffer.byteLength(serialized, "utf8") > this.maxEntryBytes) {
+				rmSync(path, { force: true });
 				return;
 			}
-			const parsed = parseCacheFile(JSON.parse(readFileSync(this.path, "utf-8")) as unknown);
-			this.servers = new Map(
-				Object.entries(parsed.servers).filter(([server, metadata]) => server === metadata.server),
-			);
-			this.prune();
+			ensurePrivateDirectorySync(dirname(this.dir));
+			ensurePrivateDirectorySync(this.dir);
+			writeDurableAtomicFileSync(path, serialized);
+			const refreshedAt = new Date(refreshedAtMs);
+			utimesSync(path, refreshedAt, refreshedAt);
+			this.prune(path);
 		} catch {
-			this.servers = new Map();
+			// Persistence is best effort; the entry stays usable in memory.
 		}
 	}
 
-	private save(): void {
-		this.prune();
-		const serialized = this.serialize();
-		if (Buffer.byteLength(serialized, "utf8") > this.maxBytes) return;
-		const dir = dirname(this.path);
-		ensurePrivateDirectorySync(dir);
-		writeDurableAtomicFileSync(this.path, serialized);
-	}
-
-	private prune(): void {
+	/** Removes files older than `maxAgeMs`, then the least recently refreshed beyond `maxServers`, never `keep`. */
+	private prune(keep: string): void {
 		const cutoff = this.now() - this.maxAgeMs;
-		const sorted = () =>
-			Array.from(this.servers.entries()).sort((left, right) => {
-				const leftTime = latestSeenAt(left[1]);
-				const rightTime = latestSeenAt(right[1]);
-				return (Number.isFinite(leftTime) ? leftTime : 0) - (Number.isFinite(rightTime) ? rightTime : 0);
-			});
-		for (const [server, metadata] of sorted()) {
-			const seenAt = latestSeenAt(metadata);
-			if (!Number.isFinite(seenAt) || seenAt < cutoff) {
-				this.servers.delete(server);
-				this.discovery.delete(server);
+		const files: { path: string; mtimeMs: number }[] = [];
+		for (const name of readdirSync(this.dir)) {
+			if (!METADATA_FILE_PATTERN.test(name)) continue;
+			const path = join(this.dir, name);
+			try {
+				const { mtimeMs } = lstatSync(path);
+				if (path !== keep && mtimeMs < cutoff) {
+					rmSync(path, { force: true });
+				} else {
+					files.push({ path, mtimeMs });
+				}
+			} catch {
+				// Another process removed the file.
 			}
 		}
-		while (this.servers.size > this.maxServers) {
-			const oldest = sorted()[0];
-			if (!oldest) break;
-			this.servers.delete(oldest[0]);
-			this.discovery.delete(oldest[0]);
+		const evictable = files.filter((file) => file.path !== keep).sort((left, right) => left.mtimeMs - right.mtimeMs);
+		const excess = files.length - this.maxServers;
+		for (const file of evictable.slice(0, Math.max(0, excess))) {
+			rmSync(file.path, { force: true });
 		}
-		while (this.serializedBytes() > this.maxBytes) {
-			const oldest = sorted()[0];
-			if (!oldest) break;
-			this.servers.delete(oldest[0]);
-			this.discovery.delete(oldest[0]);
-		}
-	}
-
-	private serializedBytes(): number {
-		return Buffer.byteLength(this.serialize(), "utf8");
-	}
-
-	private serialize(): string {
-		return `${JSON.stringify({ version: 2, servers: Object.fromEntries(this.servers.entries()) }, null, 2)}\n`;
 	}
 }

@@ -826,7 +826,7 @@ describe("MCP support", () => {
 				},
 			}),
 		);
-		expect(new McpMetadataCache({ agentDir: legacyDir }).getAll()).toEqual([]);
+		expect(new McpMetadataCache({ agentDir: legacyDir }).get("fake")).toBeUndefined();
 
 		const tempDir = makeTempDir();
 		tempDirs.push(tempDir);
@@ -852,47 +852,56 @@ describe("MCP support", () => {
 		expect(changedIdentity.toolsLastSeenAt).toBe(new Date(now).toISOString());
 		expect(changedIdentity.resourcesLastSeenAt).toBe(new Date(0).toISOString());
 		expect(changedIdentity.promptsLastSeenAt).toBe(new Date(0).toISOString());
+		expect(new McpMetadataCache({ agentDir: tempDir, now: () => now }).get("fake")).toEqual(changedIdentity);
 		expect(() => cache.set("fake", base, [])).toThrow("at least one refreshed category");
 	});
 
-	it("prunes stale and excess MCP metadata cache entries", () => {
+	it("prunes stale and excess persisted MCP metadata without evicting entries in memory", () => {
 		const tempDir = makeTempDir();
 		tempDirs.push(tempDir);
 		let now = Date.parse("2026-01-01T00:00:00.000Z");
-		const cache = new McpMetadataCache({
-			agentDir: tempDir,
-			maxServers: 2,
-			maxAgeMs: 1_000,
-			now: () => now,
-		});
+		const options = { agentDir: tempDir, maxServers: 2, maxAgeMs: 1_000, now: () => now };
+		const cache = new McpMetadataCache(options);
 		const metadata = { tools: [], resources: [], prompts: [] };
 		cache.set("one", { server: "one", ...metadata }, ["tools", "resources", "prompts"]);
 		now += 100;
 		cache.set("two", { server: "two", ...metadata }, ["tools", "resources", "prompts"]);
 		now += 100;
 		cache.set("three", { server: "three", ...metadata }, ["tools", "resources", "prompts"]);
-		expect(cache.get("one")).toBeUndefined();
-		expect(cache.getAll().map((entry) => entry.server)).toEqual(["two", "three"]);
+		expect(cache.getAll().map((entry) => entry.server)).toEqual(["one", "two", "three"]);
+
+		const reloaded = new McpMetadataCache(options);
+		expect(reloaded.get("one")).toBeUndefined();
+		expect(reloaded.get("two")?.server).toBe("two");
+		expect(reloaded.get("three")?.server).toBe("three");
 
 		now += 2_000;
-		const reloaded = new McpMetadataCache({
-			agentDir: tempDir,
-			maxServers: 2,
-			maxAgeMs: 1_000,
-			now: () => now,
-		});
-		expect(reloaded.getAll()).toEqual([]);
+		const expired = new McpMetadataCache(options);
+		expect(expired.get("two")).toBeUndefined();
+		expect(expired.get("three")).toBeUndefined();
 	});
 
-	it("measures the exact pretty-printed metadata cache payload against the byte cap", () => {
+	it("keeps metadata too large to persist usable in memory without evicting other servers", () => {
 		const tempDir = makeTempDir();
 		tempDirs.push(tempDir);
-		const cache = new McpMetadataCache({ agentDir: tempDir, maxBytes: 240 });
-		cache.set("one", { server: "one", tools: [], resources: [], prompts: [] }, ["tools", "resources", "prompts"]);
+		const options = { agentDir: tempDir, maxEntryBytes: 1_024 };
+		const cache = new McpMetadataCache(options);
+		const empty = { resources: [], prompts: [] };
+		const small = [{ name: "read_note", inputSchema: { type: "object" } } satisfies SdkTool];
+		const large = Array.from(
+			{ length: 50 },
+			(_, index) => ({ name: `tool_${index}`, inputSchema: { type: "object" } }) satisfies SdkTool,
+		);
+		cache.set("small", { server: "small", tools: small, ...empty }, ["tools", "resources", "prompts"]);
+		cache.set("large", { server: "large", tools: small, ...empty }, ["tools", "resources", "prompts"]);
+		cache.set("large", { server: "large", tools: large, ...empty }, ["tools", "resources", "prompts"]);
 
-		const cachePath = join(tempDir, "mcp", "metadata-cache.json");
-		expect(statSync(cachePath).size).toBeLessThanOrEqual(240);
-		expect(cache.get("one")).toBeUndefined();
+		expect(cache.get("small")?.tools).toEqual(small);
+		expect(cache.get("large")?.tools).toEqual(large);
+		const reloaded = new McpMetadataCache(options);
+		expect(reloaded.get("small")?.tools).toEqual(small);
+		// The earlier, smaller entry must not outlive the one that replaced it.
+		expect(reloaded.get("large")).toBeUndefined();
 	});
 
 	it("streams lifecycle events for status changes, tool calls, enablement, and auth", async () => {
