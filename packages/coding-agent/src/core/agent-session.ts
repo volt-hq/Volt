@@ -648,6 +648,7 @@ export class AgentSession {
 				liveState: this.liveState,
 				hostActions: this._hostActions,
 				conversation: () => this._conversation,
+				turnPolicy: () => this._turnPolicy,
 				extensions: () => this._extensions,
 				extensionServices: () => this._extensionServices,
 				jobs: () => this._jobs,

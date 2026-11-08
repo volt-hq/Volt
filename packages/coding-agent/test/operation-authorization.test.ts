@@ -74,6 +74,29 @@ describe("operation authorization", () => {
 		});
 	});
 
+	it("makes run_code visible to the research profile without authorizing an operation of its own", () => {
+		const runCode = getTrustedToolOperationResolver("run_code");
+		// It advertises what scripts may call: the bindable built-in tools' operations and trusted MCP reads.
+		expect(runCode?.advertisedCapabilitySets).toEqual(
+			expect.arrayContaining([
+				["workspace.read"],
+				["network.read"],
+				["workspace.write"],
+				["process.execute"],
+				["integration.read"],
+			]),
+		);
+		expect(isToolVisibleUnderGrant(runCode, RESEARCH_OPERATION_GRANT_PROFILE)).toBe(true);
+		const decision = authorizeToolOperation(runCode, { code: "return 1" }, RESEARCH_OPERATION_GRANT_PROFILE);
+		expect(decision).toMatchObject({
+			allowed: true,
+			resolution: { kind: "resolved", capabilities: [] },
+			missingCapabilities: [],
+		});
+		// The script itself reads nothing; only its nested reads, authorized as their own calls, count as research.
+		expect(operationProvidesResearchEvidence(decision.resolution)).toBe(false);
+	});
+
 	it("resolves parameter-sensitive LSP and inspection operations", () => {
 		const lsp = getTrustedToolOperationResolver("lsp");
 		for (const action of ["status", "diagnostics"]) {

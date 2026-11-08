@@ -10,7 +10,8 @@ import { join } from "node:path";
 import type { AgentMessage, AgentTool, Conversation } from "@hansjm10/volt-agent-core";
 import type { Api, ImageContent, JsonValue, Model } from "@hansjm10/volt-ai";
 import type { AgentSessionConfig, AgentSessionEvent } from "../agent-session.ts";
-import type { CodeModeActiveTool, CodeModeBindingSources } from "../code-mode/bindings.ts";
+import type { CodeModeActiveTool, CodeModeBindingSources, CodeModeBindingTarget } from "../code-mode/bindings.ts";
+import { codeModeDispatchHostOf } from "../code-mode/dispatch.ts";
 import { type ToolDefinition, type ToolInfo, wrapRegisteredTools } from "../extensions/index.ts";
 import type { LiveState } from "../host/live-state.ts";
 import { resolveLspConfig } from "../lsp/config.ts";
@@ -23,6 +24,7 @@ import type { ModelRegistry } from "../model-registry.ts";
 import {
 	getTrustedToolOperationResolver,
 	isToolVisibleUnderGrant,
+	type OperationCapability,
 	type OperationGrantProfile,
 	RESEARCH_OPERATION_GRANT_PROFILE,
 	type ToolOperationResolver,
@@ -40,6 +42,7 @@ import {
 	createAllToolDefinitions,
 	createDefaultWebSearchOperations,
 	DEFAULT_ACTIVE_TOOL_NAMES,
+	describeRunCode,
 	extractUrls,
 	isCodexImageGenerationModel,
 	type SubagentToolManager,
@@ -57,6 +60,7 @@ import type { SessionExtensionServices } from "./extension-services.ts";
 import type { HostActions } from "./host-actions.ts";
 import type { SessionJobs } from "./jobs.ts";
 import { McpAuthRequests } from "./mcp-auth-requests.ts";
+import type { SessionTurnPolicy } from "./turn-policy.ts";
 
 interface ToolDefinitionEntry {
 	definition: ToolDefinition<any, any>;
@@ -79,6 +83,15 @@ function directMcpToolTargets(
 		]),
 	);
 }
+
+/** Capabilities that only read; a nested call whose resolution holds nothing else is read-only (section 5.11). */
+const READ_CAPABILITIES: ReadonlySet<OperationCapability> = new Set([
+	"workspace.read",
+	"network.read",
+	"process.inspect",
+	"integration.discover",
+	"integration.read",
+]);
 
 function normalizePromptSnippet(text: string | undefined): string | undefined {
 	if (!text) return undefined;
@@ -142,6 +155,8 @@ export interface SessionToolRuntimeHost {
 	/** Runs host actions, such as LSP server installs, once a client approves them. */
 	readonly hostActions: HostActions;
 	conversation(): Conversation<AgentTool>;
+	/** The session's turn policy, whose tool-call and tool-result policies a code mode script's nested calls pass. */
+	turnPolicy(): SessionTurnPolicy;
 	extensions(): SessionExtensionBinding;
 	extensionServices(): SessionExtensionServices;
 	jobs(): SessionJobs;
@@ -211,6 +226,11 @@ export class SessionToolRuntime {
 	private effectiveActiveToolNames: string[] = [];
 	/** Registry last staged for the conversation, including same-name tool replacements. */
 	private effectiveToolRegistry = this.toolRegistry;
+	/**
+	 * The active trusted `run_code` tool as last staged, with the description that lists the bindings scripts get
+	 * (section 5.14 of docs/code-mode-design.md), and the registered tool it copies.
+	 */
+	private stagedRunCode: { tool: AgentTool; registered: AgentTool } | undefined;
 	private toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private toolPromptSnippets: Map<string, string> = new Map();
 	private toolPromptGuidelines: Map<string, string[]> = new Map();
@@ -364,6 +384,27 @@ export class SessionToolRuntime {
 	}
 
 	/**
+	 * Whether a code mode script's nested call only reads: its trusted operation resolution holds nothing but read
+	 * capabilities (section 5.11 of docs/code-mode-design.md). A call with no trusted resolver, such as one to an
+	 * extension tool, or whose operation does not resolve, may have changed state.
+	 */
+	codeModeCallIsReadOnly(target: CodeModeBindingTarget, args: Record<string, unknown>): boolean {
+		const resolution =
+			target.kind === "mcp"
+				? this.mcpManager &&
+					getTrustedToolOperationResolver("mcp", { integrationReadAuthority: this.mcpManager })?.resolve({
+						action: "call",
+						server: target.server,
+						tool: target.tool,
+					})
+				: this.trustedOperationResolver(target.toolName)?.resolve(args);
+		return (
+			resolution?.kind === "resolved" &&
+			resolution.capabilities.every((capability) => READ_CAPABILITIES.has(capability))
+		);
+	}
+
+	/**
 	 * Get the names of currently active tools.
 	 * Returns the names of tools currently set on the agent.
 	 */
@@ -380,6 +421,7 @@ export class SessionToolRuntime {
 	activeTools(): AgentTool[] {
 		return this.effectiveActiveToolNames.flatMap((name) => {
 			const tool = this.toolRegistry.get(name);
+			if (tool && tool === this.stagedRunCode?.registered) return [this.stagedRunCode.tool];
 			return tool ? [tool] : [];
 		});
 	}
@@ -500,8 +542,16 @@ export class SessionToolRuntime {
 		this.host.extensionServices().invalidate();
 		this.effectiveActiveToolNames = validToolNames;
 		this.effectiveToolRegistry = this.toolRegistry;
+		// The description lists the bindings scripts get, from the tools just made active, so it is staged with them.
+		const runCode = this.toolRegistry.get("run_code");
+		this.stagedRunCode =
+			runCode && validToolNames.includes("run_code") && this.isTrustedBuiltin("run_code")
+				? { tool: { ...runCode, description: describeRunCode(this.codeModeBindingSources()) }, registered: runCode }
+				: undefined;
+		const staged = this.stagedRunCode;
+		const conversationTools = staged ? tools.map((tool) => (tool === staged.registered ? staged.tool : tool)) : tools;
 		this.host.jobs().revokeUngranted();
-		if (!this.host.isDisposed()) this.host.conversation().setTools(tools);
+		if (!this.host.isDisposed()) this.host.conversation().setTools(conversationTools);
 
 		// Rebuild base system prompt with new tool set
 		this.baseSystemPromptText = this.rebuildSystemPrompt(validToolNames);
@@ -523,8 +573,14 @@ export class SessionToolRuntime {
 		const effective = [
 			...new Set(
 				planningState.mode === "plan"
-					? Array.from(this.toolRegistry.keys()).filter((name) =>
-							isToolVisibleUnderGrant(this.trustedOperationResolver(name), RESEARCH_OPERATION_GRANT_PROFILE),
+					? Array.from(this.toolRegistry.keys()).filter(
+							(name) =>
+								isToolVisibleUnderGrant(
+									this.trustedOperationResolver(name),
+									RESEARCH_OPERATION_GRANT_PROFILE,
+								) &&
+								// Plan mode offers every tool the profile authorizes, but code mode only where Build mode would.
+								(name !== "run_code" || this.requestedBuildToolNames.includes(name)),
 						)
 					: planningState.plan?.phase === "active"
 						? [...this.requestedBuildToolNames, "update_plan_progress", "request_replan"]
@@ -984,6 +1040,12 @@ export class SessionToolRuntime {
 								},
 							}
 						: {}),
+					runCode: {
+						bindingSources: () => this.codeModeBindingSources(),
+						dispatchHost: () => codeModeDispatchHostOf(this, this.host.turnPolicy(), this.host.cwd),
+						callIsReadOnly: (target, args) => this.codeModeCallIsReadOnly(target, args),
+						autoResizeImages,
+					},
 				});
 
 		if (!this.baseToolsOverride) {
@@ -1016,6 +1078,7 @@ export class SessionToolRuntime {
 					...(this.mcpManager ? ["mcp"] : []),
 					...directMcpToolDefinitions.map((definition) => definition.name),
 					...(this.lspManager ? ["lsp"] : []),
+					...(this.host.settingsManager.getCodeModeEnabled() ? ["run_code"] : []),
 				];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this.refreshRegistry({

@@ -194,6 +194,7 @@ export interface Settings {
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
 	lsp?: LspSettings; // LSP diagnostics after edit/write (see docs/lsp.md)
+	codeMode?: CodeModeSettings;
 	remote?: RemoteSettings; // voltd daemon / remote access (see docs/daemon.md)
 	tuiMode?: TuiMode; // default: "regular"
 	fullscreenExitOutput?: FullscreenExitOutput; // default: "transcript"; no effect in regular mode
@@ -211,6 +212,12 @@ export interface ExtensionEntrySettings {
 	 * mark them `remoteSafe`. Global settings only: a project's value is ignored.
 	 */
 	remoteSafeCommands?: string[];
+}
+
+/** Code mode: the `run_code` tool (see docs/settings.md). */
+export interface CodeModeSettings {
+	/** Adds `run_code` to a conversation's default active tools. Default: false. */
+	enabled?: boolean;
 }
 
 export interface RemoteSettings {
@@ -2232,6 +2239,11 @@ export class SettingsManager {
 
 	getCodeBlockIndent(): string {
 		return this.settings.markdown?.codeBlockIndent ?? "  ";
+	}
+
+	/** Whether `run_code` joins a conversation's default active tools: only when `codeMode.enabled` is true. */
+	getCodeModeEnabled(): boolean {
+		return this.settings.codeMode?.enabled === true;
 	}
 
 	getLspSettings(): LspSettings | undefined {

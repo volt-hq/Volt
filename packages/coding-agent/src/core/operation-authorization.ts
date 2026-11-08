@@ -1,3 +1,4 @@
+import { BINDABLE_BUILTIN_TOOL_NAMES } from "./code-mode/bindings.ts";
 import { type InspectionToolInput, resolveInspectionCommand } from "./tools/inspect.ts";
 
 export const OPERATION_CAPABILITIES = [
@@ -204,6 +205,31 @@ function createMcpResolver(authority: IntegrationReadAuthority): ToolOperationRe
 	};
 }
 
+let runCodeResolver: ToolOperationResolver | undefined;
+
+/**
+ * The resolver of `run_code` (section 5.12 of docs/code-mode-design.md). It advertises the capability sets of the
+ * tools scripts may call, the bindable built-in tools and MCP tools configured as trusted reads, so a grant profile
+ * that authorizes any of them makes `run_code` visible. A call resolves to no capabilities, because the script itself
+ * performs no operation: each nested call is authorized as its own call under the same profile, and a script's
+ * bindings are narrowed to what that profile authorizes. The outer call therefore provides no research evidence;
+ * only its successful nested reads do.
+ */
+function getRunCodeResolver(): ToolOperationResolver {
+	// Built on first use: the bindings module imports this one.
+	if (!runCodeResolver) {
+		const sets = new Map<string, readonly OperationCapability[]>();
+		for (const name of BINDABLE_BUILTIN_TOOL_NAMES) {
+			for (const capabilities of getTrustedToolOperationResolver(name)?.advertisedCapabilitySets ?? []) {
+				sets.set([...capabilities].sort().join(" "), capabilities);
+			}
+		}
+		sets.set("integration.read", ["integration.read"]);
+		runCodeResolver = { advertisedCapabilitySets: [...sets.values()], resolve: () => resolved() };
+	}
+	return runCodeResolver;
+}
+
 export const RESEARCH_OPERATION_GRANT_PROFILE: OperationGrantProfile = Object.freeze({
 	id: "research",
 	capabilities: new Set<OperationCapability>([
@@ -223,6 +249,7 @@ export function getTrustedToolOperationResolver(
 ): ToolOperationResolver | undefined {
 	if (toolName === "lsp") return LSP_RESOLVER;
 	if (toolName === "inspect") return INSPECTION_RESOLVER;
+	if (toolName === "run_code") return getRunCodeResolver();
 	if (toolName === "mcp" && options.integrationReadAuthority) {
 		return createMcpResolver(options.integrationReadAuthority);
 	}

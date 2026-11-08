@@ -714,8 +714,8 @@ const { session } = await createAgentSession({ resourceLoader: loader });
 
 Specify which built-in tools to enable:
 
-- Built-in tool names: `read`, `bash`, `jobs`, `edit`, `write`, `image_gen`, `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp`, `subagent`, child-only `subagent_registry`, and `mcp`
-- Default built-ins: `read`, `bash`, `jobs`, `edit`, `write`, `web_search`, `web_fetch`, `lsp` (status remains available when LSP is disabled), `image_gen` when an OpenAI Codex model is selected, `subagent` when spawning is available, and `subagent_registry` when the manager belongs to a child runtime
+- Built-in tool names: `read`, `bash`, `jobs`, `edit`, `write`, `image_gen`, `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp`, `subagent`, child-only `subagent_registry`, `mcp`, and `run_code`
+- Default built-ins: `read`, `bash`, `jobs`, `edit`, `write`, `web_search`, `web_fetch`, `lsp` (status remains available when LSP is disabled), `image_gen` when an OpenAI Codex model is selected, `subagent` when spawning is available, `subagent_registry` when the manager belongs to a child runtime, and `run_code` when the [`codeMode.enabled`](settings.md#code-mode) setting is on (pass it in `tools` to enable it without the setting)
 - `noTools: "all"` disables all tools
 - `noTools: "builtin"` disables default built-ins, including `subagent`, while keeping extension and custom tools enabled
 - `excludeTools` disables specific built-in, extension, or custom tool names after any `tools` allowlist is applied
