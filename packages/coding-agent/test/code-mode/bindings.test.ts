@@ -130,7 +130,7 @@ const SERVERS = ["github", "my-server", "my_server"];
 const MCP_TOOL_NAMES = ["create_issue", "get-file", "read.note", "__proto__", "", "t".repeat(250)];
 
 const activeTool: fc.Arbitrary<CodeModeActiveTool> = fc.oneof(
-	fc.constantFrom(...allToolNames, ...NATIVE_PLAN_TOOL_NAMES, "run_code", "future_builtin").map(builtin),
+	fc.constantFrom(...allToolNames, ...NATIVE_PLAN_TOOL_NAMES, "future_builtin").map(builtin),
 	fc
 		.oneof(
 			fc.constantFrom(...DESIGN_NEVER, "read", "bash", "__proto__", "", "x".repeat(300), "a.b", '["read"]'),
@@ -162,6 +162,9 @@ describe("code mode bindings", () => {
 		for (const name of [...allToolNames, ...NATIVE_PLAN_TOOL_NAMES]) {
 			expect(BINDABLE_BUILTIN_TOOL_NAMES.has(name) !== NEVER_BINDABLE_TOOL_NAMES.has(name), name).toBe(true);
 		}
+		// The code-mode tool is a built-in tool, classified as never bindable.
+		expect(allToolNames.has("run_code")).toBe(true);
+		expect(NEVER_BINDABLE_TOOL_NAMES.has("run_code")).toBe(true);
 	});
 
 	it("binds exactly the calls the model could make directly, at paths the runtime accepts", () => {

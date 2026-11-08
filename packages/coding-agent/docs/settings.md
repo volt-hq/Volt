@@ -390,6 +390,12 @@ See [LSP Diagnostics](lsp.md) for the full reference, including built-in server 
 | `lsp.maxDiagnostics` | number | `20` | Maximum diagnostics reported per tool call |
 | `lsp.severity` | string | `"error"` | Minimum severity to report: `error`, `warning`, `information`, or `hint` |
 
+### Code Mode
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `codeMode.enabled` | boolean | `false` | Adds `run_code` to the default active tools. `run_code` runs a sandboxed script that calls the conversation's other active tools and returns only what the script prints or returns. `--tools`, `--exclude-tools`, and `remote.allowTools` apply to it like any other tool |
+
 ### Remote Access (daemon)
 
 Settings the background daemon reads; see [Background daemon](daemon.md). The daemon reads them from global settings only (never a project's), when it starts: run `volt daemon restart` after changing them. An invalid value keeps the daemon from starting.

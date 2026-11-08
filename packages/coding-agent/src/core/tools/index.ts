@@ -110,6 +110,15 @@ export {
 	type RequestUserInputToolOptions,
 } from "./request-user-input.ts";
 export {
+	createRunCodeTool,
+	createRunCodeToolDefinition,
+	describeRunCode,
+	type RunCodeCallDetails,
+	type RunCodeDetails,
+	type RunCodeToolInput,
+	type RunCodeToolOptions,
+} from "./run-code.ts";
+export {
 	createSubagentRegistryTool,
 	createSubagentRegistryToolDefinition,
 	createSubagentTool,
@@ -216,6 +225,7 @@ import {
 	createRequestUserInputToolDefinition,
 	type RequestUserInputToolOptions,
 } from "./request-user-input.ts";
+import { createRunCodeTool, createRunCodeToolDefinition, type RunCodeToolOptions } from "./run-code.ts";
 import {
 	createSubagentRegistryTool,
 	createSubagentRegistryToolDefinition,
@@ -245,7 +255,7 @@ export type CoreToolName =
 	| "lsp"
 	| "jobs"
 	| "request_user_input";
-export type ToolName = CoreToolName | "subagent" | typeof SUBAGENT_REGISTRY_TOOL_NAME | "mcp";
+export type ToolName = CoreToolName | "subagent" | typeof SUBAGENT_REGISTRY_TOOL_NAME | "mcp" | "run_code";
 export const DEFAULT_ACTIVE_TOOL_NAMES: readonly CoreToolName[] = [
 	"request_user_input",
 	"jobs",
@@ -284,6 +294,7 @@ export const allToolNames: Set<ToolName> = new Set([
 	"subagent",
 	SUBAGENT_REGISTRY_TOOL_NAME,
 	"mcp",
+	"run_code",
 ]);
 
 export interface ToolsOptions {
@@ -304,6 +315,7 @@ export interface ToolsOptions {
 	subagent?: SubagentToolOptions;
 	subagentRegistry?: SubagentRegistryToolOptions;
 	mcp?: McpGatewayToolOptions;
+	runCode?: RunCodeToolOptions;
 }
 
 export function createToolDefinition(toolName: ToolName, cwd: string, options?: ToolsOptions): ToolDef {
@@ -351,6 +363,11 @@ export function createToolDefinition(toolName: ToolName, cwd: string, options?: 
 				throw new Error("MCP tool requires McpGatewayToolOptions");
 			}
 			return createMcpToolDefinition(options.mcp);
+		case "run_code":
+			if (!options?.runCode) {
+				throw new Error("run_code tool requires RunCodeToolOptions");
+			}
+			return createRunCodeToolDefinition(options.runCode);
 		default:
 			throw new Error(`Unknown tool name: ${toolName}`);
 	}
@@ -401,6 +418,11 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 				throw new Error("MCP tool requires McpGatewayToolOptions");
 			}
 			return createMcpTool(options.mcp);
+		case "run_code":
+			if (!options?.runCode) {
+				throw new Error("run_code tool requires RunCodeToolOptions");
+			}
+			return createRunCodeTool(options.runCode);
 		default:
 			throw new Error(`Unknown tool name: ${toolName}`);
 	}
@@ -432,7 +454,8 @@ export function createReadOnlyToolDefinitions(cwd: string, options?: ToolsOption
 export function createAllToolDefinitions(
 	cwd: string,
 	options?: ToolsOptions,
-): Record<CoreToolName, ToolDef> & Partial<Record<"subagent" | typeof SUBAGENT_REGISTRY_TOOL_NAME | "mcp", ToolDef>> {
+): Record<CoreToolName, ToolDef> &
+	Partial<Record<"subagent" | typeof SUBAGENT_REGISTRY_TOOL_NAME | "mcp" | "run_code", ToolDef>> {
 	return {
 		request_user_input: createRequestUserInputToolDefinition(options?.requestUserInput),
 		jobs: createJobsToolDefinition(options?.jobs),
@@ -453,6 +476,7 @@ export function createAllToolDefinitions(
 			? { [SUBAGENT_REGISTRY_TOOL_NAME]: createSubagentRegistryToolDefinition(options.subagentRegistry) }
 			: {}),
 		...(options?.mcp ? { mcp: createMcpToolDefinition(options.mcp) } : {}),
+		...(options?.runCode ? { run_code: createRunCodeToolDefinition(options.runCode) } : {}),
 	};
 }
 
@@ -482,7 +506,8 @@ export function createReadOnlyTools(cwd: string, options?: ToolsOptions): Tool[]
 export function createAllTools(
 	cwd: string,
 	options?: ToolsOptions,
-): Record<CoreToolName, Tool> & Partial<Record<"subagent" | typeof SUBAGENT_REGISTRY_TOOL_NAME | "mcp", Tool>> {
+): Record<CoreToolName, Tool> &
+	Partial<Record<"subagent" | typeof SUBAGENT_REGISTRY_TOOL_NAME | "mcp" | "run_code", Tool>> {
 	return {
 		request_user_input: createRequestUserInputTool(options?.requestUserInput),
 		jobs: createJobsTool(options?.jobs),
@@ -503,5 +528,6 @@ export function createAllTools(
 			? { [SUBAGENT_REGISTRY_TOOL_NAME]: createSubagentRegistryTool(cwd, options.subagentRegistry) }
 			: {}),
 		...(options?.mcp ? { mcp: createMcpTool(options.mcp) } : {}),
+		...(options?.runCode ? { run_code: createRunCodeTool(options.runCode) } : {}),
 	};
 }

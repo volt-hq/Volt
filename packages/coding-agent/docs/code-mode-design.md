@@ -1,6 +1,6 @@
 # Code mode
 
-- Status: Design complete, ready for review. Every decision is recorded in section 5; section 8 lists the approvals for implementation, granted on 2026-11-04, and the follow-ups, and section 9 the delivery plan. Sections 5.1 to 5.14 were reviewed with the maintainer; sections 5.15 to 5.18 were decided without a separate review round.
+- Status: Design complete, ready for review. Every decision is recorded in section 5; section 8 lists the approvals for implementation, granted on 2026-11-04, and the follow-ups, and section 9 the delivery plan. Sections 5.1 to 5.14 were reviewed with the maintainer; sections 5.15 to 5.18 were decided without a separate review round. Delivery steps 1 and 2 are merged. Step 3 ships as several pull requests; the first wires a minimal `run_code` tool end to end, and section 9 lists what remains.
 - Date: 2026-11-04
 - Audience: Volt maintainers.
 - Scope: A sandboxed script tool that lets the model call Volt tools programmatically, so intermediate results stay out of the model context. This document covers the runtime that executes scripts, how it is supervised, and the constraints Volt places on it.
@@ -556,7 +556,8 @@ Shell commands written inside JavaScript are fragile. In testing, 6 of 12 realis
 #### Restricted profiles
 
 - In Plan mode the binding set is narrowed to tools the research profile can authorize: workspace reads, network reads, process inspection, and MCP tools configured as trusted reads. Per-call authorization still applies, so `lsp` `rename` and `fix` reject with `blocked`.
-- The code-mode tool gets a trusted operation resolver that advertises the capability sets of its bindings, so a grant profile can make it visible (`isToolVisibleUnderGrant`, `src/core/operation-authorization.ts:232`) and authorize it.
+- The code-mode tool gets a trusted operation resolver (`RUN_CODE_RESOLVER` in `src/core/operation-authorization.ts`) that advertises no capability sets and resolves a call to no capabilities, because the script itself performs no operation: each nested call is authorized as its own call under the same profile, so the outer call provides no research evidence and only its successful nested reads do. What a script can reach depends on the session's active tools, so the resolver shows `run_code` under no grant profile (`isToolVisibleUnderGrant`), and it never makes a session look research-capable to `submit_plan`'s check (`resolverCanProvideResearchEvidence`). Under a profile, every binding is another active trusted tool that the profile shows and that can provide research evidence itself, so the check needs nothing from `run_code`. This cannot widen what a profile allows: the bindings are narrowed by the same profile, and extension services, which run trusted tools for extensions, map only to `read`, `find`, `grep`, and `lsp`.
+- In Plan mode, the trusted `run_code` is active only when the Build tool request includes it (section 5.15) and its scripts would get a binding among the other tools Plan mode activates: a built-in binding, or MCP tools through the `mcp` gateway, as the description counts them (section 5.14). A Plan mode session with no bindable read tool therefore has no `run_code` to call, and `submit_plan` reports that it cannot succeed.
 - Successful nested reads record Plan research evidence through the existing tool-result policy, because nested calls pass that policy under their own call IDs.
 
 #### Declarations
@@ -637,7 +638,9 @@ Decided.
 
 #### Language
 
-Scripts are JavaScript or erasable TypeScript. The host strips TypeScript with `node:module`'s `stripTypeScriptTypes` in strip mode before the script reaches the VM. On Node 22.20 and 24.20 it preserved every line and column, so stack traces still map to the script, and it rejected `enum`, `namespace`, and parameter properties with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`, which the host reports as a syntax error (section 5.11). The API is experimental and emits an `ExperimentalWarning`, which the host suppresses so it never reaches the terminal or a client; if the API changes, `amaro`, the stripper Node bundles, is the replacement DeepSeek also names.
+Scripts are JavaScript or erasable TypeScript. The host strips TypeScript with `node:module`'s `stripTypeScriptTypes` in strip mode before the script reaches the VM. On Node 22.20 and 24.20 it preserved every line and column, so stack traces still map to the script, and it rejected `enum`, `namespace`, and parameter properties with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`, which the host reports as a syntax error (section 5.11).
+
+The host strips a script inside the wrapper the runtime evaluates it in (`SCRIPT_PREFIX` and `SCRIPT_SUFFIX` in `prelude.ts`), so top-level `await` and `return` parse, and then slices the wrapper back off; strip mode replaces types with whitespace, so every offset is kept. Syntax strip mode does not support fails before the script starts, rendered as a syntax error with `The script did not start.` and the line Node reports. Any other strip failure runs the script unchanged, so the engine reports genuine JavaScript errors: code the TypeScript parser rejects but sloppy-mode JavaScript accepts, such as a legacy octal literal or a `with` statement, runs as written. `details.language` is `typescript` when stripping changed the script. The API is experimental and emits an `ExperimentalWarning`, which the host suppresses so it never reaches the terminal or a client; if the API changes, `amaro`, the stripper Node bundles, is the replacement DeepSeek also names.
 
 #### Binding names
 
@@ -685,6 +688,8 @@ Guidelines:
 - In run_code scripts, print counts, summaries, and selected fields rather than whole tool results.
 - When a run_code script fails, check which nested calls completed before running it again.
 
+The text above is the description of a session where every binding is available. A binding line appears only for a bound tool: the shapes of `bash`, `read`, and `image_gen` only for the trusted built-in tools, every other bound tool on the combined `Promise<string>` line, and the MCP line only while the built-in `mcp` gateway is active and authorized, or a direct MCP tool is bound. The shell-command advice appears only when `bash` is bound. A session with no bindings says `No tools are available to scripts in this session.` instead of the call and error paragraphs. The store line appears once `store()` and `load()` ship (section 5.17). The description is generated when the session stages its active tools, from those tools, and the registered tool keeps a generic description.
+
 The description measures about 470 tokens, plus about 20 for the store line that section 5.17 added; with the snippet, guidelines, and parameter schema, the contract adds about 650 tokens per request, comparable to the roughly 2,600 characters of guidance Pydantic reports.
 
 The description does not mention BigInt or the `context.source` reviver: until [#1024](https://github.com/volt-hq/Volt/issues/1024) lands, no BigInt reaches a script.
@@ -704,7 +709,8 @@ Decided without a separate review round.
 - The setting stays out of the protocol. Remote clients read and change host settings through `QueryResult.settings` and `set_settings`, which list their fields explicitly and reject unknown ones, and the iOS app rejects unknown fields in host frames. `codeMode.enabled` is not added to either, so the recorded iOS build keeps working, and a phone can neither see nor change it. Exposing it remotely is a later protocol change that waits for app support.
 - `run_code` is otherwise an ordinary tool name: `--tools` must list it to keep it, `--exclude-tools run_code` removes it, `--no-tools` removes it, and SDK callers pass it in `tools`. A conversation a paired phone opens needs it in `remote.allowTools` when that ceiling is set. Enabling code mode never widens what a session may do (section 5.12).
 - Subagents inherit `run_code` with the parent's active tools unless their own tool policy leaves it out, and their scripts get bindings from their own tool policy.
-- In Plan mode, an enabled `run_code` is available with read-only bindings (section 5.12).
+- `run_code` is registered in every conversation that has built-in tools, as a conversation-scoped built-in tool like the `mcp` gateway; the setting only adds it to the default active tools.
+- In Plan mode, `run_code` is active only when the Build tool request includes it, whether from the setting, `--tools`, or a later change of the active tools, and its scripts would get at least one binding; those bindings are read-only (section 5.12).
 - There is no per-model routing: code mode is not switched on or off by model. The evidence varies by model and task. Pydantic measured the largest gains for the weakest model and lower accuracy for one model; DeepSeek measured no gain on coding benchmarks with its own model; Codex reportedly enables its code mode for one model only (secondary source). Volt has no measurements of its own yet, so the choice stays with the user.
 - Code mode complements the `mcp` tool and `directTools` and changes neither, apart from the binding path `describe` adds while `run_code` is active (section 5.14).
 
@@ -748,16 +754,14 @@ interface RunCodeDetails {
 	failureKind?: "script_error" | "compute_budget" | "call_budget" | "timeout" | "aborted" | "output_limit" | "sandbox";
 	language: "javascript" | "typescript";
 	wallMs: number;
-	computeMs: number;
 	calls: Array<{
 		seq: number;
-		tool: string;
-		argsPreview: string; // at most 160 characters (section 5.11 preview rules)
+		tool: string; // the tool the call went through, or mcp.<server>.<tool>
+		argsPreview?: string; // at most 160 characters (section 5.11 preview rules); dropped to fit the bound
 		path?: string; // exact `path` argument of read, write, and edit calls
 		status: "completed" | "failed" | "cancelled" | "unsettled";
 		readOnly: boolean;
-		startedAt?: number;
-		durationMs?: number;
+		durationMs: number;
 		error?: string; // at most 256 characters
 	}>;
 	callTotals: { completed: number; failed: number; cancelled: number; unsettled: number };
@@ -768,7 +772,8 @@ interface RunCodeDetails {
 ```
 
 - Nested results are never stored in `details`; what the model saw is in the result's content, and the full output is in the spill file.
-- `details` is at most 64 KB. The call budget (200) bounds the records; if they still do not fit, argument previews of read-only calls are dropped first, then the oldest read-only records, and `complete` becomes `false`. State-changing records are kept.
+- `details` is at most 64 KB. The call budget (200) bounds the records; if they still do not fit, argument previews of read-only calls are dropped first, then the oldest read-only records, and `complete` becomes `false`. State-changing records are kept, so a run whose state-changing records alone exceed the bound keeps all of them.
+- The runtime does not measure compute time per script, so `details` has no `computeMs`. Start times of nested calls come with the card, which shows them; the records carry durations.
 
 #### Session records, compaction, and audit
 
@@ -921,7 +926,9 @@ Each step is its own pull request. None changes the protocol contract, so none s
 
 1. **Runtime.** The `quickjs-wasi` dependency; the worker pool, VM boot, prelude, codec, and host–worker messages; supervision (compute budget, watchdog, interrupt, grace, memory and stack limits). Unit tests drive scripts against fake bindings. Nothing is exposed to the model yet, and nothing reachable from the CLI imports the runtime, so neither bundled form includes it.
 2. **Bridge and scheduling.** Binding-set computation (no escalation, eligibility, grant profiles), the host checks with tool-call and tool-result policy and the `code_mode` origin, script-value projections, `ToolCallError`, image references, the scheduler, and per-server MCP limits with `maxConcurrentCalls`.
-3. **The `run_code` tool.** Input and TypeScript stripping, result rendering, truncation and spill, failure rendering, `store()`/`load()` session entries, the generated description, snippet, and guidelines, the presenter and `details`, compaction file tracking, the gateway `describe` addition, MCP audit attribution, the `codeMode.enabled` setting, user documentation (a code-mode page in `docs.json` and `docs/settings.md`), and the changeset.
+3. **The `run_code` tool.** Input and TypeScript stripping, result rendering, truncation and spill, failure rendering, `store()`/`load()` session entries, the generated description, snippet, and guidelines, the presenter and `details`, compaction file tracking, the gateway `describe` addition, MCP audit attribution, the `codeMode.enabled` setting, user documentation (a code-mode page in `docs.json` and `docs/settings.md`), and the changeset. This step ships as several pull requests:
+   - Merged first: the `run_code` tool end to end, with TypeScript stripping, the generated description, snippet, and guidelines, the rendered result and `details`, the `codeMode.enabled` setting with its `docs/settings.md` row, the trusted resolver, the Plan-mode rule, and the changeset. From this pull request on, the CLI imports the runtime, so step 4 must merge before any release that contains it.
+   - Remaining: the presenter and live card, `store()`/`load()` session entries, compaction file tracking, the gateway `describe` addition, MCP audit attribution (`parentToolCallId`), and the code-mode page in `docs.json`.
 4. **Packaging.** Bundle the worker entry and load `quickjs.wasm` in the bundled npm CLI and the standalone binary, add the WASM's third-party notices to the standalone archive, and verify on all six targets. The npm package needs no notice of its own: npm installs `quickjs-wasi` as a dependency with its license file.
 
 ### Verification
@@ -939,7 +946,7 @@ The invariants below tie each guarantee to the test that fails when it breaks.
 
 Each guarantee the runtime makes, where it is enforced, and the test that fails when it breaks. Section 5 records the decisions; these tables are how they are kept. A pull request that adds a guarantee adds its row, and a guarantee without a test says why. Every row describes merged code. A planned guarantee gets a row in a planned table, naming the test to write before the implementation, until the pull request that lands it moves the row into a table of its own. Steps 3 and 4 add their rows in their own pull requests.
 
-Sources are in `src/core/code-mode/` unless a path says otherwise. Tests are cited as `file: "test name"`, where `file` names a test file in `test/code-mode/` without `.test.ts`, except `mcp`, which is `test/mcp.test.ts`.
+Sources are in `src/core/code-mode/` unless a path says otherwise. Tests are cited as `file: "test name"`, where `file` names a test file in `test/code-mode/` without `.test.ts`, except `mcp`, which is `test/mcp.test.ts`, `operation-authorization`, which is `test/operation-authorization.test.ts`, and `suite/run-code`, which is `test/suite/run-code.test.ts`.
 
 #### Isolation and the engine
 
@@ -1085,7 +1092,7 @@ Sources are in `src/core/code-mode/` unless a path says otherwise. Tests are cit
 
 #### Model-facing result
 
-The rendering in `render.ts` is not yet wired to a tool; the `run_code` tool supplies each call's tool name, arguments, and read-only classification, and each image's source.
+The `run_code` tool supplies each call's tool name, arguments, and read-only classification, and each image's source (section "run_code tool" below).
 
 | Guarantee | Enforced in | Test |
 |---|---|---|
@@ -1102,6 +1109,20 @@ The rendering in `render.ts` is not yet wired to a tool; the `run_code` tool sup
 | A truncated stream keeps its head and tail, split evenly, around one marker; a line too long for either end is cut in the middle; an image whose caption is left out is dropped. Only the first and last 2000 lines are split into lines, and the marker counts the rest exactly. | `render.ts` `lineWindow`, `truncateLines`, `cutMiddle` | render: "keeps the head and tail of a long stream around one marker that names the full output"; "renders an item of a million lines and counts the lines it leaves out exactly"; "counts the lines of many multi-line items in the marker as the full output file has them"; "cuts a lone long line in the middle and still names the full output"; "keeps the first and last lines of a long multi-line return value inside its fence"; "drops an image whose caption is left out" |
 | Whenever anything is left out, the full rendering is written to a temp file that the stream marker or the return-value notice names; when it cannot be written, no path is named. | `render.ts` `writeTempFile`, `omissionMarker` | render: "writes the full output file whenever it leaves anything out, even when the rendering ends in an empty line"; "writes the full rendering, fences and return value included, to the file it names"; "keeps the head and tail of a long stream around one marker that names the full output"; "names the full output after a truncated return value when the stream was not cut"; "leaves out the file path when the full rendering cannot be written" |
 | An argument preview shows strings of up to 60 characters in full and longer ones by length, other values as compact JSON with exact numbers, on one line within its length. | `render.ts` `previewCodeModeArgs`, `boundedJson` | render: "shows strings of up to 60 characters in full and longer ones by their length"; "shows other values as compact JSON with exact numbers, quotes keys that are not identifiers, and skips undefined"; "stays within its length on one line" |
+
+#### run_code tool
+
+| Guarantee | Enforced in | Test |
+|---|---|---|
+| `run_code` is registered in every conversation with built-in tools and is active by default only with `codeMode.enabled`; `--tools`, `--exclude-tools`, and SDK `tools` treat it as any other tool name. In Plan mode it is active only when the Build tool request includes it and its scripts would get a binding. | `src/core/tools/index.ts`; `src/core/session/tool-runtime.ts` `build`, `syncPlanningRuntime`, `planToolNames`; `src/core/sdk.ts`; `src/core/settings-manager.ts` `getCodeModeEnabled` | suite/run-code: "is active by default, in Build and Plan mode, only when codeMode.enabled is set" |
+| `run_code` is a classified built-in tool that is never bindable. | `bindings.ts` `BUILTIN_TOOL_ELIGIBILITY` | bindings: "classifies every built-in tool as bindable or never bindable, as the design lists them" |
+| The `run_code` resolver advertises no capabilities, so no profile shows it and it never makes a session look research-capable; a call resolves to no capabilities and provides no research evidence, and only its nested reads, authorized as their own calls, count as research. | `src/core/operation-authorization.ts` `RUN_CODE_RESOLVER` | operation-authorization: "gives run_code no capabilities of its own, advertised or resolved"; suite/run-code: "binds only read-only tools in Plan mode, where only nested reads count as research"; "stays inactive in Plan mode while it would bind nothing, so submit_plan reports research is impossible" |
+| The description lists the bindings of the tools active when the tool set is staged: the shapes of the trusted `bash`, `read`, and `image_gen`, every other bound tool as text, and an MCP line only while MCP tools are callable. It never depends on which MCP tools are listed, and the registered tool keeps its own description. | `src/core/tools/run-code.ts` `describeRunCode`; `bindings.ts` `codeModeCallsMcpTools`; `src/core/session/tool-runtime.ts` `setEffectiveToolsByName`, `activeTools` | run-code: "lists the default Build tools' bindings, with the shapes of bash, read, and image_gen"; "lists only the bindings the research profile authorizes in Plan mode"; "gives a tool an extension replaced by name the plain text shape"; "lists MCP tools while the gateway or a direct MCP tool makes them callable, whatever servers are listed"; "says no tools are available when nothing is bound"; suite/run-code: "describes the bindings of the tools active when the tool set is staged" |
+| TypeScript is stripped inside the runtime's wrapper, so top-level `await` and `return` parse and stack lines map to the script. Syntax strip mode does not support fails as a syntax error before any VM starts; code the TypeScript parser rejects runs unchanged; no type-stripping warning reaches the process. | `src/core/tools/run-code.ts` `prepareScript`, `withoutTypeStrippingWarning` | run-code: "strips TypeScript annotations around top-level await and return, emitting no warning"; "keeps the script's line numbers in stack traces of stripped TypeScript"; "fails TypeScript that strip mode does not support as a syntax error, without starting a VM"; "runs code the TypeScript parser rejects unchanged, so the engine reports genuine errors" |
+| Nested calls pass the session's hooks with the `code_mode` origin and are neither tool executions nor transcript entries of their own; a call that completed before a failure stays applied and the failure lists it. | `src/core/tools/run-code.ts` `createRunCodeToolDefinition`; `dispatch.ts` `codeModeDispatchHostOf` | suite/run-code: "runs a script whose nested reads pass the session's hooks and returns only its result"; "reports a script that fails after a write, which stays applied" |
+| The script's `timeoutMs` and the call's signal reach the runtime. | `src/core/tools/run-code.ts` `createRunCodeToolDefinition` | run-code: "names MCP calls by server and tool and passes the script's timeout to the runtime" |
+| `details` records each call's tool (`mcp.<server>.<tool>` for MCP tools), argument preview, the path of a `read`, `write`, or `edit` call, status, read-only classification, and error, with exact totals. It stays within 64 KB by dropping the previews of read-only calls, then the oldest read-only records, never a state-changing record. | `src/core/tools/run-code.ts` `buildRunCodeDetails`; `src/core/session/tool-runtime.ts` `codeModeCallIsReadOnly` | run-code: "records each call's tool, arguments, and path, with exact totals and output statistics"; "names MCP calls by server and tool and passes the script's timeout to the runtime"; "drops the argument previews of the oldest read-only calls first to fit 64 KB"; "then drops the oldest read-only records, never a state-changing one"; "keeps every record of a run that fits, and caps errors at 256 characters" |
+| Images the script did not show are listed with the call that returned them: `read <path>`, `image_gen <path>`, or `MCP <server>.<tool>`. | `src/core/tools/run-code.ts` `imageSource`, `taggingImages` | run-code: "labels the images a script did not show by the call that returned them" |
 
 ## 10. Risks
 

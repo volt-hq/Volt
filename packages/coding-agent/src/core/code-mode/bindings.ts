@@ -33,6 +33,8 @@ const BUILTIN_TOOL_ELIGIBILITY = {
 	subagent_registry: "never",
 	// MCP tools get their own bindings; the gateway's other actions manage servers.
 	mcp: "never",
+	// The code-mode tool itself: scripts do not start scripts.
+	run_code: "never",
 } as const satisfies Record<ToolName, "bindable" | "never">;
 
 /** Built-in tools scripts may call. Any other built-in is not bindable. */
@@ -52,8 +54,6 @@ export const NEVER_BINDABLE_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"submit_plan",
 	"update_plan_progress",
 	"request_replan",
-	// The code-mode tool itself.
-	"run_code",
 ]);
 
 /** An active tool, as the model could call it directly. */
@@ -108,8 +108,7 @@ export interface CodeModeBindingSpec extends CodeModeBinding {
  */
 export function computeCodeModeBindings(sources: CodeModeBindingSources): CodeModeBindingSpec[] {
 	const { grantProfile } = sources;
-	const authorized = (resolver: ToolOperationResolver | undefined) =>
-		grantProfile === undefined || isToolVisibleUnderGrant(resolver, grantProfile);
+	const authorized = (resolver: ToolOperationResolver | undefined) => isAuthorized(resolver, grantProfile);
 	const bindings: CodeModeBindingSpec[] = [];
 	const add = (path: string[], target: CodeModeBindingTarget): void => {
 		if (path.some((segment) => segment === "" || segment === "__proto__")) return;
@@ -164,6 +163,28 @@ export function computeCodeModeBindings(sources: CodeModeBindingSources): CodeMo
 	);
 	for (const target of sortedTargets) add(["mcp", target.server, target.tool], { kind: "mcp", ...target });
 	return bindings;
+}
+
+/**
+ * Whether scripts can call MCP tools in a session with these sources, whichever tools are listed: the built-in `mcp`
+ * gateway is active and the grant profile, if any, authorizes it, or a direct MCP tool is bound.
+ */
+export function codeModeCallsMcpTools(sources: Omit<CodeModeBindingSources, "mcpTools">): boolean {
+	const { grantProfile } = sources;
+	const gateway = sources.activeTools.some(
+		(tool) => tool.kind === "builtin" && tool.name === "mcp" && isAuthorized(tool.resolver, grantProfile),
+	);
+	// Direct tools are bound whichever MCP tools are listed.
+	return (
+		gateway || computeCodeModeBindings({ ...sources, mcpTools: [] }).some((binding) => binding.target.kind === "mcp")
+	);
+}
+
+function isAuthorized(
+	resolver: ToolOperationResolver | undefined,
+	grantProfile: OperationGrantProfile | undefined,
+): boolean {
+	return grantProfile === undefined || isToolVisibleUnderGrant(resolver, grantProfile);
 }
 
 function compare(left: string, right: string): number {

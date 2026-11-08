@@ -204,6 +204,19 @@ function createMcpResolver(authority: IntegrationReadAuthority): ToolOperationRe
 	};
 }
 
+/**
+ * The resolver of `run_code` (section 5.12 of docs/code-mode-design.md). A call resolves to no capabilities, because
+ * the script itself performs no operation: each nested call is authorized as its own call under the same profile, and
+ * a script's bindings are narrowed to what that profile authorizes. The outer call therefore provides no research
+ * evidence; only its successful nested reads do. It advertises no capability sets either: what a script can reach
+ * depends on the session's active tools, so no grant profile shows `run_code` by its resolver. Plan mode activates it
+ * only while its scripts would get a binding (`SessionToolRuntime.syncPlanningRuntime`).
+ */
+const RUN_CODE_RESOLVER: ToolOperationResolver = {
+	advertisedCapabilitySets: [],
+	resolve: () => resolved(),
+};
+
 export const RESEARCH_OPERATION_GRANT_PROFILE: OperationGrantProfile = Object.freeze({
 	id: "research",
 	capabilities: new Set<OperationCapability>([
@@ -223,6 +236,7 @@ export function getTrustedToolOperationResolver(
 ): ToolOperationResolver | undefined {
 	if (toolName === "lsp") return LSP_RESOLVER;
 	if (toolName === "inspect") return INSPECTION_RESOLVER;
+	if (toolName === "run_code") return RUN_CODE_RESOLVER;
 	if (toolName === "mcp" && options.integrationReadAuthority) {
 		return createMcpResolver(options.integrationReadAuthority);
 	}

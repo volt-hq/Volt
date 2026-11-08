@@ -571,6 +571,7 @@ async function createAgentSessionWithTrackedResources(
 	}
 	// Status remains available even when language-server execution is disabled.
 	defaultActiveToolNames.push("lsp");
+	if (settingsManager.getCodeModeEnabled()) defaultActiveToolNames.push("run_code");
 	const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
 	const excludedToolNames = options.excludeTools;
 	const excludedToolNameSet = excludedToolNames ? new Set(excludedToolNames) : undefined;
