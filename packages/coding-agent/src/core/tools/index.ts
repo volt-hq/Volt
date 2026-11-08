@@ -115,6 +115,9 @@ export {
 	describeRunCode,
 	type RunCodeCallDetails,
 	type RunCodeDetails,
+	type RunCodeProgress,
+	type RunCodeProgressCall,
+	type RunCodeToolDetails,
 	type RunCodeToolInput,
 	type RunCodeToolOptions,
 } from "./run-code.ts";

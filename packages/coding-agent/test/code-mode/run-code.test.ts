@@ -24,6 +24,7 @@ import {
 	createRunCodeTool,
 	describeRunCode,
 	type RunCodeDetails,
+	type RunCodeProgress,
 } from "../../src/core/tools/run-code.ts";
 
 const cwd = mkdtempSync(join(tmpdir(), "volt-run-code-"));
@@ -208,11 +209,12 @@ const TOOLS = [
 		throw new Error("the tool broke");
 	}),
 	tool("wait", (_args, signal) => new Promise((_resolve, reject) => signal?.addEventListener("abort", reject))),
+	tool("slow", (args) => new Promise((resolve) => setTimeout(() => resolve(text("slow")), Number(args.ms ?? 0)))),
 	gateway(),
 ];
 const READ_ONLY = new Set(["read", "grep"]);
 /** Tools that stand in for extension tools: no trusted resolver, and bound only by name. */
-const EXTENSION_TOOLS = new Set(["broken", "wait"]);
+const EXTENSION_TOOLS = new Set(["broken", "wait", "slow"]);
 
 /** A `run_code` tool over a session stand-in with every policy allowing every call. */
 function runCode(target: CodeModeWorkerPool = pool) {
@@ -405,6 +407,98 @@ describe("run_code", () => {
 			"3 images not shown: img_1 (read b.png), img_2 (image_gen images/generated.png), img_3 (MCP browser.screenshot)",
 		);
 		expect(details.images.unshown.map((ref) => ref.ref)).toStrictEqual(["img_1", "img_2", "img_3"]);
+	});
+});
+
+/** Runs a script, recording the partial results the live card receives and when each arrived. */
+async function runWithProgress(code: string) {
+	const updates: Array<{ at: number; lines: string[]; details: RunCodeProgress }> = [];
+	const result = await runCode().execute("call-1", { code }, undefined, (update) => {
+		const text = update.content
+			.filter((part): part is TextContent => part.type === "text")
+			.map((part) => part.text)
+			.join("\n");
+		updates.push({ at: performance.now(), lines: text.split("\n"), details: update.details as RunCodeProgress });
+	});
+	return { result, details: result.details as RunCodeDetails, updates };
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+describe("run_code progress", () => {
+	it("reports progress at most every 250 ms, always reports the last change, and stops when the script returns", async () => {
+		const { details, updates } = await runWithProgress(
+			[
+				"await Promise.allSettled([tools.broken({})]);",
+				"for (let i = 0; i < 30; i++) { await tools.read({ path: 'f' + i + '.txt' }); console.log('line ' + i); }",
+				"await tools.slow({ ms: 800 });",
+				"console.warn('after');",
+				"await tools.slow({ ms: 700 });",
+				"return 'done';",
+			].join("\n"),
+		);
+		expect(updates.length).toBeGreaterThanOrEqual(2);
+		for (let index = 1; index < updates.length; index++) {
+			expect(updates[index].at - updates[index - 1].at).toBeGreaterThanOrEqual(240);
+		}
+		for (const { details: progress } of updates) {
+			expect(progress.status).toBe("running");
+			expect(progress.language).toBe("javascript");
+			for (const call of progress.calls) {
+				if (call.endedAt !== undefined) expect(call.endedAt).toBeGreaterThanOrEqual(call.startedAt);
+			}
+		}
+		// The trailing report of the reads and the first wait, then of the second wait.
+		const first = updates.find(
+			({ details: progress }) => progress.callTotals.running === 1 && progress.calls.at(-1)?.seq === 32,
+		);
+		expect(first?.details).toMatchObject({
+			callTotals: { running: 1, completed: 30, failed: 1, cancelled: 0 },
+			outputLines: 30,
+		});
+		expect(first?.details.calls.at(-1)).toMatchObject({ tool: "slow", argsPreview: "ms=800", status: "running" });
+		expect(first?.lines.at(-1)).toBe("line 29");
+		const second = updates.find(({ details: progress }) => progress.calls.at(-1)?.seq === 33);
+		expect(second?.details).toMatchObject({ callTotals: { running: 1, completed: 31, failed: 1 }, outputLines: 31 });
+		expect(second?.lines.at(-1)).toBe("warn: after");
+		expect(
+			updates.some(({ details: progress }) =>
+				progress.calls.some(
+					(call) => call.seq === 1 && call.status === "failed" && call.error === "the tool broke",
+				),
+			),
+		).toBe(true);
+
+		const reported = updates.length;
+		await sleep(400);
+		expect(updates).toHaveLength(reported);
+		// The final details are the record of the run, not progress.
+		expect(details).toMatchObject({ status: "completed", callTotals: { completed: 32, failed: 1 }, complete: true });
+		expect(details).not.toHaveProperty("outputLines");
+		expect(details.calls[0]).not.toHaveProperty("startedAt");
+	});
+
+	it("keeps the newest 50 calls and 100 output lines, counting every call and line", async () => {
+		const { updates } = await runWithProgress(
+			[
+				"for (let i = 0; i < 60; i++) await tools.read({ path: 'f' + i + '.txt' });",
+				"for (let i = 0; i < 150; i++) console.log('line ' + i);",
+				"text('a\\r\\nb\\n');",
+				"await tools.slow({ ms: 800 });",
+			].join("\n"),
+		);
+		// Reported while the last call runs.
+		const last = updates.find(
+			({ details: progress }) => progress.callTotals.running === 1 && progress.calls.at(-1)?.seq === 61,
+		);
+		expect(last?.details.calls).toHaveLength(50);
+		expect(last?.details.calls[0]?.seq).toBe(12);
+		expect(last?.details.calls.at(-1)).toMatchObject({ seq: 61, tool: "slow", status: "running" });
+		expect(last?.details.callTotals).toStrictEqual({ running: 1, completed: 60, failed: 0, cancelled: 0 });
+		expect(last?.details.outputLines).toBe(152);
+		expect(last?.lines).toHaveLength(100);
+		expect(last?.lines[0]).toBe("line 52");
+		expect(last?.lines.slice(-2)).toStrictEqual(["a", "b"]);
 	});
 });
 
