@@ -273,41 +273,70 @@ describe("code mode MCP dispatch in a session", () => {
 		expect(internals._planning.hasResearch()).toBe(true);
 	});
 
-	/** What the session's `mcp` gateway's describe action says about a tool. */
-	async function describeTool(session: AgentSession, server: string, tool: string): Promise<Record<string, unknown>> {
+	/** What the session's gateway tells the model about a tool through either schema-discovery path. */
+	async function discoverTool(
+		session: AgentSession,
+		action: "describe" | "search",
+		server: string,
+		tool: string,
+	): Promise<Record<string, unknown>> {
 		const gateway = (session as unknown as SessionInternals)._tools.registeredTool("mcp");
 		if (!gateway) throw new Error("the session has no mcp gateway");
-		const result = await gateway.execute("describe", { action: "describe", server, tool });
-		return (result.details as { result: Record<string, unknown> }).result;
+		const result = await gateway.execute(
+			action,
+			action === "describe" ? { action, server, tool } : { action, server, query: tool, includeSchema: true },
+		);
+		expect(result.isError).not.toBe(true);
+		const data = (result.details as { result: Record<string, unknown> }).result;
+		const text = result.content
+			.filter((part) => part.type === "text")
+			.map((part) => part.text)
+			.join("\n");
+		expect(JSON.parse(text)).toEqual(data);
+		const description = action === "search" ? data.selectedTool : data;
+		expect(description).toMatchObject({ tool });
+		return description as Record<string, unknown>;
 	}
 
 	const MCP_RESULT = "Promise<{ text: string; structured?: unknown; images: ImageRef[] }>";
 
-	it("describes how a script calls an MCP tool while run_code is active, and only then", async () => {
-		const without = await createSession({ agentMode: "build" });
-		expect(without.getActiveToolNames()).not.toContain("run_code");
-		expect(await describeTool(without, "fake", "read_note")).not.toHaveProperty("codeMode");
+	it.each(["describe", "search"] as const)(
+		"%s includes script bindings and guidance only while run_code is active",
+		async (action) => {
+			const without = await createSession({ agentMode: "build" });
+			expect(without.getActiveToolNames()).not.toContain("run_code");
+			expect(await discoverTool(without, action, "fake", "read_note")).not.toHaveProperty("codeMode");
 
-		const withCodeMode = await createSession({ agentMode: "build", codeMode: true });
-		expect(withCodeMode.getActiveToolNames()).toContain("run_code");
-		expect(await describeTool(withCodeMode, "fake", "write_note")).toMatchObject({
-			tool: "write_note",
-			codeMode: { call: "tools.mcp.fake.write_note(args)", returns: MCP_RESULT },
-		});
-		// Matched as the manager looks the server up.
-		expect(await describeTool(withCodeMode, "FAKE", "read_note")).toMatchObject({
-			codeMode: { call: "tools.mcp.fake.read_note(args)", returns: MCP_RESULT },
-		});
-	});
+			const withCodeMode = await createSession({ agentMode: "build", codeMode: true });
+			expect(withCodeMode.getActiveToolNames()).toContain("run_code");
+			expect(await discoverTool(withCodeMode, action, "fake", "write_note")).toMatchObject({
+				tool: "write_note",
+				codeMode: {
+					call: "tools.mcp.fake.write_note(args)",
+					returns: MCP_RESULT,
+					guidance: expect.stringContaining("Prefer run_code with this binding"),
+				},
+			});
+			// Matched as the manager looks the server up.
+			expect(await discoverTool(withCodeMode, action, "FAKE", "read_note")).toMatchObject({
+				codeMode: { call: "tools.mcp.fake.read_note(args)", returns: MCP_RESULT },
+			});
+			withCodeMode.setActiveToolsByName(withCodeMode.getActiveToolNames().filter((name) => name !== "run_code"));
+			expect(await discoverTool(withCodeMode, action, "fake", "read_note")).not.toHaveProperty("codeMode");
+		},
+	);
 
-	it("describes only the MCP tools a script could call in Plan mode", async () => {
-		const session = await createSession({ agentMode: "plan", codeMode: true });
-		expect(session.getActiveToolNames()).toContain("run_code");
-		expect(await describeTool(session, "fake", "read_note")).toMatchObject({
-			codeMode: { call: "tools.mcp.fake.read_note(args)", returns: MCP_RESULT },
-		});
-		const unbound = await describeTool(session, "fake", "write_note");
-		expect(unbound).toMatchObject({ tool: "write_note" });
-		expect(unbound).not.toHaveProperty("codeMode");
-	});
+	it.each(["describe", "search"] as const)(
+		"%s includes bindings only for MCP tools a script could call in Plan mode",
+		async (action) => {
+			const session = await createSession({ agentMode: "plan", codeMode: true });
+			expect(session.getActiveToolNames()).toContain("run_code");
+			expect(await discoverTool(session, action, "fake", "read_note")).toMatchObject({
+				codeMode: { call: "tools.mcp.fake.read_note(args)", returns: MCP_RESULT },
+			});
+			const unbound = await discoverTool(session, action, "fake", "write_note");
+			expect(unbound).toMatchObject({ tool: "write_note" });
+			expect(unbound).not.toHaveProperty("codeMode");
+		},
+	);
 });

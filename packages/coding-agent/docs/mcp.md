@@ -475,7 +475,7 @@ Search returns compact routing information. Scope a query to a known server and 
 { "action": "search", "server": "github", "query": "search issues", "limit": 3, "includeSchema": true, "maxBytes": 8192 }
 ```
 
-`includeSchema` adds `selectedTool` only when its complete cached input schema and optional output schema fit the discovery budget. It does not connect to a server or refresh metadata. Otherwise `schemaOmitted` explains why a separate `describe` is needed. Constraints are never silently removed from schemas. Search reports `coverage` with searched, missing, and stale server ids; missing or stale metadata requires `connect` before it can contribute results.
+`includeSchema` adds `selectedTool` only when its complete cached input schema, optional output schema, and any code-mode guidance fit the discovery budget. While `run_code` is active and can call that tool, `selectedTool.codeMode` includes its script binding, return shape, and usage guidance, just as [`describe`](#describe-result) does. Search does not connect to a server or refresh metadata. Otherwise `schemaOmitted` explains why a separate `describe` is needed. Constraints are never silently removed from schemas. Search reports `coverage` with searched, missing, and stale server ids; missing or stale metadata requires `connect` before it can contribute results.
 
 ```json
 {
@@ -541,12 +541,13 @@ A cursor belongs to one server and metadata snapshot. If the catalog changes, re
 
 Large descriptions and schemas produce a bounded preview with a cache reference. Retrieve the complete result with `read_cache`; schema constraints are not simplified or discarded.
 
-While the [`run_code`](settings.md#code-mode) tool is active and its scripts can call the tool, the result also says how a script calls it and what the call resolves with:
+While the [`run_code`](settings.md#code-mode) tool is active and its scripts can call the tool, the result also says how a script calls it, what the call resolves with, and when to prefer a script:
 
 ```json
 "codeMode": {
   "call": "tools.mcp.github.search_issues(args)",
-  "returns": "Promise<{ text: string; structured?: unknown; images: ImageRef[] }>"
+  "returns": "Promise<{ text: string; structured?: unknown; images: ImageRef[] }>",
+  "guidance": "Prefer run_code with this binding for independent batches, pagination, or filtering large results, even a single listing. Return relevant fields or summaries, not whole results."
 }
 ```
 

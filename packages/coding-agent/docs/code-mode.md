@@ -11,9 +11,11 @@ return `${stale.length} of ${issues.structured.items.length} open bugs are stale
 
 ## When to Use It
 
-Code mode pays off on long, tool-heavy work: paging through MCP results, triaging many issues, editing many files the same way, or filtering large outputs down to what matters. It does not make ordinary coding better, and on small tasks it costs more than direct tool calls. While `run_code` is active, its description and guidance add about 650 tokens to every request.
+Prefer code mode for batches of independent tool calls, pagination, and filtering or aggregating large results—even a single large issue or pull-request listing. After discovering MCP tools and their arguments, scripts can call their bindings and return only relevant fields, counts, and summaries. Independent calls can run concurrently with `Promise.allSettled`; inspect rejected results and await dependent calls in order.
 
-Code mode is off by default. Direct tool calls keep working alongside it, and the model decides which to use for each step.
+Use direct calls for small one-off results or steps that need the model's judgment between calls. Code mode does not make ordinary coding better, and on small tasks it can cost more than direct calls. Its description and guidance add prompt overhead to every request while active.
+
+Code mode is off by default. Direct tool calls keep working alongside it, and the model decides which to use for each step; enabling it guides that choice rather than forcing every call through a script.
 
 ## Enabling Code Mode
 
@@ -60,14 +62,17 @@ const result = await tools.bash({ command: String.raw`grep -rn "TODO\b" src | wc
 
 ### MCP Tools
 
-MCP tools are bound at `tools.mcp.<server>.<tool>` while the `mcp` gateway or a promoted direct MCP tool is active, once the server's tool metadata is fresh. Use brackets for names that are not JavaScript identifiers: `tools.mcp["my-server"]["get-file"](args)`. The model finds MCP tools and their arguments with the `mcp` tool's `search` and `describe` actions. While `run_code` is active, `describe` also says how a script calls the tool:
+MCP tools are bound at `tools.mcp.<server>.<tool>` while the `mcp` gateway or a promoted direct MCP tool is active, once the server's tool metadata is fresh. Use brackets for names that are not JavaScript identifiers: `tools.mcp["my-server"]["get-file"](args)`. The model finds MCP tools and their arguments with the `mcp` tool's `search` and `describe` actions. While `run_code` is active and can call the tool, `describe` and a schema-bearing search's `selectedTool` also say how a script calls it and when to prefer a script:
 
 ```json
 "codeMode": {
   "call": "tools.mcp.github.search_issues(args)",
-  "returns": "Promise<{ text: string; structured?: unknown; images: ImageRef[] }>"
+  "returns": "Promise<{ text: string; structured?: unknown; images: ImageRef[] }>",
+  "guidance": "Prefer run_code with this binding for independent batches, pagination, or filtering large results, even a single listing. Return relevant fields or summaries, not whole results."
 }
 ```
+
+Search includes this with `includeSchema: true` only when the complete schemas and guidance fit its discovery budget; otherwise it directs the model to `describe`. No script hint appears for tools code mode cannot call, including untrusted MCP tools in Plan mode.
 
 Calls from scripts run at most 4 at a time per server, across the process. A server's `maxConcurrentCalls` configuration changes that; `1` serializes calls to a server that does not handle concurrent requests well.
 

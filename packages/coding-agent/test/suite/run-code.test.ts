@@ -70,6 +70,36 @@ describe("run_code in a session", () => {
 		expect(listed.session.getActiveToolNames()).not.toContain("bash");
 	});
 
+	it("offers batching and large-result guidance to the model only while run_code is active", async () => {
+		const harness = await setup({ ...CODE_MODE, systemPrompt: "" });
+		const offered: Context[] = [];
+		const respond = (context: Context) => {
+			offered.push(context);
+			return fauxAssistantMessage("ready");
+		};
+		harness.setResponses([respond, respond]);
+		harness.session.setActiveToolsByName(["read", "run_code"]);
+		await harness.session.prompt("prepare to inspect large results");
+		harness.session.setActiveToolsByName(["read"]);
+		await harness.session.prompt("continue without code mode");
+
+		expect(offered).toHaveLength(2);
+		const [enabled, disabled] = offered;
+		expect(enabled.systemPrompt).toContain("Prefer run_code for batches of independent tool calls, pagination");
+		expect(enabled.systemPrompt).toContain("including a single large listing");
+		expect(enabled.systemPrompt).toContain("Use direct calls for small one-off results");
+		expect(enabled.systemPrompt).toContain(
+			"print relevant fields, counts, and summaries rather than whole tool results",
+		);
+		const description = enabled.tools?.find((tool) => tool.name === "run_code")?.description;
+		expect(description).toContain("large results, even from a single call");
+		expect(description).toContain("Run independent calls concurrently with Promise.allSettled");
+		expect(description).toContain("inspect rejected results, and await dependent calls in order");
+		expect(disabled.systemPrompt).not.toContain("Prefer run_code");
+		expect(disabled.systemPrompt).not.toContain("In run_code scripts");
+		expect(disabled.tools?.map((tool) => tool.name)).not.toContain("run_code");
+	});
+
 	it("runs a script whose nested reads pass the session's hooks and returns only its result", async () => {
 		const hooked: Array<{ toolName: string; toolCallId: string; origin: ExtensionOperationOrigin | undefined }> = [];
 		const harness = await setup({

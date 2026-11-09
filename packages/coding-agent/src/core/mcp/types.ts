@@ -387,6 +387,8 @@ export interface McpGatewayExecutionContext {
 	surface: McpCallerSurface;
 	caller?: "model" | "user";
 	restrictedTrustedRead?: boolean;
+	/** Host-owned resolver for model-facing discovery hints, only for tools the active `run_code` can call. */
+	codeModeBinding?: (server: string, tool: string) => string | undefined;
 	/** The `run_code` call whose script made the call; set only for a code mode script's nested call. */
 	parentToolCallId?: string;
 }

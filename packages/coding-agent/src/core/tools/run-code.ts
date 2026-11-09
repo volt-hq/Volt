@@ -157,14 +157,14 @@ export interface RunCodeToolOptions {
 const MIB = 1024 * 1024;
 
 const INTRO =
-	"Run a JavaScript script in a sandbox. The script calls tools and only what it prints or returns comes back to you, so use it to fan out calls, loop, and filter large results instead of making many separate calls.";
+	"Run a JavaScript script in a sandbox. The script calls tools and only what it prints or returns comes back to you. Prefer it for independent call batches, pagination, or filtering and aggregating large results, even from a single call.";
 const LANGUAGE =
 	"The script is the body of an async function: top-level await and return work. Erasable TypeScript annotations are allowed. The sandbox has no file system, network, process, timers, or modules; tools are its only way out.";
 const CALLS = "Call tools as `await tools.<name>(args)` with the same arguments as the tool itself";
 const NO_TOOLS = "No tools are available to scripts in this session.";
-const MCP_LINE = `- MCP tools: tools.mcp.<server>.<tool>(args): ${CODE_MODE_MCP_RESULT_SHAPE}. Find them and their arguments with the mcp tool's search and describe actions first. Use brackets for names that are not identifiers: tools.mcp["my-server"]["get-file"](args).`;
+const MCP_LINE = `- MCP tools: tools.mcp.<server>.<tool>(args): ${CODE_MODE_MCP_RESULT_SHAPE}. Find them and their arguments with the mcp tool's search and describe actions first. After discovery, prefer these bindings for batches, pagination, and large-result filtering. Use brackets for names that are not identifiers: tools.mcp["my-server"]["get-file"](args).`;
 const ERRORS =
-	'A failed call rejects with ToolCallError { tool; kind: "invalid_arguments" | "blocked" | "failed" | "cancelled"; reason?; message }. Use Promise.allSettled for independent calls so one failure does not lose the others.';
+	'A failed call rejects with ToolCallError { tool; kind: "invalid_arguments" | "blocked" | "failed" | "cancelled"; reason?; message }. Run independent calls concurrently with Promise.allSettled, inspect rejected results, and await dependent calls in order.';
 const OUTPUT = `Output: text(value), console.log/warn/error(...), image(ref), and the return value appear in order. ImageRef = { type: "image"; ref; mimeType; width?; height?; bytes; path? }; only images passed to image(ref) reach you. Output is limited to ${DEFAULT_MAX_BYTES / 1024} KB, with the full output saved to a file you can read.`;
 const LIMITS = `Limits: ${DEFAULT_CODE_MODE_SCRIPT_LIMITS.computeBudgetMs / 1000} s of computation, ${DEFAULT_CODE_MODE_SCRIPT_LIMITS.callBudget} tool calls, and ${DEFAULT_CODE_MODE_POOL_OPTIONS.memoryLimitBytes / MIB} MiB of memory per script. Tool calls made before a failure are not undone; a failed result lists them.`;
 const STORE = `store(key, value) and load(key) keep small JSON values across scripts in this conversation; up to ${MAX_STORED_BYTES / MIB} MiB in total.`;
@@ -537,10 +537,10 @@ export function createRunCodeToolDefinition(
 		name: "run_code",
 		label: "run_code",
 		description: REGISTERED_DESCRIPTION,
-		promptSnippet: "Run a JavaScript script that calls other tools and returns only what it prints",
+		promptSnippet: "Batch tool calls and filter large results with sandboxed JavaScript",
 		promptGuidelines: [
-			"Use run_code when a task needs many tool calls, loops over items, or filtering of large results; use direct tool calls for single calls, for steps that need your judgment between calls, and for questions to the user.",
-			"In run_code scripts, print counts, summaries, and selected fields rather than whole tool results.",
+			"Prefer run_code for batches of independent tool calls, pagination, and filtering or aggregating large results, including a single large listing. Use direct calls for small one-off results, steps that need your judgment between calls, and questions to the user.",
+			"In run_code scripts, print relevant fields, counts, and summaries rather than whole tool results.",
 			"When a run_code script fails, check which nested calls completed before running it again.",
 		],
 		parameters: runCodeSchema,
