@@ -39,8 +39,17 @@ describe("peakInFlight", () => {
 		assert.equal(peakInFlight([nested(1, 0, 50), nested(2, 0, 50), nested(3, 1, 40)]), 3);
 		// Rounded independently, a call issued as the previous settles can appear to start 1 ms early.
 		assert.equal(peakInFlight([nested(1, 1, 11), nested(2, 11, 20), nested(3, 31, 5)]), 1);
-		// Calls shorter than the tolerance never overlap.
+		// Overlaps within the tolerance do not count.
 		assert.equal(peakInFlight([nested(1, 0, 1), nested(2, 0, 1)]), 1);
+	});
+
+	test("counts a call of any duration issued well inside another's span", () => {
+		assert.equal(peakInFlight([nested(1, 0, 100), nested(2, 10, 1)]), 2);
+		assert.equal(peakInFlight([nested(1, 0, 100), nested(2, 10, 0)]), 2);
+		assert.equal(peakInFlight([nested(1, 0, 100), nested(2, 10, 1), nested(3, 50, 1)]), 2);
+		// In the same millisecond, issue order decides: a short call issued after a long one overlaps it.
+		assert.equal(peakInFlight([nested(1, 10, 100), nested(2, 10, 1)]), 2);
+		assert.equal(peakInFlight([nested(1, 10, 1), nested(2, 10, 100)]), 1);
 	});
 });
 
@@ -148,6 +157,14 @@ describe("summarizeRunCodeUsage", () => {
 		);
 		assert.equal(report.models[0].scripts.unresolved, 1);
 		assert.equal(report.models[0].scripts.sequential, 0);
+	});
+
+	test("classifies a short call issued while a longer one runs as concurrent", () => {
+		const overlapping = [{ session: "s1", id: "c2", details: details([nested(1, 0, 100), nested(2, 10, 1)]) }];
+		const { scripts } = summarizeRunCodeUsage(callRows, overlapping, { model: "m1" }).models[0];
+		assert.equal(scripts.concurrent, 1);
+		assert.equal(scripts.sequential, 0);
+		assert.equal(scripts.maxPeakInFlight, 2);
 	});
 });
 

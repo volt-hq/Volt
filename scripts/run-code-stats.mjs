@@ -72,23 +72,19 @@ export function parseRunCodeStatsArgs(argv) {
 }
 
 /**
- * The most nested calls a script had in flight at once, from each call's issue time and duration. Overlaps within
- * the rounding tolerance do not count, so calls shorter than the tolerance never overlap.
+ * The most nested calls a script had in flight at once: for each call, itself plus the calls issued before it that
+ * settled more than the rounding tolerance after it was issued. A call issued as another settles does not overlap
+ * it; a call of any duration issued well inside another's span does.
  */
 export function peakInFlight(calls) {
-	if (calls.length === 0) return 0;
-	const events = [];
-	for (const { startMs, durationMs } of calls) {
-		const end = startMs + durationMs - OVERLAP_TOLERANCE_MS;
-		if (end > startMs) events.push([startMs, 1], [end, -1]);
-	}
-	// At equal times, ends come before starts: a call issued as another settles does not overlap it.
-	events.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-	let inFlight = 0;
-	let peak = 1;
-	for (const [, delta] of events) {
-		inFlight += delta;
-		peak = Math.max(peak, inFlight);
+	const ordered = [...calls].sort((a, b) => a.startMs - b.startMs || a.seq - b.seq);
+	// In issue order, a call that settled before one call was issued settled before every later one too.
+	let openEnds = [];
+	let peak = 0;
+	for (const { startMs, durationMs } of ordered) {
+		openEnds = openEnds.filter((end) => end - startMs > OVERLAP_TOLERANCE_MS);
+		openEnds.push(startMs + durationMs);
+		peak = Math.max(peak, openEnds.length);
 	}
 	return peak;
 }
