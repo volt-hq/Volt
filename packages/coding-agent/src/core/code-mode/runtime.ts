@@ -96,6 +96,12 @@ export interface CodeModeCallRecord {
 	binding: string;
 	/** `unsettled` calls were still running when the script ended and may have taken effect. */
 	status: CodeModeCallStatus;
+	/**
+	 * When the script issued the call, in milliseconds since the run started, the origin of the result's `durationMs`.
+	 * With `durationMs` it shows which calls the script had in flight at once.
+	 */
+	startMs: number;
+	/** From when the script issued the call, including any wait to be scheduled, until it settled. */
 	durationMs: number;
 	error?: { kind: CodeModeCallErrorKind; reason?: CodeModeCallErrorReason; message: string };
 }
@@ -542,9 +548,16 @@ class ScriptRun {
 			this.protocolViolation(`unknown binding ${call.binding}`);
 			return;
 		}
+		const startedAt = performance.now();
 		const state: CallState = {
-			record: { seq: call.seq, binding: call.binding, status: "completed", durationMs: 0 },
-			startedAt: performance.now(),
+			record: {
+				seq: call.seq,
+				binding: call.binding,
+				status: "completed",
+				startMs: startedAt - this.startedAt,
+				durationMs: 0,
+			},
+			startedAt,
 			bytes: argumentBytes,
 			settled: Promise.resolve(),
 			done: false,

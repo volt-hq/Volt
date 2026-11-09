@@ -205,9 +205,10 @@ describe("run_code presenter", () => {
 							argsPreview: 'path="a.ts"',
 							status: "completed",
 							readOnly: true,
+							startMs: 0,
 							durationMs: 40,
 						},
-						{ seq: 2, tool: "bash", status: "completed", readOnly: false, durationMs: 2500 },
+						{ seq: 2, tool: "bash", status: "completed", readOnly: false, startMs: 40, durationMs: 2500 },
 					],
 				}),
 				"Script completed in 1.2s (2 tool calls)\nReturn value: 7",
@@ -234,9 +235,17 @@ describe("run_code presenter", () => {
 					language: "typescript",
 					wallMs: 6400,
 					calls: [
-						{ seq: 1, tool: "edit", status: "failed", readOnly: false, durationMs: 12, error: "no match" },
-						{ seq: 2, tool: "wait", status: "cancelled", readOnly: false, durationMs: 3 },
-						{ seq: 3, tool: "bash", status: "unsettled", readOnly: false, durationMs: 5000 },
+						{
+							seq: 1,
+							tool: "edit",
+							status: "failed",
+							readOnly: false,
+							startMs: 0,
+							durationMs: 12,
+							error: "no match",
+						},
+						{ seq: 2, tool: "wait", status: "cancelled", readOnly: false, startMs: 12, durationMs: 3 },
+						{ seq: 3, tool: "bash", status: "unsettled", readOnly: false, startMs: 15, durationMs: 5000 },
 					],
 					complete: false,
 				}),
@@ -271,6 +280,7 @@ describe("run_code presenter", () => {
 			argsPreview: `path="f${index + 1}.ts"`,
 			status: "completed" as const,
 			readOnly: true,
+			startMs: index,
 			durationMs: 1,
 		}));
 		const presented = presentRunCode(done(finalDetails({ calls }), "Script completed"));
@@ -327,6 +337,7 @@ describe("run_code presenter", () => {
 			argsPreview: `query="${wide}"`,
 			status: "failed" as const,
 			readOnly: false,
+			startMs: 0,
 			durationMs: 1,
 			error: `\u0001${wide}`,
 		}));
