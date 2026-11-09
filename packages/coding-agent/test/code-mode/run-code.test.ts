@@ -155,15 +155,28 @@ describe("run_code description", () => {
 		).toBe(describeRunCode(sources({ activeTools: active })));
 	});
 
-	it("guides MCP batches and large-result filtering through scripts after discovery only when MCP is callable", () => {
-		const guidance = "After discovery, prefer these bindings for batches, pagination, and large-result filtering.";
+	it("keeps MCP discovery direct and reuses known schemas only when MCP bindings are callable", () => {
 		const withMcp = describeRunCode(sources({ activeTools: [builtin("read"), builtin("mcp")] }));
-		expect(withMcp).toContain("Find them and their arguments with the mcp tool's search and describe actions first.");
-		expect(withMcp).toContain(guidance);
+		expect(withMcp).toContain("Discover missing schemas with the direct mcp tool's search and describe actions.");
+		expect(withMcp).toContain("Reuse complete, current schemas already returned.");
+		expect(withMcp).toContain(
+			"tools.mcp is a namespace, not a callable gateway; discovery is not available inside scripts.",
+		);
+		expect(withMcp).toContain('tools.mcp["my-server"]["get-file"](args)');
 
 		const withoutMcp = describeRunCode(sources({ activeTools: [builtin("read")] }));
-		expect(withoutMcp).not.toContain(guidance);
+		expect(withoutMcp).not.toContain("Discover missing schemas");
 		expect(withoutMcp).not.toContain("tools.mcp");
+	});
+
+	it("offers deterministic read loops without requiring scripts for small results in both descriptions", () => {
+		for (const description of [
+			runCode().description,
+			describeRunCode(sources({ activeTools: DEFAULT_BUILD_TOOLS })),
+		]) {
+			expect(description).toContain("deterministic read-only loops");
+			expect(description).toContain("Use direct calls for small results or steps requiring interpretation.");
+		}
 	});
 
 	it("says no tools are available when nothing is bound", () => {
@@ -439,6 +452,15 @@ describe("run_code", () => {
 			{ tool: "mcp.browser.screenshot", status: "completed" },
 			{ tool: "wait", status: "cancelled" },
 		]);
+	});
+
+	it("does not expose MCP gateway discovery as a callable script binding", async () => {
+		const { isError, output, details } = await run(
+			"return tools.mcp({ action: 'describe', server: 'browser', tool: 'screenshot' });",
+		);
+		expect(isError).toBe(true);
+		expect(output).toContain("TypeError");
+		expect(details.calls).toEqual([]);
 	});
 
 	it("labels the images a script did not show by the call that returned them", async () => {
