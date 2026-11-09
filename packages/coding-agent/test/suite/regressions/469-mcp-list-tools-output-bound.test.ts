@@ -57,6 +57,7 @@ async function createFixture(
 		bytes?: number;
 		cacheBytes?: number;
 		metadataBytes?: number;
+		codeModeBinding?: (server: string, tool: string) => string | undefined;
 		lines?: number;
 		output?: string;
 		trustedTools?: string[];
@@ -127,9 +128,9 @@ async function createFixture(
 		metadataCache,
 		outputStore: store,
 	});
-	const gateway = createMcpToolDefinition({ manager });
+	const gateway = createMcpToolDefinition({ manager, codeModeBinding: options.codeModeBinding });
 	const harness = await createHarness({
-		tools: [createMcpTool({ manager })],
+		tools: [createMcpTool({ manager, codeModeBinding: options.codeModeBinding })],
 		settings: { compaction: { enabled: false } },
 	});
 	fixtures.push({ manager, harness, directory });
@@ -514,6 +515,71 @@ describe("#469 bounded MCP model output", () => {
 		expect(cached.isError).not.toBe(true);
 		expect(upstream).not.toHaveBeenCalled();
 	});
+
+	it.each(["requested", "hard"] as const)(
+		"counts code mode search hints within the %s discovery budget",
+		async (bound) => {
+			const budget = 2048;
+			const bytes = bound === "hard" ? budget : 51200;
+			const maxBytes = bound === "requested" ? budget : 8192;
+			const inputSchema = {
+				type: "object" as const,
+				description: "",
+				properties: { id: { type: "string", pattern: "^[a-z]+$" } },
+				required: ["id"],
+			};
+			const outputSchema = { type: "object" as const, properties: { text: { type: "string" } } };
+			const tools: Tool[] = [{ name: "read_note", inputSchema, outputSchema }];
+			let codeMode = false;
+			const codeModeBinding = vi.fn(() => (codeMode ? "tools.mcp.fake.read_note(args)" : undefined));
+			const { execute, manager, connection } = await createFixture({ tools, bytes, codeModeBinding });
+			await manager.connectServer("fake");
+			const input = { action: "search" as const, query: "read note", includeSchema: true, maxBytes };
+			const plain = await execute(input);
+			expect(plain.data.selectedTool).toMatchObject({ inputSchema, outputSchema });
+			expect(plain.data.selectedTool).not.toHaveProperty("codeMode");
+
+			const upstream = vi.spyOn(connection, "listTools");
+			codeMode = true;
+			const hinted = await execute(input);
+			expect(hinted.result.isError).not.toBe(true);
+			expect(hinted.data.selectedTool).toMatchObject({
+				inputSchema,
+				outputSchema,
+				codeMode: {
+					call: "tools.mcp.fake.read_note(args)",
+					returns: "Promise<{ text: string; structured?: unknown; images: ImageRef[] }>",
+					guidance: expect.stringContaining("even a single listing"),
+				},
+			});
+			expect(Buffer.byteLength(hinted.text)).toBeLessThanOrEqual(budget);
+			expect(upstream).not.toHaveBeenCalled();
+
+			// The schema alone fits exactly, but adding the hint must not exceed either budget or split the schema.
+			inputSchema.description = "x".repeat(budget - Buffer.byteLength(plain.text));
+			await manager.connectServer("fake");
+			codeMode = false;
+			const exact = await execute(input);
+			expect(exact.data.selectedTool).toMatchObject({ inputSchema, outputSchema });
+			expect(Buffer.byteLength(exact.text)).toBe(budget);
+			codeMode = true;
+			const omitted = await execute(input);
+			expect(omitted.result.isError).not.toBe(true);
+			expect(omitted.data.selectedTool).toBeUndefined();
+			expect(omitted.data.schemaOmitted).toContain("Use describe");
+			expect(omitted.data.matches?.[0].tool).toBe("read_note");
+			expect(omitted.data.truncation).toBeUndefined();
+			expect(omitted.data.cache).toBeUndefined();
+			expect(Buffer.byteLength(omitted.text)).toBeLessThanOrEqual(budget);
+
+			codeModeBinding.mockClear();
+			const summaries = await execute({ ...input, includeSchema: false });
+			expect(summaries.data.selectedTool).toBeUndefined();
+			const missing = await execute({ ...input, query: "no_matching_tool" });
+			expect(missing.data.selectedTool).toBeUndefined();
+			expect(codeModeBinding).not.toHaveBeenCalled();
+		},
+	);
 
 	it("fits discovery envelopes after schema omission and reports oversized summary retrieval", async () => {
 		const tools: Tool[] = Array.from({ length: 10 }, (_, index) => ({

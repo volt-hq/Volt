@@ -155,6 +155,17 @@ describe("run_code description", () => {
 		).toBe(describeRunCode(sources({ activeTools: active })));
 	});
 
+	it("guides MCP batches and large-result filtering through scripts after discovery only when MCP is callable", () => {
+		const guidance = "After discovery, prefer these bindings for batches, pagination, and large-result filtering.";
+		const withMcp = describeRunCode(sources({ activeTools: [builtin("read"), builtin("mcp")] }));
+		expect(withMcp).toContain("Find them and their arguments with the mcp tool's search and describe actions first.");
+		expect(withMcp).toContain(guidance);
+
+		const withoutMcp = describeRunCode(sources({ activeTools: [builtin("read")] }));
+		expect(withoutMcp).not.toContain(guidance);
+		expect(withoutMcp).not.toContain("tools.mcp");
+	});
+
 	it("says no tools are available when nothing is bound", () => {
 		const description = describeRunCode(sources({ activeTools: [builtin("jobs"), builtin("run_code")] }));
 		expect(description).toContain(NO_TOOLS);

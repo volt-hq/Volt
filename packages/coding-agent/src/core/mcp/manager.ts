@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { CallToolResult, GetPromptResult, ReadResourceResult } from "@modelcontextprotocol/sdk/types.js";
 import { omitUndefined } from "../../utils/json.ts";
+import { CODE_MODE_MCP_RESULT_SHAPE } from "../code-mode/bindings.ts";
 import type { McpAuditLogger } from "./audit.ts";
 import {
 	DEFAULT_MCP_MAX_CONCURRENT_CALLS,
@@ -127,6 +128,25 @@ function parentOf(context: McpGatewayExecutionContext): { parentToolCallId?: str
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Adds session-owned code mode hints before discovery output is budgeted, never to failed descriptions. */
+function withCodeModeBinding(result: unknown, context: McpGatewayExecutionContext): unknown {
+	if (context.codeModeBinding === undefined || !isRecord(result) || "status" in result) return result;
+	const { server, tool } = result;
+	if (typeof server !== "string" || typeof tool !== "string") return result;
+	const call = context.codeModeBinding(server, tool);
+	return call === undefined
+		? result
+		: {
+				...result,
+				codeMode: {
+					call,
+					returns: CODE_MODE_MCP_RESULT_SHAPE,
+					guidance:
+						"Prefer run_code with this binding for independent batches, pagination, or filtering large results, even a single listing. Return relevant fields or summaries, not whole results.",
+				},
+			};
 }
 
 const ALL_METADATA_CATEGORIES: readonly McpMetadataCategory[] = Object.freeze(["tools", "resources", "prompts"]);
@@ -479,11 +499,14 @@ export class McpManager {
 			case "list_servers":
 				return { action: "list_servers", servers: this.listServers() };
 			case "search":
-				return this.searchForModel(input);
+				return this.searchForModel(input, context);
 			case "describe":
-				return this.describe(requireString(input.server, "server"), requireString(input.tool, "tool"), signal, {
-					restrictedTrustedRead: context.restrictedTrustedRead,
-				});
+				return withCodeModeBinding(
+					await this.describe(requireString(input.server, "server"), requireString(input.tool, "tool"), signal, {
+						restrictedTrustedRead: context.restrictedTrustedRead,
+					}),
+					context,
+				);
 			case "connect":
 				return this.connectServer(requireString(input.server, "server"), signal, {
 					restrictedTrustedRead: context.restrictedTrustedRead,
@@ -816,7 +839,7 @@ export class McpManager {
 		return Math.min(maxBytes ?? 8192, this.outputStore.getMaxOutputBytes());
 	}
 
-	private searchForModel(input: McpGatewayInput): unknown {
+	private searchForModel(input: McpGatewayInput, context: McpGatewayExecutionContext): unknown {
 		const budget = this.discoveryBudget(input.maxBytes);
 		const found = this.search(input.query ?? "", input.limit, input.server);
 		const result: Record<string, unknown> = { ...found, returnedMatches: found.matches.length };
@@ -830,19 +853,22 @@ export class McpManager {
 			// Search is discovery-only: schema loading must not connect or refresh a server.
 			const tool = this.metadataCache.getTool(best.server, best.tool);
 			if (tool) {
-				const selectedTool = {
-					server: best.server,
-					tool: tool.name,
-					description: tool.description ?? "",
-					inputSchema: tool.inputSchema,
-					...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
-					annotations: tool.annotations ?? {},
-					metadataHash: best.metadataHash,
-				};
+				const selectedTool = withCodeModeBinding(
+					{
+						server: best.server,
+						tool: tool.name,
+						description: tool.description ?? "",
+						inputSchema: tool.inputSchema,
+						...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
+						annotations: tool.annotations ?? {},
+						metadataHash: best.metadataHash,
+					},
+					context,
+				);
 				if (byteLength(JSON.stringify({ ...result, selectedTool })) <= budget) {
 					result.selectedTool = selectedTool;
 				} else {
-					result.schemaOmitted = "Use describe: the complete schema exceeds the discovery budget.";
+					result.schemaOmitted = "Use describe: the complete tool description exceeds the discovery budget.";
 				}
 			} else {
 				result.schemaOmitted = "Metadata changed during discovery; search again before selecting a tool.";
