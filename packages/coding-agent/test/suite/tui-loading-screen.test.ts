@@ -8,6 +8,7 @@
 import { type Component, setKeybindings } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
+import type { ConversationConnector } from "../../src/client/conversation-connector.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
 import { stopThemeWatcher } from "../../src/core/theme/runtime.ts";
 import { createInteractiveTui, InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
@@ -57,32 +58,44 @@ async function start(tuiMode: "regular" | "fullscreen"): Promise<{ harness: TuiH
 	return { harness, tui: await harness.startMode({ tuiMode, columns: 100, rows: 30 }) };
 }
 
+/** A mode over the harness's connector that starts through `init`, as the volt CLI starts the TUI. */
+async function startup(tuiMode: "regular" | "fullscreen"): Promise<{
+	harness: TuiHarness;
+	mode: InteractiveMode;
+	terminal: VirtualTerminal;
+	/** The terminal's visible rows once it rendered. */
+	shown(): Promise<string>;
+}> {
+	const harness = await createTuiHarness({ globalSettings: SETTINGS });
+	harnesses.push(harness);
+	vi.stubEnv("VOLT_CODING_AGENT_DIR", harness.tempDir);
+	const mode = new InteractiveMode(harness.connector, {
+		tuiMode,
+		settingsScope: {
+			cwd: harness.startup.cwd,
+			projectTrusted: harness.startup.session.settingsManager.isProjectTrusted(),
+		},
+	});
+	modes.push(mode);
+	const terminal = new VirtualTerminal(100, 30);
+	(mode as unknown as { renderer: unknown }).renderer = createInteractiveTui({
+		tuiMode,
+		showHardwareCursor: false,
+		logDirectory: harness.tempDir,
+		terminal,
+	});
+	const shown = async (): Promise<string> => {
+		await terminal.waitForRender();
+		return terminal.getViewport().join("\n");
+	};
+	return { harness, mode, terminal, shown };
+}
+
 describe("the TUI's loading screen", () => {
 	it.each(["regular", "fullscreen"] as const)(
 		"shows from startup until the conversation does, keeping what is typed meanwhile (%s)",
 		async (tuiMode) => {
-			const harness = await createTuiHarness({ globalSettings: SETTINGS });
-			harnesses.push(harness);
-			vi.stubEnv("VOLT_CODING_AGENT_DIR", harness.tempDir);
-			const mode = new InteractiveMode(harness.connector, {
-				tuiMode,
-				settingsScope: {
-					cwd: harness.startup.cwd,
-					projectTrusted: harness.startup.session.settingsManager.isProjectTrusted(),
-				},
-			});
-			modes.push(mode);
-			const terminal = new VirtualTerminal(100, 30);
-			(mode as unknown as { renderer: unknown }).renderer = createInteractiveTui({
-				tuiMode,
-				showHardwareCursor: false,
-				logDirectory: harness.tempDir,
-				terminal,
-			});
-			const shown = async (): Promise<string> => {
-				await terminal.waitForRender();
-				return terminal.getViewport().join("\n");
-			};
+			const { mode, terminal, shown } = await startup(tuiMode);
 
 			const started = mode.init();
 			await vi.waitFor(async () => {
@@ -102,6 +115,34 @@ describe("the TUI's loading screen", () => {
 			});
 		},
 	);
+
+	it("stays at startup until the conversation's host finished starting, showing what it waits for", async () => {
+		const { harness, mode, shown } = await startup("regular");
+		// A daemon serves the TUI before it finished starting: its connector says when it has.
+		const hostStarted = Promise.withResolvers<void>();
+		(harness.connector as ConversationConnector).started = async (options) => {
+			options?.onStatus?.("Starting the Volt daemon's phone transport");
+			await hostStarted.promise;
+			options?.onStatus?.(undefined);
+		};
+
+		// The conversation is ready, and the screen's own minimum has long passed.
+		await mode.init();
+		await new Promise((resolve) => setTimeout(resolve, 1_000));
+		const waiting = await shown();
+		expect(waiting).toMatch(BOLT);
+		expect(waiting).toContain("Starting Volt");
+		expect(waiting).toContain("Starting the Volt daemon's phone transport...");
+		expect(waiting).not.toContain(EDITOR_PLACEHOLDER);
+
+		hostStarted.resolve();
+		await vi.waitFor(async () => {
+			const conversation = await shown();
+			expect(conversation).toContain(EDITOR_PLACEHOLDER);
+			expect(conversation).not.toContain("Starting the Volt daemon's phone transport");
+			expect(conversation).not.toMatch(BOLT);
+		});
+	});
 
 	it.each(["regular", "fullscreen"] as const)(
 		"covers the conversation while /clear moves to a new session (%s)",

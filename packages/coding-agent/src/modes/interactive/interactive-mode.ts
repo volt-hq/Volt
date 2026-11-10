@@ -1191,8 +1191,10 @@ export class InteractiveMode {
 		this.ui.requestRender();
 
 		await this.connect();
-		// Startup ends here; the loading screen leaves once its snap has shown.
-		void loaded();
+		// Startup ends here. The loading screen leaves once the conversation's host finished starting too (a
+		// daemon brings its phone transport up after it serves the TUI), and its own first snap has shown.
+		const hostStarted = this.connector.started?.({ onStatus: (status) => this.showHostWait({ open: status }) });
+		void (hostStarted ?? Promise.resolve()).then(() => loaded());
 
 		// Set up theme file watcher
 		onThemeChange(() => {

@@ -85,6 +85,12 @@ const DAEMON_START_EXTRA_WAIT_MS = 90_000;
 const DAEMON_START_POLL_MS = 500;
 /** How long a connection its host ended shutting down waits for the daemon to announce its shutdown. */
 const SHUTDOWN_ANNOUNCEMENT_WAIT_MS = 1_000;
+/**
+ * How long a daemon that serves the TUI is waited for to finish starting: offline, its phone
+ * transport waits for its relay for as long as that lasts.
+ */
+const DAEMON_STARTED_WAIT_MS = 10_000;
+const DAEMON_STARTED_POLL_MS = 200;
 
 /** Refusals of an open that another try does not change. */
 const FINAL_OPEN_REFUSALS = new Set([
@@ -259,6 +265,33 @@ export class DaemonConnector implements ConversationConnector {
 		const deadline = Date.now() + SHUTDOWN_ANNOUNCEMENT_WAIT_MS;
 		while (!announced() && Date.now() < deadline) await delay(50);
 		return announced();
+	}
+
+	/**
+	 * Resolves once the daemon the TUI is connected to finished starting. It
+	 * answers its TUIs and opens their conversations first, then brings its
+	 * phone transport up: its status says `starting` until the transport is
+	 * ready, or will not come up (no binding, a failed endpoint). A transport
+	 * still starting after 10 s is not waited for, and neither is a daemon the
+	 * connector cannot ask.
+	 */
+	async started(options: { readonly onStatus?: (status: string | undefined) => void } = {}): Promise<void> {
+		const deadline = Date.now() + DAEMON_STARTED_WAIT_MS;
+		let waiting = false;
+		try {
+			for (;;) {
+				const control = this.control;
+				if (this.stopped || control?.connectionState !== "connected") return;
+				const status = await control.request({ type: "status" }).catch(() => undefined);
+				if (status?.type !== "status_result" || status.remoteTransport?.state !== "starting") return;
+				if (Date.now() >= deadline) return;
+				if (!waiting) options.onStatus?.("Starting the Volt daemon's phone transport");
+				waiting = true;
+				await delay(DAEMON_STARTED_POLL_MS);
+			}
+		} finally {
+			if (waiting) options.onStatus?.(undefined);
+		}
 	}
 
 	stopServing(): void {
