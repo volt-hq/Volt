@@ -1048,8 +1048,19 @@ describe("code mode worker pool", () => {
 
 	it("ends running scripts when the pool closes", async () => {
 		const closing = newPool({});
-		const running = run("await tools.call({});", { onCall: () => new Promise(() => {}) }, closing);
-		await new Promise((resolve) => setTimeout(resolve, 300));
+		// The script is running once its call reaches the host, however long the worker took to start.
+		const calling = deferred<void>();
+		const running = run(
+			"await tools.call({});",
+			{
+				onCall: () => {
+					calling.resolve();
+					return new Promise(() => {});
+				},
+			},
+			closing,
+		);
+		await calling.promise;
 		closing.close();
 		expect(failed(await running).failure).toStrictEqual({
 			kind: "sandbox",
