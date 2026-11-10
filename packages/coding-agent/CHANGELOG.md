@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.8.0] - 2026-11-10
+
+Standalone Windows executables in this release are not code-signed. Windows may show a SmartScreen warning when you first run them.
+
+### Highlights
+
+- Added the opt-in [run_code](https://volt-cli.dev/docs/code-mode/) tool, which runs a sandboxed script that calls Volt's tools and returns only what it prints; enable it with [`codeMode.enabled`](https://volt-cli.dev/docs/code-mode/#enabling-code-mode). ([#1027](https://github.com/volt-hq/Volt/issues/1027))
+  A run_code call shows a live card with the script, its nested tool calls as they run, and its newest output. Scripts can keep small JSON values across scripts with `store()` and `load()`; the values follow the conversation's branches and survive reopening it. Compaction and branch summaries list the files scripts read, wrote, or edited, and MCP audit entries of a script's calls name the run_code call.
+
+  Volt guides the model to script tool-call batches, pagination, deterministic read workflows, and filtering of large results, and to keep small, readable results as direct calls. While run_code is active, MCP search and describe results show how a script calls each tool. ([#1056](https://github.com/volt-hq/Volt/issues/1056), [#1058](https://github.com/volt-hq/Volt/issues/1058))
+- Refreshed the TUI's look: tool cards and replies use distinct colors by role instead of purple throughout, the startup logo draws the Volt bolt and wordmark with half-block characters, and a full-screen animation of the bolt snapping together plays at startup, on /clear, and during /reload.
+  File paths and patterns in tool titles, inline code, and list bullets each have their own color, and bash tool titles show the command with shell syntax highlighting. At startup the animation stays until the daemon has finished starting, including its phone transport, for at most 10 seconds.
+
+### Breaking Changes
+
+- **review:** Review engines get a checkout from `ctx.checkout()` as `{ path, release() }` instead of a path, and the host resets and reuses released checkouts, so an engine no longer runs Git to reuse them.
+  Use `checkout.path` where you used the returned path, and call `checkout.release()` when a pass is done with it instead of running `git reset --hard` and `git clean` yourself; a later `ctx.checkout()` then gets it back reset, without running the setup again. `ctx.target.commonDirectory` gives the repository's Git common directory, which identifies it across worktrees.
+- **themes:** Custom themes must define the new `info` and `toolTarget` color tokens.
+  Add both [color tokens](https://volt-cli.dev/docs/themes/#color-tokens) to your theme's `colors` (for example `"info": "#61afef"` and `"toolTarget": "#61afef"`). `info` colors informational text and notifications, and `toolTarget` colors what a tool call acts on in its title, such as a file path or search pattern. A theme without them fails to load and Volt falls back to the built-in `dark` theme.
+
+### Improvements
+
+- **models:** Refreshed the built-in model catalog, adding Claude Fable 5.2 with prompt caching on Amazon Bedrock, Kimi K3.1 Pro on Bedrock, Fireworks, and Together, and current upstream pricing and limits.
+- **tui:** Bash tool cards show a multi-line command as its first line and how many lines follow, and show the timeout only while the command runs.
+- **tui:** Collapsed tool cards wrap each output line to at most three rows, so one very long line no longer fills the transcript; expanding shows it whole.
+
+### Fixes
+
+- **mcp:** Fixed one MCP server with very large tool metadata evicting every server's cached metadata, which hid MCP tools from code mode and direct tools. ([#1053](https://github.com/volt-hq/Volt/issues/1053))
+- **models:** Claude Fable 5.1, Haiku 5.5, Opus 5, and Opus 5.5 on Amazon Bedrock, and Claude models on India inference profiles, now use prompt caching with 1-hour retention support.
+- **remote:** Phone conversations and extension inventories in a worktree checkout no longer load project extensions or other trust-requiring resources the checkout carries unless its workspace is trusted. ([#1034](https://github.com/volt-hq/Volt/issues/1034))
+- **remote:** Phone pull request reviews load project extensions, settings, skills, MCP servers, and AGENTS.md from the repository in your workspace instead of the pull request's head, so a pull request cannot add configuration that runs on the host. ([#1034](https://github.com/volt-hq/Volt/issues/1034))
+- **subagents:** Project subagent definitions in `.volt/agents` now require a project trust decision before they load. ([#1037](https://github.com/volt-hq/Volt/issues/1037))
+- **tui:** Thinking blocks render inline code, headings, links, list bullets, quotes, and code blocks in the thinking text color instead of reply markdown colors.
+- **tui:** Fixed fullscreen mouse-wheel scrolling recalling prompt history instead of scrolling the conversation on Windows.
+- Fixed turns that ended without a reply when a model returned an empty response after a tool result; Volt now retries the request and reports an error if it stays empty. ([#1060](https://github.com/volt-hq/Volt/issues/1060))
+
 ## [0.7.1] - 2026-11-03
 
 Standalone Windows executables in this release are not code-signed. Windows may show a SmartScreen warning when you first run them.
