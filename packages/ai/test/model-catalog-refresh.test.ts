@@ -112,6 +112,57 @@ describe("Claude Sonnet 5.5 catalog", () => {
 	});
 });
 
+// https://platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2
+// https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html
+// Verified 2026-11-10. These tests never send provider requests.
+describe("Claude Fable 5.2 catalog", () => {
+	const nativeModels = [
+		getModel("anthropic", "claude-fable-5-2"),
+		getModel("amazon-bedrock", "global.anthropic.claude-fable-5-2"),
+	];
+
+	it("exposes documented limits, pricing, and native prompt caching", () => {
+		for (const model of nativeModels) {
+			expect(model).toMatchObject({
+				reasoning: true,
+				input: ["text", "image"],
+				contextWindow: 1_000_000,
+				maxTokens: 128_000,
+				cost: { input: 8, output: 40, cacheRead: 0.2, cacheWrite: 10 },
+				promptCache: {
+					modes: ["explicit"],
+					retention: { short: { ttlSeconds: 300 }, long: { ttlSeconds: 3_600 } },
+				},
+			});
+		}
+		expect(getModel("amazon-bedrock", "us.anthropic.claude-fable-5-2").promptCache?.retention.long).toEqual({
+			ttlSeconds: 3_600,
+		});
+	});
+
+	it("offers xhigh and max without advertising disabled thinking", () => {
+		for (const model of nativeModels) {
+			const levels = getSupportedThinkingLevels(model);
+			expect(levels).toEqual(expect.arrayContaining(["low", "medium", "high", "xhigh", "max"]));
+			expect(levels).not.toContain("off");
+		}
+		expect(getModel("anthropic", "claude-fable-5-2").compat).toMatchObject({
+			forceAdaptiveThinking: true,
+			supportsTemperature: false,
+		});
+	});
+
+	it.each(["low", "xhigh", "max"] as const)("sends adaptive thinking at %s effort", async (reasoning) => {
+		for (const model of nativeModels) {
+			const payload = await capturePayload(model, reasoning);
+			const thinkingPayload =
+				model.api === "bedrock-converse-stream" ? payload.additionalModelRequestFields : payload;
+			expect(thinkingPayload?.thinking).toEqual({ type: "adaptive", display: "summarized" });
+			expect(thinkingPayload?.output_config).toEqual({ effort: reasoning });
+		}
+	});
+});
+
 describe("Daybreak catalog aliases", () => {
 	it.each(["gpt-daybreak-blue-latest", "gpt-daybreak-red-latest"] as const)("maps reasoning for %s", async (id) => {
 		const model = getModel("openai", id);

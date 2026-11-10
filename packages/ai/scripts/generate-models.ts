@@ -329,12 +329,19 @@ const BEDROCK_SHORT_PROMPT_CACHE_MODEL_IDS = new Set([
 	"anthropic.claude-sonnet-4-6",
 ]);
 
+// Fable 5.1, Fable 5.2, Haiku 5.5, Opus 5, and Opus 5.5 verified 2026-11-10 against
+// https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html
 const BEDROCK_LONG_PROMPT_CACHE_MODEL_IDS = new Set([
 	"anthropic.claude-fable-5",
+	"anthropic.claude-fable-5-1",
+	"anthropic.claude-fable-5-2",
 	"anthropic.claude-haiku-4-5-20251001-v1:0",
+	"anthropic.claude-haiku-5-5",
 	"anthropic.claude-opus-4-5-20251101-v1:0",
 	"anthropic.claude-opus-4-7",
 	"anthropic.claude-opus-4-8",
+	"anthropic.claude-opus-5",
+	"anthropic.claude-opus-5-5",
 	"anthropic.claude-sonnet-4-5-20250929-v1:0",
 	"anthropic.claude-sonnet-5",
 	// https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html (2026-09-28)
@@ -385,7 +392,9 @@ interface PromptCachePolicyRecord {
 }
 
 function canonicalBedrockModelId(modelId: string): string {
-	return modelId.replace(/^(?:apac|au|eu|global|jp|us)\./, "");
+	// `in.` is the India geo inference profile:
+	// https://aws.amazon.com/blogs/machine-learning/amazon-bedrock-expands-claude-model-availability-to-india-cross-region-inference/
+	return modelId.replace(/^(?:apac|au|eu|global|in|jp|us)\./, "");
 }
 
 const PROMPT_CACHE_POLICIES: readonly PromptCachePolicyRecord[] = [
