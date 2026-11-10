@@ -107,12 +107,15 @@ describe("the TUI's loading screen", () => {
 			terminal.sendInput("typed early");
 			await started;
 
-			await vi.waitFor(async () => {
-				const conversation = await shown();
-				expect(conversation).toContain("typed early");
-				expect(conversation).not.toContain("Starting Volt");
-				expect(conversation).not.toMatch(BOLT);
-			});
+			await vi.waitFor(
+				async () => {
+					const conversation = await shown();
+					expect(conversation).toContain("typed early");
+					expect(conversation).not.toContain("Starting Volt");
+					expect(conversation).not.toMatch(BOLT);
+				},
+				{ timeout: 5_000 },
+			);
 		},
 	);
 
@@ -128,7 +131,7 @@ describe("the TUI's loading screen", () => {
 
 		// The conversation is ready, and the screen's own minimum has long passed.
 		await mode.init();
-		await new Promise((resolve) => setTimeout(resolve, 1_000));
+		await new Promise((resolve) => setTimeout(resolve, 1_500));
 		const waiting = await shown();
 		expect(waiting).toMatch(BOLT);
 		expect(waiting).toContain("Starting Volt");

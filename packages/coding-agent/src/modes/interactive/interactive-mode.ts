@@ -359,8 +359,8 @@ const TURN_DONE_ALERT_BUSY_RETRY_MS = 250;
 /** Idle time after settlement before the transcript records when work finished. */
 const WORK_SUMMARY_IDLE_MS = 60_000;
 const STDOUT_FLUSH_TIMEOUT_MS = 1000;
-/** How long the loading screen shows at least: until the bolt's first snap has joined its halves. */
-const LOADING_MIN_VISIBLE_MS = 700;
+/** How long the loading screen shows at least: until the bolt's first snap has joined its halves and rested. */
+const LOADING_MIN_VISIBLE_MS = 1100;
 /** How long "Stop turn and quit" waits for the stopped turn to settle before the TUI quits anyway. */
 const STOP_TURN_WAIT_MS = 60_000;
 /**
