@@ -10,8 +10,13 @@ import {
 	ToolArgumentCoalescer,
 } from "../src/stream/tool-argument-coalescer.ts";
 import type { AssistantMessageEvent } from "../src/types.ts";
-import { EVENT_STREAM_MAX_QUEUED_EVENTS, EventStreamOverflowError } from "../src/utils/event-stream.ts";
+import {
+	EVENT_STREAM_MAX_QUEUED_BYTES,
+	EVENT_STREAM_MAX_QUEUED_EVENTS,
+	EventStreamOverflowError,
+} from "../src/utils/event-stream.ts";
 import * as jsonParse from "../src/utils/json-parse.ts";
+import { pushAndRead } from "./queued-events.ts";
 
 afterEach(() => {
 	vi.useRealTimers();
@@ -24,18 +29,16 @@ describe("bounded argument processing (#354)", () => {
 		const parse = vi.spyOn(jsonParse, "parseStreamingJson");
 		const normalizer = new AssistantStreamNormalizer();
 		const raw = JSON.stringify({ newText: "x".repeat(64 * 1024) });
-		normalizer.push({ type: "toolcall_start", contentIndex: 0, id: "edit", name: "edit" });
-		for (let offset = 0; offset < raw.length; offset += chunkSize) {
-			normalizer.push({
-				type: "toolcall_delta",
-				contentIndex: 0,
-				argsTextDelta: raw.slice(offset, offset + chunkSize),
-			});
+		function* fragments(): Generator<AssistantStreamFragment> {
+			yield { type: "toolcall_start", contentIndex: 0, id: "edit", name: "edit" };
+			for (let offset = 0; offset < raw.length; offset += chunkSize) {
+				yield { type: "toolcall_delta", contentIndex: 0, argsTextDelta: raw.slice(offset, offset + chunkSize) };
+			}
+			yield { type: "toolcall_end", contentIndex: 0 };
+			yield { type: "done", reason: "toolUse" };
 		}
-		normalizer.push({ type: "toolcall_end", contentIndex: 0 });
-		normalizer.push({ type: "done", reason: "toolUse" });
-		const events: AssistantMessageEvent[] = [];
-		for await (const event of normalizer.stream) events.push(event);
+		// Read after each fragment, so every delta the normalizer emits is observed with its own snapshot.
+		const events = await pushAndRead(normalizer, fragments());
 		const deltas = events.filter((event) => event.type === "toolcall_delta");
 		expect(deltas.map((event) => event.argsTextDelta).join("")).toBe(raw);
 		const batchChars = Math.min(TOOL_ARGUMENT_BATCH_MAX_CHARS, TOOL_ARGUMENT_BATCH_MAX_FRAGMENTS * chunkSize);
@@ -134,9 +137,11 @@ describe("bounded argument processing (#354)", () => {
 	it("reports overflow as a timely bounded assistant error instead of rejecting the consumer", async () => {
 		const normalizer = new AssistantStreamNormalizer();
 		normalizer.push({ type: "text_start", contentIndex: 0 });
+		normalizer.push({ type: "text_start", contentIndex: 1 });
 		expect(() => {
+			// Deltas that alternate between two open blocks cannot be combined in the queue.
 			for (let index = 0; index < EVENT_STREAM_MAX_QUEUED_EVENTS; index++) {
-				normalizer.push({ type: "text_delta", contentIndex: 0, delta: "x" });
+				normalizer.push({ type: "text_delta", contentIndex: index % 2, delta: "x" });
 			}
 		}).toThrow(EventStreamOverflowError);
 		const result = await normalizer.stream.result();
@@ -175,16 +180,37 @@ describe("bounded argument processing (#354)", () => {
 	it("settles timer-driven overflow as an error and releases all pending preview timers", async () => {
 		vi.useFakeTimers();
 		const normalizer = new AssistantStreamNormalizer();
-		normalizer.push({ type: "text_start", contentIndex: 0 });
-		for (let index = 0; index < EVENT_STREAM_MAX_QUEUED_EVENTS - 4; index++) {
-			normalizer.push({ type: "text_delta", contentIndex: 0, delta: "x" });
+		const headroom = () => EVENT_STREAM_MAX_QUEUED_BYTES - normalizer.stream.getQueueMetrics().queuedBytes;
+		// A pending preview joins the queued delta of its call, so it can only overflow the byte limit.
+		// Every queued event is charged its whole snapshot: two open text blocks make each one large,
+		// and deltas that alternate between the blocks cannot be combined.
+		for (const contentIndex of [0, 1]) {
+			normalizer.push({ type: "text_start", contentIndex });
+			normalizer.push({ type: "text_delta", contentIndex, delta: "x".repeat(16 * 1024) });
 		}
-		normalizer.push({ type: "toolcall_start", contentIndex: 1, id: "call", name: "edit" });
-		normalizer.push({ type: "toolcall_delta", contentIndex: 1, argsTextDelta: '{"newText":"' });
-		normalizer.push({ type: "toolcall_delta", contentIndex: 1, argsTextDelta: "pending" });
+		let deltas = 0;
+		const pushTextDelta = () => normalizer.push({ type: "text_delta", contentIndex: deltas++ % 2, delta: "" });
+		pushTextDelta();
+		const before = headroom();
+		pushTextDelta();
+		const entryBytes = before - headroom();
+		// Leave room for the tool-call start and its first delta, but not for what the preview adds.
+		while (headroom() >= 4 * entryBytes) pushTextDelta();
+		normalizer.push({ type: "toolcall_start", contentIndex: 2, id: "call", name: "edit" });
+		normalizer.push({ type: "toolcall_delta", contentIndex: 2, argsTextDelta: '{"newText":"' });
+		normalizer.push({
+			type: "toolcall_delta",
+			contentIndex: 2,
+			argsTextDelta: "x".repeat(TOOL_ARGUMENT_BATCH_MAX_CHARS - 1024),
+		});
+		expect(normalizer.signal.aborted).toBe(false);
+		expect(normalizer.stream.getQueueMetrics().queuedEvents).toBeLessThan(EVENT_STREAM_MAX_QUEUED_EVENTS);
 		vi.advanceTimersByTime(TOOL_ARGUMENT_BATCH_INTERVAL_MS);
 		const result = await normalizer.stream.result();
-		expect(result.diagnostics?.[0]?.type).toBe("assistant_stream_queue_limit");
+		expect(result.diagnostics?.[0]).toMatchObject({
+			type: "assistant_stream_queue_limit",
+			details: { limit: "bytes" },
+		});
 		expect(result.content).toEqual([]);
 		expect(normalizer.signal.aborted).toBe(true);
 		expect(vi.getTimerCount()).toBe(0);

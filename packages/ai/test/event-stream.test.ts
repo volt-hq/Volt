@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	drainEventStream,
 	EVENT_STREAM_MAX_QUEUED_BYTES,
@@ -24,6 +24,7 @@ describe("EventStream", () => {
 			peakQueuedEvents: 2,
 			queuedBytes: totalBytes,
 			peakQueuedBytes: totalBytes,
+			coalescedEvents: 0,
 			waitingConsumers: 0,
 		});
 		const iterator = stream[Symbol.asyncIterator]();
@@ -36,6 +37,7 @@ describe("EventStream", () => {
 			peakQueuedEvents: 2,
 			queuedBytes: 0,
 			peakQueuedBytes: totalBytes,
+			coalescedEvents: 0,
 			waitingConsumers: 1,
 		});
 		stream.push("done");
@@ -200,5 +202,148 @@ describe("EventStream", () => {
 		stream.fail(failure);
 
 		await expect(next).rejects.toBe(failure);
+	});
+});
+
+describe("EventStream coalescing", () => {
+	/** An event that starts with "+" extends the queued event before it. */
+	const append = (queued: string, next: string): string | undefined =>
+		next.startsWith("+") ? queued + next.slice(1) : undefined;
+
+	function coalescingStream(coalesce: (queued: string, next: string) => string | undefined = append) {
+		return new EventStream<string>(
+			(event) => event === "done",
+			(event) => event,
+			undefined,
+			coalesce,
+		);
+	}
+
+	/** What a stream charges for holding exactly these events. */
+	function chargeOf(events: readonly string[]): number {
+		const reference = new EventStream<string>(
+			() => false,
+			(event) => event,
+		);
+		for (const event of events) reference.push(event);
+		return reference.getQueueMetrics().queuedBytes;
+	}
+
+	it("charges only the retained entries and releases each charge when it is consumed", async () => {
+		const stream = coalescingStream();
+		for (const event of ["a", "+bb", "+ccc", "d", "+e"]) stream.push(event);
+		const retained = chargeOf(["abbccc", "de"]);
+		expect(stream.getQueueMetrics()).toEqual({
+			queuedEvents: 2,
+			peakQueuedEvents: 2,
+			queuedBytes: retained,
+			peakQueuedBytes: retained,
+			coalescedEvents: 3,
+			waitingConsumers: 0,
+		});
+
+		const iterator = stream[Symbol.asyncIterator]();
+		await expect(iterator.next()).resolves.toEqual({ value: "abbccc", done: false });
+		expect(stream.getQueueMetrics().queuedBytes).toBe(chargeOf(["de"]));
+		await expect(iterator.next()).resolves.toEqual({ value: "de", done: false });
+		expect(stream.getQueueMetrics()).toMatchObject({
+			queuedEvents: 0,
+			queuedBytes: 0,
+			peakQueuedBytes: retained,
+			coalescedEvents: 3,
+		});
+	});
+
+	it("lowers the charge when a replacement is smaller and keeps the peak", () => {
+		const stream = coalescingStream((_queued, next) => (next === "reset" ? "" : undefined));
+		stream.push("x".repeat(1000));
+		const peak = stream.getQueueMetrics().queuedBytes;
+		stream.push("reset");
+		expect(stream.getQueueMetrics()).toMatchObject({
+			queuedEvents: 1,
+			queuedBytes: chargeOf([""]),
+			peakQueuedBytes: peak,
+			coalescedEvents: 1,
+		});
+		expect(chargeOf([""])).toBeLessThan(peak);
+	});
+
+	it("offers only a queued event and a following non-completion event", async () => {
+		const coalesce = vi.fn(append);
+		const stream = coalescingStream(coalesce);
+		const iterator = stream[Symbol.asyncIterator]();
+
+		// A waiting consumer takes the event; nothing is queued to combine with.
+		const waiting = iterator.next();
+		stream.push("a");
+		await expect(waiting).resolves.toEqual({ value: "a", done: false });
+		stream.push("+b");
+		expect(coalesce).not.toHaveBeenCalled();
+
+		stream.push("+c");
+		stream.push("d");
+		stream.push("done");
+		expect(coalesce.mock.calls).toEqual([
+			["+b", "+c"],
+			["+bc", "d"],
+		]);
+		await expect(stream.result()).resolves.toBe("done");
+		const events: string[] = [];
+		for (let next = await iterator.next(); !next.done; next = await iterator.next()) events.push(next.value);
+		expect(events).toEqual(["+bc", "d", "done"]);
+		expect(stream.getQueueMetrics().coalescedEvents).toBe(1);
+	});
+
+	it("combines into the tail of a full queue and still bounds events that cannot combine", async () => {
+		const stream = coalescingStream();
+		for (let index = 0; index < EVENT_STREAM_MAX_QUEUED_EVENTS; index++) stream.push(String(index));
+		for (let index = 0; index < EVENT_STREAM_MAX_QUEUED_EVENTS; index++) stream.push("+x");
+		expect(stream.getQueueMetrics()).toMatchObject({
+			queuedEvents: EVENT_STREAM_MAX_QUEUED_EVENTS,
+			peakQueuedEvents: EVENT_STREAM_MAX_QUEUED_EVENTS,
+			coalescedEvents: EVENT_STREAM_MAX_QUEUED_EVENTS,
+		});
+		expect(() => stream.push("separate")).toThrow(EventStreamOverflowError);
+		expect(stream.getQueueMetrics()).toMatchObject({ queuedEvents: 0, queuedBytes: 0 });
+		await expect(stream.result()).rejects.toMatchObject({ limit: "events" });
+	});
+
+	it("fails at the byte bound when a combined entry alone exceeds it", async () => {
+		const stream = coalescingStream((_queued, next) =>
+			next === "grow" ? "x".repeat(EVENT_STREAM_MAX_QUEUED_BYTES) : undefined,
+		);
+		stream.push("small");
+		expect(() => stream.push("grow")).toThrow(EventStreamOverflowError);
+		expect(stream.getQueueMetrics()).toMatchObject({ queuedEvents: 0, queuedBytes: 0, coalescedEvents: 0 });
+		await expect(stream.result()).rejects.toMatchObject({ code: "event_stream_queue_overflow", limit: "bytes" });
+		await expect(stream[Symbol.asyncIterator]().next()).rejects.toMatchObject({ limit: "bytes" });
+	});
+
+	it("installs the overflow terminal when a combined entry exceeds the byte bound", async () => {
+		const overflowEvent = vi.fn((_error: EventStreamOverflowError, _event: string) => "done");
+		const stream = new EventStream<string>(
+			(event) => event === "done",
+			(event) => event,
+			overflowEvent,
+			(_queued, next) => (next === "grow" ? "x".repeat(EVENT_STREAM_MAX_QUEUED_BYTES) : undefined),
+		);
+		stream.push("small");
+		expect(() => stream.push("grow")).toThrow(EventStreamOverflowError);
+		expect(overflowEvent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ limit: "bytes" }), "grow");
+		await expect(stream.result()).resolves.toBe("done");
+		await expect(stream[Symbol.asyncIterator]().next()).resolves.toEqual({ value: "done", done: false });
+	});
+
+	it("queues every event separately without a coalesce hook", () => {
+		const stream = new EventStream<string>(
+			(event) => event === "done",
+			(event) => event,
+		);
+		for (const event of ["a", "+b", "+c"]) stream.push(event);
+		expect(stream.getQueueMetrics()).toMatchObject({
+			queuedEvents: 3,
+			queuedBytes: chargeOf(["a", "+b", "+c"]),
+			coalescedEvents: 0,
+		});
 	});
 });

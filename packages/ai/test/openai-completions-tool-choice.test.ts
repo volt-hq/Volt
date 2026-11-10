@@ -644,16 +644,24 @@ describe("openai-completions tool_choice", () => {
 			{ apiKey: "test" },
 		);
 
-		const toolCallContentIndexes: number[] = [];
+		const toolCallEvents: string[] = [];
+		const toolCallContentIndexes = new Set<number>();
 		for await (const event of s) {
 			if (event.type === "toolcall_start" || event.type === "toolcall_delta" || event.type === "toolcall_end") {
-				toolCallContentIndexes.push(event.contentIndex);
+				toolCallEvents.push(event.type);
+				toolCallContentIndexes.add(event.contentIndex);
 			}
 		}
 
 		const response = await s.result();
 		expect(response.stopReason).toBe("toolUse");
-		expect(toolCallContentIndexes).toEqual([0, 0, 0, 0, 0]);
+		// Queued deltas for one block may arrive combined: assert the block and event order, not the count.
+		expect([...toolCallContentIndexes]).toEqual([0]);
+		expect(toolCallEvents.filter((type, index) => type !== toolCallEvents[index - 1])).toEqual([
+			"toolcall_start",
+			"toolcall_delta",
+			"toolcall_end",
+		]);
 		expect(response.content).toHaveLength(1);
 		const toolCall = response.content[0];
 		expect(toolCall.type).toBe("toolCall");

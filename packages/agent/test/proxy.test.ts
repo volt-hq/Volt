@@ -81,12 +81,15 @@ describe("proxy stream normalization", () => {
 			{ type: "text", text: "hello", textSignature: "text-signature" },
 			{ type: "toolCall", id: "call-1", name: "lookup", arguments: { query: "volt" } },
 		]);
-		const firstTextDelta = events.find((event) => event.type === "text_delta");
-		expect(firstTextDelta?.type === "text_delta" ? firstTextDelta.snapshot.content[0] : undefined).toEqual({
-			type: "text",
-			text: "hel",
-		});
-		expect(firstTextDelta?.type === "text_delta" && Object.isFrozen(firstTextDelta.snapshot)).toBe(true);
+		// Queued deltas for one block may arrive combined: each delta's snapshot holds the text delivered so far.
+		let deliveredText = "";
+		for (const event of events) {
+			if (event.type !== "text_delta") continue;
+			deliveredText += event.delta;
+			expect(event.snapshot.content[0]).toEqual({ type: "text", text: deliveredText });
+			expect(Object.isFrozen(event.snapshot)).toBe(true);
+		}
+		expect(deliveredText).toBe("hello");
 		expect(events.every((event) => Object.isFrozen(event))).toBe(true);
 	});
 

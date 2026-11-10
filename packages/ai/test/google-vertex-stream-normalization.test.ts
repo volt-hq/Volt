@@ -188,7 +188,9 @@ describe("Google Vertex stream normalization", () => {
 			streamGoogleVertex(model, context, { apiKey: "AIzaSyExampleRealisticLookingApiKey123456" }),
 		);
 
-		expect(events.map((event) => event.seq)).toEqual(events.map((_, index) => index));
+		// Queued deltas for one block arrive combined, so seq increases but can skip values.
+		const seqs = events.map((event) => event.seq);
+		expect(seqs.every((seq, index) => index === 0 || seq > seqs[index - 1]!)).toBe(true);
 		expect(events[0]?.type).toBe("start");
 		expect(events.at(-1)?.type).toBe("done");
 
