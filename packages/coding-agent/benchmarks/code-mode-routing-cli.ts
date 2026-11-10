@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -10,12 +9,18 @@ import {
 } from "@hansjm10/volt-ai";
 import { anthropicOAuthProvider, openaiCodexOAuthProvider } from "@hansjm10/volt-ai/oauth";
 import { getModels as getSourceModels } from "../../ai/src/models.ts";
+import { getAgentDir } from "../src/config.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { createCodeModeFixtures } from "./code-mode-fixtures.ts";
-import { CASE_LIMITS, ROUTING_MODES, type RoutingMode, runRoutingCase } from "./code-mode-routing.ts";
-import { parseRoutingRun, type RoutingObservation, type RoutingRun, summarizeRoutingRuns } from "./code-mode-routing-report.ts";
+import { type BenchmarkFixture, createCodeModeFixtures } from "./code-mode-fixtures.ts";
+import { createRealisticRoutingFixtures } from "./code-mode-fixtures-realistic.ts";
+import { ALL_ROUTING_MODES, CASE_LIMITS, ROUTING_MODES, type RoutingMode, runRoutingCase } from "./code-mode-routing.ts";
+import { compareRoutingRuns, parseRoutingRun, type RoutingObservation, type RoutingRun, summarizeRoutingRuns } from "./code-mode-routing-report.ts";
 
 export const DEFAULT_MODELS = ["openai-codex/gpt-6-astra"];
+/** One model per run. Both use the stored subscription credential of their provider. */
+export const BENCHMARK_MODELS = [...DEFAULT_MODELS, "anthropic/claude-opus-5-5"];
+export const ROUTING_SUITES = ["core", "realistic", "all"] as const;
+export type RoutingSuite = (typeof ROUTING_SUITES)[number];
 export const RUN_LIMITS = { requests: 160, reportedTokens: 500_000, timeoutMs: 30 * 60_000 };
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const MAX_REPORT_BYTES = 128 * 1024 * 1024;
@@ -24,24 +29,33 @@ export const ROUTING_HELP = `Usage: npm run benchmark:code-mode -- [mode] [optio
 Modes (default: --dry-run, no credentials or provider calls):
   --dry-run              Print the exact plan and budgets
   --self-test            Run reference programs with the faux provider
-  --live                 Run gpt-6-astra/xhigh through existing Codex OAuth
+  --live                 Run the selected model at xhigh through its stored subscription login
   --report <path>         Summarize a run directory or results.json; repeat to combine
   --help                 Show this help
 
+Report options:
+  --baseline <path>       Compare the --report runs against these runs of another experiment,
+                         such as an earlier commit or prompt; repeat to combine
+
 Run options:
+  --model <provider/id>   openai-codex/gpt-6-astra (default) or anthropic/claude-opus-5-5
+  --routes <list>         Comma-separated routes from direct, hybrid, code-first, code-only
+                         (default: hybrid,code-first,code-only). direct has no run_code tool
+  --suite <name>          core (default, twenty small tasks), realistic (five large-result tasks), or all
+  --task <id[,id...]>     Select fixtures by id from any suite instead of --suite
   --trials <1..50>        Repetitions of every task/route (default: 1)
   --trial-start <1..50>   First trial number, for split batches (default: 1)
   --seed <0..4294967295>  Reproducible ordering seed (default: 1)
-  --task <id>            Select one fixture; --dry-run lists all twenty
   --max-requests <n>     Whole-run request cap, 1..10000 (default: 160)
   --max-tokens <n>       Reported-token admission cap, 1..20000000 (default: 500000)
   --minutes <1..60>      Whole-run deadline (default: 30)
   --out <directory>      New artifact directory outside the repository
+                         (default: <agent dir>/benchmarks/code-mode-routing/<time>-<id>)
 
-All six route permutations are balanced over six trials. Each case has independent
-limits of 12 requests, 200 tool calls, and five minutes. Budgets never auto-expand.
-Report mode makes no provider calls and prints Markdown; --out also saves report.md.
-Only matching experiment fingerprints and distinct run IDs can be combined.
+Route orders are balanced over every n! trials for n routes: two for a pair, six for three.
+Each case has independent limits of 12 requests, 200 tool calls, and five minutes. Budgets
+never auto-expand. Report mode makes no provider calls and prints Markdown; --out also saves
+report.md. Only matching experiment fingerprints and distinct run IDs can be combined.
 `;
 
 export interface RoutingArgs {
@@ -54,7 +68,21 @@ export interface RoutingArgs {
 	out: string;
 	saveReport: boolean;
 	reports: string[];
-	task?: string;
+	baselines: string[];
+	routes: RoutingMode[];
+	suite: RoutingSuite;
+	tasks: string[];
+}
+
+/** Fresh fixtures for a suite. The core suite keeps its documented twenty tasks. */
+export function createRoutingSuite(suite: RoutingSuite): BenchmarkFixture[] {
+	return [...(suite === "realistic" ? [] : createCodeModeFixtures()), ...(suite === "core" ? [] : createRealisticRoutingFixtures())];
+}
+
+/** `--task` selects by id across suites, in suite order; otherwise the whole suite runs. */
+export function selectRoutingFixtures(args: Pick<RoutingArgs, "suite" | "tasks">): BenchmarkFixture[] {
+	if (!args.tasks.length) return createRoutingSuite(args.suite);
+	return createRoutingSuite("all").filter((fixture) => args.tasks.includes(fixture.id));
 }
 
 function boundedInteger(value: string, name: string, min: number, max: number): number {
@@ -67,13 +95,19 @@ function boundedInteger(value: string, name: string, min: number, max: number): 
 export function parseRoutingArgs(args: string[]): RoutingArgs {
 	const parsed: RoutingArgs = {
 		mode: "dry-run", models: [...DEFAULT_MODELS], trials: 1, trialStart: 1, seed: 1, limits: { ...RUN_LIMITS },
-		out: join(tmpdir(), `volt-code-mode-routing-${randomUUID()}`), saveReport: false, reports: [],
+		out: join(getAgentDir(), "benchmarks", "code-mode-routing", `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`),
+		saveReport: false, reports: [], baselines: [], routes: [...ROUTING_MODES], suite: "core", tasks: [],
+	};
+	const list = (value: string, name: string): string[] => {
+		const items = value.split(",");
+		if (items.some((item) => !item) || new Set(items).size !== items.length) throw new Error(`${name} needs distinct comma-separated values`);
+		return items;
 	};
 	const seen = new Set<string>();
 	let selectedMode = false;
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
-		if (seen.has(arg) && arg !== "--report") throw new Error(`Duplicate argument: ${arg}`);
+		if (seen.has(arg) && arg !== "--report" && arg !== "--baseline") throw new Error(`Duplicate argument: ${arg}`);
 		seen.add(arg);
 		if (["--dry-run", "--self-test", "--live", "--help"].includes(arg)) {
 			if (selectedMode) throw new Error("Choose one execution mode");
@@ -81,11 +115,22 @@ export function parseRoutingArgs(args: string[]): RoutingArgs {
 			parsed.mode = arg.slice(2) as RoutingArgs["mode"];
 			continue;
 		}
-		if (!["--models", "--trials", "--trial-start", "--out", "--task", "--seed", "--max-requests", "--max-tokens", "--minutes", "--report"].includes(arg))
+		if (!["--model", "--routes", "--suite", "--trials", "--trial-start", "--out", "--task", "--seed", "--max-requests", "--max-tokens", "--minutes", "--report", "--baseline"].includes(arg))
 			throw new Error(`Unknown argument: ${arg}`);
 		const value = args[++i];
 		if (!value || value.startsWith("--")) throw new Error(`Missing value: ${arg}`);
-		if (arg === "--models") parsed.models = value.split(",");
+		if (arg === "--model") parsed.models = [value];
+		if (arg === "--routes") {
+			const routes = list(value, arg);
+			if (routes.some((route) => !ALL_ROUTING_MODES.some((mode) => mode === route))) throw new Error(`--routes accepts ${ALL_ROUTING_MODES.join(", ")}`);
+			// Canonical order, so the schedule does not depend on how the list was typed.
+			parsed.routes = ALL_ROUTING_MODES.filter((mode) => routes.includes(mode));
+		}
+		if (arg === "--suite") {
+			const suite = ROUTING_SUITES.find((name) => name === value);
+			if (!suite) throw new Error(`--suite accepts ${ROUTING_SUITES.join(", ")}`);
+			parsed.suite = suite;
+		}
 		if (arg === "--trials") parsed.trials = boundedInteger(value, arg, 1, 50);
 		if (arg === "--trial-start") parsed.trialStart = boundedInteger(value, arg, 1, 50);
 		if (arg === "--seed") parsed.seed = boundedInteger(value, arg, 0, 0xffff_ffff);
@@ -93,7 +138,8 @@ export function parseRoutingArgs(args: string[]): RoutingArgs {
 		if (arg === "--max-tokens") parsed.limits.reportedTokens = boundedInteger(value, arg, 1, 20_000_000);
 		if (arg === "--minutes") parsed.limits.timeoutMs = boundedInteger(value, arg, 1, 60) * 60_000;
 		if (arg === "--out") { parsed.out = resolve(value); parsed.saveReport = true; }
-		if (arg === "--task") parsed.task = value;
+		if (arg === "--task") parsed.tasks = list(value, arg);
+		if (arg === "--baseline") parsed.baselines.push(resolve(value));
 		if (arg === "--report") {
 			if (selectedMode && parsed.mode !== "report") throw new Error("Choose one execution mode");
 			selectedMode = true;
@@ -102,19 +148,25 @@ export function parseRoutingArgs(args: string[]): RoutingArgs {
 		}
 	}
 	if (parsed.trialStart + parsed.trials - 1 > 50) throw new Error("Last trial must not exceed 50");
-	if (new Set(parsed.models).size !== parsed.models.length || parsed.models.some((model) => !DEFAULT_MODELS.includes(model)))
-		throw new Error("This benchmark accepts only openai-codex/gpt-6-astra");
-	if (parsed.task && !createCodeModeFixtures().some((fixture) => fixture.id === parsed.task)) throw new Error("Unknown fixture");
-	if ((parsed.mode === "report" || parsed.mode === "help") && [...seen].some((flag) => !["--report", "--out", "--help"].includes(flag)))
+	if (parsed.models.some((model) => !BENCHMARK_MODELS.includes(model))) throw new Error(`--model accepts ${BENCHMARK_MODELS.join(" or ")}`);
+	if (parsed.tasks.length && seen.has("--suite")) throw new Error("Choose --suite or --task");
+	if (selectRoutingFixtures(parsed).length !== (parsed.tasks.length || createRoutingSuite(parsed.suite).length)) throw new Error("Unknown fixture");
+	// Self-test replays reference scripts through run_code, which the direct route does not have.
+	if (parsed.mode === "self-test" && parsed.routes.includes("direct")) throw new Error("Self-test cannot use the direct route");
+	if (parsed.baselines.length && parsed.mode !== "report") throw new Error("--baseline needs --report");
+	if ((parsed.mode === "report" || parsed.mode === "help") && [...seen].some((flag) => !["--report", "--baseline", "--out", "--help"].includes(flag)))
 		throw new Error("Report/help mode does not accept run options");
 	return parsed;
 }
 
-/** Seeded order only, not seeded model inference. Every six trials contain each permutation once. */
-export function routingOrder(trial: number, fixture: string, seed: number): RoutingMode[] {
-	const [a, b, c] = ROUTING_MODES;
-	const permutations = [[a, b, c], [a, c, b], [b, a, c], [b, c, a], [c, a, b], [c, b, a]];
-	const ranked = permutations.map((order, index) => ({
+function permutations<T>(items: readonly T[]): T[][] {
+	if (items.length <= 1) return [[...items]];
+	return items.flatMap((item, index) => permutations([...items.slice(0, index), ...items.slice(index + 1)]).map((rest) => [item, ...rest]));
+}
+
+/** Seeded order only, not seeded model inference. Every n! trials contain each permutation of n routes once. */
+export function routingOrder(trial: number, fixture: string, seed: number, routes: readonly RoutingMode[] = ROUTING_MODES): RoutingMode[] {
+	const ranked = permutations(routes).map((order, index) => ({
 		order, rank: createHash("sha256").update(`${seed}:${fixture}:${index}`).digest("hex"),
 	})).sort((left, right) => left.rank.localeCompare(right.rank));
 	return [...ranked[(trial - 1) % ranked.length].order];
@@ -162,7 +214,9 @@ export async function runRoutingCli(
 	if (args.mode === "report") {
 		const reports: RoutingRun[] = [];
 		for (const path of args.reports) reports.push(await loadRoutingReport(path));
-		const text = summarizeRoutingRuns(reports);
+		const baselines: RoutingRun[] = [];
+		for (const path of args.baselines) baselines.push(await loadRoutingReport(path));
+		const text = baselines.length ? compareRoutingRuns(baselines, reports) : summarizeRoutingRuns(reports);
 		console.log(text);
 		if (!args.saveReport) return { failed: false };
 		const out = await createRoutingOutput(args.out);
@@ -170,26 +224,28 @@ export async function runRoutingCli(
 		return { out, failed: false };
 	}
 	if (getModels !== getSourceModels) throw new Error("Use scripts/run-code-routing.mjs to resolve workspace source");
-	const fixtures = createCodeModeFixtures().filter((fixture) => !args.task || fixture.id === args.task);
+	const fixtures = selectRoutingFixtures(args);
 	const models = args.models.map((name): Model<Api> => {
-		const model = getModels("openai-codex").find((item) => item.id === name.slice(name.indexOf("/") + 1));
+		const catalog: Model<Api>[] = name.startsWith("anthropic/") ? getModels("anthropic") : getModels("openai-codex");
+		const model = catalog.find((item) => item.id === name.slice(name.indexOf("/") + 1));
 		if (!model) throw new Error("A requested subscription model is absent from the catalog");
 		return model;
 	});
-	const planned = fixtures.length * ROUTING_MODES.length * args.trials;
+	const planned = fixtures.length * args.routes.length * args.trials;
 	if (args.mode === "dry-run") {
-		console.log(JSON.stringify({ mode: args.mode, runtime: "source", models: args.models, thinking: "xhigh", seed: args.seed,
+		console.log(JSON.stringify({ mode: args.mode, runtime: "source", models: args.models, thinking: "xhigh", seed: args.seed, routes: args.routes,
 			tasks: fixtures.map((f) => f.id), plannedCases: planned, limits: { run: args.limits, case: CASE_LIMITS },
 			worstCaseRequests: planned * CASE_LIMITS.requests, networkRequests: 0,
 			orderByTrial: Array.from({ length: args.trials }, (_, index) => ({ trial: index + args.trialStart,
 				tasks: routingFixtureOrder(fixtures.map((fixture) => fixture.id), index + args.trialStart, args.seed)
-					.map((id) => ({ fixture: id, modes: routingOrder(index + args.trialStart, id, args.seed) })),
+					.map((id) => ({ fixture: id, modes: routingOrder(index + args.trialStart, id, args.seed, args.routes) })),
 			})),
 		}, null, 2));
 		return { failed: false };
 	}
 	const auth = args.mode === "live" ? AuthStorage.create() : undefined;
 	if (auth) for (const model of models) subscriptionKey(auth, model.provider);
+	if (!args.saveReport) await mkdir(dirname(args.out), { recursive: true });
 	const out = await createRoutingOutput(args.out);
 	const cases: RoutingObservation[] = [];
 	const sourceHashes: Record<string, string> = {};
@@ -197,7 +253,7 @@ export async function runRoutingCli(
 		"packages/coding-agent/benchmarks/code-mode-routing.ts", "packages/coding-agent/benchmarks/code-mode-routing-cli.ts",
 		"packages/coding-agent/benchmarks/code-mode-fixtures.ts", "packages/coding-agent/benchmarks/code-mode-routing-report.ts", "scripts/run-code-routing.mjs",
 		"packages/coding-agent/benchmarks/code-mode-fixture-utils.ts", "packages/coding-agent/benchmarks/code-mode-fixtures-data.ts",
-		"packages/coding-agent/benchmarks/code-mode-fixtures-workflows.ts",
+		"packages/coding-agent/benchmarks/code-mode-fixtures-workflows.ts", "packages/coding-agent/benchmarks/code-mode-fixtures-realistic.ts",
 		"packages/coding-agent/src/core/tools/run-code.ts", "packages/coding-agent/src/core/code-mode/dispatch.ts",
 		"packages/coding-agent/src/core/code-mode/runtime.ts", "packages/coding-agent/src/core/code-mode/limits.ts",
 		"packages/coding-agent/src/core/mcp/gateway-tool.ts", "packages/coding-agent/src/core/session/tool-runtime.ts", "package-lock.json",
@@ -207,7 +263,7 @@ export async function runRoutingCli(
 	const manifest = {
 		format: 2 as const, runId: randomUUID(), experimentId,
 		kind: "code-mode-routing-benchmark", startedAt: new Date().toISOString(), mode: args.mode, models,
-		thinking: "xhigh" as const, trials: args.trials, trialStart: args.trialStart, seed: args.seed, plannedCases: planned,
+		thinking: "xhigh" as const, trials: args.trials, trialStart: args.trialStart, seed: args.seed, routes: args.routes, plannedCases: planned,
 		gitCommit: execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim(),
 		gitDirty: !!execFileSync("git", ["status", "--porcelain"], { cwd: REPO_ROOT, encoding: "utf8" }).trim(),
 		sourceHashes, limits: { run: args.limits, case: CASE_LIMITS }, fixtures: fixtureMetadata,
@@ -226,10 +282,10 @@ export async function runRoutingCli(
 	try {
 		outer: for (let trial = args.trialStart; trial < args.trialStart + args.trials; trial++) {
 			for (const fixtureId of routingFixtureOrder(fixtures.map((fixture) => fixture.id), trial, args.seed)) {
-				for (const [order, mode] of routingOrder(trial, fixtureId, args.seed).entries()) {
+				for (const [order, mode] of routingOrder(trial, fixtureId, args.seed, args.routes).entries()) {
 					if (controller.signal.aborted) { stopReason = "cancelled-or-deadline"; break outer; }
 					if (requests >= args.limits.requests || reportedTokens >= args.limits.reportedTokens) { stopReason = "run-budget"; break outer; }
-					const fixture = createCodeModeFixtures().find((item) => item.id === fixtureId)!;
+					const fixture = selectRoutingFixtures(args).find((item) => item.id === fixtureId)!;
 					const faux = createFauxProvider();
 					const model = args.mode === "self-test" ? faux.getModel() : models[0];
 					faux.setResponses([
@@ -256,8 +312,12 @@ export async function runRoutingCli(
 					await writeFile(join(out, `${String(cases.length).padStart(3, "0")}-${fixture.id}-${mode}.json`), JSON.stringify(observation, null, 2), { flag: "wx", mode: 0o600 });
 					console.log(`  ${result.correct ? "correct" : "FAILED"}; ${result.requests.length} requests; ${(result.elapsedMs / 1000).toFixed(1)}s; budget ${requests}/${args.limits.requests} requests, ${reportedTokens}/${args.limits.reportedTokens} reported tokens${result.failure ? `; ${result.failure}` : ""}`);
 					if (!result.correct) failed = true;
-					// Terminate this worker before another case if provider work might still be running.
-					if (result.status === "failed") { stopReason = result.failure ?? "execution-failed"; break outer; }
+					// Terminate this worker before another case if provider work might still be running. A case that ran out of
+					// requests or output finished every request it started, so the next case can go ahead.
+					if (result.status === "failed" && result.failure !== "request-limit" && result.failure !== "length") {
+						stopReason = result.failure ?? "execution-failed";
+						break outer;
+					}
 				}
 			}
 		}

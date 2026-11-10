@@ -31,8 +31,11 @@ import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import type { BenchmarkFixture } from "./code-mode-fixtures.ts";
 
+/** The default comparison: three ways of presenting code mode. */
 export const ROUTING_MODES = ["hybrid", "code-first", "code-only"] as const;
-export type RoutingMode = (typeof ROUTING_MODES)[number];
+/** `direct` is the baseline without code mode: no run_code tool and none of its guidance. */
+export const ALL_ROUTING_MODES = ["direct", ...ROUTING_MODES] as const;
+export type RoutingMode = (typeof ALL_ROUTING_MODES)[number];
 export const CASE_LIMITS = { requests: 12, toolCalls: 200, timeoutMs: 300_000, responseChars: 65_536 };
 
 const CODE_FIRST = `For the fixture's data-retrieval stage, prefer run_code when code can paginate, join, filter, or aggregate results. Discover schemas with mcp first. Run independent calls concurrently with Promise.allSettled and inspect failures. Return only the requested answer fields and necessary evidence, not whole intermediate results. Use direct calls for one lookup or when interpreting a result is necessary to choose the next step. Do not repeat completed calls.`;
@@ -40,7 +43,7 @@ const CODE_ONLY = `MCP discovery and cache reading remain direct. MCP tool invoc
 
 /** Benchmark-only presentation. The session's grants remain unchanged; a host hook enforces the route. */
 export function projectRoutingContext(context: Context, mode: RoutingMode): Context {
-	if (mode === "hybrid") return context;
+	if (mode === "hybrid" || mode === "direct") return context;
 	const suffix = mode === "code-first" ? CODE_FIRST : CODE_ONLY;
 	return {
 		...context,
@@ -86,7 +89,8 @@ export interface RoutingCaseResult {
 	answer: string;
 	elapsedMs: number;
 	requests: RoutingRequest[];
-	calls: Array<{ tool: string; route: "direct" | "programmatic"; blocked: boolean }>;
+	/** `action` is the MCP gateway action, so discovery and data calls can be told apart. */
+	calls: Array<{ tool: string; route: "direct" | "programmatic"; blocked: boolean; action?: string }>;
 	dataCalls: Array<{ tool: string; arguments: Record<string, unknown>; resultBytes: number; failed: boolean }>;
 	repeatedDataCalls: number;
 	scriptFailures: number;
@@ -196,7 +200,7 @@ export async function runRoutingCase(
 		});
 		await manager.connectServer("fixture");
 		const settingsManager = SettingsManager.inMemory({
-			codeMode: { enabled: true }, compaction: { enabled: false }, retry: { enabled: false }, lsp: { enabled: false },
+			codeMode: { enabled: mode !== "direct" }, compaction: { enabled: false }, retry: { enabled: false }, lsp: { enabled: false },
 		});
 		const loader = new DefaultResourceLoader({
 			cwd: root, agentDir, settingsManager,
@@ -209,7 +213,8 @@ export async function runRoutingCase(
 						const route = event.origin?.kind === "code_mode" ? "programmatic" : "direct";
 						const blocked = (mode === "code-only" && route === "direct" && event.toolName === "mcp" && event.input.action === "call")
 							|| result.calls.length >= limits.toolCalls;
-						result.calls.push({ tool: event.toolName, route, blocked });
+						const action = event.toolName === "mcp" ? event.input.action : undefined;
+						result.calls.push({ tool: event.toolName, route, blocked, ...(typeof action === "string" ? { action } : {}) });
 						if (blocked) return { block: true, reason: "Benchmark route or tool-call limit: use the advertised tools only" };
 						return undefined;
 					});
@@ -285,12 +290,13 @@ export async function runRoutingCase(
 			void task.finally(() => pending.delete(task));
 			return output;
 		};
+		const toolNames = mode === "direct" ? ["mcp"] : ["mcp", "run_code"];
 		const sessionManager = SessionManager.inMemory(root);
 		await sessionManager.logWriter.appendSessionInfo(`Routing benchmark: ${fixture.id}`);
 		session = await AgentSession.create({
 			cwd: root, agentDir, model: options.model, thinkingLevel: "xhigh", streamFn: trackedStream,
 			convertToLlm, modelRegistry: registry, settingsManager, sessionManager, resourceLoader: loader,
-			initialActiveToolNames: ["mcp", "run_code"], allowedToolNames: ["mcp", "run_code"], mcpManager: manager,
+			initialActiveToolNames: toolNames, allowedToolNames: toolNames, mcpManager: manager,
 		});
 		session.subscribe((event) => {
 			if (event.type === "tool_execution_end" && event.isError) {

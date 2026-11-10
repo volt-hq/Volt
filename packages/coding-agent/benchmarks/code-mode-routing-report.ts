@@ -16,7 +16,7 @@ export interface RoutingRun {
 	cases: RoutingObservation[];
 }
 
-const MODES: readonly RoutingMode[] = ["hybrid", "code-first", "code-only"];
+const MODES: readonly RoutingMode[] = ["direct", "hybrid", "code-first", "code-only"];
 
 function check(condition: unknown, path: string): asserts condition {
 	if (!condition) throw new Error(`Invalid routing run: ${path}`);
@@ -68,7 +68,7 @@ export function parseRoutingRun(value: unknown): RoutingRun {
 			if (item[key] !== undefined) string(item[key], `${path}.${key}`);
 		}
 		check(number(item.trial, `${path}.trial`, true) > 0, `${path}.trial must be positive`);
-		check(number(item.order, `${path}.order`, true) <= 2, `${path}.order must be 0..2`);
+		check(number(item.order, `${path}.order`, true) <= 3, `${path}.order must be 0..3`);
 		number(item.elapsedMs, `${path}.elapsedMs`);
 		for (const key of ["repeatedDataCalls", "scriptFailures", "toolFailures"]) number(item[key], `${path}.${key}`, true);
 		const key = JSON.stringify([item.model, item.fixture, item.trial, item.mode]);
@@ -100,6 +100,7 @@ export function parseRoutingRun(value: unknown): RoutingRun {
 			string(call.tool, `${path}.calls[].tool`);
 			check(call.route === "direct" || call.route === "programmatic", `${path}.calls[].route`);
 			check(typeof call.blocked === "boolean", `${path}.calls[].blocked`);
+			if (call.action !== undefined) string(call.action, `${path}.calls[].action`);
 		}
 		for (const rawCall of array(item.dataCalls, `${path}.dataCalls`)) {
 			const call = record(rawCall, `${path}.dataCalls[]`);
@@ -150,8 +151,8 @@ function completeInput(item: RoutingObservation): number | undefined {
 	return item.requests.reduce((sum, request) => sum + (request.usage ? request.usage.input + request.usage.cacheRead + request.usage.cacheWrite : 0), 0);
 }
 
-/** Descriptive summaries only; failures remain visible and never qualify as efficiency wins. */
-export function summarizeRoutingRuns(runs: readonly RoutingRun[]): string {
+/** Runs pool only within one experiment: same sources, model settings, and selected fixtures. */
+function checkPoolable(runs: readonly RoutingRun[]): void {
 	check(runs.length > 0, "no runs supplied");
 	const ids = new Set<string>();
 	for (const run of runs) {
@@ -162,6 +163,39 @@ export function summarizeRoutingRuns(runs: readonly RoutingRun[]): string {
 		check(run.mode === runs[0].mode, "mixed live/self-test runs");
 		check(run.thinking === runs[0].thinking, "different thinking");
 	}
+}
+
+/** What a case did, beyond its cost. Counts that need the gateway action are unknown for older artifacts. */
+function behavior(item: RoutingObservation) {
+	const direct = item.calls.filter((call) => call.tool === "mcp" && call.route === "direct");
+	const known = direct.every((call) => call.action !== undefined);
+	return {
+		requests: item.requests.length,
+		gateway: known ? direct.filter((call) => call.action !== "call").length : undefined,
+		listServers: known ? direct.filter((call) => call.action === "list_servers").length : undefined,
+		directData: known ? direct.filter((call) => call.action === "call" && !call.blocked).length : undefined,
+		scriptedData: item.calls.filter((call) => call.tool === "mcp" && call.route === "programmatic").length,
+		scripts: item.calls.filter((call) => call.tool === "run_code").length,
+		peakContext: Math.max(0, ...item.requests.map((request) => request.contextBytes)),
+	};
+}
+
+function total(values: Array<number | undefined>): string {
+	let sum = 0;
+	for (const value of values) {
+		if (value === undefined) return "unknown";
+		sum += value;
+	}
+	return String(sum);
+}
+
+function percent(values: readonly number[]): string {
+	return values.length ? `${quantile(values, 0.5).toFixed(1)}%` : "unknown";
+}
+
+/** Descriptive summaries only; failures remain visible and never qualify as efficiency wins. */
+export function summarizeRoutingRuns(runs: readonly RoutingRun[]): string {
+	checkPoolable(runs);
 	const entries = runs.flatMap((run) => run.cases.map((item) => ({ runId: run.runId, item })));
 	const planned = runs.reduce((sum, run) => sum + run.plannedCases, 0);
 	const success = entries.filter(({ item }) => item.status === "completed" && item.correct).length;
@@ -223,7 +257,7 @@ export function summarizeRoutingRuns(runs: readonly RoutingRun[]): string {
 		"| Model | Route | Metric | Median task effect | 95% task-bootstrap interval | Tasks | Successful pairs |",
 		"|---|---|---|---:|---|---:|---:|");
 	for (const model of new Set(entries.map(({ item }) => item.model))) {
-		for (const mode of MODES.filter((route) => route !== "hybrid")) {
+		for (const mode of MODES.filter((route) => route !== "hybrid" && entries.some(({ item }) => item.mode === route))) {
 			for (const metric of ["latency", "input"] as const) {
 				const effects = new Map<string, number[]>();
 				let pairs = 0;
@@ -244,6 +278,54 @@ export function summarizeRoutingRuns(runs: readonly RoutingRun[]): string {
 			}
 		}
 	}
+	lines.push("", "## Tool behavior by task and route", "",
+		"Counts cover every recorded case. Non-data gateway calls are direct mcp actions other than call, such as search, describe, and list_servers. Peak context is the largest request context of a case, in bytes.", "",
+		"| Task | Route | Cases | Median requests | Non-data gateway calls | list_servers calls | Direct data calls | Scripted data calls | Scripts | Median peak context bytes |",
+		"|---|---|---:|---:|---:|---:|---:|---:|---:|---:|");
+	for (const name of new Set(entries.map(({ item }) => item.fixture))) {
+		for (const mode of MODES) {
+			const rows = entries.filter(({ item }) => item.fixture === name && item.mode === mode).map(({ item }) => behavior(item));
+			if (!rows.length) continue;
+			lines.push(`| ${cell(name)} | ${mode} | ${rows.length} | ${quantile(rows.map((row) => row.requests), 0.5).toFixed(1)} | ${total(rows.map((row) => row.gateway))} | ${total(rows.map((row) => row.listServers))} | ${total(rows.map((row) => row.directData))} | ${total(rows.map((row) => row.scriptedData))} | ${total(rows.map((row) => row.scripts))} | ${quantile(rows.map((row) => row.peakContext), 0.5).toFixed(0)} |`);
+		}
+	}
+	if (entries.some(({ item }) => item.mode === "direct")) {
+		const directs = new Map(entries.filter(({ item }) => item.mode === "direct").map(({ runId, item }) => [pairKey(runId, item), item]));
+		lines.push("", "## Code mode versus the direct baseline", "",
+			"The direct route has no run_code tool and none of its guidance, so these deltas include the prompt overhead of code mode. Pairs match the same run, model, task, and trial, and both answers must be correct; correctness columns count every recorded case. The all-tasks row is the median of the task medians.", "",
+			"| Model | Task | Route | Route correct | Direct correct | Pairs | Median requests (direct → route) | Median input delta | Median latency delta |",
+			"|---|---|---|---:|---:|---:|---|---:|---:|");
+		for (const model of new Set(entries.map(({ item }) => item.model))) {
+			for (const mode of MODES.filter((route) => route !== "direct")) {
+				const taskInput: number[] = [];
+				const taskLatency: number[] = [];
+				let allPairs = 0;
+				for (const name of new Set(entries.map(({ item }) => item.fixture))) {
+					const group = entries.filter(({ item }) => item.model === model && item.fixture === name && item.mode === mode);
+					if (!group.length) continue;
+					const baseline = entries.filter(({ item }) => item.model === model && item.fixture === name && item.mode === "direct");
+					const requests: Array<[number, number]> = [];
+					const input: number[] = [];
+					const latency: number[] = [];
+					for (const { runId, item } of group) {
+						const base = directs.get(pairKey(runId, item));
+						if (!base?.correct || !item.correct) continue;
+						requests.push([base.requests.length, item.requests.length]);
+						if (base.elapsedMs > 0) latency.push(100 * (item.elapsedMs - base.elapsedMs) / base.elapsedMs);
+						const value = completeInput(item);
+						const baseInput = completeInput(base);
+						if (value !== undefined && baseInput !== undefined && baseInput > 0) input.push(100 * (value - baseInput) / baseInput);
+					}
+					allPairs += requests.length;
+					if (input.length) taskInput.push(quantile(input, 0.5));
+					if (latency.length) taskLatency.push(quantile(latency, 0.5));
+					const medians = requests.length ? `${quantile(requests.map((pair) => pair[0]), 0.5).toFixed(1)} → ${quantile(requests.map((pair) => pair[1]), 0.5).toFixed(1)}` : "unknown";
+					lines.push(`| ${cell(model)} | ${cell(name)} | ${mode} | ${group.filter(({ item }) => item.correct).length}/${group.length} | ${baseline.filter(({ item }) => item.correct).length}/${baseline.length} | ${requests.length} | ${medians} | ${percent(input)} | ${percent(latency)} |`);
+				}
+				if (taskInput.length || taskLatency.length) lines.push(`| ${cell(model)} | all tasks | ${mode} | | | ${allPairs} | | ${percent(taskInput)} | ${percent(taskLatency)} |`);
+			}
+		}
+	}
 	lines.push("", "## Unsuccessful recorded cases", "",
 		"| Run | Model | Task | Trial | Route | Status | Reason |", "|---|---|---|---:|---|---|---|",
 		...entries.filter(({ item }) => !item.correct).map(({ runId, item }) => `| ${cell(runId)} | ${cell(item.model)} | ${cell(item.fixture)} | ${item.trial} | ${item.mode} | ${item.status} | ${cell(item.failure ?? item.gradeReason ?? "incorrect answer")} |`));
@@ -253,5 +335,84 @@ export function summarizeRoutingRuns(runs: readonly RoutingRun[]): string {
 		"- These are a few fixed synthetic read-only tasks, not general coding, editing, shell, mutation, or real-network workloads. Task rows pool models; inspect model rows before comparing.",
 		"- Cached tokens and order effects are not isolated. Rotated ordering does not remove those confounders.",
 		"- Medians and IQRs are descriptive, not statistical significance or evidence for broad coding claims. Self-test results validate wiring only, not model performance.", "");
+	return lines.join("\n");
+}
+
+/**
+ * Compare two experiments, such as two commits or two prompts, on the cases they share. Runs pool within a side;
+ * pairs match model, task, route, and trial across sides, so both sides need the same schedule.
+ */
+export function compareRoutingRuns(baseline: readonly RoutingRun[], candidate: readonly RoutingRun[]): string {
+	checkPoolable(baseline);
+	checkPoolable(candidate);
+	check(baseline[0].mode === candidate[0].mode, "mixed live/self-test runs");
+	check(baseline[0].thinking === candidate[0].thinking, "different thinking");
+	check(!baseline.some((run) => candidate.some((other) => other.runId === run.runId)), "a run appears on both sides");
+	const index = (runs: readonly RoutingRun[]) => {
+		const items = new Map<string, RoutingObservation>();
+		for (const item of runs.flatMap((run) => run.cases)) {
+			const key = JSON.stringify([item.model, item.fixture, item.mode, item.trial]);
+			check(!items.has(key), "a model/fixture/trial/mode repeats across runs of one side");
+			items.set(key, item);
+		}
+		return items;
+	};
+	const sides = [index(baseline), index(candidate)];
+	const all = sides.flatMap((side) => [...side.values()]);
+	const recorded = (side: Map<string, RoutingObservation>) => `${[...side.values()].filter((item) => item.correct).length}/${side.size}`;
+	const lines = [
+		"# Code-mode routing comparison between experiments", "",
+		`Baseline: ${cell(baseline[0].experimentId)}; ${baseline.length} runs; correct/recorded ${recorded(sides[0])}.`,
+		`Candidate: ${cell(candidate[0].experimentId)}; ${candidate.length} runs; correct/recorded ${recorded(sides[1])}.`,
+		`${baseline[0].mode}; thinking: ${baseline[0].thinking}.`, "",
+		"Deltas are 100 × (candidate − baseline) / baseline, in percent; negative means lower. Pairs match model, task, route, and trial, and both answers must be correct. Correctness and behavior counts cover every recorded case and read baseline → candidate. Input includes cached tokens and needs complete usage on both sides.", "",
+		"| Model | Task | Route | Correct | Pairs | Median requests | Median input delta | Median latency delta | Scripts | Non-data gateway calls | list_servers calls |",
+		"|---|---|---|---|---:|---|---:|---:|---|---|---|",
+	];
+	const totals: string[] = [];
+	for (const model of new Set(all.map((item) => item.model))) {
+		for (const mode of MODES) {
+			const sums = { pairs: 0, requests: [0, 0], input: [0, 0], inputPairs: 0, elapsed: [0, 0] };
+			for (const fixture of new Set(all.map((item) => item.fixture))) {
+				const groups = sides.map((side) => [...side.values()].filter((item) => item.model === model && item.fixture === fixture && item.mode === mode));
+				if (!groups[0].length && !groups[1].length) continue;
+				const requests: Array<[number, number]> = [];
+				const input: number[] = [];
+				const latency: number[] = [];
+				for (const item of groups[1]) {
+					const base = sides[0].get(JSON.stringify([item.model, item.fixture, item.mode, item.trial]));
+					if (!base?.correct || !item.correct) continue;
+					requests.push([base.requests.length, item.requests.length]);
+					sums.pairs++;
+					sums.requests[0] += base.requests.length;
+					sums.requests[1] += item.requests.length;
+					sums.elapsed[0] += base.elapsedMs;
+					sums.elapsed[1] += item.elapsedMs;
+					if (base.elapsedMs > 0) latency.push(100 * (item.elapsedMs - base.elapsedMs) / base.elapsedMs);
+					const value = completeInput(item);
+					const baseInput = completeInput(base);
+					if (value === undefined || baseInput === undefined || baseInput <= 0) continue;
+					input.push(100 * (value - baseInput) / baseInput);
+					sums.input[0] += baseInput;
+					sums.input[1] += value;
+					sums.inputPairs++;
+				}
+				const behaviors = groups.map((group) => group.map(behavior));
+				const both = (pick: (row: ReturnType<typeof behavior>) => number | undefined) => behaviors.map((rows) => total(rows.map(pick))).join(" → ");
+				const medians = requests.length ? `${quantile(requests.map((pair) => pair[0]), 0.5).toFixed(1)} → ${quantile(requests.map((pair) => pair[1]), 0.5).toFixed(1)}` : "unknown";
+				lines.push(`| ${cell(model)} | ${cell(fixture)} | ${mode} | ${groups.map((group) => `${group.filter((item) => item.correct).length}/${group.length}`).join(" → ")} | ${requests.length} | ${medians} | ${percent(input)} | ${percent(latency)} | ${both((row) => row.scripts)} | ${both((row) => row.gateway)} | ${both((row) => row.listServers)} |`);
+			}
+			if (!sums.pairs) continue;
+			const change = (pair: number[]) => (pair[0] > 0 ? `${(100 * (pair[1] - pair[0]) / pair[0]).toFixed(1)}%` : "unknown");
+			totals.push(`| ${cell(model)} | ${mode} | ${sums.pairs} | ${sums.requests[0]} → ${sums.requests[1]} | ${change(sums.requests)} | ${sums.inputPairs ? `${sums.input[0]} → ${sums.input[1]}` : "unknown"} | ${sums.inputPairs ? change(sums.input) : "unknown"} | ${change(sums.elapsed)} |`);
+		}
+	}
+	lines.push("", "## Totals over matched pairs", "",
+		"| Model | Route | Pairs | Requests | Request change | Input incl. cache | Input change | Summed latency change |",
+		"|---|---|---:|---|---:|---|---:|---:|", ...totals,
+		"", "## Limitations", "",
+		"- The two sides ran at different times, in separate runs. Provider load, caching, and model sampling differ between them, so small latency differences are not evidence.",
+		"- Totals are dominated by the tasks with the most requests. Read the per-task rows before the totals.",
+		"- Unmatched, failed, and incorrect cases are excluded from paired efficiency, not from correctness or behavior counts.", "");
 	return lines.join("\n");
 }

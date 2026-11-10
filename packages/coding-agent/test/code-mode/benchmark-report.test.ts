@@ -2,6 +2,7 @@ import type { Usage } from "@hansjm10/volt-ai";
 import { describe, expect, it } from "vitest";
 import type { RoutingRequest } from "../../benchmarks/code-mode-routing.ts";
 import {
+	compareRoutingRuns,
 	parseRoutingRun,
 	type RoutingObservation,
 	type RoutingRun,
@@ -110,7 +111,14 @@ describe("routing report parser", () => {
 		["zero trial", (source) => ({ ...source, cases: [{ ...source.cases[0], trial: 0 }] })],
 		["fractional trial", (source) => ({ ...source, cases: [{ ...source.cases[0], trial: 1.5 }] })],
 		["negative order", (source) => ({ ...source, cases: [{ ...source.cases[0], order: -1 }] })],
-		["out of range order", (source) => ({ ...source, cases: [{ ...source.cases[0], order: 3 }] })],
+		["out of range order", (source) => ({ ...source, cases: [{ ...source.cases[0], order: 4 }] })],
+		[
+			"blank gateway action",
+			(source) => ({
+				...source,
+				cases: [{ ...source.cases[0], calls: [{ tool: "mcp", route: "direct", blocked: false, action: "" }] }],
+			}),
+		],
 		["fractional order", (source) => ({ ...source, cases: [{ ...source.cases[0], order: 0.5 }] })],
 		[
 			"duplicate observation",
@@ -304,6 +312,81 @@ describe("routing run summaries", () => {
 		]);
 		expect(report).toContain("| model/a | code-only | input | unknown | unknown | 0 | 0 |");
 		expect(report).toContain("| model/a | code-only | latency | 0.0% | insufficient tasks (<10) | 1 | 1 |");
+	});
+
+	it("counts gateway actions, scripted calls, and peak context, and marks older artifacts unknown", () => {
+		const report = summarizeRoutingRuns([
+			run([
+				observation({
+					requests: [request(), request({ index: 2, contextBytes: 900 })],
+					calls: [
+						{ tool: "mcp", route: "direct", blocked: false, action: "list_servers" },
+						{ tool: "mcp", route: "direct", blocked: false, action: "search" },
+						{ tool: "mcp", route: "direct", blocked: false, action: "call" },
+						{ tool: "run_code", route: "direct", blocked: false },
+						{ tool: "mcp", route: "programmatic", blocked: false, action: "call" },
+					],
+				}),
+				observation({ mode: "code-only", order: 3, calls: [{ tool: "mcp", route: "direct", blocked: false }] }),
+			]),
+		]);
+		expect(report).toContain("| lookup | hybrid | 1 | 2.0 | 2 | 1 | 1 | 1 | 1 | 900 |");
+		expect(report).toContain("| lookup | code-only | 1 | 1.0 | unknown | unknown | unknown | 0 | 0 | 100 |");
+		expect(report).not.toContain("versus the direct baseline");
+		expect(report).not.toContain("| model/a | direct |");
+	});
+
+	it("pairs code mode routes with the direct baseline of the same run, task, and trial", () => {
+		const three = [request(), request({ index: 2 }), request({ index: 3 })];
+		const report = summarizeRoutingRuns([
+			run([
+				observation({ mode: "direct", elapsedMs: 200, requests: three }),
+				observation({ mode: "hybrid", order: 1, elapsedMs: 100 }),
+				observation({ mode: "direct", trial: 2, correct: false, requests: three }),
+				observation({ mode: "hybrid", trial: 2, order: 1 }),
+			]),
+		]);
+		expect(report).toContain("| model/a | lookup | hybrid | 2/2 | 1/2 | 1 | 3.0 → 1.0 | -66.7% | -50.0% |");
+		expect(report).toContain("| model/a | all tasks | hybrid | | | 1 | | -66.7% | -50.0% |");
+	});
+
+	it("compares two experiments on matching cases and keeps behavior for every recorded case", () => {
+		const three = [request(), request({ index: 2 }), request({ index: 3 })];
+		const baseline = run(
+			[
+				observation({
+					elapsedMs: 300,
+					requests: three,
+					calls: [{ tool: "mcp", route: "direct", blocked: false, action: "search" }],
+				}),
+				observation({ trial: 2, requests: three }),
+			],
+			{ runId: "old-run", experimentId: "old" },
+		);
+		const candidate = run(
+			[
+				observation({
+					elapsedMs: 150,
+					calls: [
+						{ tool: "mcp", route: "direct", blocked: false, action: "list_servers" },
+						{ tool: "mcp", route: "direct", blocked: false, action: "search" },
+						{ tool: "run_code", route: "direct", blocked: false },
+					],
+				}),
+				observation({ trial: 3 }),
+			],
+			{ runId: "new-run", experimentId: "new" },
+		);
+		const report = compareRoutingRuns([baseline], [candidate]);
+		expect(report).toContain("Baseline: old; 1 runs; correct/recorded 2/2.");
+		expect(report).toContain(
+			"| model/a | lookup | hybrid | 2/2 → 2/2 | 1 | 3.0 → 1.0 | -66.7% | -50.0% | 0 → 1 | 1 → 2 | 0 → 1 |",
+		);
+		expect(report).toContain("| model/a | hybrid | 1 | 3 → 1 | -66.7% | 360 → 120 | -66.7% | -50.0% |");
+		expect(() => compareRoutingRuns([baseline], [{ ...candidate, runId: "old-run" }])).toThrow("both sides");
+		expect(() => compareRoutingRuns([baseline], [candidate, { ...candidate, runId: "again" }])).toThrow("repeats");
+		expect(() => compareRoutingRuns([baseline], [{ ...candidate, mode: "self-test" }])).toThrow("live/self-test");
+		expect(() => compareRoutingRuns([], [candidate])).toThrow("no runs");
 	});
 
 	it("rejects duplicate identities and incompatible experiments instead of double counting", () => {

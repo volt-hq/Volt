@@ -10,13 +10,20 @@ import {
 } from "@hansjm10/volt-ai";
 import { describe, expect, it } from "vitest";
 import { createCodeModeFixtures } from "../../benchmarks/code-mode-fixtures.ts";
-import { ROUTING_MODES, type RoutingMode, runRoutingCase } from "../../benchmarks/code-mode-routing.ts";
+import { createRealisticRoutingFixtures } from "../../benchmarks/code-mode-fixtures-realistic.ts";
+import {
+	ALL_ROUTING_MODES,
+	ROUTING_MODES,
+	type RoutingMode,
+	runRoutingCase,
+} from "../../benchmarks/code-mode-routing.ts";
 import {
 	createRoutingOutput,
 	parseRoutingArgs,
 	routingFixtureOrder,
 	routingOrder,
 	runRoutingCli,
+	selectRoutingFixtures,
 	subscriptionKey,
 } from "../../benchmarks/code-mode-routing-cli.ts";
 import { parseRoutingRun } from "../../benchmarks/code-mode-routing-report.ts";
@@ -113,8 +120,24 @@ describe("code-mode routing benchmark", () => {
 			fauxAssistantMessage(JSON.stringify(fixture.expected)),
 		]);
 		expect(result.correct).toBe(true);
-		expect(result.calls[0]).toEqual({ tool: "mcp", route: "direct", blocked: false });
+		expect(result.calls[0]).toEqual({ tool: "mcp", route: "direct", blocked: false, action: "describe" });
 		expect(result.dataCalls).toHaveLength(1);
+	});
+
+	it("offers only the mcp tool, without code mode guidance, in the direct route", async () => {
+		let inspected = false;
+		const result = await run("direct", [
+			(context) => {
+				expect(context.tools?.map((tool) => tool.name)).toEqual(["mcp"]);
+				expect(context.systemPrompt).not.toContain("run_code");
+				inspected = true;
+				return directLookup;
+			},
+			fauxAssistantMessage(JSON.stringify(singleLookup().expected)),
+		]);
+		expect(inspected).toBe(true);
+		expect(result.correct).toBe(true);
+		expect(result.calls).toEqual([{ tool: "mcp", route: "direct", blocked: false, action: "call" }]);
 	});
 
 	it("stops admission before exceeding its request limit", async () => {
@@ -199,9 +222,18 @@ describe("routing pilot admission", () => {
 			["--seed", "4294967296"],
 			["--report", "run", "--live"],
 			["--report", "run", "--trials", "2"],
-			["--models", "openai/gpt-6-astra"],
-			["--models", "openai-codex/gpt-6-astra,openai-codex/gpt-6-astra"],
+			["--model", "openai/gpt-6-astra"],
+			["--model", "openai-codex/gpt-6-astra,anthropic/claude-opus-5-5"],
 			["--task", "missing"],
+			["--task", "single-lookup,missing"],
+			["--task", "single-lookup,single-lookup"],
+			["--suite", "real"],
+			["--suite", "realistic", "--task", "single-lookup"],
+			["--routes", "script"],
+			["--routes", "hybrid,hybrid"],
+			["--self-test", "--routes", "direct,hybrid"],
+			["--baseline", "run"],
+			["--live", "--report", "run", "--baseline", "other"],
 			["--out"],
 			["--live", "--live"],
 		])
@@ -233,6 +265,71 @@ describe("routing pilot admission", () => {
 		expect(report.mode).toBe("report");
 		expect(report.reports).toHaveLength(2);
 		expect(parseRoutingArgs(["--help"]).mode).toBe("help");
+		const compared = parseRoutingArgs(["--report", "new", "--baseline", "old-a", "--baseline", "old-b"]);
+		expect(compared).toMatchObject({ mode: "report" });
+		expect(compared.baselines).toHaveLength(2);
+	});
+
+	it("selects one model, a canonical route subset, and fixtures by suite or id", () => {
+		const defaults = parseRoutingArgs([]);
+		expect(defaults).toMatchObject({
+			models: ["openai-codex/gpt-6-astra"],
+			routes: [...ROUTING_MODES],
+			suite: "core",
+		});
+		expect(selectRoutingFixtures(defaults).map((fixture) => fixture.id)).toEqual(
+			createCodeModeFixtures().map((fixture) => fixture.id),
+		);
+		const selected = parseRoutingArgs([
+			"--live",
+			"--model",
+			"anthropic/claude-opus-5-5",
+			"--routes",
+			"hybrid,direct",
+		]);
+		expect(selected).toMatchObject({ models: ["anthropic/claude-opus-5-5"], routes: ["direct", "hybrid"] });
+		const realistic = createRealisticRoutingFixtures().map((fixture) => fixture.id);
+		expect(selectRoutingFixtures(parseRoutingArgs(["--suite", "realistic"])).map((fixture) => fixture.id)).toEqual(
+			realistic,
+		);
+		expect(selectRoutingFixtures(parseRoutingArgs(["--suite", "all"]))).toHaveLength(20 + realistic.length);
+		expect(
+			selectRoutingFixtures(parseRoutingArgs(["--task", "listing-scan,single-lookup"])).map((fixture) => fixture.id),
+		).toEqual(["single-lookup", "listing-scan"]);
+	});
+
+	it("balances a route pair over two trials and all four routes over twenty-four", () => {
+		const pair: RoutingMode[] = ["direct", "hybrid"];
+		const orders = [1, 2, 3].map((trial) => routingOrder(trial, "listing-scan", 7, pair).join(","));
+		expect(new Set(orders.slice(0, 2))).toEqual(new Set(["direct,hybrid", "hybrid,direct"]));
+		expect(orders[2]).toBe(orders[0]);
+		const all = Array.from({ length: 24 }, (_, index) =>
+			routingOrder(index + 1, "listing-scan", 7, ALL_ROUTING_MODES),
+		);
+		expect(new Set(all.map((order) => order.join(","))).size).toBe(24);
+		for (const mode of ALL_ROUTING_MODES)
+			for (let position = 0; position < 4; position++)
+				expect(all.filter((order) => order[position] === mode)).toHaveLength(6);
+		expect(routingOrder(1, "listing-scan", 7, ["hybrid"])).toEqual(["hybrid"]);
+	});
+
+	it("continues past a case that exhausts its own request limit", async () => {
+		const root = await mkdtemp(join(tmpdir(), "routing-continue-test-"));
+		let admitted = 0;
+		try {
+			const out = join(root, "run");
+			const result = await runRoutingCli(
+				parseRoutingArgs(["--self-test", "--task", "single-lookup", "--out", out]),
+				(fixture, mode, options) =>
+					runRoutingCase(fixture, mode, { ...options, ...(admitted++ === 0 ? { limits: { requests: 1 } } : {}) }),
+			);
+			expect(result.failed).toBe(true);
+			const saved = parseRoutingRun(JSON.parse(await readFile(join(out, "results.json"), "utf8")));
+			expect(saved.cases.map((item) => item.failure)).toEqual(["request-limit", undefined, undefined]);
+			expect(saved).not.toHaveProperty("stopReason");
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
 	});
 
 	it("deterministically varies task order without losing or repeating tasks", () => {
