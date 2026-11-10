@@ -1,5 +1,24 @@
 import { createRejectedToolCallFeedback } from "./stream/invalid-tool-arguments.ts";
-import type { Message, ToolCall } from "./types.ts";
+import { EMPTY_RESPONSE_CODE } from "./stream/provider-errors.ts";
+import type { AssistantMessage, Message, ToolCall, UserMessage } from "./types.ts";
+
+/**
+ * Tell the model that its turn ended without content. Asking again with an unchanged request tends
+ * to produce the same empty turn, so the retried request must say what went wrong.
+ */
+function createEmptyReplyFeedback(message: AssistantMessage): UserMessage | undefined {
+	if (message.stopReason !== "error" || message.error?.providerCode !== EMPTY_RESPONSE_CODE) return undefined;
+	return {
+		role: "user",
+		content: [
+			{
+				type: "text",
+				text: "Your previous response was empty, so the user received no reply. Continue from the tool results above: reply to the user now, or call a tool if more work is needed.",
+			},
+		],
+		timestamp: message.timestamp,
+	};
+}
 
 /**
  * The provider-agnostic replay policy: the messages a provider request should contain for a
@@ -14,7 +33,8 @@ import type { Message, ToolCall } from "./types.ts";
  *   previous message, and a history can hold one when the turn that made the call was dropped or
  *   compacted away while the result stayed.
  * - A turn dropped because its tool call arguments were rejected is replaced by user feedback that
- *   explains why none of its tool calls ran.
+ *   explains why none of its tool calls ran. A turn dropped because it was empty is replaced by user
+ *   feedback that asks for the missing reply.
  * - Every tool call of a completed turn gets a result: a missing one is synthesized as an error
  *   result before the next user or assistant message, or at the end.
  *
@@ -46,7 +66,7 @@ export function applyReplayPolicy(messages: readonly Message[]): Message[] {
 		if (message.role === "assistant") {
 			insertSyntheticToolResults();
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
-				const feedback = createRejectedToolCallFeedback(message);
+				const feedback = createRejectedToolCallFeedback(message) ?? createEmptyReplyFeedback(message);
 				if (feedback) result.push(feedback);
 				continue;
 			}

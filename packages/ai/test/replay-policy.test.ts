@@ -169,6 +169,29 @@ describe("applyReplayPolicy", () => {
 		]);
 	});
 
+	it("asks for the missing reply in place of a turn that ended empty", () => {
+		const empty: AssistantMessage = {
+			...assistant("error", [], 30),
+			content: [],
+			error: { kind: "server", retryable: true, providerCode: "empty_response", message: "empty" },
+		};
+		const call = assistant("toolUse", ["x"], 7);
+		const note = {
+			role: "user",
+			content: [
+				{
+					type: "text",
+					text: "Your previous response was empty, so the user received no reply. Continue from the tool results above: reply to the user now, or call a tool if more work is needed.",
+				},
+			],
+			timestamp: 30,
+		};
+		expect(applyReplayPolicy([user("go"), call, result("x"), empty])).toEqual([user("go"), call, result("x"), note]);
+		// Any other failed turn is dropped without a note.
+		const overloaded = { ...empty, error: { kind: "overloaded" as const, retryable: true, message: "busy" } };
+		expect(applyReplayPolicy([user("go"), call, result("x"), overloaded])).toEqual([user("go"), call, result("x")]);
+	});
+
 	it("does not explain an aborted turn", () => {
 		const failure = { ...rejected({ code: "invalid_json" }), stopReason: "aborted" as const };
 		expect(applyReplayPolicy([user("go"), failure])).toEqual([user("go")]);

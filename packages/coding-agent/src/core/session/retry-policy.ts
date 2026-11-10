@@ -11,6 +11,7 @@ import {
 	type AssistantMessage,
 	type AssistantMessageDiagnostic,
 	createRejectedToolCallFeedback,
+	EMPTY_RESPONSE_CODE,
 	isContextOverflow,
 	type Model,
 } from "@hansjm10/volt-ai";
@@ -63,11 +64,13 @@ export function isRetryableError(message: AssistantMessage): boolean {
  * The backoff before retry `attempt` (counting from 1) of the request that
  * produced `message`, or undefined when it does not retry. Exponential from
  * `baseDelayMs`; a rejected tool call retries at once, since feedback, not
- * waiting, corrects it.
+ * waiting, corrects it, and so does an empty reply after a tool result, which
+ * is the model's choice and not an outage to wait out.
  */
 export function retryDelayMs(message: AssistantMessage, attempt: number, settings: RetrySettings): number | undefined {
 	if (!settings.enabled || attempt > settings.maxRetries || !isRetryableError(message)) return undefined;
-	return isRejectedToolCallResponse(message.diagnostics) ? 0 : settings.baseDelayMs * 2 ** (attempt - 1);
+	if (isRejectedToolCallResponse(message.diagnostics) || message.error?.providerCode === EMPTY_RESPONSE_CODE) return 0;
+	return settings.baseDelayMs * 2 ** (attempt - 1);
 }
 
 /**

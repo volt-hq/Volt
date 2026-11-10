@@ -157,12 +157,12 @@ export interface RunCodeToolOptions {
 const MIB = 1024 * 1024;
 
 const INTRO =
-	"Run a JavaScript script in a sandbox. The script calls tools and only what it prints or returns comes back to you. Prefer it for independent call batches, pagination, or filtering and aggregating large results, even from a single call.";
+	"Run a JavaScript script in a sandbox. The script calls tools and only what it prints or returns comes back to you. Prefer it for independent call batches, pagination, large-result reduction, or deterministic read-only loops. Use direct calls for small results or steps requiring interpretation.";
 const LANGUAGE =
 	"The script is the body of an async function: top-level await and return work. Erasable TypeScript annotations are allowed. The sandbox has no file system, network, process, timers, or modules; tools are its only way out.";
 const CALLS = "Call tools as `await tools.<name>(args)` with the same arguments as the tool itself";
 const NO_TOOLS = "No tools are available to scripts in this session.";
-const MCP_LINE = `- MCP tools: tools.mcp.<server>.<tool>(args): ${CODE_MODE_MCP_RESULT_SHAPE}. Find them and their arguments with the mcp tool's search and describe actions first. After discovery, prefer these bindings for batches, pagination, and large-result filtering. Use brackets for names that are not identifiers: tools.mcp["my-server"]["get-file"](args).`;
+const MCP_LINE = `- MCP tools: tools.mcp.<server>.<tool>(args): ${CODE_MODE_MCP_RESULT_SHAPE}. Discover missing schemas with the direct mcp tool's search and describe actions. Reuse complete, current schemas already returned. tools.mcp is a namespace, not a callable gateway; discovery is not available inside scripts. Use brackets for names that are not identifiers: tools.mcp["my-server"]["get-file"](args).`;
 const ERRORS =
 	'A failed call rejects with ToolCallError { tool; kind: "invalid_arguments" | "blocked" | "failed" | "cancelled"; reason?; message }. Run independent calls concurrently with Promise.allSettled, inspect rejected results, and await dependent calls in order.';
 const OUTPUT = `Output: text(value), console.log/warn/error(...), image(ref), and the return value appear in order. ImageRef = { type: "image"; ref; mimeType; width?; height?; bytes; path? }; only images passed to image(ref) reach you. Output is limited to ${DEFAULT_MAX_BYTES / 1024} KB, with the full output saved to a file you can read.`;
@@ -539,8 +539,10 @@ export function createRunCodeToolDefinition(
 		description: REGISTERED_DESCRIPTION,
 		promptSnippet: "Batch tool calls and filter large results with sandboxed JavaScript",
 		promptGuidelines: [
-			"Prefer run_code for batches of independent tool calls, pagination, and filtering or aggregating large results, including a single large listing. Use direct calls for small one-off results, steps that need your judgment between calls, and questions to the user.",
-			"In run_code scripts, print relevant fields, counts, and summaries rather than whole tool results.",
+			"Prefer run_code for batches of independent tool calls, pagination, and filtering or aggregating results too large to read in full, including a single large listing.",
+			"For read-only workflows with known schemas, keep deterministic loops and branches (such as graph traversal or binary search) in one bounded run_code script. Dependent calls do not necessarily require model judgment.",
+			"Use direct calls for results you can read in full, such as one document of a few kilobytes that you must interpret, for trivial projections or filters, and for questions to the user. Stop the script for ambiguous evidence, an unfamiliar tool, or a new strategy.",
+			"Every run_code script is another model request: aim to answer from one script. Print the relevant fields, counts, and excerpts you need rather than whole tool results.",
 			"When a run_code script fails, check which nested calls completed before running it again.",
 		],
 		parameters: runCodeSchema,

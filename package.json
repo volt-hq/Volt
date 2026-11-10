@@ -24,6 +24,7 @@
 		"benchmark:streaming-markdown": "node --experimental-strip-types --conditions volt-source packages/coding-agent/benchmarks/streaming-markdown.ts",
 		"benchmark:memory": "node scripts/benchmark-coding-agent-memory.mjs",
 		"benchmark:swebench": "node scripts/benchmark-swebench.mjs",
+		"benchmark:code-mode": "node scripts/run-code-routing.mjs",
 		"check": "biome check --write --error-on-warnings . && npm run check:pinned-deps && npm run check:changesets && npm run check:ts-imports && npm run check:coding-agent-source-exports && npm run check:source-launchers && npm run check:shrinkwrap && npm run check:protocol-contract && npm run check:release-security && tsc --noEmit && tsc --noEmit -p packages/tui/tsconfig.json && tsc --noEmit -p packages/agent/tsconfig.json && npm run check:browser-smoke",
 		"check:browser-smoke": "node scripts/check-browser-smoke.mjs",
 		"check:coding-agent-source-exports": "node scripts/check-coding-agent-source-exports.mjs",
