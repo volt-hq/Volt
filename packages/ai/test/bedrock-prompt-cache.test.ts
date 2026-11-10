@@ -91,7 +91,7 @@ describe("Bedrock prompt-cache metadata", () => {
 	});
 
 	it("omits cache points when model metadata is unknown", async () => {
-		const model = getModel("amazon-bedrock", "us.anthropic.claude-opus-5");
+		const model = { ...getModel("amazon-bedrock", "us.anthropic.claude-opus-5"), promptCache: undefined };
 		const payload = await capturePayload(model, "long");
 		expect(lastSystemCachePoint(payload)).toBeUndefined();
 		expect(payload.messages.at(-1)?.content?.at(-1)?.cachePoint).toBeUndefined();

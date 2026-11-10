@@ -35,7 +35,13 @@ describe("generated prompt-cache metadata", () => {
 		expect(getModel("amazon-bedrock", "eu.anthropic.claude-opus-4-7").promptCache?.retention.long).toEqual({
 			ttlSeconds: 3600,
 		});
-		expect(getModel("amazon-bedrock", "us.anthropic.claude-opus-5").promptCache).toBeUndefined();
+		for (const id of [
+			"us.anthropic.claude-opus-5",
+			"in.anthropic.claude-opus-5",
+			"jp.anthropic.claude-haiku-5-5",
+		] as const) {
+			expect(getModel("amazon-bedrock", id).promptCache?.retention.long, id).toEqual({ ttlSeconds: 3600 });
+		}
 	});
 
 	it("captures established short caching with undocumented TTLs", () => {
