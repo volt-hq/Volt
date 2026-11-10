@@ -539,10 +539,10 @@ export function createRunCodeToolDefinition(
 		description: REGISTERED_DESCRIPTION,
 		promptSnippet: "Batch tool calls and filter large results with sandboxed JavaScript",
 		promptGuidelines: [
-			"Prefer run_code for batches of independent tool calls, pagination, and filtering or aggregating large results, including a single large listing.",
+			"Prefer run_code for batches of independent tool calls, pagination, and filtering or aggregating results too large to read in full, including a single large listing.",
 			"For read-only workflows with known schemas, keep deterministic loops and branches (such as graph traversal or binary search) in one bounded run_code script. Dependent calls do not necessarily require model judgment.",
-			"Use direct calls for small results you can answer reliably without scripting, including trivial projections or filters, and for questions to the user. Stop the script for ambiguous evidence, an unfamiliar tool, or a new strategy.",
-			"In run_code scripts, print relevant fields, counts, and summaries rather than whole tool results.",
+			"Use direct calls for results you can read in full, such as one document of a few kilobytes that you must interpret, for trivial projections or filters, and for questions to the user. Stop the script for ambiguous evidence, an unfamiliar tool, or a new strategy.",
+			"Every run_code script is another model request: aim to answer from one script. Print the relevant fields, counts, and excerpts you need rather than whole tool results.",
 			"When a run_code script fails, check which nested calls completed before running it again.",
 		],
 		parameters: runCodeSchema,
