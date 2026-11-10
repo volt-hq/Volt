@@ -373,6 +373,63 @@ describe("agentLoop with AgentMessage", () => {
 		}
 	});
 
+	it("reports an empty reply after tool results as a retryable error, and no other empty reply", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: `echoed: ${params.value}` }], details: { value: params.value } };
+			},
+		};
+		const run = async (replies: AssistantMessage[]): Promise<AgentMessage[]> => {
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+			const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+			let callIndex = 0;
+			const streamFn = () => {
+				const stream = new MockAssistantStream();
+				const message = replies[callIndex++];
+				if (!message) throw new Error("No reply left for this request");
+				queueMicrotask(() =>
+					stream.push({
+						type: "done",
+						seq: 1,
+						reason: message.stopReason === "toolUse" ? "toolUse" : "stop",
+						message,
+					}),
+				);
+				return stream;
+			};
+			const stream = agentLoop([createUserMessage("echo something")], context, config, undefined, streamFn);
+			for await (const _event of stream) {
+				// Drain.
+			}
+			return await stream.result();
+		};
+		const toolCall = createAssistantMessage(
+			[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
+			"toolUse",
+		);
+
+		for (const empty of [createAssistantMessage([]), createAssistantMessage([{ type: "text", text: " \n" }])]) {
+			const messages = await run([toolCall, empty]);
+			expect(messages.at(-1)).toMatchObject({
+				role: "assistant",
+				stopReason: "error",
+				error: { kind: "server", retryable: true, providerCode: "empty_response" },
+			});
+		}
+
+		// A reply with any content after tool results, and an empty reply to a user message, are left alone.
+		const thinkingOnly = createAssistantMessage([{ type: "thinking", thinking: "considered" }]);
+		expect((await run([toolCall, thinkingOnly])).at(-1)).toMatchObject({ stopReason: "stop" });
+		const afterUser = await run([createAssistantMessage([])]);
+		expect(afterUser.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		expect(afterUser.at(-1)).not.toHaveProperty("error");
+	});
+
 	it("should propagate structured failures returned by tools", async () => {
 		const toolSchema = Type.Object({});
 		const tool: AgentTool<typeof toolSchema, { code: string }> = {

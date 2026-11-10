@@ -68,7 +68,7 @@ describe("retry policy", () => {
 		expect(isRejectedToolCallResponse([REJECTED, QUEUE_LIMIT])).toBe(false);
 	});
 
-	it("backs off exponentially up to the retry limit and retries rejected tool calls at once", () => {
+	it("backs off exponentially up to the retry limit and retries rejected tool calls and empty replies at once", () => {
 		expect([1, 2, 3, 4].map((attempt) => retryDelayMs(failure(), attempt, SETTINGS))).toEqual([
 			100,
 			200,
@@ -76,6 +76,9 @@ describe("retry policy", () => {
 			undefined,
 		]);
 		expect(retryDelayMs(failure({ retryable: false, diagnostics: [REJECTED] }), 2, SETTINGS)).toBe(0);
+		const emptyReply = failure();
+		emptyReply.error = { kind: "server", retryable: true, providerCode: "empty_response", message: "empty" };
+		expect([1, 3, 4].map((attempt) => retryDelayMs(emptyReply, attempt, SETTINGS))).toEqual([0, 0, undefined]);
 		expect(retryDelayMs(failure(), 1, { ...SETTINGS, enabled: false })).toBeUndefined();
 		expect(retryDelayMs(failure({ retryable: false }), 1, SETTINGS)).toBeUndefined();
 	});

@@ -459,7 +459,7 @@ The runner starts the message on the first fragment, maps any failure under an a
 
 ### Replayed context and payload delivery
 
-The `context` a provider receives is already replayed: Volt applies `applyReplayPolicy` from `@hansjm10/volt-ai` before each request, so errored and aborted turns are gone, rejected tool calls are explained, and every tool call has a result. Apply only model-dependent normalization, such as tool call ID formats, and serialize every message, including every tool result, into the payload.
+The `context` a provider receives is already replayed: Volt applies `applyReplayPolicy` from `@hansjm10/volt-ai` before each request, so errored and aborted turns are gone, rejected tool calls and empty replies are explained, and every tool call has a result. Apply only model-dependent normalization, such as tool call ID formats, and serialize every message, including every tool result, into the payload.
 
 Return the serialized payload from `buildRequest`; the runner calls `options.onPayload(payload, model)` once before the first attempt. Volt treats the tool results of the replayed context as delivered, and clears background-job notices, only after the payload hook left the payload unchanged and the response completed successfully. A provider without a wire payload gets no `onPayload` call, which leaves notices visible; it does not fail inference. See [Background jobs](usage.md#background-jobs).
 
