@@ -8,6 +8,7 @@ import {
 	applyReplayPolicy,
 	type Context,
 	createProviderError,
+	EMPTY_RESPONSE_CODE,
 	EventStream,
 	type JsonObject,
 	type ToolResultMessage,
@@ -457,6 +458,30 @@ async function emitDeliveries(
 	return finalizedDeliveries;
 }
 
+/**
+ * A response that ends the turn after tool results with nothing to show or run: no blocks, or only
+ * blank text. Some models do this when a tool result already holds the answer, and the user would
+ * get no reply. It becomes a retryable error, so the host's retry policy asks again and reports the
+ * failure when retries run out.
+ */
+function failEmptyReply(message: AssistantMessage, afterToolResult: boolean): AssistantMessage {
+	if (!afterToolResult || message.stopReason !== "stop") return message;
+	if (!message.content.every((block) => block.type === "text" && block.text.trim().length === 0)) return message;
+	return {
+		...message,
+		stopReason: "error",
+		error: createProviderError("server", "The model ended its turn without replying after a tool result.", {
+			providerCode: EMPTY_RESPONSE_CODE,
+		}),
+	};
+}
+
+/** Whether a request answers tool results: its transcript ends with one, ignoring failed attempts after it. */
+function answersToolResult(messages: readonly AgentMessage[]): boolean {
+	const last = messages.findLast((message) => !(message.role === "assistant" && message.stopReason === "error"));
+	return last?.role === "toolResult";
+}
+
 interface StreamAssistantResponsePolicy {
 	cancelOnPreflightAbort: boolean;
 	validateProviderTail: boolean;
@@ -480,6 +505,8 @@ async function streamAssistantResponse(
 		messages = await config.transformContext(messages, signal);
 	}
 	if (policy.cancelOnPreflightAbort && signal?.aborted) return undefined;
+	// Read before conversion: the replay policy replaces a failed attempt with a note to the model.
+	const afterToolResult = answersToolResult(messages);
 
 	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
 	const llmMessages = await config.convertToLlm(messages);
@@ -536,7 +563,7 @@ async function streamAssistantResponse(
 
 			case "done":
 			case "error": {
-				const finalMessage = await response.result();
+				const finalMessage = failEmptyReply(await response.result(), afterToolResult);
 				if (addedPartial) {
 					context.messages[context.messages.length - 1] = finalMessage;
 				} else {
@@ -553,7 +580,7 @@ async function streamAssistantResponse(
 		}
 	}
 
-	const finalMessage = await response.result();
+	const finalMessage = failEmptyReply(await response.result(), afterToolResult);
 	if (addedPartial) {
 		context.messages[context.messages.length - 1] = finalMessage;
 	} else {

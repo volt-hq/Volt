@@ -10,6 +10,12 @@ const RETRYABLE_KINDS: ReadonlySet<ProviderErrorKind> = new Set([
 	"timeout",
 ]);
 
+/**
+ * `providerCode` of the error a response gets when the model ended its turn with no content. No
+ * provider sends this code; the agent loop assigns it.
+ */
+export const EMPTY_RESPONSE_CODE = "empty_response";
+
 /** Provider error codes and types whose meaning does not depend on the HTTP status. */
 const PROVIDER_CODE_KINDS: ReadonlyMap<string, ProviderErrorKind> = new Map([
 	// Anthropic error types
