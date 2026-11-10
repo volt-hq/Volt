@@ -7,6 +7,7 @@ import {
 	type AssistantMessage,
 	type Context,
 	createAssistantMessageEventStream,
+	EMPTY_RESPONSE_CODE,
 	type Model,
 	type Usage,
 } from "@hansjm10/volt-ai";
@@ -312,7 +313,9 @@ export async function runRoutingCase(
 		if (final?.role === "assistant") {
 			result.answer = textOf(final);
 			if (!result.failure && final.stopReason === "stop") result.status = "completed";
-			else result.failure ??= final.stopReason;
+			// Retries are off here, so the agent loop's empty-reply error ends the case; name it, since it is a
+			// model outcome and not a provider failure.
+			else result.failure ??= final.error?.providerCode === EMPTY_RESPONSE_CODE ? "empty-reply" : final.stopReason;
 		}
 		const grade = fixture.grade(result.answer);
 		result.correct = result.status === "completed" && grade.correct;

@@ -147,6 +147,15 @@ describe("code-mode routing benchmark", () => {
 		expect(result.status).toBe("failed");
 	});
 
+	it("records an empty reply after a tool result as its own failure", async () => {
+		const result = await run("hybrid", [directLookup, fauxAssistantMessage([])]);
+		expect(result.requests).toHaveLength(2);
+		expect(result.status).toBe("failed");
+		expect(result.failure).toBe("empty-reply");
+		expect(result.correct).toBe(false);
+		expect(result.gradeReason).toBe("The final reply was empty.");
+	});
+
 	it("blocks additional tool calls and counts repeated reads", async () => {
 		const result = await run("hybrid", [directLookup, directLookup, directLookup, fauxAssistantMessage("{}")], {
 			toolCalls: 2,
@@ -324,6 +333,29 @@ describe("routing pilot admission", () => {
 			expect(result.failed).toBe(true);
 			const saved = parseRoutingRun(JSON.parse(await readFile(join(out, "results.json"), "utf8")));
 			expect(saved.cases.map((item) => item.failure)).toEqual(["request-limit", undefined, undefined]);
+			expect(saved).not.toHaveProperty("stopReason");
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("continues past a case that ended on an empty reply", async () => {
+		const root = await mkdtemp(join(tmpdir(), "routing-empty-reply-test-"));
+		let admitted = 0;
+		try {
+			const out = join(root, "run");
+			const result = await runRoutingCli(
+				parseRoutingArgs(["--self-test", "--task", "single-lookup", "--out", out]),
+				async (fixture, mode, options) => {
+					const observed = await runRoutingCase(fixture, mode, options);
+					return admitted++ === 0
+						? { ...observed, status: "failed" as const, correct: false, failure: "empty-reply" }
+						: observed;
+				},
+			);
+			expect(result.failed).toBe(true);
+			const saved = parseRoutingRun(JSON.parse(await readFile(join(out, "results.json"), "utf8")));
+			expect(saved.cases.map((item) => item.failure)).toEqual(["empty-reply", undefined, undefined]);
 			expect(saved).not.toHaveProperty("stopReason");
 		} finally {
 			await rm(root, { recursive: true, force: true });

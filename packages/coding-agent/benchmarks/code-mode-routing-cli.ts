@@ -313,8 +313,9 @@ export async function runRoutingCli(
 					console.log(`  ${result.correct ? "correct" : "FAILED"}; ${result.requests.length} requests; ${(result.elapsedMs / 1000).toFixed(1)}s; budget ${requests}/${args.limits.requests} requests, ${reportedTokens}/${args.limits.reportedTokens} reported tokens${result.failure ? `; ${result.failure}` : ""}`);
 					if (!result.correct) failed = true;
 					// Terminate this worker before another case if provider work might still be running. A case that ran out of
-					// requests or output finished every request it started, so the next case can go ahead.
-					if (result.status === "failed" && result.failure !== "request-limit" && result.failure !== "length") {
+					// requests or output, or ended on an empty reply, finished every request it started, so the next case
+					// can go ahead.
+					if (result.status === "failed" && !["request-limit", "length", "empty-reply"].includes(result.failure ?? "")) {
 						stopReason = result.failure ?? "execution-failed";
 						break outer;
 					}

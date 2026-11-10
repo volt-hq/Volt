@@ -106,10 +106,10 @@ All tools are read-only. Repeated reads are measured, but duplicate side effects
 
 - Each case: at most 20 provider requests, 200 admitted tool calls, five minutes, and 65,536 streamed response characters. The limit was 12 for the results dated 2026-11-09 below; it was raised so the direct route can finish a task that reads a dozen results one turn at a time.
 - Whole-run defaults: 160 provider requests, 500,000 reported tokens, and 30 minutes. Override explicitly with `--max-requests` (1–10,000), `--max-tokens` (1–20,000,000), and `--minutes` (1–60). A larger trial count alone does not raise any cap.
-- Provider retries and automatic compaction are disabled. Requested output cap is 4,096 tokens; providers that ignore it are still bounded by the other limits.
+- Provider retries, session retries, and automatic compaction are disabled. Requested output cap is 4,096 tokens; providers that ignore it are still bounded by the other limits.
 - Token admission is checked between requests, so one response can overshoot it. Unknown usage cannot enforce a token limit; request, response-size, and wall-clock limits remain independent.
 - A supervisor terminates the worker process two minutes after the selected run deadline, including provider operations that ignore cancellation. Interruption can leave only the manifest and already completed case files; report mode requires a finalized `results.json`.
-- Any failed execution (including response-limit cancellation, authentication, quota, timeout, setup failure, or aggregate budget exhaustion) stops the run and ends its worker before another case can dispatch. The exceptions are a case that used all of its requests or ran out of output tokens: every request it started has finished, so it is recorded as failed and the run continues. Incorrect but completed answers remain in the comparison; they are not retried.
+- Any failed execution (including response-limit cancellation, authentication, quota, timeout, setup failure, or aggregate budget exhaustion) stops the run and ends its worker before another case can dispatch. The exceptions are a case that used all of its requests, ran out of output tokens, or ended on an empty reply after a tool result (`empty-reply`): every request it started has finished, so it is recorded as failed and the run continues. Incorrect but completed answers remain in the comparison; they are not retried.
 
 `manifest.json` records a unique run ID, experiment fingerprint, model settings, fixture definitions/oracles, source hashes, Git revision/dirty status, ordering seed, and limits. Each case records its trial number and position within the three-route block, both individually and in `results.json`. The runner prints budget consumption after each case.
 
@@ -296,13 +296,20 @@ On the core tasks Opus scripted correctly and then, in some cases, replied with 
 
 By prompt, for scripts that returned a value: committed 4/13, candidate 3/10, so the candidate wording is not the cause. A third variant added "as a tool result the user does not read: give your answer in your reply afterwards" to the tool description; it still produced 2 empty replies in 8, so it was not kept. Astra never did this. Returned values and printed output are confounded with task here (the core tasks return, the realistic ones mostly print), so the trigger may be a result that already equals the requested answer rather than `return` itself.
 
-This is a correctness failure for anyone asking Opus a question that one script can answer, and wording has not fixed it. Empty replies now carry their own reason in the report ("The final reply was empty.") so they are not counted as malformed answers.
+This was a correctness failure for anyone asking Opus a question that one script can answer, and wording did not fix it. The agent loop now does ([#1060](https://github.com/volt-hq/Volt/issues/1060)): a response that ends the turn empty after tool results is a retryable error, retried at once with a note telling the model its reply was empty. The note matters. On the two core tasks, with the fix applied and retries enabled in the harness:
 
-Artifacts, under `<agent dir>/benchmarks/code-mode-routing/`: `list-servers-bisect-20261110/` and `guidance-20261110/` (`head-*` is the committed prompt, `r1-*` the kept candidate, `r2-*` the reply variant). The comparisons across prompts were tabulated by task and trial with a one-off script, because the runs on each side differ in which trials they cover.
+| Retry | Cases | Empty replies | Outcome |
+|---|---:|---:|---|
+| Unchanged request | 5, the run stopped at its first failure | 8 across 3 cases | 5 of 7 retries were empty again; one case used up its 3 retries |
+| With the note | 12 | 5 | Every one recovered on the first retry; 12/12 correct |
+
+The benchmark itself keeps retries off, so it still shows the raw rate: such a case is recorded as failed with the reason `empty-reply`, and the run continues. Artifacts recorded before the fix show the same event as a completed case graded "The final reply was empty."
+
+Artifacts, under `<agent dir>/benchmarks/code-mode-routing/`: `list-servers-bisect-20261110/` and `guidance-20261110/` (`head-*` is the committed prompt, `r1-*` the kept candidate, `r2-*` the reply variant), and `empty-reply-fix-1060/` for the two retry checks. The comparisons across prompts were tabulated by task and trial with a one-off script, because the runs on each side differ in which trials they cover.
 
 ## Open questions the harness can now answer
 
-- Whether the empty Opus reply needs a fix in the agent loop, such as continuing the turn when a reply after a tool result has no content. Reproduce with `--model anthropic/claude-opus-5-5 --task bounded-search,hierarchy-rollup --routes hybrid --trials 4`; about a third to a half of those cases end empty.
+- How often other models and other tools produce the empty reply that the agent loop now retries. It has only been seen on Opus 5.5 after `run_code`; `--model anthropic/claude-opus-5-5 --task bounded-search,hierarchy-rollup --routes hybrid --trials 4` reproduces it in about a third to a half of cases, as `empty-reply` failures.
 - Whether the fixed price of code mode can come down. The description, guidelines, and schema cost about 680 tokens per request on Astra and 1,150 on Opus; a shorter description would show up directly in the first-request column.
 - Whether Opus can be brought to keep fetched data with `store()` instead of reading it again.
 - Whether results hold with more trials. Two pairs per task is the minimum; six trials give three order-balanced blocks for a route pair.
