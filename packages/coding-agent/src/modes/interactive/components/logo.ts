@@ -49,14 +49,17 @@ function lockupPixelColor(pixel: string): ThemeColorValue {
 	return theme.resolvedColors["accent"] ?? "";
 }
 
-/** Encode the lockup pixel map as half-block lines (▀ ▄ █), one terminal line per pair of pixel rows. */
-function renderLockup(): string[] {
+/**
+ * Encode a pixel map, in the lockup's pixels, as half-block lines (▀ ▄ █), one terminal line per
+ * pair of pixel rows.
+ */
+export function renderHalfBlocks(pixels: readonly string[]): string[] {
 	const mode = theme.getColorMode();
 	const fg = (pixel: string) => fgAnsi(lockupPixelColor(pixel), mode);
 	const lines: string[] = [];
-	for (let row = 0; row < VOLT_LOCKUP_PIXELS.length; row += 2) {
-		const top = VOLT_LOCKUP_PIXELS[row] ?? "";
-		const bottom = VOLT_LOCKUP_PIXELS[row + 1] ?? "";
+	for (let row = 0; row < pixels.length; row += 2) {
+		const top = pixels[row] ?? "";
+		const bottom = pixels[row + 1] ?? "";
 		let line = "";
 		let activeStyle = "";
 		for (let x = 0; x < Math.max(top.length, bottom.length); x++) {
@@ -93,7 +96,7 @@ export function renderLogo(version: string): string {
 	if (APP_NAME !== "volt") {
 		return theme.bold(theme.fg("accent", APP_NAME)) + theme.fg("dim", ` v${version}`);
 	}
-	const lines = renderLockup();
+	const lines = renderHalfBlocks(VOLT_LOCKUP_PIXELS);
 	lines[lines.length - 1] += theme.fg("dim", ` v${version}`);
 	return lines.join("\n");
 }

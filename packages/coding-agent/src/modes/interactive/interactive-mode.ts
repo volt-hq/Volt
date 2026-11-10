@@ -206,6 +206,7 @@ import { ExtensionSettingsComponent } from "./components/extension-settings.ts";
 import { FooterComponent, type FooterViewModel } from "./components/footer.ts";
 import { HostDialogComponent, HostFormDialogComponent } from "./components/host-request-dialog.ts";
 import { type HotkeySection, HotkeysComponent } from "./components/hotkeys.ts";
+import { LoadingScreenComponent } from "./components/loading-screen.ts";
 import { PlanInspectorComponent } from "./components/plan-inspector.ts";
 import { type PlanDetailsAction, PlanDetailsComponent, PlanStatusComponent } from "./components/plan-status.ts";
 import { createRemoteControlBackend, RemoteControlCenterComponent } from "./components/remote-control-center.ts";
@@ -358,6 +359,8 @@ const TURN_DONE_ALERT_BUSY_RETRY_MS = 250;
 /** Idle time after settlement before the transcript records when work finished. */
 const WORK_SUMMARY_IDLE_MS = 60_000;
 const STDOUT_FLUSH_TIMEOUT_MS = 1000;
+/** How long the loading screen shows at least: until the bolt's first snap has joined its halves. */
+const LOADING_MIN_VISIBLE_MS = 700;
 /** How long "Stop turn and quit" waits for the stopped turn to settle before the TUI quits anyway. */
 const STOP_TURN_WAIT_MS = 60_000;
 /**
@@ -581,6 +584,11 @@ export class InteractiveMode {
 	private fullscreenConversationRoot: VStack;
 	private conversationView: ActiveViewDescriptor;
 	private activeView: ActiveViewDescriptor;
+	/** The full-screen loading animation: while the TUI starts, moves to a new session, or reloads. */
+	private readonly loadingScreen: LoadingScreenComponent;
+	private readonly loadingView: ActiveViewDescriptor;
+	/** The load the loading screen shows for, with when it showed: none while it does not show. */
+	private loading: { readonly since: number } | undefined;
 	private planStatus: PlanStatusComponent;
 	private planDetails: PlanDetailsComponent | undefined;
 	private planInspector: PlanInspectorComponent;
@@ -913,6 +921,8 @@ export class InteractiveMode {
 			fullscreenRoot: this.mainView.getFullscreenLayout(),
 		};
 		this.activeView = this.conversationView;
+		this.loadingScreen = new LoadingScreenComponent(this.ui);
+		this.loadingView = this.createDedicatedView(this.loadingScreen);
 
 		// Load hide thinking block setting
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
@@ -1101,9 +1111,10 @@ export class InteractiveMode {
 		const [fdPath] = await Promise.all([ensureTool("fd"), ensureTool("rg")]);
 		this.fdPath = fdPath;
 
-		// Mount the conversation through the renderer-aware view descriptor.
+		// The loading screen shows until the conversation does. The editor keeps the keyboard, so what is
+		// typed meanwhile waits in it. The first frame is not forced: it leaves the terminal's scrollback.
 		this.renderWidgets(); // Initialize with default spacer
-		this.activateView(this.conversationView, this.editor, false);
+		const loaded = this.showLoadingScreen(`Starting ${APP_TITLE}`, this.editor, false);
 
 		this.setupKeyHandlers();
 		this.setupPlanPaneInputRouting();
@@ -1180,6 +1191,8 @@ export class InteractiveMode {
 		this.ui.requestRender();
 
 		await this.connect();
+		// Startup ends here; the loading screen leaves once its snap has shown.
+		void loaded();
 
 		// Set up theme file watcher
 		onThemeChange(() => {
@@ -1944,7 +1957,13 @@ export class InteractiveMode {
 			const waited = Date.now() - (this.hostWaitLoader?.startedAt ?? Date.now());
 			return `${label}...${waited >= 2_000 ? ` (${formatDuration(waited, { wholeSeconds: true })})` : ""}`;
 		};
+		// The loading screen covers the status area: it shows the wait under its message.
+		const show = (loader: Loader): void => {
+			loader.setMessage(text() ?? "");
+			this.loadingScreen.setDetail(text());
+		};
 		if (text() === undefined) {
+			this.loadingScreen.setDetail(undefined);
 			if (!shown) return;
 			this.hostWaitLoader = undefined;
 			clearInterval(shown.timer);
@@ -1960,12 +1979,12 @@ export class InteractiveMode {
 				(message) => theme.fg("muted", message),
 				"",
 			);
-			const timer = setInterval(() => loader.setMessage(text() ?? ""), 1_000);
+			const timer = setInterval(() => show(loader), 1_000);
 			timer.unref?.();
 			this.hostWaitLoader = { loader, startedAt: Date.now(), timer };
 			this.statusContainer.addChild(loader);
 		}
-		this.hostWaitLoader?.loader.setMessage(text() ?? "");
+		if (this.hostWaitLoader) show(this.hostWaitLoader.loader);
 		this.ui.requestRender();
 	}
 
@@ -2017,7 +2036,7 @@ export class InteractiveMode {
 			return confirm ? { confirmed: outcome.option === "Yes" } : { value: outcome.option };
 		} finally {
 			// Still moving: rendering waits for the conversation again.
-			if (this.store.moving !== undefined) this.sessionRenderSuspension ??= this.ui.suspendRendering();
+			if (this.store.moving !== undefined) this.holdRendering();
 		}
 	}
 
@@ -2346,7 +2365,7 @@ export class InteractiveMode {
 	 * showed for the conversation's extensions and work is released.
 	 */
 	private leaveConversation(): void {
-		this.sessionRenderSuspension ??= this.ui.suspendRendering();
+		this.holdRendering();
 		this.dismissWorkInspector?.();
 		this.unsubscribeWorkSource?.();
 		this.unsubscribeWorkSource = undefined;
@@ -2355,6 +2374,44 @@ export class InteractiveMode {
 		this.syncStatus();
 		this.shownFold = undefined;
 		this.resetExtensionUI();
+	}
+
+	/**
+	 * Hold rendering until the next conversation shows, so the one the TUI
+	 * leaves is not drawn half released. The loading screen covers it instead,
+	 * and goes on animating.
+	 */
+	private holdRendering(): void {
+		if (this.loading === undefined) this.sessionRenderSuspension ??= this.ui.suspendRendering();
+	}
+
+	/**
+	 * Show the full-screen loading animation over `message`, with the keyboard
+	 * on `focus`. The function it returns ends the load: the conversation
+	 * shows again, with the keyboard on the editor unless told otherwise, once
+	 * the animation has shown its first snap. A dialog opened meanwhile stays,
+	 * and returns to the conversation.
+	 */
+	private showLoadingScreen(
+		message: string,
+		focus: Component,
+		forceRender = true,
+	): (focus?: Component) => Promise<void> {
+		const load = { since: Date.now() };
+		this.loading = load;
+		this.loadingScreen.start(message);
+		this.activateView(this.loadingView, focus, forceRender);
+		return async (restoreFocus) => {
+			const remaining = LOADING_MIN_VISIBLE_MS - (Date.now() - load.since);
+			if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining).unref());
+			// A later load took the screen over, or the TUI stopped.
+			if (this.loading !== load) return;
+			this.loading = undefined;
+			this.loadingScreen.stop();
+			if (this.activeView === this.loadingView) {
+				this.activateView(this.conversationView, restoreFocus ?? this.editor);
+			}
+		};
 	}
 
 	/**
@@ -5012,6 +5069,11 @@ export class InteractiveMode {
 			this.sessionRenderSuspension = undefined;
 			suspension?.release();
 			this.renderer.renderNow();
+		} else if (this.activeView === this.loadingView && this.renderer instanceof TuiMainScreen) {
+			// The main screen keeps its last frame: the conversation, not the loading screen that filled it.
+			this.activateView(this.conversationView, null, false);
+			this.renderer.resetViewportOnNextRender();
+			this.renderer.renderNow();
 		}
 		this.ui.stop({ preserveScreen: this.renderer.mode === "fullscreen" });
 	}
@@ -5067,6 +5129,8 @@ export class InteractiveMode {
 	}
 
 	private activateView(view: ActiveViewDescriptor, focus: Component | null, forceRender = true): void {
+		// A dialog that opened over the loading screen returns to the conversation once the load ended.
+		if (view === this.loadingView && this.loading === undefined) view = this.conversationView;
 		// A dedicated view must never receive input behind the work overlay.
 		if (focus === this.workInspector) focus = this.editor;
 		this.dismissWorkInspector?.();
@@ -5123,7 +5187,8 @@ export class InteractiveMode {
 
 	/** Show the work inspector over the conversation, or focus it when it shows; `workId` selects an item. */
 	private showWorkInspector(workId?: string): void {
-		if (this.isShuttingDown || this.sessionRenderSuspension) return;
+		// Not over a conversation the TUI is leaving: rendering waits, or the loading screen shows.
+		if (this.isShuttingDown || this.sessionRenderSuspension || this.store.moving !== undefined) return;
 		if (this.workOverlay) {
 			this.workOverlay.focus();
 			if (workId === undefined) this.workInspector?.refresh();
@@ -7199,36 +7264,19 @@ export class InteractiveMode {
 
 		this.resetExtensionUI();
 
-		const reloadBox = new Container();
-		const borderColor = (s: string) => theme.fg("border", s);
-		reloadBox.addChild(new DynamicBorder(borderColor));
-		reloadBox.addChild(new Spacer(1));
-		reloadBox.addChild(
-			new Text(
-				theme.fg(
-					"muted",
-					options?.progressMessage ?? "Reloading keybindings, extensions, skills, prompts, themes...",
-				),
-				1,
-				0,
-			),
-		);
-		reloadBox.addChild(new Spacer(1));
-		reloadBox.addChild(new DynamicBorder(borderColor));
-
 		const previousEditor = this.editor;
-		this.editorContainer.clear();
-		this.editorContainer.addChild(reloadBox);
-		this.ui.setFocus(reloadBox);
-		this.ui.requestRender(true);
+		// The loading screen takes the keyboard: nothing is typed into an editor the reload may replace.
+		const loaded = this.showLoadingScreen(
+			options?.progressMessage ?? "Reloading keybindings, extensions, skills, prompts, themes...",
+			this.loadingScreen,
+		);
 		await new Promise((resolve) => process.nextTick(resolve));
 
-		const dismissReloadBox = (editor: Component) => {
+		const showEditor = async (editor: Component): Promise<void> => {
 			this.dismissWorkInspector?.();
 			this.editorContainer.clear();
 			this.editorContainer.addChild(editor);
-			this.ui.setFocus(editor);
-			this.ui.requestRender();
+			await loaded(editor);
 		};
 
 		try {
@@ -7268,7 +7316,7 @@ export class InteractiveMode {
 			this.setupAutocompleteProvider();
 			this.setupExtensionShortcuts();
 			this.transcript.rebuild();
-			dismissReloadBox(this.editor as Component);
+			await showEditor(this.editor as Component);
 			this.showLoadedResources({
 				force: false,
 				showDiagnosticsWhenQuiet: true,
@@ -7286,7 +7334,7 @@ export class InteractiveMode {
 			);
 			return true;
 		} catch (error) {
-			dismissReloadBox(previousEditor as Component);
+			await showEditor(previousEditor as Component);
 			this.showError(`Reload failed: ${error instanceof Error ? error.message : String(error)}`);
 			return false;
 		}
@@ -8056,6 +8104,8 @@ export class InteractiveMode {
 			// Stop the turn before the move, so it is persisted as it stopped.
 			await this.store.client.intent("abort");
 		}
+		// The editor keeps the keyboard, as while rendering waits for a move: what is typed meanwhile waits in it.
+		const loaded = this.showLoadingScreen("Starting a new session", this.editor);
 		try {
 			if (!(await this.sessions.newSession()).moved) return;
 			this.chatContainer.addChild(new Spacer(1));
@@ -8063,6 +8113,8 @@ export class InteractiveMode {
 			this.ui.requestRender();
 		} catch (error: unknown) {
 			this.showError(`Failed to create session: ${errorText(error)}`);
+		} finally {
+			await loaded();
 		}
 	}
 
@@ -8600,6 +8652,8 @@ export class InteractiveMode {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
 		}
+		this.loading = undefined;
+		this.loadingScreen.stop();
 		this.globalInputUnsubscribe?.();
 		this.globalInputUnsubscribe = undefined;
 		this.planPaneInputUnsubscribe?.();
