@@ -1,5 +1,10 @@
 import type { AssistantMessage, AssistantMessageEvent } from "../types.ts";
 
+/**
+ * Limits on the events a stream holds for a consumer that has not read them. Assistant streams
+ * combine queued deltas for one block, so there the limits bound only backlog that cannot merge:
+ * block starts and ends, and deltas that alternate between blocks.
+ */
 export const EVENT_STREAM_MAX_QUEUED_EVENTS = 1024;
 export const EVENT_STREAM_MAX_QUEUED_BYTES = 16 * 1024 * 1024;
 
@@ -25,6 +30,7 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 	private queuedBytes = 0;
 	private peakQueuedEvents = 0;
 	private peakQueuedBytes = 0;
+	private coalescedEvents = 0;
 	private readonly frozenSizes = new WeakMap<object, number>();
 	private waiting: EventStreamWaiter<T>[] = [];
 	private done = false;
@@ -36,15 +42,23 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 	private isComplete: (event: T) => boolean;
 	private extractResult: (event: T) => R;
 	private readonly overflowEvent: ((error: EventStreamOverflowError, event: T) => T) | undefined;
+	private readonly coalesce: ((queued: T, next: T) => T | undefined) | undefined;
 
+	/**
+	 * @param coalesce Returns one event that replaces `queued`, the newest unconsumed event, and stands
+	 * for `next` as well, or `undefined` to queue `next` separately. It is never given a completion
+	 * event and must not return one.
+	 */
 	constructor(
 		isComplete: (event: T) => boolean,
 		extractResult: (event: T) => R,
 		overflowEvent?: (error: EventStreamOverflowError, event: T) => T,
+		coalesce?: (queued: T, next: T) => T | undefined,
 	) {
 		this.isComplete = isComplete;
 		this.extractResult = extractResult;
 		this.overflowEvent = overflowEvent;
+		this.coalesce = coalesce;
 		this.finalResultPromise = new Promise((resolve, reject) => {
 			this.resolveFinalResult = resolve;
 			this.rejectFinalResult = reject;
@@ -52,6 +66,17 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		void this.finalResultPromise.catch(() => {});
 	}
 
+	/**
+	 * Hand `event` to a waiting consumer, or queue it.
+	 *
+	 * A queued event may be combined with the event pushed after it (see `coalesce`), so a consumer
+	 * that reads more slowly than the producer pushes receives fewer events. Assistant streams combine
+	 * queued deltas for one block into one delta with the newest `seq`, snapshot, and tool state, so
+	 * `seq` increases and may skip values. Events are never reordered, and an event already handed to
+	 * a consumer never changes.
+	 *
+	 * @throws EventStreamOverflowError when backlog that could not be combined exceeds a queue limit.
+	 */
 	push(event: T): void {
 		if (this.done) return;
 
@@ -59,36 +84,21 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		// frozen values so unchanged snapshot subtrees do not need another traversal.
 		let bytes = 0;
 		if (this.waiting.length === 0) {
-			bytes = this.measureSize(event, new Set()).bytes;
-			const limit =
-				this.queue.length >= EVENT_STREAM_MAX_QUEUED_EVENTS
-					? "events"
-					: this.queuedBytes + bytes > EVENT_STREAM_MAX_QUEUED_BYTES
-						? "bytes"
-						: undefined;
-			if (limit) {
-				const error = new EventStreamOverflowError(limit);
-				// Overflow explicitly fails the whole stream and releases its backlog. Do not
-				// make a slow consumer drain stale previews before learning it cannot finish.
-				this.queue = [];
-				this.queuedBytes = 0;
-				if (this.overflowEvent) {
-					const terminal = this.overflowEvent(error, event);
-					// The failure terminal must itself fit the empty queue. An invalid callback
-					// fails explicitly instead of recursively invoking overflow recovery.
-					if (
-						this.isComplete(terminal) &&
-						this.measureSize(terminal, new Set()).bytes <= EVENT_STREAM_MAX_QUEUED_BYTES
-					) {
-						this.push(terminal);
-					} else {
-						this.fail(error);
-					}
-				} else {
-					this.fail(error);
-				}
-				throw error;
+			const tail = this.queue.at(-1);
+			const merged = tail && this.coalesce && !this.isComplete(event) ? this.coalesce(tail.event, event) : undefined;
+			if (tail && merged !== undefined) {
+				const mergedBytes = this.measureSize(merged, new Set()).bytes;
+				const queuedBytes = this.queuedBytes - tail.bytes + mergedBytes;
+				if (queuedBytes > EVENT_STREAM_MAX_QUEUED_BYTES) this.overflow("bytes", event);
+				this.queue[this.queue.length - 1] = { event: merged, bytes: mergedBytes };
+				this.queuedBytes = queuedBytes;
+				this.peakQueuedBytes = Math.max(this.peakQueuedBytes, queuedBytes);
+				this.coalescedEvents += 1;
+				return;
 			}
+			bytes = this.measureSize(event, new Set()).bytes;
+			if (this.queue.length >= EVENT_STREAM_MAX_QUEUED_EVENTS) this.overflow("events", event);
+			if (this.queuedBytes + bytes > EVENT_STREAM_MAX_QUEUED_BYTES) this.overflow("bytes", event);
 		}
 
 		const completesStream = this.isComplete(event);
@@ -168,6 +178,7 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		peakQueuedEvents: number;
 		queuedBytes: number;
 		peakQueuedBytes: number;
+		coalescedEvents: number;
 		waitingConsumers: number;
 	} {
 		return {
@@ -175,8 +186,34 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 			peakQueuedEvents: this.peakQueuedEvents,
 			queuedBytes: this.queuedBytes,
 			peakQueuedBytes: this.peakQueuedBytes,
+			coalescedEvents: this.coalescedEvents,
 			waitingConsumers: this.waiting.length,
 		};
+	}
+
+	/** Fail the whole stream at a queue limit, release its backlog, and throw to the producer. */
+	private overflow(limit: "events" | "bytes", event: T): never {
+		const error = new EventStreamOverflowError(limit);
+		// Overflow explicitly fails the whole stream and releases its backlog. Do not
+		// make a slow consumer drain stale previews before learning it cannot finish.
+		this.queue = [];
+		this.queuedBytes = 0;
+		if (this.overflowEvent) {
+			const terminal = this.overflowEvent(error, event);
+			// The failure terminal must itself fit the empty queue. An invalid callback
+			// fails explicitly instead of recursively invoking overflow recovery.
+			if (
+				this.isComplete(terminal) &&
+				this.measureSize(terminal, new Set()).bytes <= EVENT_STREAM_MAX_QUEUED_BYTES
+			) {
+				this.push(terminal);
+			} else {
+				this.fail(error);
+			}
+		} else {
+			this.fail(error);
+		}
+		throw error;
 	}
 
 	private measureSize(value: unknown, seen: Set<object>): { bytes: number; frozen: boolean } {
@@ -230,8 +267,34 @@ export class AssistantMessageEventStream extends EventStream<AssistantMessageEve
 				throw new Error("Unexpected event type for final result");
 			},
 			overflowEvent ?? assistantOverflowEvent,
+			coalesceAssistantDeltas,
 		);
 	}
+}
+
+/**
+ * Combine a pushed delta with the unconsumed delta before it when both extend the same block. The
+ * result carries the combined delta and the newer event's `seq`, snapshot, and tool state.
+ */
+function coalesceAssistantDeltas(
+	queued: AssistantMessageEvent,
+	next: AssistantMessageEvent,
+): AssistantMessageEvent | undefined {
+	if (next.type === "text_delta" || next.type === "thinking_delta") {
+		if (queued.type !== next.type || queued.contentIndex !== next.contentIndex) return undefined;
+		return Object.freeze({ ...next, delta: queued.delta + next.delta });
+	}
+	if (next.type !== "toolcall_delta" || queued.type !== "toolcall_delta") return undefined;
+	if (queued.contentIndex !== next.contentIndex) return undefined;
+	// A delta that changes the call's identity stays a separate event.
+	if (next.id !== undefined && next.id !== queued.id) return undefined;
+	if (next.name !== undefined && next.name !== queued.name) return undefined;
+	return Object.freeze({
+		...next,
+		argsTextDelta: queued.argsTextDelta + next.argsTextDelta,
+		...(queued.id === undefined ? {} : { id: queued.id }),
+		...(queued.name === undefined ? {} : { name: queued.name }),
+	});
 }
 
 function assistantOverflowEvent(error: EventStreamOverflowError, event: AssistantMessageEvent): AssistantMessageEvent {

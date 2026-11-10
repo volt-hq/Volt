@@ -5,18 +5,21 @@ import type { AssistantStreamFragment } from "../src/stream/fragments.ts";
 import { AssistantStreamNormalizer } from "../src/stream/normalizer.ts";
 import { createProviderError } from "../src/stream/provider-errors.ts";
 import { parseStreamingJson } from "../src/utils/json-parse.ts";
+import { pushAndRead, readQueued } from "./queued-events.ts";
 import { streamResponsesEvents } from "./responses-stream.ts";
 
 const init = { api: "test", provider: "test", model: "test", timestamp: 0 };
 
+/** Every event the normalizer emits: reading after each fragment keeps queued deltas from combining. */
 async function normalize(fragments: AssistantStreamFragment[]) {
 	const normalizer = new AssistantStreamNormalizer();
-	normalizer.push({ type: "start", init });
-	normalizer.push({ type: "toolcall_start", contentIndex: 0, id: "call-1", name: "edit" });
-	for (const fragment of fragments) normalizer.push(fragment);
+	const events = await pushAndRead(normalizer, [
+		{ type: "start", init },
+		{ type: "toolcall_start", contentIndex: 0, id: "call-1", name: "edit" },
+		...fragments,
+	]);
 	normalizer.end();
-	const events = [];
-	for await (const event of normalizer.stream) events.push(event);
+	events.push(...(await readQueued(normalizer.stream)));
 	return { events, result: await normalizer.stream.result() };
 }
 

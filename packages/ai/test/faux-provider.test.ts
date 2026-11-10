@@ -381,7 +381,20 @@ describe("faux provider", () => {
 		expect(events).toContain("toolcall_start");
 		expect(events).toContain("toolcall_delta");
 		expect(events).toContain("toolcall_end");
-		expect(toolCallDeltas.length).toBeGreaterThan(1);
+		// Queued deltas for one block may arrive combined: assert their order and content, not their count.
+		expect(events.filter((type, index) => type !== events[index - 1])).toEqual([
+			"start",
+			"thinking_start",
+			"thinking_delta",
+			"thinking_end",
+			"text_start",
+			"text_delta",
+			"text_end",
+			"toolcall_start",
+			"toolcall_delta",
+			"toolcall_end",
+			"done",
+		]);
 		expect(JSON.parse(toolCallDeltas.join(""))).toEqual({ text: "hi", count: 12 });
 	});
 

@@ -124,10 +124,13 @@ describe("issue #351 complete tool arguments", () => {
 
 		expect(execute).toHaveBeenCalledTimes(1);
 		expect(execute.mock.calls[0]).toEqual(expect.arrayContaining(["call-351", { text }]));
+		// Queued deltas for one block may arrive combined: assert their content, not their count.
 		const deltas = harness
 			.eventsOfType("message_update")
-			.filter((event) => event.assistantMessageEvent.type === "toolcall_delta");
-		expect(deltas.length).toBeGreaterThan(1);
+			.flatMap((event) =>
+				event.assistantMessageEvent.type === "toolcall_delta" ? [event.assistantMessageEvent.argsTextDelta] : [],
+			);
+		expect(deltas.join("")).toBe(JSON.stringify({ text }));
 		const completeIndex = harness.events.findIndex(
 			(event) => event.type === "message_update" && event.assistantMessageEvent.type === "toolcall_end",
 		);

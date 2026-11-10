@@ -447,6 +447,8 @@ All streaming events emitted during assistant message generation:
 
 Streaming events for different content blocks are not guaranteed to be contiguous. Providers may emit deltas for text, thinking, and tool calls in the same upstream chunk, and volt may surface corresponding events interleaved, for example `text_start`, `text_delta`, `toolcall_start`, `text_delta`, `toolcall_delta`. Consumers must use `contentIndex` to associate each delta/end event with its block and must not assume that a block's `*_start`/`*_delta`/`*_end` sequence is uninterrupted by events for other blocks.
 
+A consumer that reads more slowly than the provider produces receives fewer delta events. Consecutive queued `text_delta`, `thinking_delta`, or `toolcall_delta` events for one block are delivered as one event: its `delta` (or `argsTextDelta`) is their concatenation, and its `seq`, `snapshot`, and `toolState` are those of the newest. Append each delta as it arrives and do not count delta events. `seq` strictly increases across a stream and can skip values. Start, end, `done`, and `error` events are never combined or reordered.
+
 ## Image Input
 
 Models with vision capabilities can process images. You can check if a model supports images via the `input` property. If you pass images to a non-vision model, they are silently ignored.

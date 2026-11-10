@@ -14,7 +14,8 @@ async function* produce(options?: StreamOptions): AsyncIterable<AssistantMessage
 			yield {
 				type: "text_delta",
 				seq,
-				contentIndex: 0,
+				// Deltas that alternate between two blocks cannot be combined in the queue.
+				contentIndex: seq % 2,
 				delta: "x",
 				toolState: [],
 				snapshot: fauxAssistantMessage("x".repeat(seq + 1)),

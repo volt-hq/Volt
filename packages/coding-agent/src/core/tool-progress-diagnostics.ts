@@ -37,6 +37,7 @@ interface QueueMetrics {
 	peakQueuedEvents: number;
 	queuedBytes: number;
 	peakQueuedBytes: number;
+	coalescedEvents: number;
 	waitingConsumers: number;
 }
 
@@ -367,6 +368,7 @@ export class ToolProgressDiagnostics {
 						peakQueuedEvents: queue.peakQueuedEvents,
 						queuedBytes: queue.queuedBytes,
 						peakQueuedBytes: queue.peakQueuedBytes,
+						coalescedEvents: queue.coalescedEvents,
 						waitingConsumers: queue.waitingConsumers,
 					}
 				: { available: false as const },

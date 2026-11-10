@@ -53,6 +53,7 @@ describe("bounded tool diagnostics", () => {
 			peakQueuedEvents: 5,
 			queuedBytes: 100,
 			peakQueuedBytes: 200,
+			coalescedEvents: 7,
 			waitingConsumers: 0,
 		};
 		const reader = vi.fn(() => ({ ...metrics }));

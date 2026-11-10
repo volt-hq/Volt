@@ -9,10 +9,12 @@ import { streamGoogle } from "../src/providers/google.ts";
 import { streamGoogleVertex } from "../src/providers/google-vertex.ts";
 import { streamMistral } from "../src/providers/mistral.ts";
 import { streamOpenAICompletions } from "../src/providers/openai-completions.ts";
+import type { AssistantStreamFragment } from "../src/stream/fragments.ts";
 import { AssistantStreamNormalizer } from "../src/stream/normalizer.ts";
 import { createProviderError } from "../src/stream/provider-errors.ts";
 import type { AssistantMessageEvent, Context, Usage } from "../src/types.ts";
 import { drainEventStream } from "../src/utils/event-stream.ts";
+import { pushAndRead } from "./queued-events.ts";
 import { streamResponsesEvents } from "./responses-stream.ts";
 
 const mock = vi.hoisted(() => ({ chunks: [] as unknown[] }));
@@ -424,18 +426,16 @@ describe("normalizer usage evidence", () => {
 
 	it("preserves partial evidence and immutable cumulative snapshots through failure", async () => {
 		const normalizer = new AssistantStreamNormalizer();
-		normalizer.push({ type: "start", init });
-		for (const input of [2, 5]) {
-			normalizer.push({
-				type: "meta",
-				patch: { usage: { ...zero, availability: "partial", input, totalTokens: input } },
-			});
-			normalizer.push({ type: "text_delta", contentIndex: 0, delta: "ok" });
-		}
-		normalizer.push({ type: "meta", patch: { usage: { cost: { total: 0.1 } } } });
-		normalizer.push({ type: "error", reason: "aborted", error: createProviderError("aborted", "aborted") });
-		const events: AssistantMessageEvent[] = [];
-		for await (const event of normalizer.stream) events.push(event);
+		// Read after each fragment: queued deltas for one block combine and keep only the newest snapshot.
+		const events: AssistantMessageEvent[] = await pushAndRead(normalizer, [
+			{ type: "start", init },
+			...[2, 5].flatMap((input): AssistantStreamFragment[] => [
+				{ type: "meta", patch: { usage: { ...zero, availability: "partial", input, totalTokens: input } } },
+				{ type: "text_delta", contentIndex: 0, delta: "ok" },
+			]),
+			{ type: "meta", patch: { usage: { cost: { total: 0.1 } } } },
+			{ type: "error", reason: "aborted", error: createProviderError("aborted", "aborted") },
+		]);
 		expect(events.filter((event) => event.type === "text_delta").map((event) => event.snapshot.usage.input)).toEqual([
 			2, 5,
 		]);

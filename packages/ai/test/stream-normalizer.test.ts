@@ -6,6 +6,7 @@ import { createProviderError } from "../src/stream/provider-errors.ts";
 import type { AssistantMessage, AssistantMessageEvent, Usage } from "../src/types.ts";
 import type { AssistantMessageDiagnostic } from "../src/utils/diagnostics.ts";
 import { parseStreamingJson } from "../src/utils/json-parse.ts";
+import { pushAndRead, readQueued } from "./queued-events.ts";
 
 type SnapshotEvent = Extract<AssistantMessageEvent, { snapshot: AssistantMessage }>;
 type EventOfType<T extends AssistantMessageEvent["type"]> = Extract<AssistantMessageEvent, { type: T }>;
@@ -47,17 +48,22 @@ function startFragment(overrides: Partial<AssistantMessageInit> = {}): Assistant
 	};
 }
 
-async function normalize(fragments: readonly AssistantStreamFragment[]): Promise<NormalizedRun> {
-	const normalizer = new AssistantStreamNormalizer();
-	for (const fragment of fragments) {
-		normalizer.push(fragment);
-	}
-	normalizer.end();
+/**
+ * When the consumer reads: after each fragment, so it sees every event the normalizer emits, or only
+ * after the last one, so it sees queued deltas for one block combined.
+ */
+type ReadMode = "after_each_push" | "after_all_pushes";
 
+async function normalize(
+	fragments: readonly AssistantStreamFragment[],
+	read: ReadMode = "after_each_push",
+): Promise<NormalizedRun> {
+	const normalizer = new AssistantStreamNormalizer();
 	const events: AssistantMessageEvent[] = [];
-	for await (const event of normalizer.stream) {
-		events.push(event);
-	}
+	if (read === "after_each_push") events.push(...(await pushAndRead(normalizer, fragments)));
+	else for (const fragment of fragments) normalizer.push(fragment);
+	normalizer.end();
+	events.push(...(await readQueued(normalizer.stream)));
 	return { events, result: await normalizer.stream.result() };
 }
 
@@ -928,7 +934,103 @@ function expectGeneratedMalformedRecovery(
 	expectDeeplyFrozen(result);
 }
 
+type DeltaEvent = EventOfType<"text_delta" | "thinking_delta" | "toolcall_delta">;
+
+function isDeltaEvent(event: AssistantMessageEvent): event is DeltaEvent {
+	return event.type === "text_delta" || event.type === "thinking_delta" || event.type === "toolcall_delta";
+}
+
+function deltaText(event: DeltaEvent): string {
+	return event.type === "toolcall_delta" ? event.argsTextDelta : event.delta;
+}
+
+/** The delta text delivered for each block, keyed by delta type and content index. */
+function deltaTextByBlock(events: readonly AssistantMessageEvent[]): Record<string, string> {
+	const text: Record<string, string> = {};
+	for (const event of events) {
+		if (!isDeltaEvent(event)) continue;
+		const key = `${event.type}:${event.contentIndex}`;
+		text[key] = (text[key] ?? "") + deltaText(event);
+	}
+	return text;
+}
+
+/** The identity updates that tool-argument deltas announced, in order. */
+function toolIdentityUpdates(events: readonly AssistantMessageEvent[]): string[] {
+	return events.flatMap((event) =>
+		event.type === "toolcall_delta" && (event.id !== undefined || event.name !== undefined)
+			? [`${event.contentIndex}:${event.id}:${event.name}`]
+			: [],
+	);
+}
+
+/** Start, end, and terminal events, without the wall-clock diagnostic times their messages carry. */
+function boundaryEvents(events: readonly AssistantMessageEvent[]): unknown[] {
+	return events
+		.filter((event) => !isDeltaEvent(event))
+		.map((event) => {
+			if (!("snapshot" in event)) return { type: event.type, seq: event.seq, reason: event.reason };
+			const { snapshot, ...boundary } = event;
+			return { ...boundary, content: snapshot.content };
+		});
+}
+
+function withoutDiagnosticTimes(message: AssistantMessage): AssistantMessage {
+	return {
+		...message,
+		diagnostics: message.diagnostics?.map((diagnostic) => ({ ...diagnostic, timestamp: 0 })),
+	};
+}
+
+/** A consumer that read only after the last push missed nothing a consumer that read every event saw. */
+function expectConflatedDelivery(stepwise: NormalizedRun, queued: NormalizedRun): void {
+	expect(withoutDiagnosticTimes(queued.result)).toEqual(withoutDiagnosticTimes(stepwise.result));
+	expect(deltaTextByBlock(queued.events)).toEqual(deltaTextByBlock(stepwise.events));
+	expect(toolIdentityUpdates(queued.events)).toEqual(toolIdentityUpdates(stepwise.events));
+	expect(boundaryEvents(queued.events)).toEqual(boundaryEvents(stepwise.events));
+	expect(queued.events.length).toBeLessThan(stepwise.events.length);
+
+	// The stepwise events are every emitted event, at the index of its seq.
+	expectContiguousSeq(stepwise.events);
+	let previousSeq = -1;
+	for (const event of queued.events) {
+		expect(event.seq).toBeGreaterThan(previousSeq);
+		// A delivered event stands for the run of emitted events that ends at its own seq.
+		const run = stepwise.events.slice(previousSeq + 1, event.seq + 1);
+		previousSeq = event.seq;
+		if (!isDeltaEvent(event)) {
+			expect(run.map((emitted) => emitted.type)).toEqual([event.type]);
+			continue;
+		}
+		const emittedDeltas = run.filter(isDeltaEvent);
+		expect(emittedDeltas).toHaveLength(run.length);
+		for (const emitted of emittedDeltas) {
+			expect(emitted).toMatchObject({ type: event.type, contentIndex: event.contentIndex });
+		}
+		expect(deltaText(event)).toBe(emittedDeltas.map(deltaText).join(""));
+		// A combined delta carries the state of the newest delta it stands for.
+		const newest = emittedDeltas.at(-1);
+		if (!newest) throw new Error(`Expected an emitted delta at seq ${event.seq}`);
+		expect(event.snapshot.content).toEqual(newest.snapshot.content);
+		expect(event.toolState).toEqual(newest.toolState);
+		expectDeeplyFrozen(event);
+	}
+	expect(previousSeq).toBe(stepwise.events.length - 1);
+}
+
 describe("AssistantStreamNormalizer generated fragment-stream invariants", () => {
+	it("delivers the same content and boundaries to a consumer that reads only after the last push", async () => {
+		await fc.assert(
+			fc.asyncProperty(generatedFragmentStreamInputArbitrary, async (input) => {
+				const { fragments } = buildGeneratedFragmentStream(input);
+				const stepwise = await normalize(fragments, "after_each_push");
+				const queued = await normalize(fragments, "after_all_pushes");
+				expectConflatedDelivery(stepwise, queued);
+			}),
+			{ numRuns: 100 },
+		);
+	});
+
 	it("keeps seq, delta content, authoritative ends, and raw tool state mutually consistent", async () => {
 		await fc.assert(
 			fc.asyncProperty(generatedFragmentStreamInputArbitrary, async (input) => {

@@ -7,6 +7,7 @@ import { TOOL_ARGUMENT_BATCH_INTERVAL_MS } from "../src/stream/tool-argument-coa
 import type { AssistantMessageEvent } from "../src/types.ts";
 import { EVENT_STREAM_MAX_QUEUED_EVENTS, EventStreamOverflowError } from "../src/utils/event-stream.ts";
 import * as jsonParse from "../src/utils/json-parse.ts";
+import { pushAndRead } from "./queued-events.ts";
 import { streamResponsesEvents } from "./responses-stream.ts";
 
 afterEach(() => {
@@ -122,16 +123,18 @@ describe("tool limits, strict completion, and processing cooperate", () => {
 		vi.useFakeTimers();
 		const normalizer = new AssistantStreamNormalizer();
 		start(normalizer);
-		normalizer.push({ type: "toolcall_start", contentIndex: 0, id: "first", name: "edit" });
-		normalizer.push({ type: "toolcall_delta", contentIndex: 0, argsTextDelta: '{"x":"' });
-		normalizer.push({ type: "toolcall_delta", contentIndex: 0, argsTextDelta: "pending" });
-		normalizer.push({ type: "toolcall_delta", contentIndex: 1, id: "second", name: "read", argsTextDelta: '{"y":' });
-		normalizer.push({ type: "toolcall_delta", contentIndex: 0, argsTextDelta: '"}' });
-		normalizer.push({ type: "toolcall_delta", contentIndex: 1, argsTextDelta: "1}" });
-		normalizer.push({ type: "toolcall_end", contentIndex: 1 });
-		normalizer.push({ type: "toolcall_end", contentIndex: 0 });
-		normalizer.push({ type: "done", reason: "toolUse" });
-		const events = await collect(normalizer);
+		// Read after each fragment: a flushed preview left in the queue would join the delta before it.
+		const events = await pushAndRead(normalizer, [
+			{ type: "toolcall_start", contentIndex: 0, id: "first", name: "edit" },
+			{ type: "toolcall_delta", contentIndex: 0, argsTextDelta: '{"x":"' },
+			{ type: "toolcall_delta", contentIndex: 0, argsTextDelta: "pending" },
+			{ type: "toolcall_delta", contentIndex: 1, id: "second", name: "read", argsTextDelta: '{"y":' },
+			{ type: "toolcall_delta", contentIndex: 0, argsTextDelta: '"}' },
+			{ type: "toolcall_delta", contentIndex: 1, argsTextDelta: "1}" },
+			{ type: "toolcall_end", contentIndex: 1 },
+			{ type: "toolcall_end", contentIndex: 0 },
+			{ type: "done", reason: "toolUse" },
+		]);
 		expect(
 			events.slice(1, 6).map((event) => [event.type, "contentIndex" in event ? event.contentIndex : null]),
 		).toEqual([
@@ -215,11 +218,15 @@ describe("tool limits, strict completion, and processing cooperate", () => {
 		normalizer.push({ type: "toolcall_start", contentIndex: 0, id: "call", name: "edit" });
 		normalizer.push({ type: "toolcall_delta", contentIndex: 0, argsTextDelta: '{"x":"' });
 		normalizer.push({ type: "toolcall_delta", contentIndex: 0, argsTextDelta: "pending" });
-		// Starting text flushes the pending tool preview: five events are now retained.
+		// Starting text flushes the pending tool preview into the queued tool delta. With the second
+		// text start, five events are now retained.
 		normalizer.push({ type: "text_start", contentIndex: 1 });
+		normalizer.push({ type: "text_start", contentIndex: 2 });
+		// Deltas that alternate between the two text blocks cannot be combined in the queue.
 		for (let index = 5; index < EVENT_STREAM_MAX_QUEUED_EVENTS; index++) {
-			normalizer.push({ type: "text_delta", contentIndex: 1, delta: "" });
+			normalizer.push({ type: "text_delta", contentIndex: 1 + (index % 2), delta: "" });
 		}
+		expect(normalizer.stream.getQueueMetrics().queuedEvents).toBe(EVENT_STREAM_MAX_QUEUED_EVENTS);
 		expect(() => vi.advanceTimersByTime(10)).not.toThrow();
 		const message = await normalizer.stream.result();
 		expect(message).toMatchObject({
@@ -239,10 +246,15 @@ describe("tool limits, strict completion, and processing cooperate", () => {
 		normalizer.push({ type: "toolcall_start", contentIndex: 0, id: "call", name: "edit" });
 		normalizer.push({ type: "toolcall_end", contentIndex: 0, argumentsText: "{}" });
 		normalizer.push({ type: "text_start", contentIndex: 1 });
-		for (let index = 5; index < EVENT_STREAM_MAX_QUEUED_EVENTS; index++) {
-			normalizer.push({ type: "text_delta", contentIndex: 1, delta: "" });
+		normalizer.push({ type: "text_start", contentIndex: 2 });
+		// Five events are retained and two text ends follow. Deltas that alternate between the two
+		// text blocks cannot be combined in the queue.
+		for (let index = 7; index < EVENT_STREAM_MAX_QUEUED_EVENTS; index++) {
+			normalizer.push({ type: "text_delta", contentIndex: 1 + (index % 2), delta: "" });
 		}
 		normalizer.push({ type: "text_end", contentIndex: 1 });
+		normalizer.push({ type: "text_end", contentIndex: 2 });
+		expect(normalizer.stream.getQueueMetrics().queuedEvents).toBe(EVENT_STREAM_MAX_QUEUED_EVENTS);
 		expect(() => normalizer.push({ type: "done", reason: "toolUse" })).toThrow(EventStreamOverflowError);
 		const message = await normalizer.stream.result();
 		expect(message).toMatchObject({
