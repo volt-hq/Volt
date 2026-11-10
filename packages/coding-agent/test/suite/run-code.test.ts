@@ -70,7 +70,7 @@ describe("run_code in a session", () => {
 		expect(listed.session.getActiveToolNames()).not.toContain("bash");
 	});
 
-	it("offers batching and large-result guidance to the model only while run_code is active", async () => {
+	it("offers selective scripting and deterministic read-loop guidance only while run_code is active", async () => {
 		const harness = await setup({ ...CODE_MODE, systemPrompt: "" });
 		const offered: Context[] = [];
 		const respond = (context: Context) => {
@@ -86,17 +86,33 @@ describe("run_code in a session", () => {
 		expect(offered).toHaveLength(2);
 		const [enabled, disabled] = offered;
 		expect(enabled.systemPrompt).toContain("Prefer run_code for batches of independent tool calls, pagination");
-		expect(enabled.systemPrompt).toContain("including a single large listing");
-		expect(enabled.systemPrompt).toContain("Use direct calls for small one-off results");
+		expect(enabled.systemPrompt).toContain("results too large to read in full, including a single large listing");
+		expect(enabled.systemPrompt).toContain("For read-only workflows with known schemas");
+		expect(enabled.systemPrompt).toContain("graph traversal or binary search) in one bounded run_code script");
+		expect(enabled.systemPrompt).toContain("Dependent calls do not necessarily require model judgment.");
 		expect(enabled.systemPrompt).toContain(
-			"print relevant fields, counts, and summaries rather than whole tool results",
+			"Use direct calls for results you can read in full, such as one document of a few kilobytes that you must interpret",
+		);
+		expect(enabled.systemPrompt).toContain("for trivial projections or filters, and for questions to the user");
+		expect(enabled.systemPrompt).toContain(
+			"Stop the script for ambiguous evidence, an unfamiliar tool, or a new strategy.",
+		);
+		expect(enabled.systemPrompt).toContain("check which nested calls completed before running it again");
+		expect(enabled.systemPrompt).toContain(
+			"Every run_code script is another model request: aim to answer from one script.",
+		);
+		expect(enabled.systemPrompt).toContain(
+			"Print the relevant fields, counts, and excerpts you need rather than whole tool results.",
 		);
 		const description = enabled.tools?.find((tool) => tool.name === "run_code")?.description;
-		expect(description).toContain("large results, even from a single call");
+		expect(description).toContain("large-result reduction, or deterministic read-only loops");
+		expect(description).toContain("Use direct calls for small results or steps requiring interpretation.");
 		expect(description).toContain("Run independent calls concurrently with Promise.allSettled");
 		expect(description).toContain("inspect rejected results, and await dependent calls in order");
 		expect(disabled.systemPrompt).not.toContain("Prefer run_code");
-		expect(disabled.systemPrompt).not.toContain("In run_code scripts");
+		expect(disabled.systemPrompt).not.toContain("Every run_code script");
+		expect(disabled.systemPrompt).not.toContain("Dependent calls do not necessarily require model judgment");
+		expect(disabled.systemPrompt).not.toContain("Stop the script for ambiguous evidence");
 		expect(disabled.tools?.map((tool) => tool.name)).not.toContain("run_code");
 	});
 

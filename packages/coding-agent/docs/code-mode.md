@@ -13,7 +13,9 @@ return `${stale.length} of ${issues.structured.items.length} open bugs are stale
 
 Prefer code mode for batches of independent tool calls, pagination, and filtering or aggregating large results—even a single large issue or pull-request listing. After discovering MCP tools and their arguments, scripts can call their bindings and return only relevant fields, counts, and summaries. Independent calls can run concurrently with `Promise.allSettled`; inspect rejected results and await dependent calls in order.
 
-Use direct calls for small one-off results or steps that need the model's judgment between calls. Code mode does not make ordinary coding better, and on small tasks it can cost more than direct calls. Its description and guidance add prompt overhead to every request while active.
+For read-only workflows with known schemas, keep deterministic loops and branches in one bounded script. Examples include graph traversal and binary search, where the next call follows a known rule over the previous result. Dependent calls do not necessarily need another model turn. Stop the script when ambiguous evidence, an unfamiliar tool, or a new strategy requires the model's judgment.
+
+Use direct calls for small results that can be answered reliably without scripting, including trivial projections or filters, and for questions to the user. Code mode does not make ordinary coding better, and on small tasks it can cost more than direct calls. Its description and guidance add prompt overhead to every request while active.
 
 Code mode is off by default. Direct tool calls keep working alongside it, and the model decides which to use for each step; enabling it guides that choice rather than forcing every call through a script.
 
@@ -72,7 +74,7 @@ MCP tools are bound at `tools.mcp.<server>.<tool>` while the `mcp` gateway or a 
 }
 ```
 
-Search includes this with `includeSchema: true` only when the complete schemas and guidance fit its discovery budget; otherwise it directs the model to `describe`. No script hint appears for tools code mode cannot call, including untrusted MCP tools in Plan mode.
+Search includes this with `includeSchema: true` only when the complete schemas and guidance fit its discovery budget; otherwise it directs the model to `describe`. Reuse complete, current schemas already returned rather than rediscovering them. If schemas are missing or stale, use the direct `mcp` tool's `search` or `describe` actions. Discovery is not available inside scripts: `tools.mcp` is a namespace, not a callable gateway. Scripts call the individual `tools.mcp.<server>.<tool>(args)` bindings instead. No script hint appears for tools code mode cannot call, including untrusted MCP tools in Plan mode.
 
 Calls from scripts run at most 4 at a time per server, across the process. A server's `maxConcurrentCalls` configuration changes that; `1` serializes calls to a server that does not handle concurrent requests well.
 
