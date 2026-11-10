@@ -88,15 +88,17 @@ Every answer must contain exact JSON fields and values. Graders reject missing/e
 
 ### Realistic suite
 
-The core tasks return small results, so they measure saved round trips and little else. Recorded MCP use in real sessions looks different: results have a median near 6 KB, and most calls sit in chains of three or more consecutive tool-only turns. The `realistic` suite is shaped like that. Its data is generated, not copied from any session or binary.
+The core tasks return small results, so they measure saved round trips and little else. Recorded MCP use in real sessions looks different: results have a median near 6 KB, and most calls sit in chains of three or more consecutive tool-only turns. The `realistic` suite is shaped like that. Its data is generated step traces of an invented job scheduler, not copied from any session or system.
 
 | Fixture ID | Behavior covered |
 |---|---|
-| `listing-scan` | Twelve listings of about 5 KB each; count exact matches among near misses |
-| `tail-call-chain` | Six dependent reads through large listings, each next read fixed by a rule |
-| `xref-triage` | A lookup, then reading four listings to tell which one decides an outcome |
-| `byte-signature-scan` | Eight paged raw reads; matches that span a page or are not byte-aligned |
-| `loop-interpretation` | One large listing that has to be read; a script cannot save a round trip |
+| `trace-scan` | Twelve traces of about 4 KB each; count exact matches among near misses |
+| `handoff-chain` | Six dependent reads through large traces, each next read fixed by a rule |
+| `message-triage` | A lookup, then reading four traces to tell which job decides an outcome |
+| `byte-marker-scan` | Eight paged raw reads; markers that span a page or are not byte-aligned |
+| `loop-interpretation` | One large trace that has to be read; a script cannot save a round trip |
+
+The first version of this suite used assembly-style listings. On `anthropic/claude-opus-5-5` the provider's safety filter refused the first such task before the model produced output, so the domain was changed to job traces with the same structure. Keep new fixtures in mundane domains for the same reason.
 
 All tools are read-only. Repeated reads are measured, but duplicate side effects cannot be evaluated by this pilot. No shell, local file, web, image, subagent, or external MCP tools are exposed to the benchmark model. The synthetic MCP client executes in process and cannot connect to a real server.
 

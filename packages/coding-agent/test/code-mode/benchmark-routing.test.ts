@@ -294,23 +294,21 @@ describe("routing pilot admission", () => {
 		);
 		expect(selectRoutingFixtures(parseRoutingArgs(["--suite", "all"]))).toHaveLength(20 + realistic.length);
 		expect(
-			selectRoutingFixtures(parseRoutingArgs(["--task", "listing-scan,single-lookup"])).map((fixture) => fixture.id),
-		).toEqual(["single-lookup", "listing-scan"]);
+			selectRoutingFixtures(parseRoutingArgs(["--task", "trace-scan,single-lookup"])).map((fixture) => fixture.id),
+		).toEqual(["single-lookup", "trace-scan"]);
 	});
 
 	it("balances a route pair over two trials and all four routes over twenty-four", () => {
 		const pair: RoutingMode[] = ["direct", "hybrid"];
-		const orders = [1, 2, 3].map((trial) => routingOrder(trial, "listing-scan", 7, pair).join(","));
+		const orders = [1, 2, 3].map((trial) => routingOrder(trial, "trace-scan", 7, pair).join(","));
 		expect(new Set(orders.slice(0, 2))).toEqual(new Set(["direct,hybrid", "hybrid,direct"]));
 		expect(orders[2]).toBe(orders[0]);
-		const all = Array.from({ length: 24 }, (_, index) =>
-			routingOrder(index + 1, "listing-scan", 7, ALL_ROUTING_MODES),
-		);
+		const all = Array.from({ length: 24 }, (_, index) => routingOrder(index + 1, "trace-scan", 7, ALL_ROUTING_MODES));
 		expect(new Set(all.map((order) => order.join(","))).size).toBe(24);
 		for (const mode of ALL_ROUTING_MODES)
 			for (let position = 0; position < 4; position++)
 				expect(all.filter((order) => order[position] === mode)).toHaveLength(6);
-		expect(routingOrder(1, "listing-scan", 7, ["hybrid"])).toEqual(["hybrid"]);
+		expect(routingOrder(1, "trace-scan", 7, ["hybrid"])).toEqual(["hybrid"]);
 	});
 
 	it("continues past a case that exhausts its own request limit", async () => {
