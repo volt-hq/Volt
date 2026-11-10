@@ -7,7 +7,7 @@ import type { Context, Model } from "../src/types.ts";
 
 const oauthToken = "sk-ant-oat01-test-subscription-token";
 const sessionId = "93d29ab7-a89b-4c20-b78d-e7273b678473";
-const userAgent = "claude-cli/2.1.280 (external, cli)";
+const userAgent = "claude-cli/2.1.322 (external, cli)";
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 interface CapturedRequest {
@@ -95,29 +95,33 @@ async function captureRequests(
 }
 
 describe("Anthropic subscription request conventions", () => {
-	it("matches the captured Claude Code client identity without enabling unsupported features", async () => {
-		const [request] = await captureRequests({ sessionId });
+	it.each(["claude-sonnet-5", "claude-fable-5-2"])(
+		"sends the current subscription client identity for %s without enabling unsupported features",
+		async (modelId) => {
+			const [request] = await captureRequests({ sessionId }, { id: modelId });
 
-		expect(request.url).toBe("/v1/messages?beta=true");
-		expect(request.headers).toMatchObject({
-			authorization: `Bearer ${oauthToken}`,
-			"user-agent": userAgent,
-			"x-app": "cli",
-			"x-claude-code-session-id": sessionId,
-			"anthropic-version": "2023-06-01",
-			"anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
-		});
-		expect(request.headers["x-api-key"]).toBeUndefined();
-		expect(request.headers["x-client-request-id"]).toMatch(uuidPattern);
-		expect(request.headers["x-cc-atis"]).toBeUndefined();
-		expect(request.headers["anthropic-dispatch-id"]).toBeUndefined();
-		expect(request.body.system).toEqual([
-			{ type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." },
-			{ type: "text", text: context.systemPrompt },
-		]);
-		expect(request.body.tools).toMatchObject([{ name: "Read" }, { name: "custom_lookup" }]);
-		expect(request.body.stream).toBe(true);
-	});
+			expect(request.url).toBe("/v1/messages?beta=true");
+			expect(request.headers).toMatchObject({
+				authorization: `Bearer ${oauthToken}`,
+				"user-agent": userAgent,
+				"x-app": "cli",
+				"x-claude-code-session-id": sessionId,
+				"anthropic-version": "2023-06-01",
+				"anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
+			});
+			expect(request.headers["x-api-key"]).toBeUndefined();
+			expect(request.headers["x-client-request-id"]).toMatch(uuidPattern);
+			expect(request.headers["x-cc-atis"]).toBeUndefined();
+			expect(request.headers["anthropic-dispatch-id"]).toBeUndefined();
+			expect(request.body.system).toEqual([
+				{ type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." },
+				{ type: "text", text: context.systemPrompt },
+			]);
+			expect(request.body.tools).toMatchObject([{ name: "Read" }, { name: "custom_lookup" }]);
+			expect(request.body.stream).toBe(true);
+			expect(request.body.model).toBe(modelId);
+		},
+	);
 
 	it("keeps the session identity with caching disabled and generates a new ID for each request", async () => {
 		const requests = await captureRequests({ sessionId, cacheRetention: "none" }, {}, 2);

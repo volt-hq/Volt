@@ -49,7 +49,7 @@ describe("subscription usage adapters", { concurrent: false }, () => {
 			const headers = new Headers(init?.headers);
 			expect(headers.get("authorization")).toBe("Bearer access-token");
 			expect(headers.get("anthropic-beta")).toBe("oauth-2025-04-20");
-			expect(headers.get("user-agent")).toBe("claude-cli/2.1.280 (external, cli)");
+			expect(headers.get("user-agent")).toBe("claude-cli/2.1.322 (external, cli)");
 			expect(headers.get("accept")).toBe("application/json, text/plain, */*");
 			expect(headers.get("content-type")).toBe("application/json");
 			expect(init?.method).toBe("GET");
