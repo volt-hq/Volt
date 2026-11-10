@@ -46,6 +46,12 @@ Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party h
 
 Volt sends subscription requests directly to Anthropic with a pinned Claude Code-compatible client identity; it does not invoke or inspect an installed `claude` executable. Inference and `/usage` share that identity, while inference also sends Volt's session ID and a per-request ID. Volt retains its own tools, system prompt, and supported feature flags rather than reproducing Claude Code's private runtime. If Anthropic reports `claude_code_version_too_old`, Volt's compatibility pin needs updating; running `claude update` does not change Volt's requests. API-key authentication is separate.
 
+### Anthropic per-message effort
+
+For direct Anthropic requests using an API key or Claude Pro/Max OAuth, changing the thinking level applies to the next new input without rewriting earlier turns or changing the request's initial effort. Changing it while tools run waits for new input; tool results alone keep the turn's effort. Resume, forks, and compaction reconstruct the retained turns' selections from the session log.
+
+This uses Anthropic's [per-message effort beta](https://platform.claude.com/docs/en/build-with-claude/effort#change-effort-mid-conversation) on Claude Fable 5.2/5.1, Mythos 5.2/5.1, Opus 5.5/5, Sonnet 5.5, and Haiku 5.5, with adaptive thinking enabled. Other models, non-adaptive thinking, proxies, and cloud endpoints retain request-level effort. A model or thinking-mode switch can still invalidate the cache, and compaction replaces the summarized prefix. No thinking-binding overrides or additional thinking betas are enabled.
+
 ### GitHub Copilot
 
 - Press Enter for github.com, or enter your GitHub Enterprise Server domain

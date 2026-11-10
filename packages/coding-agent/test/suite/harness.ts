@@ -82,6 +82,8 @@ export function getAssistantTexts(harness: Harness): string[] {
 
 export interface HarnessOptions {
 	agentDir?: string;
+	/** Provider identity for tests of provider-specific runtime policy; requests still use faux. */
+	provider?: string;
 	/** Optional faux streaming pace for tests that interrupt an unfinished provider response. */
 	tokensPerSecond?: number;
 	models?: FauxModelDefinition[];
@@ -185,6 +187,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	// Leave room for nested worktree/quarantine paths within Git for Windows' path limit.
 	const tempDir = mkdtempSync(join(tmpdir(), "volt-"));
 	const fauxProvider = createFauxProvider({
+		provider: options.provider,
 		models: options.models,
 		tokensPerSecond: options.tokensPerSecond,
 		...(options.refreshPromptCache === undefined ? {} : { refreshPromptCache: options.refreshPromptCache }),

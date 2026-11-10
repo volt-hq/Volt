@@ -7,11 +7,12 @@
 
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type {
+	ContextMessage,
 	DeepReadonly,
 	ImageContent,
 	JsonCompatibleInput,
 	JsonValue,
-	Message,
+	ModelThinkingLevel,
 	TextContent,
 	UserMessage,
 } from "@hansjm10/volt-ai";
@@ -202,9 +203,10 @@ export function extractVisibleTextContent(content: unknown, textPartSeparator = 
  * - Compaction's generateSummary (for summarization)
  * - Custom extensions and tools
  */
-export function convertToLlm(messages: AgentMessage[]): Message[] {
+export function convertToLlm(messages: (AgentMessage & { thinkingLevel?: ModelThinkingLevel })[]): ContextMessage[] {
 	return messages
-		.map((m): Message | undefined => {
+		.map((m): ContextMessage | undefined => {
+			const thinking = m.thinkingLevel === undefined ? {} : { thinkingLevel: m.thinkingLevel };
 			switch (m.role) {
 				case "bashExecution":
 					// Skip messages excluded from context (!! prefix)
@@ -215,6 +217,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						role: "user",
 						content: [{ type: "text", text: bashExecutionToText(m) }],
 						timestamp: m.timestamp,
+						...thinking,
 					};
 				case "custom": {
 					const content = typeof m.content === "string" ? [{ type: "text" as const, text: m.content }] : m.content;
@@ -222,6 +225,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						role: "user",
 						content,
 						timestamp: m.timestamp,
+						...thinking,
 					};
 				}
 				case "branchSummary":
@@ -229,6 +233,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						role: "user",
 						content: [{ type: "text" as const, text: BRANCH_SUMMARY_PREFIX + m.summary + BRANCH_SUMMARY_SUFFIX }],
 						timestamp: m.timestamp,
+						...thinking,
 					};
 				case "compactionSummary":
 					return {
@@ -237,6 +242,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 							{ type: "text" as const, text: COMPACTION_SUMMARY_PREFIX + m.summary + COMPACTION_SUMMARY_SUFFIX },
 						],
 						timestamp: m.timestamp,
+						...thinking,
 					};
 				case "user":
 					return "clientMessageId" in m ? withoutClientMessageId(m) : m;

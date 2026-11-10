@@ -1,4 +1,4 @@
-import type { ImageContent, JsonValue, Message, TextContent } from "@hansjm10/volt-ai";
+import type { ContextMessage, ImageContent, JsonValue, ModelThinkingLevel, TextContent } from "@hansjm10/volt-ai";
 import type { AgentMessage } from "../types.ts";
 
 export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
@@ -117,9 +117,10 @@ export function createCustomMessage(
 	};
 }
 
-export function convertToLlm(messages: AgentMessage[]): Message[] {
+export function convertToLlm(messages: (AgentMessage & { thinkingLevel?: ModelThinkingLevel })[]): ContextMessage[] {
 	return messages
-		.map((m): Message | undefined => {
+		.map((m): ContextMessage | undefined => {
+			const thinking = m.thinkingLevel === undefined ? {} : { thinkingLevel: m.thinkingLevel };
 			switch (m.role) {
 				case "bashExecution":
 					if (m.excludeFromContext) {
@@ -129,6 +130,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						role: "user",
 						content: [{ type: "text", text: bashExecutionToText(m) }],
 						timestamp: m.timestamp,
+						...thinking,
 					};
 				case "custom": {
 					const content = typeof m.content === "string" ? [{ type: "text" as const, text: m.content }] : m.content;
@@ -136,6 +138,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						role: "user",
 						content,
 						timestamp: m.timestamp,
+						...thinking,
 					};
 				}
 				case "branchSummary":
@@ -143,6 +146,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						role: "user",
 						content: [{ type: "text" as const, text: BRANCH_SUMMARY_PREFIX + m.summary + BRANCH_SUMMARY_SUFFIX }],
 						timestamp: m.timestamp,
+						...thinking,
 					};
 				case "compactionSummary":
 					return {
@@ -151,6 +155,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 							{ type: "text" as const, text: COMPACTION_SUMMARY_PREFIX + m.summary + COMPACTION_SUMMARY_SUFFIX },
 						],
 						timestamp: m.timestamp,
+						...thinking,
 					};
 				case "user":
 				case "assistant":
@@ -160,5 +165,5 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 					return undefined;
 			}
 		})
-		.filter((m): m is Message => m !== undefined);
+		.filter((m): m is ContextMessage => m !== undefined);
 }

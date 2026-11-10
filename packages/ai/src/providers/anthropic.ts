@@ -19,8 +19,8 @@ import type {
 	AnthropicMessagesCompat,
 	CacheRetention,
 	Context,
+	ContextMessage,
 	ImageContent,
-	Message,
 	Model,
 	PromptCacheRefreshFunction,
 	ProviderEnv,
@@ -39,7 +39,7 @@ import type { JsonObject } from "../utils/json-value.ts";
 import { ANTHROPIC_OAUTH_BETA, ANTHROPIC_OAUTH_USER_AGENT } from "../utils/oauth/anthropic-client.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 
-import { canRefreshAnthropicPromptCache } from "./anthropic-capabilities.ts";
+import { canRefreshAnthropicPromptCache, supportsAnthropicPerMessageEffort } from "./anthropic-capabilities.ts";
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { resolvePromptCacheRetention, supportsPromptCacheMode } from "./prompt-cache.ts";
@@ -155,6 +155,11 @@ export type AnthropicThinkingDisplay = "summarized" | "omitted";
 
 const FINE_GRAINED_TOOL_STREAMING_BETA = "fine-grained-tool-streaming-2025-05-14";
 const INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14";
+const PER_MESSAGE_EFFORT_BETA = "mid-conversation-output-config-2026-07-01";
+
+// The installed SDK does not yet type effort-only system messages. Keep the extension
+// explicit here and assert it only at the SDK payload boundary.
+type AnthropicMessageParam = MessageParam | { role: "system"; content: []; output_config: { effort: AnthropicEffort } };
 
 function getAnthropicCompat(
 	model: Model<"anthropic-messages">,
@@ -235,12 +240,33 @@ export interface AnthropicOptions extends StreamOptions {
 	client?: Anthropic;
 }
 
-function mergeHeaders(...headerSources: (Record<string, string | null> | undefined)[]): Record<string, string | null> {
+function mergeHeaders(
+	requiredBeta: string | undefined,
+	...headerSources: (Record<string, string | null> | undefined)[]
+): Record<string, string | null> {
 	const merged: Record<string, string | null> = {};
+	let betaHeader = "";
 	for (const headers of headerSources) {
 		if (headers) {
 			Object.assign(merged, headers);
+			if (requiredBeta) {
+				for (const [key, value] of Object.entries(headers)) {
+					if (key.toLowerCase() === "anthropic-beta") {
+						betaHeader = value ?? "";
+						delete merged[key];
+					}
+				}
+			}
 		}
+	}
+	if (requiredBeta) {
+		// Explicit beta overrides still replace optional betas, but cannot remove the
+		// beta required by the effort controls we add to this request's payload.
+		const betas = betaHeader
+			.split(",")
+			.map((value) => value.trim())
+			.filter(Boolean);
+		merged["anthropic-beta"] = [...new Set([...betas, requiredBeta])].join(",");
 	}
 	return merged;
 }
@@ -717,6 +743,42 @@ function mapThinkingLevelToEffort(
 	}
 }
 
+/** Only rendered new input can establish or change effort; tool results never do. */
+function getMessageEffort(message: ContextMessage, model: Model<"anthropic-messages">): AnthropicEffort | undefined {
+	if (message.role !== "user" || message.thinkingLevel === undefined || message.thinkingLevel === "off") {
+		return undefined;
+	}
+	const hasInput =
+		typeof message.content === "string"
+			? message.content.trim().length > 0
+			: message.content.some((block) => block.type === "image" || block.text.trim().length > 0);
+	return hasInput ? mapThinkingLevelToEffort(model, message.thinkingLevel) : undefined;
+}
+
+function getInitialMessageEffort(
+	model: Model<"anthropic-messages">,
+	context: Context,
+	options?: AnthropicOptions,
+): AnthropicEffort | undefined {
+	if (
+		options?.client ||
+		!options?.thinkingEnabled ||
+		!model.reasoning ||
+		model.compat?.forceAdaptiveThinking !== true ||
+		!supportsAnthropicPerMessageEffort(model)
+	) {
+		return undefined;
+	}
+	// Never derive the historical prefix from today's request-level effort. Missing/off
+	// snapshots do not express an adaptive effort change; the first eligible input is
+	// the stable baseline and later unannotated inputs inherit the last known effort.
+	for (const message of context.messages) {
+		const effort = getMessageEffort(message, model);
+		if (effort !== undefined) return effort;
+	}
+	return undefined;
+}
+
 /** Map provider-neutral simple options to the exact AnthropicOptions `streamSimpleAnthropic` sends. */
 function resolveSimpleAnthropicOptions(
 	model: Model<"anthropic-messages">,
@@ -856,6 +918,7 @@ function createRequestClient(
 		apiKey,
 		options?.interleavedThinking ?? true,
 		shouldUseFineGrainedToolStreamingBeta(model, context),
+		getInitialMessageEffort(model, context, options) !== undefined,
 		options?.headers,
 		copilotDynamicHeaders,
 		options?.sessionId,
@@ -869,6 +932,7 @@ function createClient(
 	apiKey: string,
 	interleavedThinking: boolean,
 	useFineGrainedToolStreamingBeta: boolean,
+	usePerMessageEffort: boolean,
 	optionsHeaders?: Record<string, string>,
 	dynamicHeaders?: Record<string, string>,
 	sessionId?: string,
@@ -877,12 +941,16 @@ function createClient(
 ): { client: Anthropic; isOAuthToken: boolean } {
 	// Adaptive thinking models have interleaved thinking built in, so skip the beta header.
 	const needsInterleavedBeta = interleavedThinking && model.compat?.forceAdaptiveThinking !== true;
+	const requiredBeta = usePerMessageEffort ? PER_MESSAGE_EFFORT_BETA : undefined;
 	const betaFeatures: string[] = [];
 	if (useFineGrainedToolStreamingBeta) {
 		betaFeatures.push(FINE_GRAINED_TOOL_STREAMING_BETA);
 	}
 	if (needsInterleavedBeta) {
 		betaFeatures.push(INTERLEAVED_THINKING_BETA);
+	}
+	if (usePerMessageEffort) {
+		betaFeatures.push(PER_MESSAGE_EFFORT_BETA);
 	}
 
 	if (model.provider === "cloudflare-ai-gateway") {
@@ -892,6 +960,7 @@ function createClient(
 			baseURL: resolveCloudflareBaseUrl(model, env),
 			dangerouslyAllowBrowser: true,
 			defaultHeaders: mergeHeaders(
+				requiredBeta,
 				{
 					accept: "application/json",
 					"anthropic-dangerous-direct-browser-access": "true",
@@ -916,6 +985,7 @@ function createClient(
 			baseURL: model.baseUrl,
 			dangerouslyAllowBrowser: true,
 			defaultHeaders: mergeHeaders(
+				requiredBeta,
 				{
 					accept: "application/json",
 					"anthropic-dangerous-direct-browser-access": "true",
@@ -940,6 +1010,7 @@ function createClient(
 			defaultQuery: { beta: "true" },
 			dangerouslyAllowBrowser: true,
 			defaultHeaders: mergeHeaders(
+				requiredBeta,
 				{
 					accept: "application/json",
 					"anthropic-dangerous-direct-browser-access": "true",
@@ -969,6 +1040,7 @@ function createClient(
 		baseURL: model.baseUrl,
 		dangerouslyAllowBrowser: true,
 		defaultHeaders: mergeHeaders(
+			requiredBeta,
 			{
 				accept: "application/json",
 				"anthropic-dangerous-direct-browser-access": "true",
@@ -991,9 +1063,17 @@ function buildParams(
 ): MessageCreateParamsStreaming {
 	const { cacheControl } = getCacheControl(model, options?.cacheRetention);
 	const compat = getAnthropicCompat(model);
+	const initialEffort = getInitialMessageEffort(model, context, options);
 	const params: MessageCreateParamsStreaming = {
 		model: model.id,
-		messages: convertMessages(context.messages, model, isOAuthToken, cacheControl, compat.allowEmptySignature),
+		messages: convertMessages(
+			context.messages,
+			model,
+			isOAuthToken,
+			cacheControl,
+			compat.allowEmptySignature,
+			initialEffort,
+		) as MessageParam[],
 		max_tokens: options?.maxTokens ?? model.maxTokens,
 		stream: true,
 	};
@@ -1048,14 +1128,9 @@ function buildParams(
 			if (model.compat?.forceAdaptiveThinking === true) {
 				// Adaptive thinking: Claude decides when and how much to think.
 				params.thinking = { type: "adaptive", display };
-				if (options.effort) {
-					// The Anthropic SDK types can lag newly supported effort values such as "xhigh".
-					params.output_config =
-						options.effort === "xhigh"
-							? ({ effort: options.effort } as unknown as NonNullable<
-									MessageCreateParamsStreaming["output_config"]
-								>)
-							: { effort: options.effort };
+				const effort = initialEffort ?? options.effort;
+				if (effort) {
+					params.output_config = { effort };
 				}
 			} else {
 				// Budget-based thinking for older models
@@ -1094,13 +1169,15 @@ function normalizeToolCallId(id: string): string {
 }
 
 function convertMessages(
-	messages: Message[],
+	messages: ContextMessage[],
 	model: Model<"anthropic-messages">,
 	isOAuthToken: boolean,
 	cacheControl?: CacheControlEphemeral,
 	allowEmptySignature = false,
-): MessageParam[] {
-	const params: MessageParam[] = [];
+	initialEffort?: AnthropicEffort,
+): AnthropicMessageParam[] {
+	const params: AnthropicMessageParam[] = [];
+	let activeEffort = initialEffort;
 
 	// Transform messages for cross-provider compatibility
 	const transformedMessages = transformMessages(messages, model, normalizeToolCallId);
@@ -1109,6 +1186,13 @@ function convertMessages(
 		const msg = transformedMessages[i];
 
 		if (msg.role === "user") {
+			const effort = initialEffort === undefined ? undefined : getMessageEffort(msg, model);
+			if (effort !== undefined && effort !== activeEffort) {
+				// Only new input triggers a control. Putting it before the user also
+				// leaves the conversation cache breakpoint on real content.
+				params.push({ role: "system", content: [], output_config: { effort } });
+				activeEffort = effort;
+			}
 			if (typeof msg.content === "string") {
 				if (msg.content.trim().length > 0) {
 					params.push({
@@ -1165,11 +1249,11 @@ function convertMessages(
 						});
 						continue;
 					}
-					if (block.thinking.trim().length === 0) continue;
 					// If thinking signature is missing/empty (e.g., from aborted stream),
 					// convert to plain text for Anthropic. Some compatible providers emit
 					// and accept empty signatures, so let marked models preserve the block.
 					if (!block.thinkingSignature || block.thinkingSignature.trim().length === 0) {
+						if (block.thinking.trim().length === 0) continue;
 						blocks.push(
 							allowEmptySignature
 								? {
@@ -1185,7 +1269,7 @@ function convertMessages(
 					} else {
 						blocks.push({
 							type: "thinking",
-							thinking: sanitizeSurrogates(block.thinking),
+							thinking: block.thinking,
 							signature: block.thinkingSignature,
 						});
 					}

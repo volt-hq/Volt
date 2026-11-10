@@ -487,9 +487,20 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 	parameters: TParameters;
 }
 
+/**
+ * A provider-request message. `thinkingLevel` snapshots the selection when new input
+ * entered the conversation, not the current selection. Providers with per-message
+ * effort can use it without rewriting earlier turns. It is request-only metadata:
+ * keep it when transforming input, but do not persist it as part of a Message.
+ */
+export type ContextMessage =
+	| (UserMessage & { thinkingLevel?: ModelThinkingLevel })
+	| AssistantMessage
+	| ToolResultMessage;
+
 export interface Context {
 	systemPrompt?: string;
-	messages: Message[];
+	messages: ContextMessage[];
 	tools?: Tool[];
 }
 

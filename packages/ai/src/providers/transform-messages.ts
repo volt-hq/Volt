@@ -1,4 +1,4 @@
-import type { Api, AssistantMessage, ImageContent, Message, Model, TextContent, ToolCall } from "../types.ts";
+import type { Api, AssistantMessage, ContextMessage, ImageContent, Model, TextContent, ToolCall } from "../types.ts";
 
 const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
@@ -23,7 +23,10 @@ function replaceImagesWithPlaceholder(content: (TextContent | ImageContent)[], p
 	return result;
 }
 
-function downgradeUnsupportedImages<TApi extends Api>(messages: Message[], model: Model<TApi>): Message[] {
+function downgradeUnsupportedImages<TApi extends Api>(
+	messages: ContextMessage[],
+	model: Model<TApi>,
+): ContextMessage[] {
 	if (model.input.includes("image")) {
 		return messages;
 	}
@@ -55,10 +58,10 @@ function downgradeUnsupportedImages<TApi extends Api>(messages: Message[], model
  * becomes plain text or is dropped when it is opaque.
  */
 export function transformMessages<TApi extends Api>(
-	messages: Message[],
+	messages: ContextMessage[],
 	model: Model<TApi>,
 	normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
-): Message[] {
+): ContextMessage[] {
 	// Map original tool call IDs to normalized IDs so their results follow.
 	const toolCallIdMap = new Map<string, string>();
 	return downgradeUnsupportedImages(messages, model).map((msg) => {

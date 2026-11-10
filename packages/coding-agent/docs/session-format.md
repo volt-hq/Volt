@@ -235,6 +235,8 @@ The model context of the active branch is built from the root to the leaf:
 
 `buildContext(state, { convertToLlm, transformContext? })` turns that context into provider messages: it applies `transformContext`, converts the messages with `convertToLlm` (coding-agent's converts bash executions, custom messages, and summaries to user messages and drops bash executions excluded from context), and applies the replay policy of `@hansjm10/volt-ai`.
 
+For Anthropic requests, `withThinkingLevels(state)` adds request-only `thinkingLevel` snapshots to input messages before context hooks and conversion. `buildContext` can do the same with `thinkingLevels: true`. Each snapshot comes from the thinking selection where that input entered the branch; changes during an assistant/tool loop wait for new input. A compaction summary inherits the retained turn's effective level, including when its original user message was summarized away. Context hooks and custom converters should preserve this field when copying or rewriting input. `ContextMessage` in `volt-ai` describes the optional request metadata; persisted `Message` entries and protocol frames do not acquire it.
+
 ## Lineage
 
 A session created by fork, clone, or import starts with a `forked_from` host entry, at ordinal 1 with `parentId: null`. A log holds at most one, and only there.

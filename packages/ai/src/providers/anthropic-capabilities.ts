@@ -1,6 +1,6 @@
 /**
- * Claude request capabilities, derived from the model version so that new Claude releases work
- * without a code change. A Claude model without a recognizable version counts as the newest release.
+ * General Claude request capabilities derive from the model version so that new releases work
+ * without a code change. Per-message effort is beta and uses a separate explicit allowlist.
  *
  * - Claude 4.6 and later take adaptive thinking. Claude 4.7 and later reject `budget_tokens`; the 4.6
  *   models accept both and use adaptive, which Anthropic recommends.
@@ -68,6 +68,27 @@ export function supportsAnthropicSamplingParameters(modelId: string, modelName?:
 /** Whether a Claude model accepts the xhigh and max effort levels. Undefined for other models. */
 export function supportsAnthropicXhighEffort(modelId: string, modelName?: string): boolean | undefined {
 	return isClaudeAtLeast(modelId, 4, 7, modelName);
+}
+
+/** Only documented Claude API models, including their dated snapshots, support this beta. */
+const PER_MESSAGE_EFFORT_MODEL = /^claude-(?:(?:fable|mythos)-5-[12]|opus-5(?:-5)?|(?:sonnet|haiku)-5-5)(?:-\d{8})?$/;
+
+/** Do not infer beta support from adaptive thinking or a proxy's Claude-compatible API. */
+export function supportsAnthropicPerMessageEffort(model: Model<"anthropic-messages">): boolean {
+	if (model.provider !== "anthropic" || !PER_MESSAGE_EFFORT_MODEL.test(model.id)) return false;
+	try {
+		const url = new URL(model.baseUrl);
+		return (
+			url.origin === "https://api.anthropic.com" &&
+			url.pathname === "/" &&
+			!url.username &&
+			!url.password &&
+			!url.search &&
+			!url.hash
+		);
+	} catch {
+		return false;
+	}
 }
 
 /**
