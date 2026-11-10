@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { getModel } from "../src/models.ts";
 import {
 	getAnthropicThinkingMode,
 	isClaudeAtLeast,
+	supportsAnthropicPerMessageEffort,
 	supportsAnthropicSamplingParameters,
 	supportsAnthropicXhighEffort,
 } from "../src/providers/anthropic-capabilities.ts";
@@ -82,6 +84,70 @@ describe("Claude 4.7 capabilities", () => {
 	it("does not classify non-Claude models", () => {
 		expect(supportsAnthropicSamplingParameters("gpt-5.5")).toBeUndefined();
 		expect(supportsAnthropicXhighEffort("gpt-5.5")).toBeUndefined();
+	});
+});
+
+describe("Anthropic per-message effort capability", () => {
+	const model = getModel("anthropic", "claude-fable-5-2");
+
+	it.each([
+		"claude-fable-5-2",
+		"claude-mythos-5-2",
+		"claude-fable-5-1",
+		"claude-mythos-5-1",
+		"claude-opus-5-5",
+		"claude-opus-5",
+		"claude-sonnet-5-5",
+		"claude-haiku-5-5",
+	])("accepts the documented alias and date snapshots of %s", (id) => {
+		expect(supportsAnthropicPerMessageEffort({ ...model, id })).toBe(true);
+		expect(supportsAnthropicPerMessageEffort({ ...model, id: `${id}-20261101` })).toBe(true);
+	});
+
+	it.each([
+		"claude-opus-4-6",
+		"claude-opus-4-8",
+		"claude-fable-5",
+		"claude-mythos-5",
+		"claude-mythos-preview",
+		"claude-sonnet-5",
+		"claude-opus-6",
+		"claude-fable-5-3",
+		"claude-opus-5-6",
+		"claude-opus-5-50",
+		"claude-opus-5-5-preview",
+		"claude-opus-5-latest",
+		"claude-opus-5.5",
+		"claude-opus-5-20261101-extra",
+		"anthropic/claude-opus-5-5",
+		"us.anthropic.claude-opus-5-5-v1:0",
+	])("does not infer support for %s", (id) => {
+		expect(supportsAnthropicPerMessageEffort({ ...model, id })).toBe(false);
+	});
+
+	it.each([
+		"https://proxy.example/anthropic",
+		"https://api.anthropic.com.proxy.example",
+		"https://api.anthropic.com/proxy",
+		"https://api.anthropic.com?upstream=proxy",
+		"https://api.anthropic.com#proxy",
+		"https://user@api.anthropic.com",
+		"https://api.anthropic.com:8443",
+		"http://api.anthropic.com",
+		"not a URL",
+	])("rejects non-direct or ambiguous endpoints: %s", (baseUrl) => {
+		expect(supportsAnthropicPerMessageEffort({ ...model, baseUrl })).toBe(false);
+	});
+
+	it.each(["github-copilot", "amazon-bedrock", "google-vertex", "cloudflare-ai-gateway", "custom"])(
+		"does not enable the beta for provider %s even with a direct-looking URL",
+		(provider) => {
+			expect(supportsAnthropicPerMessageEffort({ ...model, provider })).toBe(false);
+		},
+	);
+
+	it("accepts the direct endpoint with a trailing slash", () => {
+		expect(supportsAnthropicPerMessageEffort({ ...model, baseUrl: "https://api.anthropic.com/" })).toBe(true);
 	});
 });
 

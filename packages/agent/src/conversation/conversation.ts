@@ -105,7 +105,7 @@ import {
 	type ConversationWorkFinished,
 	type ConversationWorkStart,
 } from "./api.ts";
-import { buildContext } from "./context.ts";
+import { buildContext, withThinkingLevels } from "./context.ts";
 import { type ConversationActivityKind, OperationCoordinator, type OperationLease } from "./coordinator.ts";
 import {
 	type ClientInputRecord,
@@ -192,6 +192,8 @@ interface DispatchStart {
 }
 
 interface PreparedRequest {
+	/** Whether input carried historical thinking through the context pipeline. */
+	readonly thinkingLevels: boolean;
 	/** The fold's branch messages the loop's provider context was built from. */
 	readonly messages: readonly AgentMessage[];
 	readonly tools: readonly AgentTool[] | undefined;
@@ -1736,6 +1738,7 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 					: "continuation";
 		run.retryRequest = false;
 		run.request = {
+			thinkingLevels: state.context.model?.provider === "anthropic",
 			messages: state.context.messages,
 			tools,
 			configurationEpoch: this.configurationEpoch,
@@ -1756,9 +1759,11 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 	/** The branch messages a turn requests with: without a length-stopped message its retry leaves out. */
 	private requestMessages(run: TurnRun, state: ConversationState): readonly AgentMessage[] {
 		const entry = run.dropEntryId === undefined ? undefined : state.tree.byId.get(run.dropEntryId);
-		if (!entry || !isCoreLogEntry(entry) || entry.type !== "message") return state.context.messages;
-		const dropped = entry.payload.message;
-		return state.context.messages.filter((message) => message !== dropped);
+		const dropped = entry && isCoreLogEntry(entry) && entry.type === "message" ? entry.payload.message : undefined;
+		const messages = dropped
+			? state.context.messages.filter((message) => message !== dropped)
+			: state.context.messages;
+		return state.context.model?.provider === "anthropic" ? withThinkingLevels(state, messages) : messages;
 	}
 
 	private async resolveSystemPrompt(signal: AbortSignal): Promise<string> {
@@ -1776,19 +1781,32 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 			const prepared = run.request;
 			let messages = context.messages;
 			let basis = prepared?.messages ?? this.foldState.context.messages;
+			let thinkingLevels = prepared?.thinkingLevels ?? false;
 			for (;;) {
 				const state = this.foldState;
-				if (state.context.messages !== basis) {
-					const appended = isPrefix(basis, state.context.messages)
-						? state.context.messages.slice(basis.length)
-						: undefined;
+				const needsThinkingLevels = state.context.model?.provider === "anthropic";
+				if (state.context.messages !== basis || (needsThinkingLevels && !thinkingLevels)) {
+					const appended =
+						needsThinkingLevels === thinkingLevels && isPrefix(basis, state.context.messages)
+							? state.context.messages.slice(basis.length)
+							: undefined;
 					messages = appended
-						? [...messages, ...(await this.convertMessages(cloneAgentMessages(appended)))]
+						? [
+								...messages,
+								...(await this.convertMessages(
+									cloneAgentMessages(
+										state.context.model?.provider === "anthropic"
+											? withThinkingLevels(state, appended)
+											: appended,
+									),
+								)),
+							]
 						: await buildContext(
 								{ ...state, context: { ...state.context, messages: this.requestMessages(run, state) } },
 								this.contextOptions(signal),
 							);
 					basis = state.context.messages;
+					thinkingLevels = needsThinkingLevels;
 					if (signal?.aborted) return createAbortedAssistantStream(model);
 					continue;
 				}

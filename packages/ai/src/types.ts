@@ -487,9 +487,22 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 	parameters: TParameters;
 }
 
+/**
+ * A provider-request message. `thinkingLevel` snapshots the selection at an explicit
+ * input boundary, or the effective level represented by a historical compaction anchor.
+ * Synthetic reminders and shell output stay unannotated and inherit prior effort.
+ * Supported Anthropic simple requests use the latest rendered snapshot for thinking
+ * mode (including off), not a newer request-level selection awaiting input. Keep this
+ * metadata when transforming input, but do not persist it as part of a Message.
+ */
+export type ContextMessage =
+	| (UserMessage & { thinkingLevel?: ModelThinkingLevel })
+	| AssistantMessage
+	| ToolResultMessage;
+
 export interface Context {
 	systemPrompt?: string;
-	messages: Message[];
+	messages: ContextMessage[];
 	tools?: Tool[];
 }
 

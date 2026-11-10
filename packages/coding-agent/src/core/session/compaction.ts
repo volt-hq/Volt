@@ -7,17 +7,18 @@
  */
 
 import { join } from "node:path";
-import type {
-	AgentMessage,
-	AgentTool,
-	Conversation,
-	ConversationCompactionCause,
-	ConversationCompactionCheck,
-	ConversationCompactionDecision,
-	ConversationCompactionRequest,
-	ConversationCompactionSummary,
-	StreamFn,
-	ThinkingLevel,
+import {
+	type AgentMessage,
+	type AgentTool,
+	type Conversation,
+	type ConversationCompactionCause,
+	type ConversationCompactionCheck,
+	type ConversationCompactionDecision,
+	type ConversationCompactionRequest,
+	type ConversationCompactionSummary,
+	type StreamFn,
+	type ThinkingLevel,
+	withThinkingLevels,
 } from "@hansjm10/volt-agent-core";
 import { type Api, applyReplayPolicy, estimateToolDefinitionTokens, type Model, type Tool } from "@hansjm10/volt-ai";
 import type { ActiveCompaction, AgentSessionConfig, AgentSessionEvent, CompactionReason } from "../agent-session.ts";
@@ -544,7 +545,9 @@ export class SessionCompaction {
 			const generated = await this.generate(
 				preparation,
 				model,
-				branchMessages,
+				model.provider === "anthropic"
+					? withThinkingLevels(this.host.sessionManager.getConversationState(), branchMessages)
+					: branchMessages,
 				prepared.retainedCount,
 				prepared,
 				{ stream: request.stream, signal: request.signal },

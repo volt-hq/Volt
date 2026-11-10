@@ -356,7 +356,12 @@ export async function compactContext(
 								...context,
 								messages: [
 									...context.messages,
-									{ role: "user", content: instruction(target), timestamp: instructionTimestamp },
+									{
+										role: "user",
+										content: instruction(target),
+										timestamp: instructionTimestamp,
+										...(model.provider === "anthropic" ? { thinkingLevel: reasoning } : {}),
+									},
 								],
 							}),
 							// Classify overflow before validating a candidate, including zero-output length stops.
