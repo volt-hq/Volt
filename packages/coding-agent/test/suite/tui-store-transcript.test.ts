@@ -404,11 +404,11 @@ describe("the TUI follows its client's subscription", () => {
 			await session.prompt("a prompt in the first conversation");
 			await waitForScreen(tui, "a prompt in the first conversation");
 
-			// Rendering waits while the client moves, and resumes once the conversation it moved to shows.
+			// The loading screen covers the conversation while the client moves: rendering goes on, for its animation.
 			const renderer = (tui.mode as unknown as { renderer: { suspendRendering(): unknown } }).renderer;
 			const suspend = vi.spyOn(renderer, "suspendRendering");
 			await access.handleClearCommand();
-			expect(suspend).toHaveBeenCalledOnce();
+			expect(suspend).not.toHaveBeenCalled();
 
 			const target = harness.connector.conversation;
 			expect(target.id).not.toBe(harness.startup.id);
@@ -425,6 +425,21 @@ describe("the TUI follows its client's subscription", () => {
 			await waitForScreen(tui, "a prompt in the new conversation", "reply in the new conversation");
 		},
 	);
+
+	it("holds rendering while a move without the loading screen runs, until its conversation shows", async () => {
+		const { harness, tui, access, session } = await start();
+		await session.prompt("a prompt in the first conversation");
+		await waitForScreen(tui, "a prompt in the first conversation");
+		const stored = await harness.storeSession("stored session");
+
+		const renderer = (tui.mode as unknown as { renderer: { suspendRendering(): unknown } }).renderer;
+		const suspend = vi.spyOn(renderer, "suspendRendering");
+		expect((await tui.resume(stored)).cancelled).toBe(false);
+		expect(suspend).toHaveBeenCalledOnce();
+		expect(access.sessionRenderSuspension).toBeUndefined();
+		expect(tui.store.conversation).not.toBe(harness.startup.id);
+		await vi.waitFor(async () => expect(await screen(tui)).not.toContain("a prompt in the first conversation"));
+	});
 
 	it("ends when its conversation loses its log, with the host's reason and the unsent draft", async () => {
 		const { harness, access } = await start();

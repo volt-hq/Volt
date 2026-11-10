@@ -85,6 +85,12 @@ const DAEMON_START_EXTRA_WAIT_MS = 90_000;
 const DAEMON_START_POLL_MS = 500;
 /** How long a connection its host ended shutting down waits for the daemon to announce its shutdown. */
 const SHUTDOWN_ANNOUNCEMENT_WAIT_MS = 1_000;
+/**
+ * How long a daemon that serves the TUI is waited for to finish starting: offline, its phone
+ * transport waits for its relay for as long as that lasts.
+ */
+const DAEMON_STARTED_WAIT_MS = 10_000;
+const DAEMON_STARTED_POLL_MS = 200;
 
 /** Refusals of an open that another try does not change. */
 const FINAL_OPEN_REFUSALS = new Set([
@@ -259,6 +265,42 @@ export class DaemonConnector implements ConversationConnector {
 		const deadline = Date.now() + SHUTDOWN_ANNOUNCEMENT_WAIT_MS;
 		while (!announced() && Date.now() < deadline) await delay(50);
 		return announced();
+	}
+
+	/**
+	 * Resolves once the daemon the TUI is connected to finished starting. It
+	 * answers its TUIs and opens their conversations first, then brings its
+	 * phone transport up: its status says `starting` until the transport is
+	 * ready, or will not come up (no binding, a failed endpoint). The wait ends
+	 * after 10 s whatever the daemon does, a transport still starting or a
+	 * status left unanswered, and a daemon the connector cannot ask is not
+	 * waited for.
+	 */
+	async started(options: { readonly onStatus?: (status: string | undefined) => void } = {}): Promise<void> {
+		let waiting = false;
+		let over = false;
+		const transportStarted = async (): Promise<void> => {
+			for (;;) {
+				const control = this.control;
+				if (over || this.stopped || control?.connectionState !== "connected") return;
+				// A request has no timeout of its own: the wait's does for it.
+				const status = await control.request({ type: "status" }).catch(() => undefined);
+				if (over || status?.type !== "status_result" || status.remoteTransport?.state !== "starting") return;
+				if (!waiting) options.onStatus?.("Starting the Volt daemon's phone transport");
+				waiting = true;
+				await delay(DAEMON_STARTED_POLL_MS);
+			}
+		};
+		const gaveUp = Promise.withResolvers<void>();
+		const timer = setTimeout(gaveUp.resolve, DAEMON_STARTED_WAIT_MS);
+		timer.unref();
+		try {
+			await Promise.race([transportStarted(), gaveUp.promise]);
+		} finally {
+			over = true;
+			clearTimeout(timer);
+			if (waiting) options.onStatus?.(undefined);
+		}
 	}
 
 	stopServing(): void {

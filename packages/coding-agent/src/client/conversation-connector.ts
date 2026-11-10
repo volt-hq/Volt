@@ -155,6 +155,14 @@ export interface ConversationConnector {
 	 * after which the client quits).
 	 */
 	hostRestarting?(): Promise<boolean>;
+	/**
+	 * Resolves once the host of the conversation the client opened finished
+	 * starting, where it serves conversations before it has: a daemon brings
+	 * its phone transport up after it answers its TUIs. `onStatus` hears what
+	 * that waits for. It never rejects, and gives up on a host that does not
+	 * finish.
+	 */
+	started?(options?: { readonly onStatus?: (status: string | undefined) => void }): Promise<void>;
 	/** Open `target` for the client: the transport its host attaches the client there on. Rejects when it cannot. */
 	open(target: ConnectorTarget, options?: ConnectorOpenOptions): Promise<OpenedConversation>;
 	/** The client quits, or the conversation it shows lost its log: the connector opens nothing more for it. */

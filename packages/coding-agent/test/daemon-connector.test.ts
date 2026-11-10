@@ -23,7 +23,12 @@ import type { ProtocolClient } from "../src/client/protocol-client.ts";
 import { VERSION } from "../src/config.ts";
 import * as sessionMetadata from "../src/core/session-manager.ts";
 import { getDefaultSessionDirPath, SessionManager } from "../src/core/session-manager.ts";
-import type { ControlRequest, ConversationOpenTarget, WorkerSpawnOptions } from "../src/daemon/control-protocol.ts";
+import {
+	type ControlRequest,
+	type ConversationOpenTarget,
+	PROTOCOL_VERSION,
+	type WorkerSpawnOptions,
+} from "../src/daemon/control-protocol.ts";
 import { startControlServer } from "../src/daemon/control-server.ts";
 import { probeDaemon } from "../src/daemon/spawn.ts";
 import { getWorktreesRoot } from "../src/daemon/worktree-manager.ts";
@@ -410,5 +415,153 @@ describe("the daemon connector against a daemon of another version (D7)", () => 
 			`The Volt daemon runs 0.0.0-other; this terminal runs ${VERSION}.`,
 		);
 		expect(daemon.requests.map((request) => request.type)).toEqual(["status", "shutdown"]);
+	});
+});
+
+describe("the daemon connector's wait for a daemon that has not finished starting", () => {
+	const WAITING = "Starting the Volt daemon's phone transport";
+	type Transport = { state: "starting" | "ready" | "degraded" | "unavailable"; unanswered?: boolean };
+
+	/**
+	 * A connector with its control connection to a daemon of this version, whose status reports
+	 * `transport` as its phone transport, or stays `unanswered`: `statuses` counts how often it was asked.
+	 */
+	async function connected(transport: Transport): Promise<{ tui: DaemonConnector; statuses(): number }> {
+		const endpoint = createTestSocketEndpoint("volt-connector-started");
+		cleanups.push(endpoint.cleanup);
+		let statuses = 0;
+		const server = await startControlServer({
+			socketPath: endpoint.socketPath,
+			version: VERSION,
+			handlers: {
+				onRequest: (connection, request) => {
+					if (request.type !== "status") {
+						connection.send({ type: "ok", id: request.id });
+						return;
+					}
+					statuses++;
+					if (transport.unanswered) return;
+					connection.send({
+						type: "status_result",
+						id: request.id,
+						version: VERSION,
+						protocolVersion: PROTOCOL_VERSION,
+						pid: 4242,
+						startedAtMs: 1,
+						environment: { source: "inherited", reason: "test" },
+						phoneConnections: 0,
+						remoteTransport: { state: transport.state },
+						workspaces: [],
+						clients: [],
+						revokedClients: [],
+						remotePolicy: { allowTools: null, detachedRuntimeTtlMs: 1_800_000 },
+						keepAwake: { enabled: false, state: "disabled" },
+						workers: [],
+					});
+				},
+			},
+		});
+		cleanups.push(() => server.close());
+		const ensured = { healthy: true, state: "healthy" as const, socketPath: endpoint.socketPath, spawned: false };
+		const tui = new DaemonConnector({
+			agentDir: dirname(endpoint.socketPath),
+			startup: { target: { kind: "new" }, cwd: process.cwd() },
+			spawn: spawnOptions(process.cwd()),
+			daemon: {
+				ensure: async () => ensured,
+				probe: async () => ensured,
+				waitForExit: async () => "exited",
+				isServiceProcess: async () => false,
+			},
+		});
+		cleanups.push(() => tui.dispose());
+		// The control connection an open makes, without a conversation to open.
+		await (tui as unknown as { connect(options: object): Promise<unknown> }).connect({});
+		return { tui, statuses: () => statuses };
+	}
+
+	it.each(["ready", "degraded", "unavailable"] as const)(
+		"does not wait for a daemon whose phone transport is %s",
+		async (state) => {
+			const { tui, statuses } = await connected({ state });
+			const onStatus = vi.fn();
+			await tui.started({ onStatus });
+			expect(statuses()).toBe(1);
+			expect(onStatus).not.toHaveBeenCalled();
+		},
+	);
+
+	it("waits while the phone transport starts, saying so, until it is ready", async () => {
+		const transport: Transport = { state: "starting" };
+		const { tui, statuses } = await connected(transport);
+		const onStatus = vi.fn();
+		let settled = false;
+		const waiting = tui.started({ onStatus }).then(() => {
+			settled = true;
+		});
+		await vi.waitFor(() => expect(statuses()).toBeGreaterThan(2), { timeout: 5_000 });
+		expect(settled).toBe(false);
+		expect(onStatus.mock.calls).toEqual([[WAITING]]);
+
+		transport.state = "ready";
+		await waiting;
+		expect(onStatus.mock.calls).toEqual([[WAITING], [undefined]]);
+	});
+
+	it("gives up on a phone transport still starting after 10 s", async () => {
+		const transport: Transport = { state: "starting" };
+		const { tui } = await connected(transport);
+		const onStatus = vi.fn();
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			const waiting = tui.started({ onStatus });
+			await vi.waitFor(() => expect(onStatus).toHaveBeenCalledWith(WAITING), { timeout: 5_000 });
+			await vi.advanceTimersByTimeAsync(10_000);
+			await waiting;
+			expect(transport.state).toBe("starting");
+			expect(onStatus).toHaveBeenLastCalledWith(undefined);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("gives up after 10 s on a connected daemon that does not answer its status", async () => {
+		const { tui, statuses } = await connected({ state: "starting", unanswered: true });
+		const onStatus = vi.fn();
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			let settled = false;
+			const waiting = tui.started({ onStatus }).then(() => {
+				settled = true;
+			});
+			await vi.waitFor(() => expect(statuses()).toBe(1), { timeout: 5_000 });
+			expect(settled).toBe(false);
+			await vi.advanceTimersByTimeAsync(10_000);
+			await waiting;
+			expect(statuses()).toBe(1);
+			expect(onStatus).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("does not wait without a control connection, or once the TUI stopped", async () => {
+		const never = new DaemonConnector({
+			agentDir: tmpdir(),
+			startup: { target: { kind: "new" }, cwd: process.cwd() },
+			spawn: spawnOptions(process.cwd()),
+			daemon: {
+				ensure: async () => Promise.reject(new Error("never asked")),
+				probe: async () => Promise.reject(new Error("never asked")),
+				waitForExit: async () => "exited",
+				isServiceProcess: async () => false,
+			},
+		});
+		await never.started();
+
+		const { tui, statuses } = await connected({ state: "starting" });
+		tui.stopServing();
+		await tui.started();
+		expect(statuses()).toBe(0);
 	});
 });
