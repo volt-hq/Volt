@@ -42,12 +42,6 @@ export function sessionUsage(session: AgentSession): UsageTotals {
 	return totals;
 }
 
-export function formatTokens(value: number): string {
-	if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-	if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
-	return String(value);
-}
-
 export function formatCost(value: number): string {
 	return `$${value.toFixed(value < 0.1 ? 3 : 2)}`;
 }
@@ -55,12 +49,6 @@ export function formatCost(value: number): string {
 export function formatDuration(ms: number): string {
 	const seconds = Math.round(ms / 1000);
 	return seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`;
-}
-
-export function usageText(usage: UsageTotals): string {
-	const prompt = usage.input + usage.cacheRead + usage.cacheWrite;
-	const cached = prompt > 0 ? `, ${Math.round((usage.cacheRead / prompt) * 100)}% cached` : "";
-	return `${formatCost(usage.cost)} (${formatTokens(prompt)} in${cached}, ${formatTokens(usage.output)} out)`;
 }
 
 /** Runs tasks with bounded concurrency. Tasks must not throw. */

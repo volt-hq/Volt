@@ -1,7 +1,7 @@
 /**
  * The swarm review engine's pure parts: how it packs the host's hunks into shards, maps verified findings onto the
- * host's report shapes, resolves its options, and reads base files through the host. The engine as a whole runs in
- * test/suite/swarm-review-engine.test.ts.
+ * host's report shapes, resolves its options, writes its report, and reads base files through the host. The engine
+ * as a whole runs in test/suite/swarm-review-engine.test.ts.
  */
 
 import type { ReviewEngineChangedFile, ReviewEngineContext } from "@hansjm10/volt-coding-agent";
@@ -9,10 +9,17 @@ import { Check } from "typebox/value";
 import { describe, expect, it } from "vitest";
 import { createBaseReader } from "../../../.volt/extensions/swarm-review/base.ts";
 import { resolveOptions } from "../../../.volt/extensions/swarm-review/index.ts";
-import type { ReportedFinding } from "../../../.volt/extensions/swarm-review/report.ts";
+import { buildReport, type ReportedFinding, reportSummary } from "../../../.volt/extensions/swarm-review/report.ts";
 import { buildSubmission, candidateFor, slug } from "../../../.volt/extensions/swarm-review/submit.ts";
 import { MAX_SHARD_BYTES, packShards } from "../../../.volt/extensions/swarm-review/target.ts";
-import type { Candidate, Cluster, SwarmState } from "../../../.volt/extensions/swarm-review/types.ts";
+import type {
+	Candidate,
+	Cluster,
+	PassState,
+	SwarmSetup,
+	SwarmState,
+	WorkerState,
+} from "../../../.volt/extensions/swarm-review/types.ts";
 import { ReviewCandidateReportSchema, ReviewVerificationReportSchema } from "../src/core/review-report.ts";
 
 function file(
@@ -322,7 +329,7 @@ describe("the result the engine submits", () => {
 describe("the options of a run", () => {
 	const engine = (
 		params: Record<string, string | boolean | number>,
-		controls: { focus?: string; scope?: string[] } = {},
+		controls: { focus?: string; scope?: string[]; effort?: string } = {},
 		tools: string[] = [],
 	) =>
 		({
@@ -343,6 +350,7 @@ describe("the options of a run", () => {
 			fresh: false,
 			scope: [],
 		});
+		expect(resolveOptions(engine({}), {})).not.toHaveProperty("stragglerGrace");
 		expect(
 			resolveOptions(engine({}), { workers: 12, waveSize: 4, workerThinking: "low", verifierConcurrency: 3 }),
 		).toMatchObject({
@@ -356,24 +364,44 @@ describe("the options of a run", () => {
 
 	it("lets a parameter win over a setting, and keeps the wave within the workers", () => {
 		expect(
-			resolveOptions(
-				engine({
-					workers: 3,
-					waveSize: 20,
-					concurrency: 2,
-					thinking: "high",
-					fresh: true,
-					stragglerGrace: 40,
-				}),
-				{ workers: 12 },
-			),
+			resolveOptions(engine({ workers: 3, waveSize: 20, workerThinking: "high", fresh: true }), { workers: 12 }),
 		).toMatchObject({
 			workers: 3,
 			waveSize: 3,
-			concurrency: 2,
 			thinking: "high",
 			fresh: true,
+		});
+	});
+
+	it("takes concurrency and straggler grace from settings only", () => {
+		expect(resolveOptions(engine({}), { concurrency: 2, verifierConcurrency: 1, stragglerGrace: 40 })).toMatchObject({
+			concurrency: 2,
+			verifierConcurrency: 1,
 			stragglerGrace: 40,
+		});
+		expect(resolveOptions(engine({ concurrency: 2, verifierConcurrency: 1, stragglerGrace: 40 }), {})).toMatchObject({
+			concurrency: 10,
+			verifierConcurrency: 6,
+		});
+		expect(resolveOptions(engine({ stragglerGrace: 40 }), {})).not.toHaveProperty("stragglerGrace");
+	});
+
+	it("runs one wave at low effort unless the run sets the workers, and every wave at high effort", () => {
+		expect(resolveOptions(engine({}), {})).toMatchObject({ workers: 30, waveSize: 10, stopWhenSaturated: true });
+		expect(resolveOptions(engine({}, { effort: "low" }), {})).toMatchObject({
+			workers: 10,
+			waveSize: 10,
+			stopWhenSaturated: true,
+		});
+		// Low effort never raises a smaller budget, and an explicit worker count still wins.
+		expect(resolveOptions(engine({}, { effort: "low" }), { workers: 6 })).toMatchObject({ workers: 6, waveSize: 6 });
+		expect(resolveOptions(engine({ workers: 20 }, { effort: "low" }), {})).toMatchObject({
+			workers: 20,
+			waveSize: 10,
+		});
+		expect(resolveOptions(engine({}, { effort: "high" }), {})).toMatchObject({
+			workers: 30,
+			stopWhenSaturated: false,
 		});
 	});
 
@@ -396,10 +424,81 @@ describe("the options of a run", () => {
 			workers: 30,
 			thinking: "max",
 		});
-		expect(resolveOptions(engine({ model: "faux/faux-1", verifier: "" }), {})).toMatchObject({
+		expect(resolveOptions(engine({ workerModel: "faux/faux-1", verifierModel: "" }), {})).toMatchObject({
 			model: "faux/faux-1",
 		});
-		expect(resolveOptions(engine({ verifier: "" }), {})).not.toHaveProperty("verifier");
+		expect(resolveOptions(engine({ verifierModel: "" }), {})).not.toHaveProperty("verifier");
+	});
+});
+
+describe("the report", () => {
+	const usage = (cost: number) => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost });
+	const pass = (cost: number): PassState => ({ status: "done", toolCalls: 0, turns: 1, usage: usage(cost) });
+	const worker = (index: number, cost: number): WorkerState => ({
+		...pass(cost),
+		index,
+		wave: 1,
+		shard: 0,
+		candidates: [],
+		dropped: 0,
+	});
+	const confirmed = cluster({
+		verifiers: [pass(1), pass(1.5)],
+		verdicts: [
+			{ verdict: "confirmed", reason: "Guard returns amount.", findings: [reported()] },
+			{ verdict: "confirmed", reason: "Read the branch.", findings: [reported()] },
+		],
+	});
+	const rejected = cluster({
+		id: "K2",
+		title: "Overflow",
+		outcome: "rejected",
+		verdicts: [
+			{ verdict: "rejected", reason: "Bounded input.", findings: [] },
+			{ verdict: "rejected", reason: "Bounded input.", findings: [] },
+		],
+	});
+	const suppressed = cluster({
+		id: "K3",
+		title: "Old issue",
+		outcome: "suppressed",
+		verdicts: [],
+		suppressedBy: { title: "Old issue", reason: "Intended." },
+	});
+	const setup = {
+		options: { workers: 2, waveSize: 2, thinking: "max", verifierThinking: "high", exec: false },
+		target: {
+			description: "uncommitted changes",
+			scope: [],
+			shards: [{ index: 0, files: ["src/value.ts"], hunkIds: [], partialFiles: [] }],
+			submodules: false,
+		},
+		workerModel: { provider: "faux", id: "worker" },
+		verifierModel: { provider: "faux", id: "verifier" },
+		engine: { target: { controls: { includeOptional: true } } },
+	} as unknown as SwarmSetup;
+
+	it("counts only the outcomes some cluster had, leads the cost with its total, and says how to undo the memory", () => {
+		const run = state([confirmed, rejected, suppressed], {
+			workers: [worker(0, 0.5), worker(1, 0.5)],
+			clusterPasses: [pass(0.25)],
+			waves: [{ wave: 1, workers: 2, candidates: 2, newClusters: 2, clusteringFallback: false }],
+		});
+		const { markdown, findings } = buildReport(setup, run, 65_000, 2);
+		expect(findings).toHaveLength(1);
+		expect(markdown).toContain(": **1 confirmed finding(s)**, 1 rejected, 1 suppressed");
+		expect(markdown).not.toContain("disputed");
+		expect(markdown).not.toContain("uncertain");
+		expect(markdown).toContain("Estimated cost: $3.75 (workers $1.00 · clustering $0.25 · verifiers $2.50) · 1m 5s");
+		expect(markdown).toContain("Rerun with `--fresh` to verify them again.");
+		expect(markdown).toContain("Remembered 2 rejected issue(s) for future reviews; `--fresh` ignores them.");
+	});
+
+	it("summarizes without the outcomes no cluster had", () => {
+		expect(reportSummary(state([]), [])).toBe("0 confirmed finding(s).");
+		expect(reportSummary(state([confirmed, rejected]), [reported()])).toBe(
+			"1 confirmed finding(s), 1 rejected.\n1. [P2] Zero returns the numerator (src/value.ts:2)",
+		);
 	});
 });
 

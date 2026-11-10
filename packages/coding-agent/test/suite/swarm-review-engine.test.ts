@@ -94,6 +94,8 @@ async function setup(
 	const harness = await createHostHarness({
 		whenUnattached: "keep",
 		extensions: [{ manifest: swarmManifest, factory: swarmReview }],
+		// One verifier session at a time, so the faux provider's queue is in order.
+		globalSettings: { extensions: { "swarm-review": { settings: { verifierConcurrency: 1 } } } },
 	});
 	cleanups.push(() => harness.cleanup());
 	const conversation = await harness.openStartup();
@@ -104,15 +106,13 @@ async function setup(
 	return { harness, client, cwd: conversation.cwd, conversation };
 }
 
-/** Options that keep the run to one worker and one session at a time, so the faux provider's queue is in order. */
+/** Options that keep the run to one worker on the faux model; the settings keep verifiers to one at a time. */
 const SEQUENTIAL = {
 	workers: 1,
 	waveSize: 1,
-	concurrency: 1,
-	verifierConcurrency: 1,
-	model: "faux/faux-1",
-	verifier: "faux/faux-1",
-	thinking: "off",
+	workerModel: "faux/faux-1",
+	verifierModel: "faux/faux-1",
+	workerThinking: "off",
 	verifierThinking: "off",
 	fresh: true,
 };
@@ -126,21 +126,29 @@ describe("the swarm review as an engine", () => {
 			remoteSafe: true,
 			targets: ["uncommitted", "branch", "branch_uncommitted", "commit", "pr"],
 		});
+		// Named as the settings they override.
 		expect(Object.keys(engine?.parameters?.properties ?? {})).toEqual([
 			"workers",
 			"waveSize",
-			"concurrency",
-			"model",
-			"thinking",
-			"verifier",
+			"workerModel",
+			"workerThinking",
+			"verifierModel",
 			"verifierThinking",
-			"verifierConcurrency",
-			"stragglerGrace",
 			"fresh",
 		]);
-		// Its models and counts have settings of the extension's, and /swarm-review is gone.
+		// Its models and counts have settings of the extension's, tuning is settings only, and /swarm-review is gone.
 		expect(Object.keys(swarmManifest.settings.properties)).toEqual(
-			expect.arrayContaining(["workerModel", "verifierModel", "workers", "waveSize"]),
+			expect.arrayContaining([
+				"workerModel",
+				"workerThinking",
+				"verifierModel",
+				"verifierThinking",
+				"workers",
+				"waveSize",
+				"concurrency",
+				"verifierConcurrency",
+				"stragglerGrace",
+			]),
 		);
 		expect(conversation.session.extensionRunner.getRegisteredCommands().map((command) => command.name)).not.toContain(
 			"swarm-review",
@@ -295,7 +303,7 @@ describe("the swarm review as an engine", () => {
 		const started = await client.intent("review", {
 			target: "uncommitted",
 			engine: ENGINE,
-			engineParams: { ...SEQUENTIAL, model: "nothing/at-all" },
+			engineParams: { ...SEQUENTIAL, workerModel: "nothing/at-all" },
 		});
 		const workId = (started as { result: { workId: string } }).result.workId;
 		await vi.waitFor(() => expect(getReviewRun(conversation.session.sessionManager, workId)?.status).toBe("failed"));
@@ -304,6 +312,31 @@ describe("the swarm review as an engine", () => {
 		);
 		expect(harness.faux.state.callCount).toBe(0);
 	});
+
+	test.each([
+		{ effort: "standard" as const, workerSessions: 1 },
+		{ effort: "high" as const, workerSessions: 2 },
+	])(
+		"at $effort effort, a wave that finds nothing new runs $workerSessions worker session(s)",
+		async ({ effort, workerSessions }) => {
+			const nothing = () =>
+				fauxAssistantMessage(fauxToolCall("report_findings", { findings: [] }), { stopReason: "toolUse" });
+			const { client, conversation, harness } = await setup([nothing(), nothing()]);
+			const started = await client.intent("review", {
+				target: "uncommitted",
+				engine: ENGINE,
+				effort,
+				engineParams: { ...SEQUENTIAL, workers: 2 },
+			});
+			const workId = (started as { result: { workId: string } }).result.workId;
+			await vi.waitFor(
+				() => expect(getReviewRun(conversation.session.sessionManager, workId)?.status).toBe("completed"),
+				{ timeout: 30_000 },
+			);
+			expect(harness.faux.state.callCount).toBe(workerSessions);
+		},
+		60_000,
+	);
 
 	test("lets verifiers run commands when a client at the host grants bash, in a checkout each reuses once reset", async () => {
 		const toolResults: string[] = [];

@@ -155,7 +155,7 @@ function median(values: number[]): number {
  * Runs one wave. Once most of the wave has finished (at least all but one worker for small waves), a running worker
  * whose own elapsed time exceeds the median finished duration plus a grace period is told to wrap up, and after
  * another grace it is forced to report. Measuring each worker's own elapsed time covers workers that start late
- * (concurrency below the wave size). The grace is half the median, clamped, unless --straggler-grace sets it.
+ * (concurrency below the wave size). The grace is half the median, clamped, unless the stragglerGrace setting sets it.
  */
 export async function runWave(setup: SwarmSetup, state: SwarmState, workers: WorkerState[]): Promise<void> {
 	const { options, signal, target } = setup;
