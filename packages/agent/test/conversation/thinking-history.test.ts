@@ -130,8 +130,52 @@ describe("request-only thinking history", () => {
 					.reverse()
 					.map((message) => (message.role === "user" ? { ...message, content: "redacted" } : message)),
 		});
-		expect(levels(request)).toEqual(["low", "high"]);
+		expect(levels(request)).toEqual([undefined, "high"]);
 		expect(request[1]).toMatchObject({ content: "redacted" });
+	});
+
+	it.each([
+		{ kind: "custom_message", text: "reminder", display: false, array: false },
+		{ kind: "bash", command: "visible", exclude: false },
+		{ kind: "bash", command: "hidden", exclude: true },
+		// The current leaf is the third public entry: append a summary without changing branches.
+		{ kind: "navigate", pick: 3, summary: "branch context" },
+	] satisfies LogOp[])("does not activate pending thinking on synthetic input %j", (synthetic) => {
+		const ops: LogOp[] = [
+			{ kind: "thinking", level: "high" },
+			{ kind: "user", text: "task", array: false },
+			{ kind: "thinking", level: "low" },
+			synthetic,
+			toolTurn,
+			{ kind: "tool_result", pick: 0, isError: false },
+		];
+		const state = fold(buildLog(ops));
+		const annotated = withThinkingLevels(state);
+		expect(annotated[0]).toMatchObject({ role: "user", thinkingLevel: "high" });
+		for (const message of annotated.slice(1)) expect(message).not.toHaveProperty("thinkingLevel");
+		expect(state.context.thinkingLevel).toBe("low");
+		expect(convertToLlm(withThinkingLevels(restore(JSON.parse(JSON.stringify(snapshot(state))))))).toEqual(
+			convertToLlm(annotated),
+		);
+		const compacted = fold(
+			buildLog([
+				...ops,
+				{ kind: "compaction", pick: 1, summary: "checkpoint" },
+				{ kind: "user", text: "next task", array: false },
+			]),
+		);
+		expect(levels(convertToLlm(withThinkingLevels(compacted)))).toEqual(["high", "low"]);
+	});
+
+	it("leaves contexts with only synthetic input unannotated", () => {
+		const state = fold(
+			buildLog([
+				{ kind: "thinking", level: "high" },
+				{ kind: "custom_message", text: "notice", display: true, array: false },
+				{ kind: "bash", command: "visible", exclude: false },
+			]),
+		);
+		expect(levels(convertToLlm(withThinkingLevels(state)))).toEqual([undefined, undefined]);
 	});
 
 	it("uses only the selected branch's thinking changes", () => {

@@ -48,7 +48,9 @@ Volt sends subscription requests directly to Anthropic with a pinned Claude Code
 
 ### Anthropic per-message effort
 
-For direct Anthropic requests using an API key or Claude Pro/Max OAuth, changing the thinking level applies to the next new input without rewriting earlier turns or changing the request's initial effort. Changing it while tools run waits for new input; tool results alone keep the turn's effort. Resume, forks, and compaction reconstruct the retained turns' selections from the session log.
+For supported direct Anthropic requests using an API key or Claude Pro/Max OAuth, changing the thinking level applies to the next delivered prompt, steering message, or follow-up, including an extension's explicit `sendUserMessage`. While tools run, changes—including switching to or from `off` on models that support it—wait for that input. Tool results, shell output, custom reminders, and branch summaries inherit the existing effort rather than activating a pending selection.
+
+Resume, forks, and compaction reconstruct the retained turns' selections from the session log. The provider ignores inputs that become empty after text sanitization when selecting effort or emitting controls. Effort-only changes preserve earlier turns and the initial effort; actually turning thinking on or off changes the mode and can invalidate the cache.
 
 This uses Anthropic's [per-message effort beta](https://platform.claude.com/docs/en/build-with-claude/effort#change-effort-mid-conversation) on Claude Fable 5.2/5.1, Mythos 5.2/5.1, Opus 5.5/5, Sonnet 5.5, and Haiku 5.5, with adaptive thinking enabled. Other models, non-adaptive thinking, proxies, and cloud endpoints retain request-level effort. A model or thinking-mode switch can still invalidate the cache, and compaction replaces the summarized prefix. No thinking-binding overrides or additional thinking betas are enabled.
 

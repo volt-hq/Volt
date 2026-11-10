@@ -488,10 +488,12 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 }
 
 /**
- * A provider-request message. `thinkingLevel` snapshots the selection when new input
- * entered the conversation, not the current selection. Providers with per-message
- * effort can use it without rewriting earlier turns. It is request-only metadata:
- * keep it when transforming input, but do not persist it as part of a Message.
+ * A provider-request message. `thinkingLevel` snapshots the selection at an explicit
+ * input boundary, or the effective level represented by a historical compaction anchor.
+ * Synthetic reminders and shell output stay unannotated and inherit prior effort.
+ * Supported Anthropic simple requests use the latest rendered snapshot for thinking
+ * mode (including off), not a newer request-level selection awaiting input. Keep this
+ * metadata when transforming input, but do not persist it as part of a Message.
  */
 export type ContextMessage =
 	| (UserMessage & { thinkingLevel?: ModelThinkingLevel })

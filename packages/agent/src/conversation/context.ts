@@ -60,14 +60,9 @@ export function withThinkingLevels(
 			entry.type === "custom_message" ||
 			(entry.type === "branch_summary" && entry.payload.summary)
 		) {
-			// Only new input advances the effective level, never a tool result or an
-			// assistant response recorded after a setting changed while it streamed.
-			if (
-				entry.type !== "message" ||
-				(entry.payload.message.role !== "assistant" &&
-					entry.payload.message.role !== "toolResult" &&
-					!(entry.payload.message.role === "bashExecution" && entry.payload.message.excludeFromContext))
-			) {
+			// Only an explicit user message activates the selected level. Reminders,
+			// shell output, summaries, and tool continuations are not new input.
+			if (entry.type === "message" && entry.payload.message.role === "user") {
 				effective = selected;
 			}
 			inputs.push({ index, level: effective });
@@ -81,7 +76,7 @@ export function withThinkingLevels(
 	const byMessage = new Map(state.context.messages.map((message, index) => [message, levels[index]]));
 	return messages.map((message) => {
 		const thinkingLevel = byMessage.get(message);
-		return thinkingLevel !== undefined && message.role !== "assistant" && message.role !== "toolResult"
+		return thinkingLevel !== undefined && (message.role === "user" || message.role === "compactionSummary")
 			? { ...message, thinkingLevel }
 			: message;
 	});

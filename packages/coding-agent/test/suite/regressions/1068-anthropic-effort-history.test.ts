@@ -1,7 +1,14 @@
 import type { AgentTool } from "@hansjm10/volt-agent-core";
-import { type Context, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
+import {
+	type Context,
+	fauxAssistantMessage,
+	fauxToolCall,
+	getModel,
+	type SimpleStreamOptions,
+} from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import { streamSimpleAnthropic } from "../../../../ai/src/providers/anthropic.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
@@ -66,6 +73,130 @@ describe("#1068 Anthropic effort history", () => {
 		for (const event of harness.eventsOfType("message_end"))
 			expect(event.message).not.toHaveProperty("thinkingLevel");
 	});
+
+	it.each(["prompt", "steer", "followUp", "sendUserMessage"] as const)(
+		"keeps reminders unannotated until a real %s is delivered",
+		async (delivery) => {
+			let harness: Harness;
+			const tool: AgentTool = {
+				name: "inspect",
+				label: "Inspect",
+				description: "Test tool",
+				parameters: Type.Object({}),
+				execute: async () => {
+					await harness.session.setThinkingLevel("low", { persistDefault: false });
+					await harness.session.sendCustomMessage({
+						customType: "reminder",
+						content: "Keep working.",
+						display: false,
+					});
+					return { content: [{ type: "text", text: "result" }] };
+				},
+			};
+			harness = await anthropicHarness({ tools: [tool] });
+			await harness.session.setThinkingLevel("high", { persistDefault: false });
+			const requests: Context[] = [];
+			harness.setResponses([
+				(context) => {
+					requests.push({ ...context, messages: structuredClone(context.messages) });
+					return fauxAssistantMessage([fauxToolCall("inspect", {})], { stopReason: "toolUse" });
+				},
+				async (context) => {
+					requests.push({ ...context, messages: structuredClone(context.messages) });
+					if (delivery === "sendUserMessage") {
+						await harness.session.sendUserMessage("second", { deliverAs: "followUp" });
+					} else if (delivery !== "prompt") {
+						await harness.session[delivery]("second");
+					}
+					return fauxAssistantMessage("done");
+				},
+				(context) => {
+					requests.push({ ...context, messages: structuredClone(context.messages) });
+					return fauxAssistantMessage("follow-up");
+				},
+			]);
+			await harness.session.prompt("first");
+			if (delivery === "prompt") await harness.session.prompt("second");
+			await harness.session.waitForIdle();
+			expect(requests.map(inputLevels)).toEqual([["high"], ["high", undefined], ["high", undefined, "low"]]);
+			for (const event of harness.eventsOfType("message_end"))
+				expect(event.message).not.toHaveProperty("thinkingLevel");
+			for (const entry of harness.sessionManager.getEntries()) {
+				if (entry.type === "custom_message") expect(entry).not.toHaveProperty("thinkingLevel");
+				if (entry.type === "message") expect(entry.message).not.toHaveProperty("thinkingLevel");
+			}
+		},
+	);
+
+	it.each([
+		{ before: "high", after: "off" },
+		{ before: "off", after: "high" },
+	] as const)(
+		"defers serialized $before → $after mode through a tool loop with reminders",
+		async ({ before, after }) => {
+			let harness: Harness;
+			const target = getModel("anthropic", "claude-opus-5");
+			const tool: AgentTool = {
+				name: "inspect",
+				label: "Inspect",
+				description: "Test tool",
+				parameters: Type.Object({}),
+				execute: async () => {
+					await harness.session.setThinkingLevel(after, { persistDefault: false });
+					await harness.session.sendCustomMessage({
+						customType: "reminder",
+						content: "Continue.",
+						display: false,
+					});
+					return { content: [{ type: "text", text: "result" }] };
+				},
+			};
+			harness = await anthropicHarness({ tools: [tool], models: [{ id: target.id, reasoning: true }] });
+			await harness.session.setThinkingLevel(before, { persistDefault: false });
+			const requests: { context: Context; options: SimpleStreamOptions | undefined }[] = [];
+			const stream = harness.control.getStreamFn();
+			harness.control.setStreamFn((model, context, options) => {
+				requests.push({ context: { ...context, messages: structuredClone(context.messages) }, options });
+				return stream(model, context, options);
+			});
+			harness.setResponses([
+				fauxAssistantMessage([fauxToolCall("inspect", {})], { stopReason: "toolUse" }),
+				fauxAssistantMessage("done"),
+				fauxAssistantMessage("follow-up"),
+			]);
+			await harness.session.prompt("first");
+			await harness.session.prompt("second");
+			expect(requests.map(({ context }) => inputLevels(context))).toEqual([
+				[before],
+				[before, undefined],
+				[before, undefined, after],
+			]);
+
+			const payloads: {
+				thinking?: { type: string };
+				output_config?: { effort: string };
+				messages: { role: string }[];
+			}[] = [];
+			for (const request of requests) {
+				// Exercise the actual Anthropic serializer on the session's captured input.
+				// The hook stops before transport; faux remains the only response provider.
+				await streamSimpleAnthropic(target, request.context, {
+					...request.options,
+					apiKey: "sk-ant-api03-test",
+					onPayload: (payload) => {
+						payloads.push(JSON.parse(JSON.stringify(payload)) as (typeof payloads)[number]);
+						throw new Error("Captured before network");
+					},
+				}).result();
+			}
+			expect(payloads).toHaveLength(3);
+			expect(payloads.map((payload) => payload.thinking?.type)).toEqual(
+				[before, before, after].map((level) => (level === "off" ? "disabled" : "adaptive")),
+			);
+			expect(payloads[1].output_config).toEqual(payloads[0].output_config);
+			expect(payloads[1].messages.filter((message) => message.role === "system")).toEqual([]);
+		},
+	);
 
 	it("restores historical selections from SQLite and copies them into a fork", async () => {
 		const first = await anthropicHarness({ log: "sqlite" });

@@ -195,6 +195,82 @@ describe("Anthropic per-message effort", () => {
 		]);
 	});
 
+	describe.each([
+		{ before: "high", after: "off" },
+		{ before: "off", after: "high" },
+	] as const)("pending $before → $after", ({ before, after }) => {
+		it.each(apiKeys)("keeps mode, controls, and token caps stable until rendered input with %s", async (apiKey) => {
+			const requests = captureRequests();
+			const target = getModel("anthropic", "claude-opus-5");
+			const messages: ContextMessage[] = [
+				user("Earlier", "medium"),
+				{ ...assistant(), model: target.id },
+				user("Inspect", before),
+				{
+					...assistant([
+						{ type: "thinking", thinking: "Reasoned.", thinkingSignature: "signed" },
+						{ type: "toolCall", id: "call_1", name: "read", arguments: {} },
+					]),
+					model: target.id,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_1",
+					toolName: "read",
+					content: [{ type: "text", text: "ok" }],
+					isError: false,
+					timestamp: 3,
+				},
+				user("Automatic reminder"),
+			];
+			const options = { apiKey, maxTokens: 1024, cacheRetention: "short" as const };
+			await streamSimpleAnthropic(
+				target,
+				{ messages },
+				{ ...options, reasoning: before === "off" ? undefined : before },
+			).result();
+			const pending = { ...options, reasoning: after === "off" ? undefined : after };
+			// Even annotated input cannot activate a change if it renders nothing.
+			messages.push(user([{ type: "text", text: "\uD800" }], after));
+			await streamSimpleAnthropic(target, { messages }, pending).result();
+			expect((await refreshPromptCacheAnthropic(target, { messages }, pending)).status).toBe("refreshed");
+			messages.push(user("Next task", after));
+			await streamSimpleAnthropic(target, { messages }, pending).result();
+
+			expect(requests).toHaveLength(4);
+			expect(requests[1].body).toEqual(requests[0].body);
+			expect(requests[2].body).toEqual({ ...requests[0].body, stream: false, max_tokens: 0 });
+			expect(requests[1].headers.get("anthropic-beta")).toBe(requests[0].headers.get("anthropic-beta"));
+			expect(requests[2].headers.get("anthropic-beta")).toBe(requests[0].headers.get("anthropic-beta"));
+			for (const [index, level] of [
+				[0, before],
+				[3, after],
+			] as const) {
+				const payload = requests[index].body;
+				expect(payload.thinking?.type).toBe(level === "off" ? "disabled" : "adaptive");
+				expect(payload.max_tokens).toBe(level === "off" ? 1024 : 17408);
+				expect(payload.output_config).toEqual(level === "off" ? undefined : { effort: "medium" });
+				expect(payload.messages.filter((message) => message.role === "system")).toEqual(
+					level === "off" ? [] : [{ role: "system", content: [], output_config: { effort: "high" } }],
+				);
+				expect(requests[index].headers.get("anthropic-beta")?.split(",") ?? []).toEqual([
+					...(apiKey.includes("oat") ? ["claude-code-20250219", "oauth-2025-04-20"] : []),
+					...(level === "off" ? [] : [beta]),
+				]);
+			}
+		});
+	});
+
+	it("does not emit disabled thinking for a model that forbids it", async () => {
+		const requests = captureRequests();
+		await streamSimpleAnthropic(
+			model,
+			{ messages: [user("Historical off selection", "off")] },
+			defaultOptions,
+		).result();
+		expect(requests[0].body).not.toHaveProperty("thinking");
+	});
+
 	it("uses the earliest rendered annotated input, ignoring blanks, missing snapshots, and off", async () => {
 		const requests = captureRequests();
 		await streamSimpleAnthropic(
@@ -218,6 +294,103 @@ describe("Anthropic per-message effort", () => {
 		expect(requests[0].body.output_config).toEqual({ effort: "medium" });
 		expect(requests[0].body.messages.filter((message) => message.role === "system")).toEqual([]);
 		expect(requests[0].body.messages).toHaveLength(5);
+	});
+
+	it.each([
+		{ name: "high surrogate", content: "\uD800" },
+		{ name: "low surrogate", content: "\uDC00" },
+		{ name: "surrogate text array", content: [{ type: "text", text: "\uD800" }] },
+		{ name: "empty array", content: [] },
+		{ name: "whitespace", content: " \n\t" },
+		{ name: "sanitized whitespace array", content: [{ type: "text", text: " \uDC00\t" }] },
+	] satisfies { name: string; content: ContextUserMessage["content"] }[])(
+		"ignores $name input before the baseline, between inputs, and at the tail",
+		async ({ content }) => {
+			const requests = captureRequests();
+			const clean: Context = {
+				messages: [user("First", "high"), assistant(), user("Inherit"), user("Next", "low")],
+			};
+			const dirty: Context = {
+				messages: [
+					user(content, "max"),
+					...clean.messages.slice(0, 2),
+					user(content, "low"),
+					...clean.messages.slice(2),
+					user(content, "xhigh"),
+				],
+			};
+			const original = structuredClone(dirty);
+			const options = { ...defaultOptions, cacheRetention: "short" as const };
+			await streamSimpleAnthropic(model, clean, options).result();
+			await streamSimpleAnthropic(model, dirty, options).result();
+			expect((await refreshPromptCacheAnthropic(model, dirty, options)).status).toBe("refreshed");
+			expect(requests).toHaveLength(3);
+			expect(requests[1].body).toEqual(requests[0].body);
+			expect(requests[2].body).toEqual({ ...requests[0].body, stream: false, max_tokens: 0 });
+			expect(requests.map((request) => request.headers.get("anthropic-beta"))).toEqual([beta, beta, beta]);
+			expect(requests[1].body.output_config).toEqual({ effort: "high" });
+			expect(requests[1].body.messages.slice(2)).toEqual([
+				{ role: "user", content: "Inherit" },
+				{ role: "system", content: [], output_config: { effort: "low" } },
+				{ role: "user", content: [{ type: "text", text: "Next", cache_control: { type: "ephemeral" } }] },
+			]);
+			expect(dirty).toEqual(original);
+		},
+	);
+
+	it("leaves no dangling control when the last user input sanitizes away after an assistant", async () => {
+		const requests = captureRequests();
+		await streamSimpleAnthropic(
+			model,
+			{ messages: [user("First", "high"), assistant(), user([{ type: "text", text: "\uD800" }], "low")] },
+			defaultOptions,
+		).result();
+		expect(requests[0].body.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+		expect(requests[0].body.output_config).toEqual({ effort: "high" });
+	});
+
+	it("does not enable the effort beta when every annotated input sanitizes away", async () => {
+		const requests = captureRequests();
+		await streamSimpleAnthropic(
+			model,
+			{ messages: [user("\uD800", "high"), user("Unannotated"), user([{ type: "text", text: "\uDC00" }], "max")] },
+			defaultOptions,
+		).result();
+		expect(requests[0].body.messages).toEqual([{ role: "user", content: "Unannotated" }]);
+		expect(requests[0].body.output_config).toEqual({ effort: "low" });
+		expect(requests[0].headers.get("anthropic-beta")).toBeNull();
+	});
+
+	it("keeps valid text and images when neighboring text blocks sanitize away", async () => {
+		const requests = captureRequests();
+		await streamSimpleAnthropic(
+			model,
+			{
+				messages: [
+					user("First", "high"),
+					assistant(),
+					user(
+						[
+							{ type: "text", text: "\uD800" },
+							{ type: "text", text: " keep \uDC00text \uD83D\uDE42 " },
+							{ type: "image", data: "AA==", mimeType: "image/png" },
+						],
+						"low",
+					),
+				],
+			},
+			defaultOptions,
+		).result();
+		expect(requests[0].body.messages.slice(-2)).toEqual([
+			{ role: "system", content: [], output_config: { effort: "low" } },
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: " keep text \uD83D\uDE42 " },
+					{ type: "image", source: { type: "base64", media_type: "image/png", data: "AA==" } },
+				],
+			},
+		]);
 	});
 
 	it("deduplicates mapped effort and preserves annotations through image normalization", async () => {

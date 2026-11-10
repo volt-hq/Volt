@@ -743,16 +743,28 @@ function mapThinkingLevelToEffort(
 	}
 }
 
+type ContextUserMessage = Extract<ContextMessage, { role: "user" }>;
+
+/** The user content that survives rendering; effort decisions must use the same rule. */
+function normalizeUserMessage(message: ContextUserMessage): ContextUserMessage | undefined {
+	if (typeof message.content === "string") {
+		const content = sanitizeSurrogates(message.content);
+		return content.trim().length > 0 ? { ...message, content } : undefined;
+	}
+	const content = message.content.flatMap((block): (TextContent | ImageContent)[] => {
+		if (block.type === "image") return [block];
+		const text = sanitizeSurrogates(block.text);
+		return text.trim().length > 0 ? [{ ...block, text }] : [];
+	});
+	return content.length > 0 ? { ...message, content } : undefined;
+}
+
 /** Only rendered new input can establish or change effort; tool results never do. */
 function getMessageEffort(message: ContextMessage, model: Model<"anthropic-messages">): AnthropicEffort | undefined {
 	if (message.role !== "user" || message.thinkingLevel === undefined || message.thinkingLevel === "off") {
 		return undefined;
 	}
-	const hasInput =
-		typeof message.content === "string"
-			? message.content.trim().length > 0
-			: message.content.some((block) => block.type === "image" || block.text.trim().length > 0);
-	return hasInput ? mapThinkingLevelToEffort(model, message.thinkingLevel) : undefined;
+	return normalizeUserMessage(message) ? mapThinkingLevelToEffort(model, message.thinkingLevel) : undefined;
 }
 
 function getInitialMessageEffort(
@@ -782,6 +794,7 @@ function getInitialMessageEffort(
 /** Map provider-neutral simple options to the exact AnthropicOptions `streamSimpleAnthropic` sends. */
 function resolveSimpleAnthropicOptions(
 	model: Model<"anthropic-messages">,
+	context: Context,
 	options?: SimpleStreamOptions,
 ): AnthropicOptions {
 	const apiKey = options?.apiKey;
@@ -790,7 +803,18 @@ function resolveSimpleAnthropicOptions(
 	}
 
 	const base = buildBaseOptions(model, options, apiKey);
-	if (!options?.reasoning) {
+	let reasoning = options?.reasoning;
+	if (model.reasoning && model.compat?.forceAdaptiveThinking === true && supportsAnthropicPerMessageEffort(model)) {
+		// Historical snapshots own the whole thinking configuration, not just effort.
+		// A pending off/on selection must not change mode halfway through a tool loop.
+		for (let i = context.messages.length - 1; i >= 0; i--) {
+			const message = context.messages[i];
+			if (message.role !== "user" || message.thinkingLevel === undefined || !normalizeUserMessage(message)) continue;
+			reasoning = message.thinkingLevel === "off" ? undefined : message.thinkingLevel;
+			break;
+		}
+	}
+	if (!reasoning) {
 		return { ...base, thinkingEnabled: false };
 	}
 
@@ -798,12 +822,7 @@ function resolveSimpleAnthropicOptions(
 	// thinking budget on top. Undefined means the caller did not request an output cap; let the helper
 	// use the model cap. Do not coerce to 0 here, or the thinking budget would become the entire
 	// max_tokens value.
-	const adjusted = adjustMaxTokensForThinking(
-		base.maxTokens,
-		model.maxTokens,
-		options.reasoning,
-		options.thinkingBudgets,
-	);
+	const adjusted = adjustMaxTokensForThinking(base.maxTokens, model.maxTokens, reasoning, options?.thinkingBudgets);
 
 	// For models with adaptive thinking: use an effort level.
 	// For older models: use budget-based thinking.
@@ -812,7 +831,7 @@ function resolveSimpleAnthropicOptions(
 			...base,
 			maxTokens: adjusted.maxTokens,
 			thinkingEnabled: true,
-			effort: mapThinkingLevelToEffort(model, options.reasoning),
+			effort: mapThinkingLevelToEffort(model, reasoning),
 		};
 	}
 
@@ -828,7 +847,8 @@ export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleS
 	model: Model<"anthropic-messages">,
 	context: Context,
 	options?: SimpleStreamOptions,
-): AssistantMessageEventStream => streamAnthropic(model, context, resolveSimpleAnthropicOptions(model, options));
+): AssistantMessageEventStream =>
+	streamAnthropic(model, context, resolveSimpleAnthropicOptions(model, context, options));
 
 /**
  * Replay the `streamSimpleAnthropic` request with `max_tokens: 0`, which reads (and renews) the
@@ -843,7 +863,7 @@ export const refreshPromptCacheAnthropic: PromptCacheRefreshFunction<"anthropic-
 	if (!canRefreshAnthropicPromptCache(model, simpleOptions)) {
 		return { status: "unsupported", reason: "budget-based thinking cannot be refreshed without output" };
 	}
-	const options = resolveSimpleAnthropicOptions(model, simpleOptions);
+	const options = resolveSimpleAnthropicOptions(model, context, simpleOptions);
 	if (!getCacheControl(model, options.cacheRetention).cacheControl) {
 		return { status: "unsupported", reason: "request has no cache breakpoints" };
 	}
@@ -1186,50 +1206,35 @@ function convertMessages(
 		const msg = transformedMessages[i];
 
 		if (msg.role === "user") {
-			const effort = initialEffort === undefined ? undefined : getMessageEffort(msg, model);
+			const input = normalizeUserMessage(msg);
+			if (!input) continue;
+			const content: MessageParam["content"] =
+				typeof input.content === "string"
+					? input.content
+					: input.content.map(
+							(item): ContentBlockParam =>
+								item.type === "text"
+									? { type: "text", text: item.text }
+									: {
+											type: "image",
+											source: {
+												type: "base64",
+												media_type: item.mimeType as
+													| "image/jpeg"
+													| "image/png"
+													| "image/gif"
+													| "image/webp",
+												data: item.data,
+											},
+										},
+						);
+			const effort = initialEffort === undefined ? undefined : getMessageEffort(input, model);
 			if (effort !== undefined && effort !== activeEffort) {
-				// Only new input triggers a control. Putting it before the user also
-				// leaves the conversation cache breakpoint on real content.
+				// Emit the control only with its rendered input, never on its own.
 				params.push({ role: "system", content: [], output_config: { effort } });
 				activeEffort = effort;
 			}
-			if (typeof msg.content === "string") {
-				if (msg.content.trim().length > 0) {
-					params.push({
-						role: "user",
-						content: sanitizeSurrogates(msg.content),
-					});
-				}
-			} else {
-				const blocks: ContentBlockParam[] = msg.content.map((item) => {
-					if (item.type === "text") {
-						return {
-							type: "text",
-							text: sanitizeSurrogates(item.text),
-						};
-					} else {
-						return {
-							type: "image",
-							source: {
-								type: "base64",
-								media_type: item.mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
-								data: item.data,
-							},
-						};
-					}
-				});
-				const filteredBlocks = blocks.filter((b) => {
-					if (b.type === "text") {
-						return b.text.trim().length > 0;
-					}
-					return true;
-				});
-				if (filteredBlocks.length === 0) continue;
-				params.push({
-					role: "user",
-					content: filteredBlocks,
-				});
-			}
+			params.push({ role: "user", content });
 		} else if (msg.role === "assistant") {
 			const blocks: ContentBlockParam[] = [];
 
