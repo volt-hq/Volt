@@ -189,6 +189,18 @@ function total(values: Array<number | undefined>): string {
 	return String(sum);
 }
 
+/** Input tokens of one request, counting cached ones; undefined when the provider did not report them completely. */
+function requestInput(request: RoutingObservation["requests"][number] | undefined): number | undefined {
+	if (request?.usage?.availability !== "complete") return undefined;
+	return request.usage.input + request.usage.cacheRead + request.usage.cacheWrite;
+}
+
+/** Median of the first and second members of pairs, as "a → b" with no decimals. */
+function arrow(pairs: ReadonlyArray<readonly [number, number]>): string {
+	if (!pairs.length) return "unknown";
+	return `${quantile(pairs.map((pair) => pair[0]), 0.5).toFixed(0)} → ${quantile(pairs.map((pair) => pair[1]), 0.5).toFixed(0)}`;
+}
+
 function percent(values: readonly number[]): string {
 	return values.length ? `${quantile(values, 0.5).toFixed(1)}%` : "unknown";
 }
@@ -292,9 +304,9 @@ export function summarizeRoutingRuns(runs: readonly RoutingRun[]): string {
 	if (entries.some(({ item }) => item.mode === "direct")) {
 		const directs = new Map(entries.filter(({ item }) => item.mode === "direct").map(({ runId, item }) => [pairKey(runId, item), item]));
 		lines.push("", "## Code mode versus the direct baseline", "",
-			"The direct route has no run_code tool and none of its guidance, so these deltas include the prompt overhead of code mode. Pairs match the same run, model, task, and trial, and both answers must be correct; correctness columns count every recorded case. The all-tasks row is the median of the task medians.", "",
-			"| Model | Task | Route | Route correct | Direct correct | Pairs | Median requests (direct → route) | Median input delta | Median latency delta |",
-			"|---|---|---|---:|---:|---:|---|---:|---:|");
+			"The direct route has no run_code tool and none of its guidance, so these deltas include the prompt overhead of code mode. First-request input is the fixed prompt and tool-schema size every request carries; final-request input is the context the session would carry into its next turn. Summed input counts each request in full, so it weighs an extra request more heavily than a long session with a warm cache would. Pairs match the same run, model, task, and trial, and both answers must be correct; correctness columns count every recorded case. The all-tasks row is the median of the task medians.", "",
+			"| Model | Task | Route | Route correct | Direct correct | Pairs | Median requests (direct → route) | Median input delta | Median latency delta | Median first-request input (direct → route) | Median final-request input (direct → route) |",
+			"|---|---|---|---:|---:|---:|---|---:|---:|---|---|");
 		for (const model of new Set(entries.map(({ item }) => item.model))) {
 			for (const mode of MODES.filter((route) => route !== "direct")) {
 				const taskInput: number[] = [];
@@ -307,10 +319,17 @@ export function summarizeRoutingRuns(runs: readonly RoutingRun[]): string {
 					const requests: Array<[number, number]> = [];
 					const input: number[] = [];
 					const latency: number[] = [];
+					const first: Array<[number, number]> = [];
+					const final: Array<[number, number]> = [];
 					for (const { runId, item } of group) {
 						const base = directs.get(pairKey(runId, item));
 						if (!base?.correct || !item.correct) continue;
 						requests.push([base.requests.length, item.requests.length]);
+						for (const [pairs, at] of [[first, 0], [final, -1]] as const) {
+							const left = requestInput(base.requests.at(at));
+							const right = requestInput(item.requests.at(at));
+							if (left !== undefined && right !== undefined) pairs.push([left, right]);
+						}
 						if (base.elapsedMs > 0) latency.push(100 * (item.elapsedMs - base.elapsedMs) / base.elapsedMs);
 						const value = completeInput(item);
 						const baseInput = completeInput(base);
@@ -320,9 +339,9 @@ export function summarizeRoutingRuns(runs: readonly RoutingRun[]): string {
 					if (input.length) taskInput.push(quantile(input, 0.5));
 					if (latency.length) taskLatency.push(quantile(latency, 0.5));
 					const medians = requests.length ? `${quantile(requests.map((pair) => pair[0]), 0.5).toFixed(1)} → ${quantile(requests.map((pair) => pair[1]), 0.5).toFixed(1)}` : "unknown";
-					lines.push(`| ${cell(model)} | ${cell(name)} | ${mode} | ${group.filter(({ item }) => item.correct).length}/${group.length} | ${baseline.filter(({ item }) => item.correct).length}/${baseline.length} | ${requests.length} | ${medians} | ${percent(input)} | ${percent(latency)} |`);
+					lines.push(`| ${cell(model)} | ${cell(name)} | ${mode} | ${group.filter(({ item }) => item.correct).length}/${group.length} | ${baseline.filter(({ item }) => item.correct).length}/${baseline.length} | ${requests.length} | ${medians} | ${percent(input)} | ${percent(latency)} | ${arrow(first)} | ${arrow(final)} |`);
 				}
-				if (taskInput.length || taskLatency.length) lines.push(`| ${cell(model)} | all tasks | ${mode} | | | ${allPairs} | | ${percent(taskInput)} | ${percent(taskLatency)} |`);
+				if (taskInput.length || taskLatency.length) lines.push(`| ${cell(model)} | all tasks | ${mode} | | | ${allPairs} | | ${percent(taskInput)} | ${percent(taskLatency)} | | |`);
 			}
 		}
 	}

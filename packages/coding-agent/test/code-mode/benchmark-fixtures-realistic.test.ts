@@ -68,6 +68,10 @@ describe("realistic code mode benchmark fixtures", () => {
 			for (const wrong of ["{}", "not json", `Result: ${expectedJson}`])
 				expect(fixture.grade(wrong)).toMatchObject({ correct: false });
 			expect(fixture.grade(JSON.stringify({ ...fixture.expected, extra: 1 })).correct).toBe(false);
+			expect(fixture.grade(" \n")).toEqual({ correct: false, reason: "The final reply was empty." });
+			expect(fixture.grade("The answer is 4.").reason).toBe(
+				"Answer must be JSON, optionally inside one JSON code fence.",
+			);
 		},
 	);
 

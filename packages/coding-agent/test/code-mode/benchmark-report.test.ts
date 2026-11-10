@@ -337,7 +337,8 @@ describe("routing run summaries", () => {
 	});
 
 	it("pairs code mode routes with the direct baseline of the same run, task, and trial", () => {
-		const three = [request(), request({ index: 2 }), request({ index: 3 })];
+		// 100 + 120 + 140 input tokens against the route's single 120-token request.
+		const three = [request({ usage: usage(80) }), request({ index: 2 }), request({ index: 3, usage: usage(120) })];
 		const report = summarizeRoutingRuns([
 			run([
 				observation({ mode: "direct", elapsedMs: 200, requests: three }),
@@ -346,8 +347,10 @@ describe("routing run summaries", () => {
 				observation({ mode: "hybrid", trial: 2, order: 1 }),
 			]),
 		]);
-		expect(report).toContain("| model/a | lookup | hybrid | 2/2 | 1/2 | 1 | 3.0 → 1.0 | -66.7% | -50.0% |");
-		expect(report).toContain("| model/a | all tasks | hybrid | | | 1 | | -66.7% | -50.0% |");
+		expect(report).toContain(
+			"| model/a | lookup | hybrid | 2/2 | 1/2 | 1 | 3.0 → 1.0 | -66.7% | -50.0% | 100 → 120 | 140 → 120 |",
+		);
+		expect(report).toContain("| model/a | all tasks | hybrid | | | 1 | | -66.7% | -50.0% | | |");
 	});
 
 	it("compares two experiments on matching cases and keeps behavior for every recorded case", () => {

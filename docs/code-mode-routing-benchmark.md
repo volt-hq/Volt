@@ -117,7 +117,7 @@ All tools are read-only. Repeated reads are measured, but duplicate side effects
 
 An additional equal-task-weight view takes each task's median successful paired delta, then the median across tasks. Its exploratory 95% percentile interval resamples entire task effects (2,000 draws, deterministic seed 1729), requiring at least ten tasks. Repeating one task does not turn it into many independent task samples. This interval captures observed task heterogeneity, not all within-task inference uncertainty, caching, time trends, or real-world reliability.
 
-The report also counts what each route did per task: direct gateway actions other than `call` (with `list_servers` separately), direct and scripted data calls, scripts, and the largest request context. When a run includes the direct route, a further section pairs every other route with it. Artifacts recorded before gateway actions were stored show those counts as unknown.
+The report also counts what each route did per task: direct gateway actions other than `call` (with `list_servers` separately), direct and scripted data calls, scripts, and the largest request context. When a run includes the direct route, a further section pairs every other route with it. That section also shows the input of each side's first request (the fixed prompt and tool-schema size every request carries) and of its final request (the context the session would carry into a next turn), because summed input alone cannot tell a larger prompt or an extra request from a larger conversation. Artifacts recorded before gateway actions were stored show those counts as unknown.
 
 `--report <candidate> --baseline <baseline>` compares two experiments instead, for example a prompt change against the commit before it. Runs pool within a side under the usual rules; pairs match model, task, route, and trial across the sides, so run both with the same seed, trials, tasks, and routes. To produce the baseline side, run the same command from a `git worktree` of the earlier commit. The two sides run at different times, so small latency differences are not evidence.
 
@@ -207,11 +207,24 @@ Hybrid used 61% less input than direct on Astra and 57% less on Opus. The totals
 | `loop-interpretation` | 3 → 3.5 | +26.2% | +37.2% | 3 → 4.5 | +70.3% | +66.9% |
 
 - **Deterministic work over large results is where code mode pays.** One script replaced six to ten model turns, and the traces never entered the conversation: peak context fell from about 90 KB to 30 KB on `handoff-chain` and from about 160 KB to 40 KB on `trace-scan`.
-- **Code mode costs on tasks that need the result to be read.** On `loop-interpretation`, a direct call is one read. Hybrid instead probed the unfamiliar trace format with one script and analysed it with more: Astra used three scripts across its two cases and Opus five. On `message-triage`, Opus ran six scripts across two cases where direct reads sufficed.
+- **On tasks that need the result to be read, hybrid sums to more input but does not carry more context.** On `loop-interpretation`, a direct call is one read. Hybrid instead probed the unfamiliar trace format with one script and analysed it with more: Astra used three scripts across its two cases and Opus five. On `message-triage`, Opus ran six scripts across two cases where direct reads sufficed. The table below separates the two costs behind those positive deltas.
 - **Correctness did not separate the routes.** Both models answered every direct case, including the by-eye marker scan, so this suite still cannot rank routes on reliability.
 - **Opus repeated reads under hybrid.** Seven data calls were repeats: each follow-up script read the same trace again instead of keeping it with `store()`. Astra stored it and had none.
 
 A replicate on Astra with the earlier assembly-style version of the same tasks (commit `720500fcf`, 20/20 correct) gave the same split: −85%, −80%, and −74% input on the three deterministic tasks, +10% and +43% on the two reading tasks.
+
+Summed input has two parts that the totals mix. Median input tokens of the final request, direct → hybrid, from the same pairs:
+
+| Task | Astra final-request input | Opus final-request input |
+|---|---|---|
+| `handoff-chain` | 15,583 → 4,463 | 22,826 → 9,064 |
+| `byte-marker-scan` | 9,355 → 4,539 | 29,102 → 8,382 |
+| `trace-scan` | 27,741 → 7,497 | 39,658 → 9,834 |
+| `message-triage` | 11,488 → 11,985 | 17,572 → 12,199 |
+| `loop-interpretation` | 6,020 → 5,633 | 9,774 → 9,720 |
+
+- **Code mode has a fixed price on every request.** Enabling `run_code` adds 2,429 bytes of tool schema and 869 bytes of system-prompt guidance. The first request of every case measured it: about 680 more input tokens on Astra (roughly 2,930 → 3,610) and 1,150 on Opus (roughly 5,530 → 6,680). On Astra that price times the request count accounts for all of the `message-triage` increase and about three quarters of the `loop-interpretation` one. On Opus it accounts for 57% and 34% of them; the rest is extra script requests.
+- **The reading tasks end with the same or less context under hybrid.** The positive input deltas come from that fixed price and from extra requests, not from a larger conversation. Summed input charges an extra request its whole context, which is the right cost for a session that ends there. A long session with a warm cache pays mostly for what stays in context, and on that measure hybrid is at most 4% above direct (Astra on `message-triage`) and lower everywhere else. The benchmark's sessions are one task long, so it cannot weigh the two.
 
 Limits: two trials per task give two pairs, so each task row is a direction and rough size, not an interval. The suite has five authored tasks, weighted towards the workloads where scripting should help; the all-task totals are not an estimate for typical sessions. Catalog estimates are not subscription charges.
 
@@ -231,14 +244,67 @@ The revised `run_code` guidance was compared with the prompt before it (commit `
 
 The revised guidance does what it was written for: hybrid now keeps the whole binary search and traversal in one script, and it did not start scripting the small tasks. Across the 15 hybrid cases per side, requests fell from 64 to 49 and input from 271,199 to 197,637 tokens.
 
-It also has a side effect. Under the revised prompt, hybrid sometimes calls `mcp list_servers` before searching: in 4 of 15 cases here, and in none of the 45 old-prompt cases. A follow-up restored the earlier "find them with search and describe first" sentence in the MCP line; the extra call remained (3 of 6 small-task hybrid cases, against 5 of 9 for the committed wording), so that sentence is not the cause and the change was not kept. The intro sentence and the three guideline bullets have not been isolated.
+In these runs hybrid sometimes called `mcp list_servers` before searching under the revised prompt (4 of 15 cases) and never under the old one, which made `empty-result` look 33% more expensive. That difference did not survive a larger check: the bisect in the next section found the old prompt making the same call just as often. Read the `empty-result` row as noise from an optional discovery call, not as an effect of the revision.
 
 Limits: three trials is a partial order block, and latency differences under about 15% are within noise. These runs predate the `--baseline` report and the gateway-action counts, so they were tabulated by a one-off script. Artifacts: `prompt-ab-20261110/` under the same directory.
 
+## Guidance follow-up: 2026-11-10
+
+Three checks on the hybrid route, each against the committed prompt. Its side comes from runs at `0e5daeb46`, `1624583cf`, and `bb8635cf8`, which share the same `run_code` text; candidates ran from worktrees with only that text changed. All used the stored subscription logins at `xhigh`; together they made 136 cases and reported 2.94 million tokens.
+
+### The `list_servers` call is not caused by the revised prompt
+
+Five prompt variants ran `empty-result` and `temporal-asof` on Astra, six trials each in two interleaved blocks: the old prompt, the committed one, and the committed one with the intro sentence, the guideline bullets, or the MCP line put back to the old text. All 60 cases were correct.
+
+| Variant | Cases calling `list_servers` | Requests | Input tokens |
+|---|---:|---:|---:|
+| Old prompt (`53b37ac48`) | 4/12 | 40 | 165,849 |
+| Committed prompt | 3/12 | 39 | 164,673 |
+| Committed, old intro sentence | 5/12 | 41 | 172,986 |
+| Committed, old guideline bullets | 5/12 | 41 | 170,863 |
+| Committed, old MCP line | 2/12 | 38 | 160,181 |
+
+Every variant makes the call in roughly a third of cases, the old prompt included. The 0-of-6 against 4-of-6 split in the earlier check was sampling noise. The call also appears with code mode off: both models made it on `message-triage` under the direct route. It is an optional discovery step the models take on some tasks, worth one request when it happens, and not something the `run_code` wording controls.
+
+### "Aim to answer from one script" trims Opus's script count
+
+Transcripts of the two reading tasks showed the pattern behind the extra requests: one script to probe an unfamiliar format, one to extract, and on Opus often a third to verify. The candidate wording changes three guideline bullets: `run_code` is for results "too large to read in full", direct calls are for "results you can read in full, such as one document of a few kilobytes that you must interpret", and "Every run_code script is another model request: aim to answer from one script."
+
+Realistic suite, hybrid route, committed → candidate. Opus has four trials per task (two for `byte-marker-scan`); Astra has two.
+
+| Model | Cases | Correct | Requests | Scripts | Input tokens |
+|---|---:|---|---|---|---:|
+| `anthropic/claude-opus-5-5` | 18 per side | 16 → 18 | 87 → 78 | 40 → 31 | 732,712 → 674,041 (−8.0%) |
+| `openai-codex/gpt-6-astra` | 10 per side | 10 → 10 | 42 → 42 | 13 → 12 | 204,317 → 197,628 (−3.3%) |
+
+- **Opus wrote fewer scripts.** Matching cases by task and trial, the candidate used fewer scripts in nine, more in one, and the same in eight. The gain is on `handoff-chain` (mean input 31,804 → 25,676) and `trace-scan` (41,591 → 34,466), where the committed prompt usually spent a first script looking at the format.
+- **It did not move single-document reads to direct calls.** Every `loop-interpretation` case under either wording still used a script, and `message-triage` was unchanged (63,615 → 63,545). Given the final-request numbers above, that is a defensible choice by the models, so the wording was not pushed further.
+- **Astra did not change**, on the realistic tasks or on four core tasks (`bounded-search`, `hierarchy-rollup`, `empty-result`, `nested-projection`; 12/12 correct, 39 requests on both sides, the same call sequence on every task). The one-script behaviour the revision was written for is intact.
+- **Opus still repeats reads** (34 → 41 repeated data calls): follow-up scripts fetch the same trace again instead of using `store()`.
+
+The candidate was kept. The two Opus failures on the committed side are format failures, not wrong data: one prose answer and one empty reply, described next.
+
+### Opus sometimes ends its turn with an empty reply after a script returns the answer
+
+On the core tasks Opus scripted correctly and then, in some cases, replied with nothing. The provider's raw stream for one such case is `message_start`, `message_delta` with `end_turn`, `message_stop`: no content block at all, with 37 output tokens reported. Volt is not dropping the text; none arrives.
+
+| Last step before the final reply | Opus hybrid cases | Empty final reply |
+|---|---:|---:|
+| A script that returned a value | 31 | 9 |
+| A script that only printed | 26 | 0 |
+| A direct MCP call | 7 | 0 |
+
+By prompt, for scripts that returned a value: committed 4/13, candidate 3/10, so the candidate wording is not the cause. A third variant added "as a tool result the user does not read: give your answer in your reply afterwards" to the tool description; it still produced 2 empty replies in 8, so it was not kept. Astra never did this. Returned values and printed output are confounded with task here (the core tasks return, the realistic ones mostly print), so the trigger may be a result that already equals the requested answer rather than `return` itself.
+
+This is a correctness failure for anyone asking Opus a question that one script can answer, and wording has not fixed it. Empty replies now carry their own reason in the report ("The final reply was empty.") so they are not counted as malformed answers.
+
+Artifacts, under `<agent dir>/benchmarks/code-mode-routing/`: `list-servers-bisect-20261110/` and `guidance-20261110/` (`head-*` is the committed prompt, `r1-*` the kept candidate, `r2-*` the reply variant). The comparisons across prompts were tabulated by task and trial with a one-off script, because the runs on each side differ in which trials they cover.
+
 ## Open questions the harness can now answer
 
-- Which part of the revised prompt causes the extra `list_servers` call. Run `--task empty-result,temporal-asof --routes hybrid --trials 6` for each candidate wording and compare with `--baseline`.
-- Whether guidance can stop scripting on single large reads without losing the deterministic wins. `loop-interpretation` and `message-triage` are the regression tasks; `handoff-chain` and `byte-marker-scan` are the wins to keep.
+- Whether the empty Opus reply needs a fix in the agent loop, such as continuing the turn when a reply after a tool result has no content. Reproduce with `--model anthropic/claude-opus-5-5 --task bounded-search,hierarchy-rollup --routes hybrid --trials 4`; about a third to a half of those cases end empty.
+- Whether the fixed price of code mode can come down. The description, guidelines, and schema cost about 680 tokens per request on Astra and 1,150 on Opus; a shorter description would show up directly in the first-request column.
+- Whether Opus can be brought to keep fetched data with `store()` instead of reading it again.
 - Whether results hold with more trials. Two pairs per task is the minimum; six trials give three order-balanced blocks for a route pair.
 
 The following sections preserve the earlier four-task evidence; those runs were not pooled with the expanded suite.
@@ -311,9 +377,9 @@ Both runs have experiment fingerprint `e84620b8f4458cca172df1649425983aa9b542bd0
 
 ## Prompt follow-up
 
-The 360-case comparison above measured the prior production prompt, not the revised guidance. It motivated a small follow-up in `packages/coding-agent/src/core/tools/run-code.ts`: recommend one bounded script for deterministic read-only loops with known schemas, keep small results and genuine interpretation steps direct, reuse complete current MCP schemas, and explicitly keep MCP gateway discovery outside scripts. Existing batching, output reduction, concurrency, and failure-recovery guidance remains.
+The 360-case comparison above measured the prior production prompt, not the revised guidance. It motivated a small follow-up in `packages/coding-agent/src/core/tools/run-code.ts`: recommend one bounded script for deterministic read-only loops with known schemas, keep small results and genuine interpretation steps direct, reuse complete current MCP schemas, and explicitly keep MCP gateway discovery outside scripts. Existing batching, output reduction, concurrency, and failure-recovery guidance remains. The guidance follow-up above then added that every script is another model request and that results the model can read in full belong in direct calls.
 
-Focused tests verify the model-facing prompt and binding contract; they do not establish that this exact wording improves model behavior. The targeted live check above did: it found the intended gains on two tasks and an extra discovery call on small ones. The prompt's source hash differs from the recorded 360-case experiment, so later results must not be pooled into that comparison. Tool availability, permissions, code-mode defaults, and runtime behavior are unchanged.
+Focused tests verify the model-facing prompt and binding contract; they do not establish that this exact wording improves model behavior. The targeted live check above did: it found the intended gains on two tasks, and the later bisect cleared the revision of the extra discovery call first attributed to it. The prompt's source hash differs from the recorded 360-case experiment, so later results must not be pooled into that comparison. Tool availability, permissions, code-mode defaults, and runtime behavior are unchanged.
 
 ## Interpretation
 

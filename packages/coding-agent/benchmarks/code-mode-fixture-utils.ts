@@ -104,6 +104,8 @@ export function fixture(
 		},
 		grade(answer) {
 			const trimmed = answer.trim();
+			// A turn that ends without text is a different failure from a malformed answer; keep them apart.
+			if (!trimmed) return { correct: false, reason: "The final reply was empty." };
 			const fenced = /^```(?:json)?\s*\n([\s\S]*?)\n```$/.exec(trimmed);
 			let parsed: unknown;
 			try {
