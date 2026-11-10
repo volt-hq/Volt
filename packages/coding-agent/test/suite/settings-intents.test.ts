@@ -57,6 +57,7 @@ describe("settings the host reads", () => {
 			personality: "default",
 			transport: "auto",
 			reviewModel: null,
+			reviewVerifierModel: null,
 			imageAutoResize: true,
 			blockImages: false,
 			httpIdleTimeoutMs: DEFAULT_HTTP_IDLE_TIMEOUT_MS,
@@ -66,6 +67,7 @@ describe("settings the host reads", () => {
 			personality: "pragmatic",
 			transport: "sse",
 			reviewModel: `${model.provider}/${model.id}`,
+			reviewVerifierModel: `${model.provider}/${model.id}`,
 			promptCacheKeepAlive: "off",
 			imageAutoResize: false,
 			blockImages: true,
@@ -74,10 +76,12 @@ describe("settings the host reads", () => {
 		});
 
 		expect(changed(frames)).toContain("settings");
+		expect(session.settingsManager.getReviewVerifierModel()).toBe(`${model.provider}/${model.id}`);
 		expect(await client.query("settings")).toMatchObject({
 			personality: "pragmatic",
 			transport: "sse",
 			reviewModel: `${model.provider}/${model.id}`,
+			reviewVerifierModel: `${model.provider}/${model.id}`,
 			promptCacheKeepAlive: "off",
 			imageAutoResize: false,
 			blockImages: true,
@@ -86,8 +90,12 @@ describe("settings the host reads", () => {
 		});
 		// Applied to the conversation at once: the system prompt follows the personality.
 		expect(session.systemPrompt).toContain("pragmatic");
-		await client.intent("set_settings", { promptCacheKeepAlive: 15, reviewModel: null });
-		expect(await client.query("settings")).toMatchObject({ promptCacheKeepAlive: 15, reviewModel: null });
+		await client.intent("set_settings", { promptCacheKeepAlive: 15, reviewModel: null, reviewVerifierModel: null });
+		expect(await client.query("settings")).toMatchObject({
+			promptCacheKeepAlive: 15,
+			reviewModel: null,
+			reviewVerifierModel: null,
+		});
 
 		// The warnings settings, which the host reads (extra usage) and clients show (context tokens).
 		expect(before.warnings).toEqual({});
@@ -114,6 +122,10 @@ describe("settings the host reads", () => {
 		expect(await rejection(client.intent("set_settings", { reviewModel: "nowhere/none" }))).toMatchObject({
 			code: "failed",
 			message: "Model not found: nowhere/none",
+		});
+		expect(await rejection(client.intent("set_settings", { reviewVerifierModel: "nowhere/else" }))).toMatchObject({
+			code: "failed",
+			message: "Model not found: nowhere/else",
 		});
 	});
 

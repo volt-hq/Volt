@@ -22,18 +22,20 @@ function modelReference(reference: string): { provider: string; modelId: string 
 /**
  * Save the host-read settings `values` names, then apply them: the HTTP idle
  * timeout to the process, and the personality, transport, and prompt-cache
- * keepalive to the conversation. A review model must be one the host knows.
+ * keepalive to the conversation. Review models must be ones the host knows.
  */
 export async function setHostSettings(session: AgentSession, values: HostSettingsValues): Promise<void> {
 	const settings = session.settingsManager;
-	const reviewModel = values.reviewModel;
-	if (typeof reviewModel === "string") {
-		const { provider, modelId } = modelReference(reviewModel);
-		if (!session.modelRegistry.find(provider, modelId)) throw new Error(`Model not found: ${reviewModel}`);
+	const { reviewModel, reviewVerifierModel } = values;
+	for (const reference of [reviewModel, reviewVerifierModel]) {
+		if (typeof reference !== "string") continue;
+		const { provider, modelId } = modelReference(reference);
+		if (!session.modelRegistry.find(provider, modelId)) throw new Error(`Model not found: ${reference}`);
 	}
 	if (values.personality !== undefined) settings.setPersonality(values.personality);
 	if (values.transport !== undefined) settings.setTransport(values.transport);
 	if (reviewModel !== undefined) settings.setReviewModel(reviewModel ?? undefined);
+	if (reviewVerifierModel !== undefined) settings.setReviewVerifierModel(reviewVerifierModel ?? undefined);
 	if (values.promptCacheKeepAlive !== undefined) settings.setPromptCacheKeepAlive(values.promptCacheKeepAlive);
 	if (values.imageAutoResize !== undefined) settings.setImageAutoResize(values.imageAutoResize);
 	if (values.blockImages !== undefined) settings.setBlockImages(values.blockImages);

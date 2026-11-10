@@ -173,6 +173,65 @@ describe("Form", () => {
 		assert.strictEqual(name, "Grace");
 	});
 
+	it("searches an enum field's options as the user types, and steps through the matches", () => {
+		const options = [
+			"anthropic/claude-opus",
+			"anthropic/claude-sonnet",
+			"openai/gpt-5",
+			"openai/gpt-5-mini",
+			"google/gemini",
+			"local/a",
+			"local/b",
+			"local/c",
+		].map((value) => ({ value }));
+		const form = new Form(PLAIN_SEMANTIC_THEME, {
+			fields: [
+				{ kind: "enum", id: "model", label: "Model", options, value: "local/a" },
+				{ kind: "string", id: "note", label: "Note" },
+			],
+		});
+		const modelLine = (): string => stripAnsi(form.render(80).lines[0]!);
+		const selected = (): unknown => {
+			const { model } = form.getValues();
+			return model;
+		};
+		form.focused = true;
+		// A long list says how to search it.
+		assert.strictEqual(modelLine().trimEnd(), "› Model  ‹ local/a ›  type to search");
+
+		type(form, "gpt");
+		assert.strictEqual(selected(), "openai/gpt-5");
+		assert.strictEqual(modelLine().trimEnd(), "› Model  ‹ openai/gpt-5 ›  gpt · 2 matches");
+		form.handleInput(KEYS.right);
+		assert.strictEqual(selected(), "openai/gpt-5-mini");
+		form.handleInput(KEYS.right);
+		assert.strictEqual(selected(), "openai/gpt-5");
+
+		// A search with no match keeps the selection, and Backspace takes the last character back.
+		type(form, "z");
+		assert.strictEqual(selected(), "openai/gpt-5");
+		assert.ok(modelLine().endsWith("gptz · no match"), modelLine());
+		form.handleInput(KEYS.backspace);
+		assert.ok(modelLine().endsWith("gpt · 2 matches"), modelLine());
+
+		// Leaving the field clears the search: left/right step through every option again.
+		form.handleInput(KEYS.tab);
+		form.handleInput(KEYS.shiftTab);
+		assert.ok(!modelLine().includes("gpt ·"), modelLine());
+		form.handleInput(KEYS.right);
+		assert.strictEqual(selected(), "openai/gpt-5-mini");
+		form.handleInput(KEYS.space);
+		assert.strictEqual(selected(), "google/gemini");
+	});
+
+	it("does not offer a search on a short enum field", () => {
+		const form = new Form(PLAIN_SEMANTIC_THEME, { fields: [fields[2]!] });
+		form.focused = true;
+		assert.strictEqual(stripAnsi(form.render(40).lines[0]!).trimEnd(), "› Level  ‹ Low ›");
+		type(form, "hi");
+		assert.deepStrictEqual(form.getValues(), { level: "high" });
+	});
+
 	it("is traversed field by field inside a focus group", () => {
 		const form = new Form(PLAIN_SEMANTIC_THEME, { fields: fields.slice(0, 2) });
 		const group = new FocusGroup([form]);

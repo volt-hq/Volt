@@ -180,6 +180,7 @@ export interface Settings {
 	reviewTools?: string[]; // Optional auxiliary tool names; immutable review snapshot tools are always active
 	reviewSetup?: ReviewSetupSettings; // A shell command run in each checkout a review's auxiliary tools run in
 	reviewEngine?: string; // The engine /review runs on without --engine: an extension's engine by name (default: standard)
+	reviewLastOptions?: Record<string, Record<string, string | boolean | number>>; // What the /review launcher last changed, by engine id ("standard" for the built-in review)
 	doubleEscapeAction?: "fork" | "tree" | "none"; // Action for double-escape with empty editor (default: "tree")
 	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default filter when opening /tree
 	thinkingBudgets?: ThinkingBudgetsSettings; // Custom token budgets for thinking levels
@@ -2143,6 +2144,41 @@ export class SettingsManager {
 		this.updateGlobalSettings("reviewEngine", (settings) => {
 			settings.reviewEngine = engine?.trim() || undefined;
 		});
+	}
+
+	/**
+	 * The options the `/review` launcher last started a review on `engine` with (`standard` for the built-in review),
+	 * where they differed from their defaults: the form opens with them. Values that are not text, booleans, or
+	 * finite numbers are left out.
+	 */
+	getReviewLastOptions(engine: string): Record<string, string | boolean | number> {
+		const all = this.settings.reviewLastOptions;
+		const entry = isSettingsRecord(all) && Object.hasOwn(all, engine) ? all[engine] : undefined;
+		const values: Record<string, string | boolean | number> = {};
+		if (!isSettingsRecord(entry)) return values;
+		for (const [name, value] of Object.entries(entry)) {
+			if (typeof value === "string" || typeof value === "boolean" || Number.isFinite(value)) {
+				defineOwnEnumerableProperty(values, name, value);
+			}
+		}
+		return values;
+	}
+
+	/** Remember the options the launcher started a review on `engine` with; none forgets the engine's. */
+	setReviewLastOptions(engine: string, values: Readonly<Record<string, string | boolean | number>>): void {
+		this.updateGlobalSettings(
+			"reviewLastOptions",
+			(settings) => {
+				const all: Record<string, Record<string, string | boolean | number>> = isSettingsRecord(
+					settings.reviewLastOptions,
+				)
+					? { ...settings.reviewLastOptions }
+					: {};
+				defineOwnEnumerableProperty(all, engine, Object.keys(values).length === 0 ? undefined : { ...values });
+				settings.reviewLastOptions = all;
+			},
+			engine,
+		);
 	}
 
 	getReviewTools(): string[] | undefined {

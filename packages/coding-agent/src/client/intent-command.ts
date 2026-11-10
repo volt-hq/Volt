@@ -546,11 +546,34 @@ export function intentCommandFlagValue(text: string, name: string): string | und
 // The options form
 // ============================================================================
 
-/** The options form: one field per declared flag, in order, each with its default. */
-export function intentCommandForm(command: IntentCommand): UiNodeFormField[] {
+/** `given` when it fits `field` (an enum's value among its options), else the field's default. */
+function startingValue(
+	field: IntentCommandField,
+	given: IntentCommandValue | undefined,
+): IntentCommandValue | undefined {
+	const fits =
+		field.kind === "boolean"
+			? typeof given === "boolean"
+			: field.kind === "integer"
+				? typeof given === "number" && Number.isInteger(given)
+				: field.kind === "enum"
+					? typeof given === "string" && (field.options ?? []).includes(given)
+					: typeof given === "string";
+	return fits ? given : field.default;
+}
+
+/**
+ * The options form: one field per declared flag, in order, each starting at its value in `values` when that fits
+ * the field, else at its default.
+ */
+export function intentCommandForm(
+	command: IntentCommand,
+	values: Readonly<Record<string, IntentCommandValue>> = {},
+): UiNodeFormField[] {
 	return command.fields
 		.filter((field) => field.inForm)
 		.map((field): UiNodeFormField => {
+			const start = startingValue(field, values[field.name]);
 			const base = {
 				id: field.name,
 				label: field.title,
@@ -560,14 +583,14 @@ export function intentCommandForm(command: IntentCommand): UiNodeFormField[] {
 				return {
 					...base,
 					kind: "boolean",
-					...(typeof field.default === "boolean" ? { value: field.default } : {}),
+					...(typeof start === "boolean" ? { value: start } : {}),
 				};
 			}
 			if (field.kind === "integer") {
 				return {
 					...base,
 					kind: "integer",
-					...(typeof field.default === "number" ? { value: field.default } : {}),
+					...(typeof start === "number" ? { value: start } : {}),
 					...(field.minimum === undefined ? {} : { min: field.minimum }),
 					...(field.maximum === undefined ? {} : { max: field.maximum }),
 				};
@@ -577,13 +600,13 @@ export function intentCommandForm(command: IntentCommand): UiNodeFormField[] {
 					...base,
 					kind: "enum",
 					options: (field.options ?? []).map((value) => ({ value })),
-					...(typeof field.default === "string" ? { value: field.default } : {}),
+					...(typeof start === "string" ? { value: start } : {}),
 				};
 			}
 			return {
 				...base,
 				kind: "string",
-				...(typeof field.default === "string" ? { value: field.default } : {}),
+				...(typeof start === "string" ? { value: start } : {}),
 				...(field.minLength === undefined ? {} : { minLength: field.minLength }),
 				...(field.maxLength === undefined ? {} : { maxLength: field.maxLength }),
 				...(field.pattern === undefined ? {} : { pattern: field.pattern }),

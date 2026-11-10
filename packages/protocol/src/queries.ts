@@ -288,6 +288,8 @@ export const QUERY_SCHEMAS = {
 				transport: Type.Optional(RpcTransportSchema),
 				/** `provider/modelId`, or null when reviews use the conversation's model. */
 				reviewModel: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+				/** `provider/modelId`, or null when reviews verify with the review model. */
+				reviewVerifierModel: Type.Optional(Type.Union([Type.String(), Type.Null()])),
 				/** `off`, or minutes of keepalive after work finishes (0: only while working). */
 				promptCacheKeepAlive: Type.Optional(Type.Union([Type.Literal("off"), Type.Number({ minimum: 0 })])),
 				imageAutoResize: Type.Optional(Type.Boolean()),
