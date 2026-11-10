@@ -185,6 +185,62 @@ Artifacts under `<OS temp directory>/`:
 
 Validation: 212 focused tests passed, all 60 model-free CLI cases passed, the 360-case dry-run schedule contained all six permutations for every task, `npm run check` passed, and offline six-run reporting succeeded. Trial 6 emitted one optional background-job performance-diagnostics retention warning; the benchmark completed with full case and provider-usage coverage. No timing or case was removed for that warning.
 
+## Code mode versus no code mode: 2026-11-10
+
+The first comparison that includes the `direct` route, on the realistic suite: 5 tasks × 2 routes × 2 trials for each model, at commit `1624583cf`. All 40 cases were correct, with no script failures and no missing cases.
+
+| Model | Route | Correct | Requests | Cumulative input incl. cache | Output tokens | Summed case wall time | Catalog USD estimate |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `openai-codex/gpt-6-astra` | Direct | 10/10 | 71 | 525,366 | 6,860 | 317 s | 2.19 |
+| `openai-codex/gpt-6-astra` | Hybrid | 10/10 | 42 | 204,317 | 4,074 | 169 s | 0.93 |
+| `anthropic/claude-opus-5-5` | Direct | 10/10 | 69 | 877,760 | 45,655 | 461 s | 2.18 |
+| `anthropic/claude-opus-5-5` | Hybrid | 10/10 | 46 | 375,472 | 12,832 | 186 s | 0.71 |
+
+Hybrid used 61% less input than direct on Astra and 57% less on Opus. The totals hide a split by task. Per task, hybrid versus direct, median of two matched pairs; negative means lower:
+
+| Task | Astra requests | Astra input | Astra latency | Opus requests | Opus input | Opus latency |
+|---|---|---:|---:|---|---:|---:|
+| `handoff-chain` | 9 → 3 | −84.5% | −52.2% | 9 → 4 | −74.3% | −33.2% |
+| `byte-marker-scan` | 10 → 3 | −79.6% | −78.9% | 10.5 → 3 | −84.2% | −92.2% |
+| `trace-scan` | 7.5 → 5.5 | −64.9% | −38.5% | 6.5 → 4.5 | −64.7% | −35.4% |
+| `message-triage` | 6 → 6 | +14.0% | +10.5% | 5.5 → 7 | +30.5% | +39.7% |
+| `loop-interpretation` | 3 → 3.5 | +26.2% | +37.2% | 3 → 4.5 | +70.3% | +66.9% |
+
+- **Deterministic work over large results is where code mode pays.** One script replaced six to ten model turns, and the traces never entered the conversation: peak context fell from about 90 KB to 30 KB on `handoff-chain` and from about 160 KB to 40 KB on `trace-scan`.
+- **Code mode costs on tasks that need the result to be read.** On `loop-interpretation`, a direct call is one read. Hybrid instead probed the unfamiliar trace format with one script and analysed it with more: Astra used three scripts across its two cases and Opus five. On `message-triage`, Opus ran six scripts across two cases where direct reads sufficed.
+- **Correctness did not separate the routes.** Both models answered every direct case, including the by-eye marker scan, so this suite still cannot rank routes on reliability.
+- **Opus repeated reads under hybrid.** Seven data calls were repeats: each follow-up script read the same trace again instead of keeping it with `store()`. Astra stored it and had none.
+
+A replicate on Astra with the earlier assembly-style version of the same tasks (commit `720500fcf`, 20/20 correct) gave the same split: −85%, −80%, and −74% input on the three deterministic tasks, +10% and +43% on the two reading tasks.
+
+Limits: two trials per task give two pairs, so each task row is a direction and rough size, not an interval. The suite has five authored tasks, weighted towards the workloads where scripting should help; the all-task totals are not an estimate for typical sessions. Catalog estimates are not subscription charges.
+
+Artifacts, under `<agent dir>/benchmarks/code-mode-routing/`: `realistic-astra-1624583cf/`, `realistic-opus-1624583cf/`, and the replicate `realistic-astra-720500fcf/`.
+
+## Revised prompt, targeted live check: 2026-11-10
+
+The revised `run_code` guidance was compared with the prompt before it (commit `53b37ac48`) on five core tasks: two where it should remove model turns and three small ones where it should change nothing. Three trials, three routes, both commits, same seed: 90 cases, all correct. Hybrid route, old → revised:
+
+| Task | Requests per trial | Scripts per trial | Median input | Median latency |
+|---|---|---|---:|---:|
+| `bounded-search` | 8/8/8 → 3/3/3 | 0/0/0 → 1/1/1 | −66.5% | −55.7% |
+| `hierarchy-rollup` | 5/4/4 → 3/3/3 | 2/1/1 → 1/1/1 | −27.2% | −9.1% |
+| `temporal-asof` | 3/3/3 → 3/4/3 | 0 → 0 | −0.9% | −0.5% |
+| `empty-result` | 3/3/3 → 4/4/4 | 0 → 0 | +32.7% | +26.3% |
+| `nested-projection` | 3/3/3 → 3/3/3 | 0 → 0 | −1.1% | −7.7% |
+
+The revised guidance does what it was written for: hybrid now keeps the whole binary search and traversal in one script, and it did not start scripting the small tasks. Across the 15 hybrid cases per side, requests fell from 64 to 49 and input from 271,199 to 197,637 tokens.
+
+It also has a side effect. Under the revised prompt, hybrid sometimes calls `mcp list_servers` before searching: in 4 of 15 cases here, and in none of the 45 old-prompt cases. A follow-up restored the earlier "find them with search and describe first" sentence in the MCP line; the extra call remained (3 of 6 small-task hybrid cases, against 5 of 9 for the committed wording), so that sentence is not the cause and the change was not kept. The intro sentence and the three guideline bullets have not been isolated.
+
+Limits: three trials is a partial order block, and latency differences under about 15% are within noise. These runs predate the `--baseline` report and the gateway-action counts, so they were tabulated by a one-off script. Artifacts: `prompt-ab-20261110/` under the same directory.
+
+## Open questions the harness can now answer
+
+- Which part of the revised prompt causes the extra `list_servers` call. Run `--task empty-result,temporal-asof --routes hybrid --trials 6` for each candidate wording and compare with `--baseline`.
+- Whether guidance can stop scripting on single large reads without losing the deterministic wins. `loop-interpretation` and `message-triage` are the regression tasks; `handoff-chain` and `byte-marker-scan` are the wins to keep.
+- Whether results hold with more trials. Two pairs per task is the minimum; six trials give three order-balanced blocks for a route pair.
+
 The following sections preserve the earlier four-task evidence; those runs were not pooled with the expanded suite.
 
 ## Initial pilot: 2026-11-09
@@ -257,7 +313,7 @@ Both runs have experiment fingerprint `e84620b8f4458cca172df1649425983aa9b542bd0
 
 The 360-case comparison above measured the prior production prompt, not the revised guidance. It motivated a small follow-up in `packages/coding-agent/src/core/tools/run-code.ts`: recommend one bounded script for deterministic read-only loops with known schemas, keep small results and genuine interpretation steps direct, reuse complete current MCP schemas, and explicitly keep MCP gateway discovery outside scripts. Existing batching, output reduction, concurrency, and failure-recovery guidance remains.
 
-Focused tests verify the model-facing prompt and binding contract; they do not establish that this exact wording improves model behavior. No live A/B trial of the revised prompt has been run. Its source hash differs from the recorded experiment, so later results must not be pooled into that comparison. Tool availability, permissions, code-mode defaults, and runtime behavior are unchanged.
+Focused tests verify the model-facing prompt and binding contract; they do not establish that this exact wording improves model behavior. The targeted live check above did: it found the intended gains on two tasks and an extra discovery call on small ones. The prompt's source hash differs from the recorded 360-case experiment, so later results must not be pooled into that comparison. Tool availability, permissions, code-mode defaults, and runtime behavior are unchanged.
 
 ## Interpretation
 
