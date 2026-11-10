@@ -1,6 +1,6 @@
 # Local code-mode routing benchmark
 
-Small development-only benchmark for deciding whether selected data tools should be callable only through `run_code`. No production tools, grants, settings, dependencies, or default routing change.
+Development-only benchmark for `run_code`: what code mode saves or costs against plain tool calls, and whether selected data tools should be callable only through it. No production tools, grants, settings, dependencies, or default routing change.
 
 ## Run
 
@@ -21,28 +21,41 @@ npm run benchmark:code-mode -- --live --task single-lookup
 # One 60-case batch: twenty tasks × three routes.
 npm run benchmark:code-mode -- --live --trials 1 --trial-start 1 --seed 1 --max-requests 400 --max-tokens 1800000 --minutes 30
 
+# Code mode off versus on, on the large-result tasks. A route pair is order-balanced every two trials.
+npm run benchmark:code-mode -- --live --suite realistic --routes direct,hybrid --trials 2 --max-requests 250 --max-tokens 3000000 --minutes 40
+
+# The same on Claude Opus 5.5, through the stored Anthropic subscription login.
+npm run benchmark:code-mode -- --live --model anthropic/claude-opus-5-5 --suite realistic --routes direct,hybrid --trials 2 --max-requests 250 --max-tokens 3000000 --minutes 40
+
+# A cheap targeted check: chosen tasks, one route.
+npm run benchmark:code-mode -- --live --task bounded-search,empty-result,temporal-asof --routes hybrid --trials 6
+
 # Re-read saved results without credentials or provider calls.
 npm run benchmark:code-mode -- --report /path/to/run
 
 # Combine distinct compatible runs; optionally save the comparison outside the repo.
 npm run benchmark:code-mode -- --report /path/to/run-a --report /path/to/run-b --out /path/to/new-comparison
+
+# Compare two experiments, such as a prompt change against the commit before it.
+npm run benchmark:code-mode -- --report /path/to/candidate-run --baseline /path/to/baseline-run
 ```
 
 `node scripts/run-code-routing.mjs` is the equivalent direct entry point. `--trials` accepts 1–50; `--trial-start` sets the first trial number (default 1, last trial cannot exceed 50). This preserves the six-order schedule across separate bounded batches: use trial starts 1 through 6 with one trial per batch, retaining the same seed. Review each batch before starting the next; do not discard or retry unsuccessful cases to manufacture a clean sample.
 
 `--seed` accepts an unsigned 32-bit integer and controls ordering only, not provider sampling. Use a new output directory for every batch. There is no unlimited mode, automatic retry-until-success, or automatic restart after a cap. Default budgets are unchanged and may truncate the larger suite; select explicit caps for full-suite runs.
 
-The live model is `openai-codex/gpt-6-astra` with `xhigh` thinking, as requested for this experiment. The runner reads the existing Codex OAuth credential from Volt's `auth.json`. It never logs credentials, refreshes or writes credentials, starts login, or falls back to environment/API keys. An absent or expired credential stops admission; refresh through the normal Volt login outside the runner before retrying.
+The live model defaults to `openai-codex/gpt-6-astra`; `--model anthropic/claude-opus-5-5` selects the other supported model. Both run with `xhigh` thinking, one model per run. The runner reads the provider's existing OAuth credential from Volt's `auth.json`. It never logs credentials, refreshes or writes credentials, starts login, or falls back to environment/API keys. An absent or expired credential stops admission; refresh through the normal Volt login outside the runner before retrying.
 
-`--task` selects one fixture from the twenty listed below; `--dry-run` prints all IDs and the exact schedule. `--out` selects a new directory whose parent exists outside the repository. Existing directories are never overwritten. By default artifacts go into a unique OS temporary directory, whose path the runner prints.
+`--suite` selects `core` (the default twenty small tasks), `realistic` (five large-result tasks), or `all`. `--task` instead selects fixtures by comma-separated ID from any suite; `--dry-run` prints the selected IDs and the exact schedule. `--routes` selects a comma-separated subset of `direct`, `hybrid`, `code-first`, and `code-only`; the default is the last three. `--out` selects a new directory whose parent exists outside the repository. Existing directories are never overwritten. By default artifacts go into a new directory under `<agent dir>/benchmarks/code-mode-routing/`, whose path the runner prints. The OS temporary directory is no longer the default: the artifacts of the first comparisons below were lost from it.
 
 ## Experimental arms
 
+- **direct:** code mode off. The session has only the native `mcp` tool: no `run_code` tool and none of its guidance. This is the baseline for what code mode saves and what its prompt costs. It is not part of the default route set, and self-test cannot run it because reference programs are scripts.
 - **hybrid:** current native `mcp` and `run_code` schemas and Volt's normal guidance.
 - **code-first:** same tools, plus stage-specific guidance favoring scripts for pagination, filtering, joining, and aggregation while retaining direct one-off calls.
 - **code-only:** native MCP discovery/cache/lifecycle actions stay direct; the model-facing MCP schema omits `action: "call"`. A benchmark-only extension checks the host-supplied operation origin and rejects direct MCP invocation. Nested calls still use the real session policy and active tool grants.
 
-This is an experimental presentation projection, not a new production routing API. It does not disable an active tool to hide its schema, bypass per-call policy, or expose tools the session lacks. MCP metadata starts warm for every case; the model still discovers the schemas through the gateway. Each task/arm has fresh fixture data and an independent in-memory session. A seeded schedule presents all six route permutations exactly once per task in each six-trial block. Every route appears twice in each position, and every pair appears in both orders equally often. Partial blocks need not be balanced. Task order also varies deterministically by trial and seed so interrupted runs do not always omit the same final tasks.
+This is an experimental presentation projection, not a new production routing API. It does not disable an active tool to hide its schema, bypass per-call policy, or expose tools the session lacks. MCP metadata starts warm for every case; the model still discovers the schemas through the gateway. Each task/arm has fresh fixture data and an independent in-memory session. A seeded schedule presents all six route permutations exactly once per task in each six-trial block. Every route appears twice in each position, and every pair appears in both orders equally often. With `--routes`, the block is n! trials for n routes: two for a pair, twenty-four for all four. Partial blocks need not be balanced. Task order also varies deterministically by trial and seed so interrupted runs do not always omit the same final tasks.
 
 ## Tasks and scoring
 
@@ -73,22 +86,38 @@ The sixteen additions are different operations and edge cases, not renamed copie
 
 Every answer must contain exact JSON fields and values. Graders reject missing/extra fields, wrong values, and non-JSON commentary; a single JSON fence is accepted. Reference programs derive answers through actual calls, not hardcoded oracle values. The expected answers are kept outside the model's prompt and tool results.
 
+### Realistic suite
+
+The core tasks return small results, so they measure saved round trips and little else. Recorded MCP use in real sessions looks different: results have a median near 6 KB, and most calls sit in chains of three or more consecutive tool-only turns. The `realistic` suite is shaped like that. Its data is generated, not copied from any session or binary.
+
+| Fixture ID | Behavior covered |
+|---|---|
+| `listing-scan` | Twelve listings of about 5 KB each; count exact matches among near misses |
+| `tail-call-chain` | Six dependent reads through large listings, each next read fixed by a rule |
+| `xref-triage` | A lookup, then reading four listings to tell which one decides an outcome |
+| `byte-signature-scan` | Eight paged raw reads; matches that span a page or are not byte-aligned |
+| `loop-interpretation` | One large listing that has to be read; a script cannot save a round trip |
+
 All tools are read-only. Repeated reads are measured, but duplicate side effects cannot be evaluated by this pilot. No shell, local file, web, image, subagent, or external MCP tools are exposed to the benchmark model. The synthetic MCP client executes in process and cannot connect to a real server.
 
 ## Limits and artifacts
 
-- Each case: at most 12 provider requests, 200 admitted tool calls, five minutes, and 65,536 streamed response characters.
+- Each case: at most 20 provider requests, 200 admitted tool calls, five minutes, and 65,536 streamed response characters. The limit was 12 for the results dated 2026-11-09 below; it was raised so the direct route can finish a task that reads a dozen results one turn at a time.
 - Whole-run defaults: 160 provider requests, 500,000 reported tokens, and 30 minutes. Override explicitly with `--max-requests` (1–10,000), `--max-tokens` (1–20,000,000), and `--minutes` (1–60). A larger trial count alone does not raise any cap.
 - Provider retries and automatic compaction are disabled. Requested output cap is 4,096 tokens; providers that ignore it are still bounded by the other limits.
 - Token admission is checked between requests, so one response can overshoot it. Unknown usage cannot enforce a token limit; request, response-size, and wall-clock limits remain independent.
 - A supervisor terminates the worker process two minutes after the selected run deadline, including provider operations that ignore cancellation. Interruption can leave only the manifest and already completed case files; report mode requires a finalized `results.json`.
-- Any failed execution (including response-limit cancellation, authentication, quota, timeout, setup failure, or aggregate budget exhaustion) stops the run and ends its worker before another case can dispatch. Incorrect but completed answers remain in the comparison; they are not retried.
+- Any failed execution (including response-limit cancellation, authentication, quota, timeout, setup failure, or aggregate budget exhaustion) stops the run and ends its worker before another case can dispatch. The exceptions are a case that used all of its requests or ran out of output tokens: every request it started has finished, so it is recorded as failed and the run continues. Incorrect but completed answers remain in the comparison; they are not retried.
 
 `manifest.json` records a unique run ID, experiment fingerprint, model settings, fixture definitions/oracles, source hashes, Git revision/dirty status, ordering seed, and limits. Each case records its trial number and position within the three-route block, both individually and in `results.json`. The runner prints budget consumption after each case.
 
 `report.md` reports correctness, requests, latency medians and interquartile ranges, provider-reported tokens/cache usage, catalog-price estimates, failures, and repeated reads, grouped by route and task. Paired efficiency comparisons match the same run, model, task, and trial; they include only pairs where both answers were correct. Failed and missing cases remain visible separately. Input-token comparisons require complete usage evidence, not zero-filled unknowns.
 
 An additional equal-task-weight view takes each task's median successful paired delta, then the median across tasks. Its exploratory 95% percentile interval resamples entire task effects (2,000 draws, deterministic seed 1729), requiring at least ten tasks. Repeating one task does not turn it into many independent task samples. This interval captures observed task heterogeneity, not all within-task inference uncertainty, caching, time trends, or real-world reliability.
+
+The report also counts what each route did per task: direct gateway actions other than `call` (with `list_servers` separately), direct and scripted data calls, scripts, and the largest request context. When a run includes the direct route, a further section pairs every other route with it. Artifacts recorded before gateway actions were stored show those counts as unknown.
+
+`--report <candidate> --baseline <baseline>` compares two experiments instead, for example a prompt change against the commit before it. Runs pool within a side under the usual rules; pairs match model, task, route, and trial across the sides, so run both with the same seed, trials, tasks, and routes. To produce the baseline side, run the same command from a `git worktree` of the earlier commit. The two sides run at different times, so small latency differences are not evidence.
 
 `--report` is read-only unless `--out` is supplied. It rejects duplicate run IDs, incompatible experiment fingerprints, mixed live/self-test runs, malformed data, and unsupported formats. Format 2 records trial identities in the aggregate; the original formatless one-trial pilot below remains historical evidence and is not silently pooled into these comparisons. Runs on different selected fixture sets or changed benchmark sources are intentionally kept separate.
 
@@ -230,6 +259,6 @@ Focused tests verify the model-facing prompt and binding contract; they do not e
 
 ## Interpretation
 
-This compares hybrid versus guided versus forced programmatic **read-only MCP invocation**, not code mode versus no code mode. Keep correctness separate from efficiency. A one-trial pilot can reveal problems or hypotheses but cannot establish significance or justify a product-wide default.
+The default routes compare hybrid versus guided versus forced programmatic **read-only MCP invocation**. Only a run that includes the `direct` route compares code mode with no code mode. Keep correctness separate from efficiency. A one-trial pilot can reveal problems or hypotheses but cannot establish significance or justify a product-wide default.
 
 There is no cache warm-up or isolation between arms; report cache use and repeat in balanced orders before making a decision. Native top-level MCP serialization and nested concurrency are part of the tested workflow. Synthetic transport has no real network latency. These results cannot establish benefits for ordinary editing, shell commands, mutating services, citation handling, or general semantic reasoning.

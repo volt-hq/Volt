@@ -36,7 +36,8 @@ export const ROUTING_MODES = ["hybrid", "code-first", "code-only"] as const;
 /** `direct` is the baseline without code mode: no run_code tool and none of its guidance. */
 export const ALL_ROUTING_MODES = ["direct", ...ROUTING_MODES] as const;
 export type RoutingMode = (typeof ALL_ROUTING_MODES)[number];
-export const CASE_LIMITS = { requests: 12, toolCalls: 200, timeoutMs: 300_000, responseChars: 65_536 };
+/** Twenty requests let the direct route finish a task that reads a dozen results one turn at a time. */
+export const CASE_LIMITS = { requests: 20, toolCalls: 200, timeoutMs: 300_000, responseChars: 65_536 };
 
 const CODE_FIRST = `For the fixture's data-retrieval stage, prefer run_code when code can paginate, join, filter, or aggregate results. Discover schemas with mcp first. Run independent calls concurrently with Promise.allSettled and inspect failures. Return only the requested answer fields and necessary evidence, not whole intermediate results. Use direct calls for one lookup or when interpreting a result is necessary to choose the next step. Do not repeat completed calls.`;
 const CODE_ONLY = `MCP discovery and cache reading remain direct. MCP tool invocation is programmatic-only in this experiment: call tools.mcp.fixture.<tool>(args) inside run_code, never mcp action=call. Discover tool schemas before writing the script. Emit only the requested answer fields and necessary evidence. Do not repeat completed calls.`;

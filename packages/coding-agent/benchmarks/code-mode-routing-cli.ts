@@ -53,7 +53,7 @@ Run options:
                          (default: <agent dir>/benchmarks/code-mode-routing/<time>-<id>)
 
 Route orders are balanced over every n! trials for n routes: two for a pair, six for three.
-Each case has independent limits of 12 requests, 200 tool calls, and five minutes. Budgets
+Each case has independent limits of 20 requests, 200 tool calls, and five minutes. Budgets
 never auto-expand. Report mode makes no provider calls and prints Markdown; --out also saves
 report.md. Only matching experiment fingerprints and distinct run IDs can be combined.
 `;
