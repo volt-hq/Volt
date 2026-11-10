@@ -420,11 +420,11 @@ describe("the daemon connector against a daemon of another version (D7)", () => 
 
 describe("the daemon connector's wait for a daemon that has not finished starting", () => {
 	const WAITING = "Starting the Volt daemon's phone transport";
-	type Transport = { state: "starting" | "ready" | "degraded" | "unavailable" };
+	type Transport = { state: "starting" | "ready" | "degraded" | "unavailable"; unanswered?: boolean };
 
 	/**
 	 * A connector with its control connection to a daemon of this version, whose status reports
-	 * `transport` as its phone transport: `statuses` counts how often it was asked.
+	 * `transport` as its phone transport, or stays `unanswered`: `statuses` counts how often it was asked.
 	 */
 	async function connected(transport: Transport): Promise<{ tui: DaemonConnector; statuses(): number }> {
 		const endpoint = createTestSocketEndpoint("volt-connector-started");
@@ -440,6 +440,7 @@ describe("the daemon connector's wait for a daemon that has not finished startin
 						return;
 					}
 					statuses++;
+					if (transport.unanswered) return;
 					connection.send({
 						type: "status_result",
 						id: request.id,
@@ -511,14 +512,34 @@ describe("the daemon connector's wait for a daemon that has not finished startin
 		const transport: Transport = { state: "starting" };
 		const { tui } = await connected(transport);
 		const onStatus = vi.fn();
-		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 		try {
 			const waiting = tui.started({ onStatus });
 			await vi.waitFor(() => expect(onStatus).toHaveBeenCalledWith(WAITING), { timeout: 5_000 });
-			vi.setSystemTime(Date.now() + 10_000);
+			await vi.advanceTimersByTimeAsync(10_000);
 			await waiting;
 			expect(transport.state).toBe("starting");
 			expect(onStatus).toHaveBeenLastCalledWith(undefined);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("gives up after 10 s on a connected daemon that does not answer its status", async () => {
+		const { tui, statuses } = await connected({ state: "starting", unanswered: true });
+		const onStatus = vi.fn();
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			let settled = false;
+			const waiting = tui.started({ onStatus }).then(() => {
+				settled = true;
+			});
+			await vi.waitFor(() => expect(statuses()).toBe(1), { timeout: 5_000 });
+			expect(settled).toBe(false);
+			await vi.advanceTimersByTimeAsync(10_000);
+			await waiting;
+			expect(statuses()).toBe(1);
+			expect(onStatus).not.toHaveBeenCalled();
 		} finally {
 			vi.useRealTimers();
 		}

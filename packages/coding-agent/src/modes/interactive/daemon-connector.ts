@@ -271,25 +271,34 @@ export class DaemonConnector implements ConversationConnector {
 	 * Resolves once the daemon the TUI is connected to finished starting. It
 	 * answers its TUIs and opens their conversations first, then brings its
 	 * phone transport up: its status says `starting` until the transport is
-	 * ready, or will not come up (no binding, a failed endpoint). A transport
-	 * still starting after 10 s is not waited for, and neither is a daemon the
-	 * connector cannot ask.
+	 * ready, or will not come up (no binding, a failed endpoint). The wait ends
+	 * after 10 s whatever the daemon does, a transport still starting or a
+	 * status left unanswered, and a daemon the connector cannot ask is not
+	 * waited for.
 	 */
 	async started(options: { readonly onStatus?: (status: string | undefined) => void } = {}): Promise<void> {
-		const deadline = Date.now() + DAEMON_STARTED_WAIT_MS;
 		let waiting = false;
-		try {
+		let over = false;
+		const transportStarted = async (): Promise<void> => {
 			for (;;) {
 				const control = this.control;
-				if (this.stopped || control?.connectionState !== "connected") return;
+				if (over || this.stopped || control?.connectionState !== "connected") return;
+				// A request has no timeout of its own: the wait's does for it.
 				const status = await control.request({ type: "status" }).catch(() => undefined);
-				if (status?.type !== "status_result" || status.remoteTransport?.state !== "starting") return;
-				if (Date.now() >= deadline) return;
+				if (over || status?.type !== "status_result" || status.remoteTransport?.state !== "starting") return;
 				if (!waiting) options.onStatus?.("Starting the Volt daemon's phone transport");
 				waiting = true;
 				await delay(DAEMON_STARTED_POLL_MS);
 			}
+		};
+		const gaveUp = Promise.withResolvers<void>();
+		const timer = setTimeout(gaveUp.resolve, DAEMON_STARTED_WAIT_MS);
+		timer.unref();
+		try {
+			await Promise.race([transportStarted(), gaveUp.promise]);
 		} finally {
+			over = true;
+			clearTimeout(timer);
 			if (waiting) options.onStatus?.(undefined);
 		}
 	}
