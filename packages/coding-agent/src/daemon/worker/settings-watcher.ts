@@ -49,10 +49,10 @@ function watchSettingsFile(directory: string, onChange: () => void): FSWatcher |
 export function watchConversationSettings(
 	conversation: HostedConversation,
 	onChanged: (catalog: "settings" | "models") => void,
-	/** Whether the project in `cwd` is trusted now. */
+	/** Whether the project of the conversation, which runs in `cwd`, is trusted now. */
 	projectTrusted: (cwd: string) => boolean,
 ): () => void {
-	const { agentDir, projectCwd } = conversation.services;
+	const { agentDir, cwd, projectCwd } = conversation.services;
 	const stopCatalog = startModelCatalogWatcher({
 		agentDir,
 		getModelRegistry: () => conversation.session.modelRegistry,
@@ -65,7 +65,7 @@ export function watchConversationSettings(
 		timer = undefined;
 		if (stopped || conversation.closed) return;
 		const settings = conversation.session.settingsManager;
-		if (settings.isProjectTrusted() && !projectTrusted(projectCwd)) {
+		if (settings.isProjectTrusted() && !projectTrusted(cwd)) {
 			if (!withheld) {
 				withheld = true;
 				console.error(

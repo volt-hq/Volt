@@ -2,8 +2,8 @@
  * Phase 2 (TUI) worktree integration — worktrees-design.md §5.2 / §9 Phase 2:
  * worktree_resolve/worktree_bind control handling, the TUI's workspace
  * resolution, the /worktree control-plane helper, relay sanitization root
- * switching, the managed-checkout path predicate, trust-path pinning helpers,
- * and new-session cwd/sessionDir overrides.
+ * switching, the managed-checkout path predicate, the checkout's gitdir
+ * pointer, and new-session cwd/sessionDir overrides.
  */
 
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -525,7 +525,7 @@ describe("managed checkout paths (§5.2.3)", () => {
 	});
 });
 
-describe("trust pinning helpers (§5.2.1)", () => {
+describe("a managed checkout's gitdir pointer", () => {
 	it("resolveWorktreeParentCheckout derives the parent from the gitdir pointer", () => {
 		const agentDir = makeTempDir("volt-wt-trust-");
 		const parent = join(agentDir, "parent-repo");

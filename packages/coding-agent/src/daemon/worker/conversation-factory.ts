@@ -12,7 +12,7 @@
  * project before (in the conversation's group, or for the group's top-level
  * conversation in its opener's earlier conversations in this worker, the
  * TUI's session); else trusted when nothing in the project needs trust,
- * untrusted in a managed worktree whose parent checkout is unknown; else
+ * untrusted in a managed worktree the daemon has no record of; else
  * resolved as its resources load: the user/global and `-e` extensions'
  * `project_trust` hooks first, then the saved decision, then
  * `defaultProjectTrust`, then the trust prompt. The top-level conversation's
@@ -22,6 +22,12 @@
  * answer decides nothing: the conversation runs untrusted, and the next one
  * asks again. A top-level conversation whose TUI left before it answered
  * does not open.
+ *
+ * A TUI-opened conversation's project is resolved where it runs
+ * (`resolveConversationProject`, #1041): its own directory, or for a pull
+ * request review checkout the repository in its workspace, with the trust of
+ * a managed worktree's workspace. Its language servers stay in its own
+ * directory.
  */
 
 import { join } from "node:path";
@@ -40,7 +46,13 @@ import { ConversationHost } from "../../core/host/conversation-host.ts";
 import type { ConversationFactory, HostedConversation } from "../../core/host/hosted-conversation.ts";
 import { LspServerPool } from "../../core/lsp/server-pool.ts";
 import { resolveModelScope } from "../../core/model-resolver.ts";
-import { decideProjectTrust, projectTrustPath, resolveConversationProjectTrust } from "../../core/project-trust.ts";
+import {
+	type ConversationProject,
+	decideProjectTrust,
+	projectTrustPath,
+	resolveConversationProject,
+	resolveConversationProjectTrust,
+} from "../../core/project-trust.ts";
 import { type IrohRemoteRuntimeToolPolicy, parseIrohRemoteAllowTools } from "../../core/remote/iroh/index.ts";
 import { getDefaultSessionDir, type SessionManager, type SessionReference } from "../../core/session-manager.ts";
 import {
@@ -160,7 +172,7 @@ export type IrohRemoteAgentRuntimeSessionSelection =
 export interface IrohRemoteAgentRuntime {
 	readonly host: ConversationHost;
 	readonly conversation: HostedConversation;
-	/** Whether the project in `cwd` is trusted now for the host's conversations: as decided for it, else as it holds nothing that needs trust or its saved decision. */
+	/** Whether the project of the host's conversation in `cwd` is trusted now: as decided for it, else as it holds nothing that needs trust or its saved decision. */
 	readonly projectTrusted: (cwd: string) => boolean;
 }
 
@@ -219,17 +231,15 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 		const top = !topOpened;
 		topOpened = true;
 		const profile = Object.hasOwn(runtimeOptions, "profile") ? runtimeOptions.profile : options.profile;
-		// A TUI's conversation reads its settings and resources where it runs, as the CLI's do.
-		const settingsCwd = cli === undefined ? projectCwd : runtimeOptions.cwd;
+		// A TUI's conversation reads its settings and resources from the project of the directory it runs in, as
+		// the CLI's do; a phone's, from the project the daemon resolved for it.
+		const project =
+			cli === undefined ? undefined : resolveConversationProject(runtimeOptions.agentDir, runtimeOptions.cwd);
+		const settingsCwd = project === undefined ? projectCwd : project.projectCwd;
 		const trust: ConversationTrust =
-			cli === undefined
+			cli === undefined || project === undefined
 				? { trusted: projectTrusted }
-				: conversationTrust(
-						runtimeOptions.agentDir,
-						runtimeOptions.cwd,
-						decisions,
-						top ? cli.trust.session : undefined,
-					);
+				: conversationTrust(project, decisions, top ? cli.trust.session : undefined);
 		const settingsManager = createConversationSettings(settingsCwd, runtimeOptions.agentDir, {
 			profile,
 			projectTrusted: trust.trusted,
@@ -240,8 +250,13 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 			authStorage,
 			cwd: runtimeOptions.cwd,
 			projectCwd: settingsCwd,
-			// A phone's conversation may work in another tree than its project: its language servers run there.
-			...(cli === undefined && options.workRoot !== undefined ? { workRoot: options.workRoot } : {}),
+			// A conversation may work in another tree than its project: its language servers run there, a TUI's
+			// in its own directory.
+			...(cli !== undefined
+				? { workRoot: runtimeOptions.cwd }
+				: options.workRoot !== undefined
+					? { workRoot: options.workRoot }
+					: {}),
 			agentDir: runtimeOptions.agentDir,
 			settingsManager,
 			workspaceName: runtimeOptions.workspaceName ?? options.workspaceName,
@@ -258,7 +273,7 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 									(opener ? cli.trust.opener(trustPath) : trustContextWithoutUI(trustPath));
 								const decided = await decideProjectTrust({
 									cwd: trustPath,
-									resourcesCwd: runtimeOptions.cwd,
+									resourcesCwd: settingsCwd,
 									trustStore: new ProjectTrustStore(runtimeOptions.agentDir),
 									defaultProjectTrust: settingsManager.getDefaultProjectTrust(),
 									extensionsResult,
@@ -449,7 +464,9 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 		runtime = {
 			host,
 			conversation: opened.conversation,
-			projectTrusted: (cwd) => resolveConversationProjectTrust(agentDir, cwd, decisions),
+			// A phone's conversations all load the project the daemon resolved; a TUI's, the project of its directory.
+			projectTrusted: (cwd) =>
+				resolveConversationProjectTrust(agentDir, cli === undefined ? projectCwd : cwd, decisions),
 		};
 		const errors = opened.conversation.diagnostics.filter((diagnostic) => diagnostic.type === "error");
 		if (errors.length > 0) {
@@ -476,25 +493,24 @@ interface ConversationTrust {
 }
 
 /**
- * The project trust a TUI-opened conversation in `cwd` opens with: a
+ * The project trust a TUI-opened conversation of `project` opens with: a
  * decision made for its project (`decisions`, else the opener's `session`
  * for a top-level conversation, which joins `decisions`), trusted when
- * nothing in it needs trust, untrusted in a managed worktree whose parent
- * checkout is unknown; else resolved as its resources load.
+ * nothing in it needs trust, untrusted in a managed worktree the daemon has
+ * no record of; else resolved as its resources load.
  */
 function conversationTrust(
-	agentDir: string,
-	cwd: string,
+	project: ConversationProject,
 	decisions: Map<string, boolean>,
 	session: ReadonlyMap<string, boolean> | undefined,
 ): ConversationTrust {
-	const trustPath = projectTrustPath(agentDir, cwd);
+	const { projectCwd, trustPath } = project;
 	const known = trustPath === undefined ? undefined : (decisions.get(trustPath) ?? session?.get(trustPath));
 	if (trustPath !== undefined && known !== undefined) {
 		decisions.set(trustPath, known);
 		return { trusted: known };
 	}
-	if (!hasTrustRequiringProjectResources(cwd)) return { trusted: true };
+	if (!hasTrustRequiringProjectResources(projectCwd)) return { trusted: true };
 	return trustPath === undefined ? { trusted: false } : { trusted: false, resolve: trustPath };
 }
 

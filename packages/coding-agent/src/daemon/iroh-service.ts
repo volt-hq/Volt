@@ -186,7 +186,7 @@ import {
 import { isPathInside, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
 import type { SessionPlacement, WorkspaceSession } from "./workspace-sessions.ts";
 import {
-	getConversationProjectRoot,
+	getConversationProject,
 	getWorkspaceWorktreesDir,
 	handleWorktreeControlRequest,
 	isWorktreeControlRequest,
@@ -1396,7 +1396,11 @@ class IrohDaemonService {
 					branch: request.gitContext.branch,
 					headOid: request.gitContext.headOid,
 					trusted: resolveIrohRemoteWorkspaceProjectTrusted(currentWorkspace, {
-						resourcesRoot: getConversationProjectRoot(currentWorkspace, worktree),
+						resourcesRoot: getConversationProject(
+							currentWorkspace,
+							worktree,
+							worktree?.path ?? currentWorkspace.path,
+						).projectCwd,
 						trustStore: this.trustStore,
 					}),
 					...(request.gitContext.baseRef === undefined ? {} : { baseBranches: [request.gitContext.baseRef] }),
@@ -3368,7 +3372,7 @@ class IrohDaemonService {
 			if (worktreeId !== undefined) {
 				const worktree = await this.worktrees.findWorktree(workspace.name, worktreeId);
 				if (!worktree || !existsSync(worktree.path)) throw new WorkspaceIntentError("worktree_not_found");
-				root = getConversationProjectRoot(workspace, worktree);
+				root = getConversationProject(workspace, worktree, worktree.path).projectCwd;
 			}
 			return await inventories.get(
 				{

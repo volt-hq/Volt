@@ -33,7 +33,7 @@ import type { WorkerCompatibility } from "./worker-spawn-options.ts";
 import { isPathInside, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
 import type { SessionPlacement, WorkspaceSession, WorkspaceSessions } from "./workspace-sessions.ts";
 import {
-	getConversationProjectRoot,
+	getConversationProject,
 	getRegisteredWorkingDirectoryForWorktree,
 	type WorktreeRuntimePreparation,
 } from "./worktree-manager.ts";
@@ -206,7 +206,8 @@ export async function resolveConversationOpen(
 			? located
 			: await placeStoredTarget(sessions, workspace.name, async () => storedLocation);
 	const rootPath = worktree?.path ?? workspace.path;
-	const projectRoot = getConversationProjectRoot(workspace, worktree);
+	// A phone's conversations load their project at the root of the tree they work in.
+	const projectRoot = getConversationProject(workspace, worktree, rootPath).projectCwd;
 	const requestedWorkingDirectory =
 		hello.conversation.target === "new" ? hello.conversation.workingDirectory : undefined;
 	const initialDirectory = await services.resolveWorkingDirectory({

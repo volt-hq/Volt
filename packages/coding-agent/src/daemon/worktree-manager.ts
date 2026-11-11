@@ -118,21 +118,33 @@ export function getRegisteredWorkingDirectoryForWorktree(
 }
 
 /**
- * The directory a phone conversation in the workspace, or in its checkout
- * `worktree`, loads its project resources from: settings, extensions, skills,
- * prompts, MCP servers, and context files. A checkout that has held a pull
- * request review holds content its author controls, so its conversations load
- * them from the same repository in the workspace instead (#1034).
+ * The project of a conversation in `directory`, inside the workspace or its
+ * checkout `worktree`: where it loads its project resources from (settings,
+ * extensions, skills, prompts, MCP servers, and context files), and the path
+ * its project trust is decided for. A checkout takes its trust from the
+ * repository in the workspace it was created from. One that has held a pull
+ * request review holds content its author controls, so its conversations
+ * load their project from that repository too, at the same relative path
+ * (#1034, #1041). `directory` is spelled as `worktree.path` is.
  */
-export function getConversationProjectRoot(
+export function getConversationProject(
 	workspace: Pick<IrohRemoteWorkspace, "path">,
 	worktree: Pick<IrohRemoteWorkspaceWorktree, "path" | "sourceRootRelativePath" | "prReviewLaunches"> | undefined,
-): string {
-	if (worktree === undefined) return workspace.path;
-	if (worktree.prReviewLaunches === undefined || worktree.prReviewLaunches.length === 0) return worktree.path;
-	return worktree.sourceRootRelativePath === undefined
-		? workspace.path
-		: join(workspace.path, ...worktree.sourceRootRelativePath.split("/"));
+	directory: string,
+): { projectCwd: string; trustPath: string } {
+	if (worktree === undefined) return { projectCwd: directory, trustPath: workspace.path };
+	const repository =
+		worktree.sourceRootRelativePath === undefined
+			? workspace.path
+			: join(workspace.path, ...worktree.sourceRootRelativePath.split("/"));
+	if (worktree.prReviewLaunches === undefined || worktree.prReviewLaunches.length === 0) {
+		return { projectCwd: directory, trustPath: repository };
+	}
+	const inside = getContainedRelativePath(worktree.path, directory);
+	return {
+		projectCwd: typeof inside === "string" ? join(repository, ...inside.split("/")) : repository,
+		trustPath: repository,
+	};
 }
 
 /** win32-aware "path is inside root" prefix check on resolved paths. */
@@ -158,9 +170,10 @@ export function isPathUnderWorktreesRoot(agentDir: string, path: string): boolea
  * Resolve the PARENT checkout of a daemon-managed worktree from the checkout's
  * `.git` gitdir pointer (`gitdir: <parent>/.git/worktrees/<id>`), without a
  * daemon round-trip or a git subprocess. Returns undefined when the path is
- * not under the worktrees root or the pointer cannot be parsed. Used by the
- * TUI to pin trust decisions to the parent workspace path — trust entries are
- * never prompted for or persisted on worktree paths (design §5.1.9/§5.2.1).
+ * not under the worktrees root or the pointer cannot be parsed. The pointer
+ * names the repository's main checkout, which need not be the workspace: it
+ * decides no trust and no project (`resolveConversationProject` does, from
+ * the daemon's records).
  */
 export function resolveWorktreeParentCheckout(agentDir: string, path: string): string | undefined {
 	if (!isPathUnderWorktreesRoot(agentDir, path)) {

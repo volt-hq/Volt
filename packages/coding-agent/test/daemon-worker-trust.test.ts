@@ -29,6 +29,7 @@ import { getWorktreesRoot } from "../src/daemon/worktree-manager.ts";
 import { DaemonConnector, type DaemonConnectorDaemon } from "../src/modes/interactive/daemon-connector.ts";
 import { type ProjectTrustHookAnswer, projectTrustHook } from "./fixtures/project-trust-extension.ts";
 import { createDaemonHarness, type DaemonHarness } from "./suite/daemon-harness.ts";
+import { writeDaemonStateFile } from "./utilities/iroh-host-state.ts";
 
 const PROJECT_TRUST_EXTENSION_PATH = realpathSync.native(
 	fileURLToPath(new URL("./fixtures/project-trust-extension.ts", import.meta.url)),
@@ -433,7 +434,13 @@ describe("project trust in the worker's conversation factory", () => {
 		mkdirSync(parent, { recursive: true });
 		const checkout = join(getWorktreesRoot(agentDir), "--parent--", "fix");
 		mkdirSync(join(checkout, ".volt", "extensions"), { recursive: true });
-		writeFileSync(join(checkout, ".git"), `gitdir: ${join(parent, ".git", "worktrees", "fix")}\n`);
+		// The daemon's record of the checkout names its workspace: the project its trust is decided for.
+		await writeDaemonStateFile(agentDir, {
+			workspaces: [{ name: "parent", path: parent }],
+			worktrees: [
+				{ id: "fix", workspaceName: "parent", path: checkout, branch: "volt/fix", createdAt: 1, sessionIds: [] },
+			],
+		});
 		expect(projectTrustPath(agentDir, checkout)).toBe(parent);
 
 		const titles: string[] = [];
