@@ -457,7 +457,7 @@ describe("review engines", () => {
 		expect(record).toMatchObject({ status: "incomplete", engine: SWARM });
 		expect(record!.result!.coverage.uncheckedAreas).toEqual([
 			"Changed-file inventory was not paged to completion.",
-			expect.stringContaining("Changed hunk was not fully inspected"),
+			expect.stringContaining("Changed file was not fully inspected"),
 		]);
 		expect(record!.result!.coverage.residualRisk[0]).toBe(
 			"Static review only. This review did not run tests or runtime checks.",
