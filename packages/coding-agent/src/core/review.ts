@@ -95,8 +95,10 @@ import {
 } from "./review-state.ts";
 import {
 	createReviewSnapshotTools,
+	mergeObservedCoverage,
 	REVIEW_SNAPSHOT_TOOL_NAMES,
 	ReviewCoverageTracker,
+	type ReviewObservedCoverage,
 	reviewSnapshotToolGuidelines,
 } from "./review-tools.ts";
 import { createEmptyReviewUsage, type ReviewUsageAttempt, ReviewUsageCollector } from "./review-usage.ts";
@@ -1552,8 +1554,10 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 			.filter((file) => file.reviewable && inRunScope(file.path, controls, options.incrementalPlan))
 			.flatMap((file) => file.hunks.map((hunk) => hunk.id)),
 	);
-	let discoveryTracker = new ReviewCoverageTracker();
-	let verificationTracker = new ReviewCoverageTracker();
+	// What each successful round's passes observed. Coverage accumulates across rounds: a follow-up round looks into
+	// one concern and does not erase what the first round read.
+	const discoveryCoverage: ReviewObservedCoverage[] = [];
+	const verificationCoverage: ReviewObservedCoverage[] = [];
 	const commandRuns: string[] = [];
 	const failedVerificationAttempts: string[] = [];
 	const pendingCommands = new Map<string, string>();
@@ -1798,8 +1802,8 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 				validatedCandidates = roundCandidates;
 				validatedFollowUps = roundFollowUps;
 				unresolvedChallenge = roundChallenge;
-				discoveryTracker = roundDiscoveryTracker;
-				verificationTracker = roundVerificationTracker;
+				discoveryCoverage.push(roundDiscoveryTracker.snapshot());
+				verificationCoverage.push(roundVerificationTracker.snapshot());
 				privateDiagnostics.recordModelLimitations("verification", verificationReport.limitations);
 				privateDiagnostics.recordVerificationAssessment(verificationReport);
 				if (verificationReport.assessment === "complete") break;
@@ -1931,8 +1935,8 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 			unresolvedChallenge,
 			challengePresentation,
 			followUpFailure,
-			discoveryCoverage: discoveryTracker.snapshot(),
-			verificationCoverage: verificationTracker.snapshot(),
+			discoveryCoverage: mergeObservedCoverage(discoveryCoverage),
+			verificationCoverage: mergeObservedCoverage(verificationCoverage),
 			commandsRun: commandRuns,
 			failedVerificationAttempts,
 			excludedPaths: reviewExclusions(snapshot, controls, options.incrementalPlan),

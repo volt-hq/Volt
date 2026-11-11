@@ -162,7 +162,7 @@ function fullReview(
 		"Coverage (retained evidence; lists can be bounded):",
 		`- Changed-file inventory complete: ${parsed.coverage.changedFileInventoryComplete ? "yes" : "no"}`,
 		`- File paths observed: ${parsed.coverage.filesInspected.map(reviewText).join(", ") || "none"}`,
-		`- Hunks inspected: ${parsed.coverage.hunksInspected.join(", ") || "none"}`,
+		`- Hunks inspected: ${parsed.coverage.hunksInspected.length}`,
 		`- Commands recorded: ${parsed.coverage.commandsRun.join("; ") || "none"}`,
 	];
 	if (parsed.coverage.context) {
@@ -178,7 +178,10 @@ function fullReview(
 			`- Exclusions: ${parsed.coverage.exclusions.map((entry) => `${reviewText(entry.path)} (${reviewText(entry.reason)})`).join("; ")}`,
 		);
 	if (parsed.coverage.uncheckedAreas.length) lines.push(`- Unchecked: ${parsed.coverage.uncheckedAreas.join("; ")}`);
-	if (parsed.coverage.residualRisk.length) lines.push(`- Residual risk: ${parsed.coverage.residualRisk.join("; ")}`);
+	// Residual risk repeats every unchecked area; list each once.
+	const unchecked = new Set(parsed.coverage.uncheckedAreas);
+	const residualRisk = parsed.coverage.residualRisk.filter((risk) => !unchecked.has(risk));
+	if (residualRisk.length) lines.push(`- Residual risk: ${residualRisk.join("; ")}`);
 	if (parsed.coverage.modelReportedLimitations.length)
 		lines.push(`- Model-reported limitations: ${parsed.coverage.modelReportedLimitations.join("; ")}`);
 	lines.push("", "Retained findings:", "");

@@ -2343,11 +2343,15 @@ describe("review pipeline", () => {
 		});
 	});
 
-	it("does not credit complete discovery coverage to a verifier that inspects nothing", async () => {
+	it("credits discovery's coverage to the run when the verifier reads no diff", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		const snapshot = await createSnapshotRepository(harness);
 		snapshots.push(snapshot);
+		const valueHunks = snapshot.changedFiles
+			.filter((file) => file.path === "src/value.ts")
+			.flatMap((file) => file.hunks.map((hunk) => hunk.id));
+		expect(valueHunks).toHaveLength(1);
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" }),
 			fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), { stopReason: "toolUse" }),
@@ -2372,23 +2376,74 @@ describe("review pipeline", () => {
 		});
 		snapshots.splice(snapshots.indexOf(snapshot), 1);
 		expect(run.errorMessage).toBeUndefined();
-		expect(run.parsed).toMatchObject({ completionStatus: "incomplete" });
-		expect(run.parsed?.overallCorrectness).toBeUndefined();
+		expect(run.parsed).toMatchObject({ completionStatus: "complete", overallCorrectness: "incorrect" });
 		expect(run.parsed?.coverage).toMatchObject({
-			changedFileInventoryComplete: false,
-			filesInspected: [],
-			hunksInspected: [],
+			changedFileInventoryComplete: true,
+			filesInspected: ["src/value.ts"],
+			hunksInspected: valueHunks,
+			uncheckedAreas: [],
 		});
 	});
 
-	it("requires the verifier to inspect relevant hunks after inventorying changed files", async () => {
+	it("keeps the first round's coverage when the follow-up round reads no diff", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const snapshot = await createSnapshotRepository(harness);
+		snapshots.push(snapshot);
+		const valueHunks = snapshot.changedFiles
+			.filter((file) => file.path === "src/value.ts")
+			.flatMap((file) => file.hunks.map((hunk) => hunk.id));
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("report_review_candidates", candidateReport() as never), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage(fauxToolCall("report_review_verification", verificationReport("incomplete") as never), {
+				stopReason: "toolUse",
+			}),
+			// The follow-up round investigates the challenge without paging any diff.
+			fauxAssistantMessage(
+				fauxToolCall("report_review_candidates", {
+					summary: "No additional candidates.",
+					candidates: [],
+					limitations: [],
+				} as never),
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage(fauxToolCall("report_review_verification", verificationReport() as never), {
+				stopReason: "toolUse",
+			}),
+		]);
+
+		const run = await runReview({
+			cwd: harness.tempDir,
+			agentDir: harness.tempDir,
+			model: harness.getModel(),
+			verifierModel: harness.getModel(),
+			authStorage: harness.authStorage,
+			modelRegistry: harness.session.modelRegistry,
+			settingsManager: harness.settingsManager,
+			resolved: snapshot,
+			controls: { scopeMode: "full", scope: ["src/**"] },
+		});
+		snapshots.splice(snapshots.indexOf(snapshot), 1);
+		expect(run.errorMessage).toBeUndefined();
+		expect(run.parsed).toMatchObject({ completionStatus: "complete", overallCorrectness: "incorrect" });
+		expect(run.parsed?.coverage).toMatchObject({
+			changedFileInventoryComplete: true,
+			hunksInspected: valueHunks,
+			uncheckedAreas: [],
+		});
+	});
+
+	it("stays incomplete, naming the file, when no pass reads its diff", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		const snapshot = await createSnapshotRepository(harness);
 		snapshots.push(snapshot);
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" }),
-			fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), { stopReason: "toolUse" }),
 			fauxAssistantMessage(fauxToolCall("report_review_candidates", candidateReport() as never), {
 				stopReason: "toolUse",
 			}),
@@ -2419,7 +2474,7 @@ describe("review pipeline", () => {
 			hunksInspected: [],
 		});
 		expect(run.parsed?.coverage.uncheckedAreas).toEqual([
-			expect.stringContaining("Changed hunk was not fully inspected"),
+			"Changed file was not fully inspected: src/value.ts (1 of 1 hunk)",
 		]);
 	});
 

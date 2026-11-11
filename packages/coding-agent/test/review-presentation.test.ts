@@ -135,7 +135,7 @@ describe("review presentation", () => {
 		view.setExpanded(true);
 		const expanded = rendered(view).join("\n");
 		for (const path of run.result!.coverage.filesInspected) expect(expanded).toContain(path);
-		for (const hunk of run.result!.coverage.hunksInspected) expect(expanded).toContain(hunk);
+		expect(expanded).toContain("Hunks inspected: 56");
 		expect(expanded).toContain("Discovery reported 1 model limitation(s).");
 		expect(expanded).toContain("Original review conclusion");
 		view.setExpanded(false);
@@ -321,6 +321,20 @@ describe("review presentation", () => {
 			expect(run).toEqual(original);
 		},
 	);
+
+	it("lists an unchecked area once in the expanded report, though residual risk repeats it", () => {
+		const run = record();
+		const gap = "Changed file was not fully inspected: src/observed-0.ts (1 of 1 hunk)";
+		run.status = "incomplete";
+		run.result!.completionStatus = "incomplete";
+		delete run.result!.overallCorrectness;
+		run.result!.coverage.uncheckedAreas = [gap];
+		run.result!.coverage.residualRisk = [STATIC_REVIEW_LIMITATION, gap];
+		const content = createReviewSeedMessage(run).content;
+		expect(content.split(gap)).toHaveLength(2);
+		expect(content).toContain(`- Unchecked: ${gap}`);
+		expect(content).toContain(`- Residual risk: ${STATIC_REVIEW_LIMITATION}`);
+	});
 
 	it("does not infer static-only, absent attempts, or passing tests from completion/failure arrays or model prose", () => {
 		const run = record();
