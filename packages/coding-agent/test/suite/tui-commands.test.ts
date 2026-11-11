@@ -855,6 +855,92 @@ describe("TUI reviews", () => {
 		await review;
 	});
 
+	it("offers the review models in the form, and saves the ones it changed through the host before the review", async () => {
+		const { harness, tui } = await start({
+			models: [
+				{ id: "faux-1", reasoning: false },
+				{ id: "faux-2", reasoning: false },
+			],
+		});
+		reviewRepository(harness.tempDir);
+		const first = heldTurn("never");
+		const second = heldTurn("never");
+		harness.faux.setResponses([first.response, second.response]);
+		const intent = vi.spyOn(tui.store.client, "intent");
+
+		let review = tui.submit("/review");
+		await choose(tui, "Uncommitted changes");
+		await waitForScreen(
+			tui,
+			"Review options",
+			"Review model",
+			"Session model",
+			"Verifier model",
+			"Same as the review model",
+		);
+		// Down past focus, scope, effort, optional findings, and scope mode to the review model; typing searches it.
+		for (let field = 0; field < 5; field++) tui.terminal.sendInput("\x1b[B");
+		tui.terminal.sendInput("faux-2");
+		await waitForScreen(tui, "faux/faux-2", "1 match");
+		tui.terminal.sendInput("\r");
+		await first.started;
+		await closeJobList(tui);
+		await waitForScreen(tui, "Equivalent command: /review uncommitted (saved review model faux/faux-2)");
+		const names = intent.mock.calls.map(([name]) => name);
+		expect(intent.mock.calls.filter(([name]) => name === "set_settings")).toEqual([
+			["set_settings", { reviewModel: "faux/faux-2" }],
+		]);
+		expect(names.indexOf("set_settings")).toBeLessThan(names.indexOf("review"));
+		expect(settingsFile(harness)).toMatchObject({ reviewModel: "faux/faux-2" });
+		await stopReviews(tui);
+		await review;
+
+		// The next launch starts at the saved model, and starting with it unchanged saves nothing.
+		review = tui.submit("/review");
+		await choose(tui, "Uncommitted changes");
+		await waitForScreen(tui, "Review options", "faux/faux-2");
+		tui.terminal.sendInput("\r");
+		await second.started;
+		expect(intent.mock.calls.filter(([name]) => name === "set_settings")).toHaveLength(1);
+		await stopReviews(tui);
+		await review;
+	});
+
+	it("opens the form with the options the launcher last started a review with, but not the focus", async () => {
+		const { harness, tui } = await start();
+		reviewRepository(harness.tempDir);
+		const first = heldTurn("never");
+		const second = heldTurn("never");
+		harness.faux.setResponses([first.response, second.response]);
+		const intent = vi.spyOn(tui.store.client, "intent");
+		const DOWN = "\x1b[B";
+
+		let review = tui.submit("/review");
+		await choose(tui, "Uncommitted changes");
+		await waitForScreen(tui, "Review options");
+		tui.terminal.sendInput("auth");
+		tui.terminal.sendInput(DOWN);
+		tui.terminal.sendInput(DOWN);
+		// Effort: standard to high.
+		tui.terminal.sendInput("\x1b[C");
+		tui.terminal.sendInput("\r");
+		await first.started;
+		await stopReviews(tui);
+		await review;
+		await vi.waitFor(() => expect(settingsFile(harness).reviewLastOptions).toEqual({ standard: { effort: "high" } }));
+
+		review = tui.submit("/review");
+		await choose(tui, "Uncommitted changes");
+		await waitForScreen(tui, "Review options", "high");
+		tui.terminal.sendInput("\r");
+		await second.started;
+		await closeJobList(tui);
+		await waitForScreen(tui, "Equivalent command: /review uncommitted --effort high");
+		expect(reviewInputs(intent).at(-1)).toEqual({ target: "uncommitted", effort: "high" });
+		await stopReviews(tui);
+		await review;
+	});
+
 	it("cancels the review when the options form is cancelled", async () => {
 		const { harness, tui, access } = await start();
 		reviewRepository(harness.tempDir);
@@ -1005,6 +1091,43 @@ describe("TUI reviews", () => {
 				{ target: "uncommitted", engine: ENGINE, engineParams: { thinking: "low" } },
 			]);
 			expect(swarm.runs[0]?.params).toEqual({ workers: 30, thinking: "low" });
+			await stopReviews(tui);
+			await review;
+		});
+
+		it("remembers the engine's options apart from the built-in review's, and offers no review models", async () => {
+			const swarm = swarmExtension();
+			const { harness, tui } = await start({ extension: swarm.extension });
+			reviewRepository(harness.tempDir);
+			const intent = vi.spyOn(tui.store.client, "intent");
+
+			let review = tui.submit("/review");
+			await choose(tui, "Uncommitted changes");
+			await choose(tui, "Swarm: Many reviewers.");
+			await waitForScreen(tui, "Review options", "thinking");
+			expect(tui.screen()).not.toContain("Review model");
+			// Down to thinking, then high to low.
+			for (let field = 0; field < 7; field++) tui.terminal.sendInput("\x1b[B");
+			tui.terminal.sendInput("\x1b[D");
+			tui.terminal.sendInput("\r");
+			await swarm.entered;
+			await stopReviews(tui);
+			await review;
+			await vi.waitFor(() =>
+				expect(settingsFile(harness).reviewLastOptions).toEqual({ [ENGINE]: { thinking: "low" } }),
+			);
+
+			review = tui.submit("/review");
+			await choose(tui, "Uncommitted changes");
+			await choose(tui, "Swarm: Many reviewers.");
+			await waitForScreen(tui, "Review options", "low");
+			tui.terminal.sendInput("\r");
+			await vi.waitFor(() => expect(swarm.runs).toHaveLength(2), { timeout: 15_000 });
+			expect(reviewInputs(intent).at(-1)).toEqual({
+				target: "uncommitted",
+				engine: ENGINE,
+				engineParams: { thinking: "low" },
+			});
 			await stopReviews(tui);
 			await review;
 		});

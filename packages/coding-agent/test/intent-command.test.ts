@@ -463,6 +463,30 @@ describe("the options form", () => {
 		expect(form[0]).not.toHaveProperty("value");
 	});
 
+	it("starts each field at a given value that fits it, and at its default otherwise", () => {
+		const form = intentCommandForm(review, {
+			focus: "auth",
+			effort: "high",
+			includeOptional: false,
+			// Not one of the field's options, and not the field's kind: the defaults stand.
+			scopeMode: "sideways",
+			scope: 3,
+			unknown: "ignored",
+		});
+		expect(form.map((field) => [field.id, "value" in field ? field.value : undefined])).toEqual([
+			["focus", "auth"],
+			["scope", undefined],
+			["effort", "high"],
+			["includeOptional", false],
+			["scopeMode", "incremental"],
+		]);
+		// What started there answers as a change from the default, so a review starts with it.
+		expect(intentCommandFormInput(review, { effort: "high", includeOptional: false })).toEqual({
+			effort: "high",
+			includeOptional: false,
+		});
+	});
+
 	it("answers with only what is set and differs from the default", () => {
 		expect(
 			intentCommandFormInput(review, {

@@ -1,5 +1,7 @@
 import type { FocusDirection, FocusScope } from "../focus.ts";
+import { fuzzyFilter } from "../fuzzy.ts";
 import { getKeybindings } from "../keybindings.ts";
+import { decodeKittyPrintable } from "../keys.ts";
 import { concatRenderFrames, createRenderFrame, type RenderFrame } from "../render-frame.ts";
 import { type SemanticTheme, type StyledText, sanitizeText, wrapStyledText } from "../styled-text.ts";
 import type { Component, Focusable } from "../tui.ts";
@@ -70,10 +72,31 @@ interface FieldState {
 	input: Input;
 	checked: boolean;
 	selected: string | undefined;
+	/** What was typed on an enum field to search its options; cleared when the field loses focus. */
+	query: string;
 }
 
 const SUBMIT_ACTION = "submit";
 const CANCEL_ACTION = "cancel";
+/** An enum field with more options than this says, while focused, that typing searches them. */
+const SEARCH_HINT_OPTIONS = 7;
+
+/** The text a key press types, or undefined for a key that types nothing (arrows, control keys, paste markers). */
+function typedText(data: string): string | undefined {
+	const kitty = decodeKittyPrintable(data);
+	if (kitty !== undefined) return kitty;
+	if (data.length === 0) return undefined;
+	for (const ch of data) {
+		const code = ch.charCodeAt(0);
+		if (code < 32 || code === 0x7f || (code >= 0x80 && code <= 0x9f)) return undefined;
+	}
+	return data;
+}
+
+/** The options of `field` that match `query`, best first; every option for an empty query. */
+function matchingOptions(field: EnumFormField, query: string): EnumFormOption[] {
+	return fuzzyFilter([...field.options], query, (option) => `${option.label ?? ""} ${option.value}`);
+}
 
 function createFieldState(field: FormField): FieldState {
 	const input = new Input();
@@ -84,6 +107,7 @@ function createFieldState(field: FormField): FieldState {
 		input,
 		checked: field.kind === "boolean" ? (field.value ?? false) : false,
 		selected: field.kind === "enum" ? field.value : undefined,
+		query: "",
 	};
 }
 
@@ -121,7 +145,8 @@ function validateField(state: FieldState): string | undefined {
 /**
  * Typed form with string, boolean, enum, and integer fields, validation, and submit/cancel actions.
  * Tab and up/down move between fields; confirm submits; cancel cancels; toggle and left/right change
- * boolean and enum values.
+ * boolean and enum values. Typing on an enum field searches its options: the best match is selected, and
+ * left/right step through the matches until the field loses focus.
  */
 export class Form implements Component, Focusable, FocusScope {
 	onSubmit?: (values: FormValues) => void;
@@ -329,7 +354,10 @@ export class Form implements Component, Focusable, FocusScope {
 			const text = option ? sanitizeText(option.label ?? option.value) : "—";
 			const display = active ? `‹ ${text} ›` : text;
 			const truncated = truncateToWidth(display, width, "…");
-			return option ? (active ? this.theme.accent(truncated) : truncated) : this.theme.muted(truncated);
+			const styled = option ? (active ? this.theme.accent(truncated) : truncated) : this.theme.muted(truncated);
+			const search = active ? this.searchText(field, state.query) : "";
+			const room = width - visibleWidth(truncated);
+			return search === "" || room < 2 ? styled : styled + this.theme.muted(truncateToWidth(search, room, "…"));
 		}
 		if (active) {
 			// Input renders a two-column prompt before its text; drop it to align with the other values.
@@ -357,16 +385,23 @@ export class Form implements Component, Focusable, FocusScope {
 				state.checked = !state.checked;
 			}
 		} else if (field.options.length > 0) {
-			const index = field.options.findIndex((option) => option.value === state.selected);
 			let direction = 0;
 			if (keybindings.matches(data, "tui.select.left")) direction = -1;
 			else if (keybindings.matches(data, "tui.select.right") || keybindings.matches(data, "tui.select.toggle")) {
 				direction = 1;
+			} else if (keybindings.matches(data, "tui.editor.deleteCharBackward")) {
+				if (state.query !== "") this.search(state, field, [...state.query].slice(0, -1).join(""));
+			} else {
+				const typed = typedText(data);
+				if (typed !== undefined) this.search(state, field, state.query + typed);
 			}
-			if (direction !== 0) {
+			// With a search, left/right step through its matches.
+			const pool = state.query === "" ? field.options : matchingOptions(field, state.query);
+			if (direction !== 0 && pool.length > 0) {
+				const index = pool.findIndex((option) => option.value === state.selected);
 				const start = index === -1 ? (direction === 1 ? -1 : 0) : index;
-				const next = (start + direction + field.options.length) % field.options.length;
-				state.selected = field.options[next]!.value;
+				const next = (start + direction + pool.length) % pool.length;
+				state.selected = pool[next]!.value;
 			}
 		}
 		if (this.valueKey(state) !== before) {
@@ -374,6 +409,21 @@ export class Form implements Component, Focusable, FocusScope {
 				Object.entries(this.externalErrors).filter(([id]) => id !== field.id),
 			);
 		}
+	}
+
+	/** Search the options of an enum field for `query`, selecting the best match when there is one. */
+	private search(state: FieldState, field: EnumFormField, query: string): void {
+		state.query = query;
+		const best = query === "" ? undefined : matchingOptions(field, query)[0];
+		if (best !== undefined) state.selected = best.value;
+	}
+
+	/** What a focused enum field shows after its value: the search and how many options match, or how to start one. */
+	private searchText(field: EnumFormField, query: string): string {
+		if (query === "") return field.options.length > SEARCH_HINT_OPTIONS ? "  type to search" : "";
+		const count = matchingOptions(field, query).length;
+		const matches = count === 0 ? "no match" : `${count} ${count === 1 ? "match" : "matches"}`;
+		return `  ${sanitizeText(query)} · ${matches}`;
 	}
 
 	private valueKey(state: FieldState): string {
@@ -387,7 +437,9 @@ export class Form implements Component, Focusable, FocusScope {
 
 	private syncFocus(): void {
 		for (const [index, state] of this.states.entries()) {
-			state.input.focused = this.hasFocus && index === this.activeIndex;
+			const active = this.hasFocus && index === this.activeIndex;
+			if (!active) state.query = "";
+			state.input.focused = active;
 		}
 		this.actionBar.focused = this.hasFocus && this.activeIndex === this.states.length;
 	}

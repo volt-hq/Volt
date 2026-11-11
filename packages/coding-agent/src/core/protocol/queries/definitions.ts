@@ -217,6 +217,7 @@ export const settingsQuery = defineQuery({
 			personality: settings.getPersonality(),
 			transport: settings.getTransport(),
 			reviewModel: settings.getReviewModel() ?? null,
+			reviewVerifierModel: settings.getReviewVerifierModel() ?? null,
 			promptCacheKeepAlive: keepAlive.enabled ? keepAlive.idleWindowMs / 60_000 : ("off" as const),
 			imageAutoResize: settings.getImageAutoResize(),
 			blockImages: settings.getBlockImages(),

@@ -54,6 +54,8 @@ export const HostSettingsValuesSchema = Type.Object(
 		transport: Type.Optional(RpcTransportSchema),
 		/** The model reviews discover findings with; null uses the conversation's model. */
 		reviewModel: Type.Optional(Type.Union([modelReference, Type.Null()])),
+		/** The model reviews verify findings with; null uses the review model. */
+		reviewVerifierModel: Type.Optional(Type.Union([modelReference, Type.Null()])),
 		/** `off`, or minutes to keep refreshing a prompt cache after work finishes (0: only while working). */
 		promptCacheKeepAlive: Type.Optional(
 			Type.Union([Type.Literal("off"), Type.Number({ minimum: 0, maximum: PROMPT_CACHE_KEEPALIVE_MAX_MINUTES })]),

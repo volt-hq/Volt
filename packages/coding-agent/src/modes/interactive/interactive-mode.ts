@@ -39,6 +39,7 @@ import {
 	type RpcCatalogModel,
 	type RpcReviewEngine,
 	type ScopedModel,
+	type UiNodeFormField,
 	type UiNodeStyledText,
 	type WithdrawnInput,
 } from "@hansjm10/volt-protocol";
@@ -88,6 +89,7 @@ import {
 	formatIntentCommand,
 	type IntentCommand,
 	type IntentCommandInput,
+	type IntentCommandValue,
 	intentCommandFlagValue,
 	intentCommandForm,
 	intentCommandFormInput,
@@ -99,6 +101,7 @@ import {
 	findReviewEngine,
 	type ReviewEngineStart,
 	reviewEngineInput,
+	reviewEngineParameterNames,
 	reviewEngineWord,
 	reviewEngineWords,
 	STANDARD_ENGINE_WORD,
@@ -383,6 +386,19 @@ const EXTENSION_STATE_LABELS: Readonly<Record<ExtensionState, string>> = {
 const PANEL_SIDEBAR_COLUMNS = 40;
 /** Narrowest terminal that shows the panel sidebar; narrower ones show sidebar panels above the editor. */
 const PANEL_SIDEBAR_MIN_TERMINAL_COLUMNS = 100;
+
+/** The review options the `/review` launcher remembers besides an engine's own: focus and scope follow the target. */
+const REMEMBERED_REVIEW_OPTIONS: readonly string[] = ["effort", "includeOptional", "scopeMode"];
+/** The launcher's review model option that leaves `reviewModel` unset: reviews use the conversation's model. */
+const SESSION_MODEL_OPTION = "session";
+/** The launcher's verifier model option that leaves `reviewVerifierModel` unset: reviews verify with the review model. */
+const REVIEW_MODEL_OPTION = "review";
+
+/** The review models the host's settings name; null where a review falls back. */
+interface ReviewModels {
+	readonly reviewModel: string | null;
+	readonly reviewVerifierModel: string | null;
+}
 
 /** Local wall-clock time, e.g. "3:42 PM". */
 function formatClockTime(ms: number): string {
@@ -8310,14 +8326,114 @@ export class InteractiveMode {
 		return { target: "commit" };
 	}
 
-	/** The review's options in one form, from the grammar's declaration; undefined when it is cancelled. */
-	private async promptForReviewOptions(command: IntentCommand): Promise<IntentCommandInput | undefined> {
+	/**
+	 * The review's options in one form, from the grammar's declaration, starting at the `remembered` values, with
+	 * `extraFields` (such as the review models) after them: the review's input and every value the form answered.
+	 * Undefined when it is cancelled.
+	 */
+	private async promptForReviewOptions(
+		command: IntentCommand,
+		remembered: Readonly<Record<string, IntentCommandValue>>,
+		extraFields: readonly UiNodeFormField[] = [],
+	): Promise<{ input: IntentCommandInput; values: Readonly<Record<string, IntentCommandValue>> } | undefined> {
 		const response = await this.showHostRequestDialog(
-			{ kind: "form", title: "Review options (Enter starts the review)", fields: intentCommandForm(command) },
+			{
+				kind: "form",
+				title: "Review options (Enter starts the review)",
+				fields: [...intentCommandForm(command, remembered), ...extraFields],
+			},
 			{},
 		);
 		if (response === undefined || !("values" in response)) return undefined;
-		return intentCommandFormInput(command, response.values);
+		return { input: intentCommandFormInput(command, response.values), values: response.values };
+	}
+
+	/**
+	 * The built-in review's model fields for the launcher form: the review model and the verifier model, each
+	 * starting at its setting and offering every model the host has. Undefined when the host cannot say.
+	 */
+	private async reviewModelFields(): Promise<{ current: ReviewModels; fields: UiNodeFormField[] } | undefined> {
+		const client = this.store.client;
+		let settings: QueryResult<"settings">;
+		let models: readonly RpcCatalogModel[];
+		try {
+			[settings, { models }] = await Promise.all([client.query("settings"), client.query("models")]);
+		} catch {
+			return undefined;
+		}
+		const references = models.map((model) => `${model.provider}/${model.id}`);
+		const current: ReviewModels = {
+			reviewModel: settings.reviewModel ?? null,
+			reviewVerifierModel: settings.reviewVerifierModel ?? null,
+		};
+		const options = (fallback: { value: string; label: string }, selected: string | null) => [
+			fallback,
+			// A setting that names a model the host no longer has stays, so the form does not change it unasked.
+			...(selected !== null && !references.includes(selected)
+				? [{ value: selected, label: `${selected} (unavailable)` }]
+				: []),
+			...references.map((value) => ({ value })),
+		];
+		return {
+			current,
+			fields: [
+				{
+					kind: "enum",
+					id: "reviewModel",
+					label: "Review model",
+					description: "The model that looks for findings. Saved as the reviewModel setting.",
+					options: options({ value: SESSION_MODEL_OPTION, label: "Session model" }, current.reviewModel),
+					value: current.reviewModel ?? SESSION_MODEL_OPTION,
+				},
+				{
+					kind: "enum",
+					id: "reviewVerifierModel",
+					label: "Verifier model",
+					description: "The model that checks each finding. Saved as the reviewVerifierModel setting.",
+					options: options(
+						{ value: REVIEW_MODEL_OPTION, label: "Same as the review model" },
+						current.reviewVerifierModel,
+					),
+					value: current.reviewVerifierModel ?? REVIEW_MODEL_OPTION,
+				},
+			],
+		};
+	}
+
+	/**
+	 * Save the review models the launcher form changed from `current` through the host. Resolves what it saved, for the
+	 * status line (empty when nothing changed), or undefined when the host refused, which shows.
+	 */
+	private async saveReviewModels(
+		current: ReviewModels,
+		values: Readonly<Record<string, IntentCommandValue>>,
+	): Promise<string | undefined> {
+		const picked = (id: string, fallback: string): string | null | undefined => {
+			const value = values[id];
+			if (typeof value !== "string") return undefined;
+			return value === fallback ? null : value;
+		};
+		const reviewModel = picked("reviewModel", SESSION_MODEL_OPTION);
+		const reviewVerifierModel = picked("reviewVerifierModel", REVIEW_MODEL_OPTION);
+		const changes: HostSettingsValues = {
+			...(reviewModel !== undefined && reviewModel !== current.reviewModel ? { reviewModel } : {}),
+			...(reviewVerifierModel !== undefined && reviewVerifierModel !== current.reviewVerifierModel
+				? { reviewVerifierModel }
+				: {}),
+		};
+		if (Object.keys(changes).length === 0) return "";
+		try {
+			await this.store.client.intent("set_settings", changes);
+		} catch (error) {
+			this.showError(`The review models could not be saved: ${errorText(error)}`);
+			return undefined;
+		}
+		return [
+			...(changes.reviewModel === undefined ? [] : [`review model ${changes.reviewModel ?? "session model"}`]),
+			...(changes.reviewVerifierModel === undefined
+				? []
+				: [`verifier model ${changes.reviewVerifierModel ?? "same as the review model"}`]),
+		].join(", ");
 	}
 
 	/** Show logical local/upstream base branches and return the selected target. */
@@ -8485,19 +8601,36 @@ export class InteractiveMode {
 			engine = chosen;
 			const offered = withReviewEngines(baseCommand, engines);
 			command = engine === STANDARD_ENGINE_WORD ? offered : withReviewEngine(offered, engine, { inForm: true });
-			const options = await this.promptForReviewOptions(command);
-			if (options === undefined) {
+			// The form opens with what the launcher last started this engine with; the built-in review adds its models.
+			const engineKey = chosen === STANDARD_ENGINE_WORD ? STANDARD_ENGINE_WORD : chosen.id;
+			const models = chosen === STANDARD_ENGINE_WORD ? await this.reviewModelFields() : undefined;
+			const answered = await this.promptForReviewOptions(
+				command,
+				this.settingsManager.getReviewLastOptions(engineKey),
+				models?.fields,
+			);
+			if (answered === undefined) {
 				this.showStatus("Review cancelled");
 				return;
 			}
+			const saved = models === undefined ? "" : await this.saveReviewModels(models.current, answered.values);
+			if (saved === undefined) return;
+			const remembered = new Set([
+				...REMEMBERED_REVIEW_OPTIONS,
+				...(chosen === STANDARD_ENGINE_WORD ? [] : reviewEngineParameterNames(chosen)),
+			]);
+			this.settingsManager.setReviewLastOptions(
+				engineKey,
+				Object.fromEntries(Object.entries(answered.input).filter(([name]) => remembered.has(name))),
+			);
 			input = {
 				...input,
-				...options,
-				...(engine === STANDARD_ENGINE_WORD || engine === undefined
-					? {}
-					: { engine: reviewEngineWord(engine, engines) }),
+				...answered.input,
+				...(chosen === STANDARD_ENGINE_WORD ? {} : { engine: reviewEngineWord(chosen, engines) }),
 			};
-			this.showStatus(`Equivalent command: /review ${formatIntentCommand(command, input)}`);
+			this.showStatus(
+				`Equivalent command: /review ${formatIntentCommand(command, input)}${saved === "" ? "" : ` (saved ${saved})`}`,
+			);
 		} else if (engine !== undefined && engine !== STANDARD_ENGINE_WORD) {
 			// What the engine costs, before it starts: the launcher's selector shows it, a command line does not.
 			this.showStatus(

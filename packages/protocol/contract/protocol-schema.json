@@ -10493,6 +10493,19 @@
 						}
 					]
 				},
+				"reviewVerifierModel": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 3,
+							"maxLength": 512,
+							"pattern": "^[^/\\s]+/\\S+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
 				"promptCacheKeepAlive": {
 					"anyOf": [
 						{
@@ -18186,6 +18199,16 @@
 					"$ref": "#/$defs/Transport"
 				},
 				"reviewModel": {
+					"anyOf": [
+						{
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"reviewVerifierModel": {
 					"anyOf": [
 						{
 							"type": "string"

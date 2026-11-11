@@ -416,6 +416,38 @@ describe("SettingsManager", () => {
 			expect(manager.getReviewEngine()).toBeUndefined();
 		});
 
+		it("remembers the launcher's last review options per engine, and forgets an engine's with none", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getReviewLastOptions("standard")).toEqual({});
+
+			manager.setReviewLastOptions("standard", { effort: "high", includeOptional: false });
+			manager.setReviewLastOptions("ext:swarm-review/swarm", { workers: 10 });
+			await manager.flush();
+			const reloaded = SettingsManager.create(projectDir, agentDir);
+			expect(reloaded.getReviewLastOptions("standard")).toEqual({ effort: "high", includeOptional: false });
+			expect(reloaded.getReviewLastOptions("ext:swarm-review/swarm")).toEqual({ workers: 10 });
+
+			// Another writer's engine survives a write of this one.
+			reloaded.setReviewLastOptions("ext:other/deep", { depth: 2 });
+			await reloaded.flush();
+			manager.setReviewLastOptions("standard", {});
+			await manager.flush();
+			const stored = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")).reviewLastOptions;
+			expect(stored).toEqual({ "ext:swarm-review/swarm": { workers: 10 }, "ext:other/deep": { depth: 2 } });
+
+			// Values that are not text, booleans, or finite numbers are left out, as is an entry that is not an object.
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					reviewLastOptions: { standard: { effort: "low", scope: ["src"], depth: null }, other: 3 },
+				}),
+			);
+			const odd = SettingsManager.create(projectDir, agentDir);
+			expect(odd.getReviewLastOptions("standard")).toEqual({ effort: "low" });
+			expect(odd.getReviewLastOptions("other")).toEqual({});
+			expect(odd.getReviewLastOptions("toString")).toEqual({});
+		});
+
 		it("reads the review setup as a command and a timeout in bounds, and nothing else", () => {
 			const setupOf = (reviewSetup: unknown) => {
 				writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ reviewSetup }));
