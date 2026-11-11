@@ -161,6 +161,7 @@ describe("a conversation's project", () => {
 
 	it("loads a pull request review from the same place in its workspace's repository", async () => {
 		const checkout = checkoutOf("review", "packages", "app");
+		mkdirSync(join(workspace.path, "packages", "app"), { recursive: true });
 		await writeDaemonStateFile(agentDir, {
 			workspaces: [workspace],
 			worktrees: [record("review", checkout, { prReviewLaunches: [reviewLaunch("review", checkout)] })],
@@ -176,8 +177,32 @@ describe("a conversation's project", () => {
 		});
 	});
 
+	it("loads a review's directory that only the pull request has from the nearest one in the repository", async () => {
+		const checkout = checkoutOf("review", "packages", "added", "deep");
+		await writeDaemonStateFile(agentDir, {
+			workspaces: [workspace],
+			worktrees: [record("review", checkout, { prReviewLaunches: [reviewLaunch("review", checkout)] })],
+		});
+		const added = join(checkout, "packages", "added", "deep");
+
+		// The repository has no `packages` at all: its root.
+		expect(resolveConversationProject(agentDir, added)).toEqual({
+			projectCwd: workspace.path,
+			trustPath: workspace.path,
+		});
+
+		// It has `packages`, and a file where the pull request has a directory.
+		mkdirSync(join(workspace.path, "packages"));
+		writeFileSync(join(workspace.path, "packages", "added"), "a file\n");
+		expect(resolveConversationProject(agentDir, added)).toEqual({
+			projectCwd: join(workspace.path, "packages"),
+			trustPath: workspace.path,
+		});
+	});
+
 	it("knows a managed checkout when the agent directory is reached through a link", async () => {
 		const checkout = checkoutOf("review", "packages", "app");
+		mkdirSync(join(workspace.path, "packages", "app"), { recursive: true });
 		await writeDaemonStateFile(agentDir, {
 			workspaces: [workspace],
 			worktrees: [record("review", checkout, { prReviewLaunches: [reviewLaunch("review", checkout)] })],
@@ -204,6 +229,7 @@ describe("a conversation's project", () => {
 	it("takes a nested repository's worktree from that repository in the workspace", async () => {
 		const ordinary = checkoutOf("nested", "src");
 		const review = checkoutOf("nested-review", "src");
+		mkdirSync(join(workspace.path, "apps", "web", "src"), { recursive: true });
 		await writeDaemonStateFile(agentDir, {
 			workspaces: [workspace],
 			worktrees: [

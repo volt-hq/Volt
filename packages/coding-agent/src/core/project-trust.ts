@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { getDaemonDir } from "../daemon/paths.ts";
 import { parseVoltdState } from "../daemon/state.ts";
 import { isPathInside } from "../daemon/workspace-directory.ts";
@@ -37,7 +37,9 @@ export interface ConversationProject {
  * project, from the repository in its workspace, as the daemon's state file
  * records the checkout (`getConversationProject`): never from the checkout's
  * `.git` pointer, which names the repository's main checkout. The state file
- * is read on each call, for a managed checkout only; one that is missing,
+ * is read on each call, for a managed checkout only. A review's directory
+ * that the repository lacks, as one the pull request adds, takes the nearest
+ * directory above it that the repository has. A state file that is missing,
  * unreadable, or without a record of the checkout or its workspace leaves the
  * conversation its own directory and no trust path. Never throws.
  */
@@ -60,11 +62,20 @@ export function resolveConversationProject(agentDir: string, cwd: string): Conve
 		const workspace = state.workspaces.find((entry) => entry.name === workspaceName);
 		if (checkout !== undefined && workspace !== undefined) {
 			const project = getConversationProject(workspace, checkout, directory);
-			return {
-				// As spelled where the project is the conversation's own directory.
-				projectCwd: project.projectCwd === directory ? cwd : project.projectCwd,
-				trustPath: canonicalizePath(resolvePath(project.trustPath)),
-			};
+			// As spelled where the project is the conversation's own directory.
+			if (project.projectCwd === directory) {
+				return { projectCwd: cwd, trustPath: canonicalizePath(resolvePath(project.trustPath)) };
+			}
+			// A directory only the pull request has is not in the repository: the nearest one above it that is.
+			let projectCwd = project.projectCwd;
+			while (
+				projectCwd !== project.trustPath &&
+				dirname(projectCwd) !== projectCwd &&
+				!statSync(projectCwd, { throwIfNoEntry: false })?.isDirectory()
+			) {
+				projectCwd = dirname(projectCwd);
+			}
+			return { projectCwd, trustPath: canonicalizePath(resolvePath(project.trustPath)) };
 		}
 	} catch {
 		// No usable record: the state file is missing, unreadable, or not the daemon's state.
