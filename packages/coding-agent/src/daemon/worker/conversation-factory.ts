@@ -86,6 +86,8 @@ export interface IrohRemoteAgentRuntimeOptions {
 	cwd: string;
 	/** Project/config root for .volt resources. Defaults to cwd. */
 	projectCwd?: string;
+	/** Root of the tree a phone's conversations work in: their language servers' project root. Defaults to projectCwd. */
+	workRoot?: string;
 	/** Host-owned workspace display name for Git context. */
 	workspaceName?: string;
 	/** Trusted managed-worktree base ref for Git context. */
@@ -238,6 +240,8 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 			authStorage,
 			cwd: runtimeOptions.cwd,
 			projectCwd: settingsCwd,
+			// A phone's conversation may work in another tree than its project: its language servers run there.
+			...(cli === undefined && options.workRoot !== undefined ? { workRoot: options.workRoot } : {}),
 			agentDir: runtimeOptions.agentDir,
 			settingsManager,
 			workspaceName: runtimeOptions.workspaceName ?? options.workspaceName,

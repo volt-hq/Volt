@@ -96,6 +96,8 @@ export interface CreateAgentSessionOptions {
 	cwd?: string;
 	/** Project/config root for .volt resources. Defaults to cwd. */
 	projectCwd?: string;
+	/** Root of the tree the conversation works in: the language servers' project root. Defaults to projectCwd. */
+	workRoot?: string;
 	/** Global config directory. Default: ~/.volt/agent */
 	agentDir?: string;
 
@@ -397,8 +399,8 @@ async function createAgentSessionWithTrackedResources(
 	untransferredFinalizers: SessionSetupFinalizer[],
 ): Promise<CreateAgentSessionResult> {
 	const cwd = resolvePath(options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd());
-	const lexicalProjectCwd = resolvePath(options.projectCwd ?? cwd);
-	const projectCwd = canonicalizePath(lexicalProjectCwd);
+	const projectCwd = canonicalizePath(resolvePath(options.projectCwd ?? cwd));
+	const workRoot = resolvePath(options.workRoot ?? options.projectCwd ?? cwd);
 	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getDefaultAgentDir();
 	let resourceLoader = options.resourceLoader;
 
@@ -717,7 +719,7 @@ async function createAgentSessionWithTrackedResources(
 			? {}
 			: { releaseGitContextProvider: options.releaseGitContextProvider }),
 		cwd,
-		projectCwd: lexicalProjectCwd,
+		workRoot,
 		agentDir,
 		scopedModels: options.scopedModels,
 		resourceLoader,

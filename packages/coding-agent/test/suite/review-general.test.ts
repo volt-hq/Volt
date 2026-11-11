@@ -67,7 +67,7 @@ async function fixture() {
 			services: {
 				cwd,
 				projectCwd: cwd,
-				lexicalProjectCwd: cwd,
+				workRoot: cwd,
 				agentDir,
 				authStorage: h.authStorage,
 				modelRegistry: h.session.modelRegistry,

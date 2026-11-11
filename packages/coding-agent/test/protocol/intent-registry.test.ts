@@ -27,7 +27,7 @@ function services(harness: Harness): AgentSessionServices {
 	return {
 		cwd: harness.tempDir,
 		projectCwd: harness.tempDir,
-		lexicalProjectCwd: harness.tempDir,
+		workRoot: harness.tempDir,
 		agentDir: harness.tempDir,
 		authStorage: harness.authStorage,
 		settingsManager: harness.settingsManager,

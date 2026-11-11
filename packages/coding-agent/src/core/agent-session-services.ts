@@ -46,6 +46,8 @@ export interface CreateAgentSessionServicesOptions {
 	cwd: string;
 	/** Project/config root for .volt resources. Defaults to cwd. */
 	projectCwd?: string;
+	/** Root of the tree the conversation works in: the language servers' project root. Defaults to projectCwd. */
+	workRoot?: string;
 	agentDir?: string;
 	authStorage?: AuthStorage;
 	settingsManager?: SettingsManager;
@@ -99,8 +101,8 @@ export interface AgentSessionServices {
 	cwd: string;
 	/** Canonical project root used by project-scoped services. */
 	projectCwd: string;
-	/** Original absolute project-root spelling retained for lexical LSP validation. */
-	lexicalProjectCwd: string;
+	/** Root of the tree the conversation works in: the language servers' project root, in its original absolute spelling. */
+	workRoot: string;
 	agentDir: string;
 	authStorage: AuthStorage;
 	settingsManager: SettingsManager;
@@ -171,8 +173,8 @@ export async function createAgentSessionServices(
 	options: CreateAgentSessionServicesOptions,
 ): Promise<AgentSessionServices> {
 	const cwd = resolvePath(options.cwd);
-	const lexicalProjectCwd = resolvePath(options.projectCwd ?? cwd);
-	const projectCwd = canonicalizePath(lexicalProjectCwd);
+	const projectCwd = canonicalizePath(resolvePath(options.projectCwd ?? cwd));
+	const workRoot = resolvePath(options.workRoot ?? options.projectCwd ?? cwd);
 	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getAgentDir();
 	const authStorage = options.authStorage ?? AuthStorage.create(join(agentDir, "auth.json"));
 	const settingsManager =
@@ -221,7 +223,7 @@ export async function createAgentSessionServices(
 		return {
 			cwd,
 			projectCwd,
-			lexicalProjectCwd,
+			workRoot,
 			agentDir,
 			authStorage,
 			settingsManager,
@@ -262,7 +264,8 @@ export async function createAgentSessionFromServices(
 ): Promise<CreateAgentSessionResult> {
 	return createAgentSessionForRuntime({
 		cwd: options.services.cwd,
-		projectCwd: options.services.lexicalProjectCwd,
+		projectCwd: options.services.projectCwd,
+		workRoot: options.services.workRoot,
 		agentDir: options.services.agentDir,
 		authStorage: options.services.authStorage,
 		settingsManager: options.services.settingsManager,

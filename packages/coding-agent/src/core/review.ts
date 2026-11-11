@@ -1363,7 +1363,7 @@ function reviewPassServices(
 	return {
 		cwd: options.cwd,
 		projectCwd: options.cwd,
-		lexicalProjectCwd: options.cwd,
+		workRoot: options.cwd,
 		agentDir: options.agentDir,
 		authStorage: options.authStorage,
 		settingsManager: options.settingsManager,

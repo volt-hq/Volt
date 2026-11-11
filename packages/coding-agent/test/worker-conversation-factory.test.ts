@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -317,6 +317,102 @@ export default function (volt) {
 			expect(tools).not.toContain("head_tool");
 			expect(session.systemPrompt).toContain("Workspace instructions.");
 			expect(session.systemPrompt).not.toContain("Head instructions.");
+		} finally {
+			errorSpy.mockRestore();
+			await runtime?.host.close(runtime.conversation);
+		}
+	});
+
+	it("roots a phone conversation's language servers at its work root, not its project root (#1041)", async () => {
+		writeRuntimeConfig({});
+		// A pull request review: the conversation works in the head's checkout, its project is the workspace.
+		const projectCwd = join(tempDir, "main");
+		const workingDirectory = join(cwd, "packages", "app");
+		mkdirSync(projectCwd, { recursive: true });
+		mkdirSync(workingDirectory, { recursive: true });
+		writeFileSync(join(projectCwd, "AGENTS.md"), "Workspace instructions.\n");
+		writeFileSync(join(cwd, "AGENTS.md"), "Head instructions.\n");
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		let runtime: Awaited<ReturnType<typeof createIrohRemoteAgentRuntime>> | undefined;
+		try {
+			runtime = await createIrohRemoteAgentRuntime({
+				agentDir,
+				cwd: workingDirectory,
+				workRoot: cwd,
+				projectCwd,
+				projectTrusted: true,
+			});
+			const { session, services } = runtime.conversation;
+
+			expect(session.sessionManager.getCwd()).toBe(workingDirectory);
+			expect(services.projectCwd).toBe(realpathSync.native(projectCwd));
+			expect(session.systemPrompt).toContain("Workspace instructions.");
+			expect(session.systemPrompt).not.toContain("Head instructions.");
+			expect(session.getLspStatus().workspaceRoot).toBe(realpathSync.native(cwd));
+			expect(services.workRoot).toBe(cwd);
+		} finally {
+			errorSpy.mockRestore();
+			await runtime?.host.close(runtime.conversation);
+		}
+	});
+
+	it("roots a phone conversation's language servers at its project root when it has no work root", async () => {
+		writeRuntimeConfig({});
+		const workingDirectory = join(cwd, "packages", "app");
+		mkdirSync(workingDirectory, { recursive: true });
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		let runtime: Awaited<ReturnType<typeof createIrohRemoteAgentRuntime>> | undefined;
+		try {
+			runtime = await createIrohRemoteAgentRuntime({ agentDir, cwd: workingDirectory, projectCwd: cwd });
+			const { session, services } = runtime.conversation;
+
+			expect(session.getLspStatus().workspaceRoot).toBe(realpathSync.native(cwd));
+			expect(services.workRoot).toBe(cwd);
+		} finally {
+			errorSpy.mockRestore();
+			await runtime?.host.close(runtime.conversation);
+		}
+	});
+
+	it("roots a TUI conversation's language servers at its own working directory", async () => {
+		writeRuntimeConfig({});
+		const workingDirectory = join(cwd, "packages", "app");
+		mkdirSync(workingDirectory, { recursive: true });
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		let runtime: Awaited<ReturnType<typeof createIrohRemoteAgentRuntime>> | undefined;
+		try {
+			runtime = await createIrohRemoteAgentRuntime({
+				agentDir,
+				cwd: workingDirectory,
+				// A work root is a phone conversation's: a TUI's conversation keeps its own directory.
+				workRoot: cwd,
+				projectCwd: cwd,
+				cli: {
+					config: {},
+					sessionOptions: {},
+					trust: {
+						opener: (trustCwd) => ({
+							cwd: trustCwd,
+							mode: "rpc",
+							hasUI: false,
+							ui: {
+								select: async () => undefined,
+								confirm: async () => false,
+								input: async () => undefined,
+								notify: () => {},
+							},
+						}),
+						session: new Map(),
+					},
+				},
+			});
+			const { session, services } = runtime.conversation;
+
+			expect(session.getLspStatus().workspaceRoot).toBe(realpathSync.native(workingDirectory));
+			expect(services.workRoot).toBe(workingDirectory);
 		} finally {
 			errorSpy.mockRestore();
 			await runtime?.host.close(runtime.conversation);

@@ -246,8 +246,8 @@ export interface AgentSessionConfig {
 	/** Called instead of disposing a supplied `gitContextProvider` on disposal (e.g. to release a pooled provider). */
 	releaseGitContextProvider?: () => void;
 	cwd: string;
-	/** Project/config root and hard LSP workspace boundary. Defaults to cwd. */
-	projectCwd?: string;
+	/** Root of the tree the session works in: the language servers' project root. Defaults to cwd. */
+	workRoot?: string;
 	/** Global config directory used for session-owned artifacts. Default: ~/.volt/agent */
 	agentDir?: string;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
@@ -665,7 +665,7 @@ export class AgentSession {
 			},
 			{
 				customTools: config.customTools,
-				projectCwd: resolvePath(config.projectCwd ?? this._cwd),
+				workRoot: resolvePath(config.workRoot ?? this._cwd),
 				allowedToolNames: config.allowedToolNames,
 				allowUnlistedExtensionTools: config.allowUnlistedExtensionTools,
 				excludedToolNames: config.excludedToolNames,

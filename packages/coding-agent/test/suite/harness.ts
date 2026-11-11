@@ -251,7 +251,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		settingsManager,
 		extensionServicesLimits: options.extensionServicesLimits,
 		cwd: options.cwd ?? tempDir,
-		...(options.projectCwd === undefined ? {} : { projectCwd: options.projectCwd }),
+		...(options.projectCwd === undefined ? {} : { workRoot: options.projectCwd }),
 		agentDir: options.agentDir ?? tempDir,
 		modelRegistry,
 		resourceLoader,

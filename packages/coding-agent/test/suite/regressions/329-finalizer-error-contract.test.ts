@@ -15,7 +15,7 @@ function createServices(harness: Harness, cwd = harness.tempDir, agentDir = harn
 	return {
 		cwd,
 		projectCwd: cwd,
-		lexicalProjectCwd: cwd,
+		workRoot: cwd,
 		agentDir,
 		authStorage: harness.authStorage,
 		settingsManager: harness.settingsManager,
@@ -207,7 +207,7 @@ describe("PR #329 finalizer error contract", () => {
 		const services: AgentSessionServices = {
 			cwd: owner.tempDir,
 			projectCwd: owner.tempDir,
-			lexicalProjectCwd: owner.tempDir,
+			workRoot: owner.tempDir,
 			agentDir: owner.tempDir,
 			authStorage: owner.authStorage,
 			settingsManager: created.session.settingsManager,

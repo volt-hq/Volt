@@ -153,7 +153,7 @@ async function fixture() {
 			services: {
 				cwd,
 				projectCwd: cwd,
-				lexicalProjectCwd: cwd,
+				workRoot: cwd,
 				agentDir,
 				authStorage: harness.authStorage,
 				modelRegistry: harness.session.modelRegistry,
