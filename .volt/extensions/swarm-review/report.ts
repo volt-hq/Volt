@@ -1,7 +1,15 @@
 import type { Api, Model } from "@hansjm10/volt-ai";
 import type { UiNode, UiNodeStyledText, WorkProgress, WorkProgressStep } from "@hansjm10/volt-protocol";
-import type { Cluster, SwarmOptions, SwarmSetup, SwarmState, Verdict, VerifiedFinding } from "./types.ts";
-import { addUsage, emptyUsage, formatCost, formatDuration, lineRange, usageText } from "./util.ts";
+import type {
+	Cluster,
+	PassState,
+	SwarmOptions,
+	SwarmSetup,
+	SwarmState,
+	Verdict,
+	VerifiedFinding,
+} from "./types.ts";
+import { addUsage, emptyUsage, formatCost, formatDuration, lineRange } from "./util.ts";
 
 export function modelRef(model: Model<Api>): string {
 	return `${model.provider}/${model.id}`;
@@ -23,6 +31,14 @@ function decidingVerdicts(cluster: Cluster): Verdict[] {
 
 function effectiveKind(cluster: Cluster): string {
 	return cluster.outcome === "single" ? (decidingVerdicts(cluster)[0]?.verdict ?? "unverified") : cluster.outcome;
+}
+
+/** How many clusters ended each way other than confirmed, leaving out the ways none did. */
+function otherCounts(state: SwarmState): string[] {
+	return ["disputed", "uncertain", "rejected", "suppressed", "unverified"].flatMap((kind) => {
+		const count = state.clusters.filter((cluster) => effectiveKind(cluster) === kind).length;
+		return count > 0 ? [`${count} ${kind}`] : [];
+	});
 }
 
 export interface ReportedFinding extends VerifiedFinding {
@@ -147,11 +163,7 @@ export function buildReport(
 	const counts = [
 		`**${findings.length} confirmed finding(s)**`,
 		...(optional.length > 0 ? [`${optional.length} optional (P3, left out of this review)`] : []),
-		`${byKind("disputed").length} disputed`,
-		`${byKind("uncertain").length} uncertain`,
-		`${byKind("rejected").length} rejected`,
-		`${byKind("suppressed").length} suppressed`,
-		...(byKind("unverified").length > 0 ? [`${byKind("unverified").length} unverified`] : []),
+		...otherCounts(state),
 	];
 	lines.push(`${claims} claim(s) → ${state.clusters.length} cluster(s): ${counts.join(", ")}`);
 	if (state.clusters.length === 0) lines.push("", "No claims. Nothing to verify.");
@@ -233,6 +245,7 @@ export function buildReport(
 		lines.push(
 			"",
 			"### Suppressed (dismissed in an earlier review; the anchored code and its context are unchanged)",
+			"Rerun with `--fresh` to verify them again.",
 		);
 		for (const cluster of suppressed) {
 			lines.push(
@@ -248,17 +261,17 @@ export function buildReport(
 			`Failed workers: ${failures.map((worker) => `#${worker.index + 1} (${worker.error ?? "unknown error"})`).join("; ")}`,
 		);
 	}
-	const workerUsage = emptyUsage();
-	for (const worker of state.workers) addUsage(workerUsage, worker.usage);
-	const clusterUsage = emptyUsage();
-	for (const pass of state.clusterPasses) addUsage(clusterUsage, pass.usage);
-	const verifierUsage = emptyUsage();
-	for (const cluster of state.clusters) for (const pass of cluster.verifiers) addUsage(verifierUsage, pass.usage);
+	const cost = (passes: readonly PassState[]): number => passes.reduce((sum, pass) => sum + pass.usage.cost, 0);
+	const workerCost = cost(state.workers);
+	const clusterCost = cost(state.clusterPasses);
+	const verifierCost = cost(state.clusters.flatMap((cluster) => cluster.verifiers));
 	lines.push(
 		"",
-		`Estimated cost: workers ${usageText(workerUsage)} · clustering ${usageText(clusterUsage)} · verifiers ${usageText(verifierUsage)} · ${formatDuration(durationMs)}`,
+		`Estimated cost: ${formatCost(workerCost + clusterCost + verifierCost)} (workers ${formatCost(workerCost)} · clustering ${formatCost(clusterCost)} · verifiers ${formatCost(verifierCost)}) · ${formatDuration(durationMs)}`,
 	);
-	if (remembered > 0) lines.push(`Remembered ${remembered} rejected issue(s) for future reviews.`);
+	if (remembered > 0) {
+		lines.push(`Remembered ${remembered} rejected issue(s) for future reviews; \`--fresh\` ignores them.`);
+	}
 	return { markdown: lines.join("\n"), findings };
 }
 
@@ -318,9 +331,8 @@ export function workProgress(state: SwarmState, options: SwarmOptions): WorkProg
 
 /** The counts and the confirmed findings, one line each: what a notice shows where the report does not fit. */
 export function reportSummary(state: SwarmState, findings: readonly ReportedFinding[]): string {
-	const count = (kind: string): number => state.clusters.filter((cluster) => effectiveKind(cluster) === kind).length;
 	return [
-		`${findings.length} confirmed finding(s), ${count("disputed")} disputed, ${count("uncertain")} uncertain, ${count("rejected")} rejected.`,
+		`${[`${findings.length} confirmed finding(s)`, ...otherCounts(state)].join(", ")}.`,
 		...findings.map(
 			(finding, index) =>
 				`${index + 1}. [P${finding.priority}] ${finding.title} (${finding.file}:${lineRange(finding.line, finding.endLine)})`,

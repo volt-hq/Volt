@@ -9,6 +9,8 @@ export interface SwarmOptions {
 	waveSize: number;
 	/** Concurrent workers within a wave. */
 	concurrency: number;
+	/** Stop once a wave adds no new cluster; false at high effort, which runs every wave. */
+	stopWhenSaturated: boolean;
 	model?: string;
 	thinking: ModelThinkingLevel;
 	verifier?: string;

@@ -5,9 +5,11 @@
  * Run it from `/review --engine swarm`, with the review's own options (`--focus`, `--scope`, `--effort`) and
  * its own:
  *
- *   /review branch main --engine swarm [--workers N] [--wave-size N] [--concurrency N] [--model <ref>]
- *                 [--thinking <level>] [--verifier <ref>] [--verifier-thinking <level>]
- *                 [--verifier-concurrency N] [--fresh] [--straggler-grace <seconds>]
+ *   /review branch main --engine swarm [--workers N] [--wave-size N] [--worker-model <ref>]
+ *                 [--worker-thinking <level>] [--verifier-model <ref>] [--verifier-thinking <level>] [--fresh]
+ *
+ * `--effort low` runs one wave unless `--workers` is given; `--effort high` runs every wave instead of stopping
+ * once a wave adds no new issue. Concurrency and straggler handling are settings only.
  *
  * Its verifiers run commands when the review grants `bash` (the TUI's `reviewTools` setting, or `tools` of an
  * extension's `ctx.reviews.start`): each in a checkout of its own, which the review's setup prepared.
@@ -103,6 +105,13 @@ export const manifest = defineManifest({
 				maximum: MAX_WORKERS,
 				default: DEFAULT_WAVE_SIZE,
 			},
+			concurrency: {
+				type: "integer",
+				title: "Concurrency",
+				description: "Reviewers running at once within a wave; the wave size when unset.",
+				minimum: 1,
+				maximum: MAX_WORKERS,
+			},
 			verifierConcurrency: {
 				type: "integer",
 				title: "Verifier concurrency",
@@ -110,6 +119,14 @@ export const manifest = defineManifest({
 				minimum: 1,
 				maximum: MAX_VERIFIER_CONCURRENCY,
 				default: DEFAULT_VERIFIER_CONCURRENCY,
+			},
+			stragglerGrace: {
+				type: "integer",
+				title: "Straggler grace",
+				description:
+					"Seconds a slow reviewer gets after most of its wave finished; derived from the wave when unset.",
+				minimum: 1,
+				maximum: 3600,
 			},
 		},
 	},
@@ -133,36 +150,38 @@ function stringOf(value: unknown): string | undefined {
 }
 
 /**
- * The run's options: the review's own (focus and scope, from the host), then the engine's parameters, each over the
- * extension's setting for it. The host has checked every parameter against its declaration.
+ * The run's options: the review's own (focus, scope, and effort, from the host), then the engine's parameters, each
+ * over the extension's setting for it. Low effort runs one wave unless the run sets the workers; high effort runs
+ * every wave. Concurrency and straggler grace are settings only. The host has checked every parameter against its
+ * declaration.
  */
 export function resolveOptions(
 	engine: Pick<ReviewEngineContext, "params" | "target" | "tools">,
 	settings: Settings,
 ): SwarmOptions {
 	const { params } = engine;
-	const workers = integerOf(params.workers, integerOf(settings.workers, DEFAULT_WORKERS));
-	const waveSize = Math.min(workers, integerOf(params.waveSize, integerOf(settings.waveSize, DEFAULT_WAVE_SIZE)));
-	const model = stringOf(params.model);
-	const verifier = stringOf(params.verifier);
-	const stragglerGrace = typeof params.stragglerGrace === "number" ? params.stragglerGrace : undefined;
-	const { focus, scope } = engine.target.controls;
+	const { focus, scope, effort } = engine.target.controls;
+	const budget = integerOf(settings.workers, DEFAULT_WORKERS);
+	const wave = integerOf(params.waveSize, integerOf(settings.waveSize, DEFAULT_WAVE_SIZE));
+	const workers = integerOf(params.workers, effort === "low" ? Math.min(budget, wave) : budget);
+	const waveSize = Math.min(workers, wave);
+	const model = stringOf(params.workerModel);
+	const verifier = stringOf(params.verifierModel);
+	const stragglerGrace = typeof settings.stragglerGrace === "number" ? settings.stragglerGrace : undefined;
 	return {
 		scope: [...scope],
 		workers,
 		waveSize,
-		concurrency: integerOf(params.concurrency, waveSize),
+		concurrency: integerOf(settings.concurrency, waveSize),
+		stopWhenSaturated: effort !== "high",
 		...(model ? { model } : {}),
-		thinking: thinkingOf(params.thinking, thinkingOf(settings.workerThinking, DEFAULT_WORKER_THINKING)),
+		thinking: thinkingOf(params.workerThinking, thinkingOf(settings.workerThinking, DEFAULT_WORKER_THINKING)),
 		...(verifier ? { verifier } : {}),
 		verifierThinking: thinkingOf(
 			params.verifierThinking,
 			thinkingOf(settings.verifierThinking, DEFAULT_VERIFIER_THINKING),
 		),
-		verifierConcurrency: integerOf(
-			params.verifierConcurrency,
-			integerOf(settings.verifierConcurrency, DEFAULT_VERIFIER_CONCURRENCY),
-		),
+		verifierConcurrency: integerOf(settings.verifierConcurrency, DEFAULT_VERIFIER_CONCURRENCY),
 		exec: engine.tools.includes("bash"),
 		fresh: params.fresh === true,
 		...(stragglerGrace !== undefined ? { stragglerGrace } : {}),
@@ -214,7 +233,9 @@ function selectModel(
 		}
 		failures.push(resolved);
 	}
-	return { error: `${label} ${failures[0] ?? "is not configured."} Pass ${flag} <provider/id>.` };
+	return {
+		error: `${label} ${failures[0] ?? "is not configured."} Pass ${flag} <provider/id>, or set it with /extensions swarm-review.`,
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -271,7 +292,7 @@ async function runSwarm(
 		const covered = target.shards.every((shard) =>
 			state.workers.some((worker) => worker.shard === shard.index && worker.status === "done"),
 		);
-		if (newClusters === 0 && covered) {
+		if (newClusters === 0 && covered && options.stopWhenSaturated) {
 			state.saturated = true;
 			break;
 		}
@@ -312,7 +333,7 @@ async function runSwarmReview(engine: ReviewEngineContext, settings: Settings): 
 	});
 	const worker = selectModel(
 		"Worker model",
-		"--model",
+		"--worker-model",
 		options.model,
 		[stringOf(settings.workerModel) ?? DEFAULT_WORKER_MODEL, settingsManager.getReviewModel()],
 		engine,
@@ -320,7 +341,7 @@ async function runSwarmReview(engine: ReviewEngineContext, settings: Settings): 
 	if ("error" in worker) throw new Error(worker.error);
 	const verifier = selectModel(
 		"Verifier model",
-		"--verifier",
+		"--verifier-model",
 		options.verifier,
 		[stringOf(settings.verifierModel) ?? DEFAULT_VERIFIER_MODEL, settingsManager.getReviewVerifierModel()],
 		engine,
@@ -456,26 +477,19 @@ export default function swarmReview(volt: ExtensionAPI) {
 					minimum: 1,
 					maximum: MAX_WORKERS,
 				},
-				concurrency: {
-					type: "integer",
-					title: "Concurrency",
-					description: "Reviewers running at once within a wave; the wave size by default.",
-					minimum: 1,
-					maximum: MAX_WORKERS,
-				},
-				model: {
+				workerModel: {
 					type: "string",
 					title: "Worker model",
 					description: "The model the reviewers use (provider/id, or a bare id); the extension's setting by default.",
 					minLength: 1,
 					maxLength: 200,
 				},
-				thinking: {
+				workerThinking: {
 					type: "string",
 					title: "Worker thinking",
 					enum: [...THINKING_LEVELS],
 				},
-				verifier: {
+				verifierModel: {
 					type: "string",
 					title: "Verifier model",
 					description: "The model the verifiers use (provider/id, or a bare id); the extension's setting by default.",
@@ -486,20 +500,6 @@ export default function swarmReview(volt: ExtensionAPI) {
 					type: "string",
 					title: "Verifier thinking",
 					enum: [...THINKING_LEVELS],
-				},
-				verifierConcurrency: {
-					type: "integer",
-					title: "Verifier concurrency",
-					description: "Verifier sessions at once; each cluster uses two.",
-					minimum: 1,
-					maximum: MAX_VERIFIER_CONCURRENCY,
-				},
-				stragglerGrace: {
-					type: "integer",
-					title: "Straggler grace",
-					description: "Seconds a slow reviewer gets after most of its wave finished; derived from the wave by default.",
-					minimum: 1,
-					maximum: 3600,
 				},
 				fresh: {
 					type: "boolean",
