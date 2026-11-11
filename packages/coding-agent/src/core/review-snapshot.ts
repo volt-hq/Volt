@@ -247,6 +247,8 @@ const SEARCH_READ_MAX_BYTES = 256 * 1024 * 1024;
 const SEARCH_FALLBACK_READ_MAX_BYTES = 64 * 1024 * 1024;
 const GIT_BINARY_PROBE_BYTES = 8_000;
 const REVIEW_BINARY_PROBE_BYTES = 8_192;
+/** Why a search skipped a binary file. `review_search` counts these files instead of listing them. */
+export const REVIEW_SEARCH_BINARY_SKIP_REASON = "Binary content was not searched.";
 const DEFAULT_REVIEW_SNAPSHOT_LIMITS: ReviewSnapshotLimits = {
 	maxMetadataBytes: 32 * 1024 * 1024,
 	maxStderrBytes: 64 * 1024,
@@ -1981,7 +1983,7 @@ async function buildSearchManifest(
 			if (entry.mode === "120000") return { entry, kind: "symlink", pathspecSafe };
 			if (entry.size === 0) return { entry, kind: "empty", pathspecSafe };
 			if (binaryPaths.has(entry.path)) {
-				return { entry, kind: "binary", pathspecSafe, reason: "Binary content was not searched." };
+				return { entry, kind: "binary", pathspecSafe, reason: REVIEW_SEARCH_BINARY_SKIP_REASON };
 			}
 			if (ambiguousPaths.has(entry.path)) return { entry, kind: "unclassified", pathspecSafe };
 			return { entry, kind: "text", pathspecSafe };
@@ -2091,28 +2093,43 @@ class SearchBlobReader {
 		await this.processResult;
 	}
 
-	private reserve(request: SearchBlobRequest): void {
+	/** Whether reading `entry` now keeps the page within its aggregate read limits. */
+	fits(entry: ReviewSnapshotTreeEntry): boolean {
+		if (this.state.contents.has(entry.oid)) return true;
+		return entry.size !== undefined && this.limitExceeded({ oid: entry.oid, size: entry.size }) === undefined;
+	}
+
+	/**
+	 * Forget a blob that turned out to be binary: drop its content and return its semantic fallback reservation, which
+	 * bounds the text a page holds for the host to search. Its bytes still count toward the page's aggregate read limit.
+	 */
+	release(entry: ReviewSnapshotTreeEntry): void {
+		this.state.contents.delete(entry.oid);
+		if (this.state.fallbackOids.delete(entry.oid)) this.state.fallbackBytes -= entry.size ?? 0;
+	}
+
+	private limitExceeded(request: SearchBlobRequest): string | undefined {
 		const readBytes = this.state.readBytes + request.size;
 		if (!Number.isSafeInteger(readBytes) || readBytes > SEARCH_READ_MAX_BYTES) {
-			throw new Error(
-				`Review snapshot search blob reads exceed the ${formatByteLimit(SEARCH_READ_MAX_BYTES)} aggregate limit.`,
-			);
+			return `Review snapshot search blob reads exceed the ${formatByteLimit(SEARCH_READ_MAX_BYTES)} aggregate limit.`;
 		}
-		let fallbackBytes = this.state.fallbackBytes;
-		const reserveFallback = this.fallbackOids.has(request.oid) && !this.state.fallbackOids.has(request.oid);
-		if (reserveFallback) {
+		if (this.fallbackOids.has(request.oid) && !this.state.fallbackOids.has(request.oid)) {
 			const fallbackLimit = Math.min(SEARCH_FALLBACK_READ_MAX_BYTES, this.source.limits.maxMetadataBytes);
-			fallbackBytes += request.size;
+			const fallbackBytes = this.state.fallbackBytes + request.size;
 			if (!Number.isSafeInteger(fallbackBytes) || fallbackBytes > fallbackLimit) {
-				throw new Error(
-					`Review snapshot semantic fallback exceeds the ${formatByteLimit(fallbackLimit)} aggregate read limit.`,
-				);
+				return `Review snapshot semantic fallback exceeds the ${formatByteLimit(fallbackLimit)} aggregate read limit.`;
 			}
 		}
-		this.state.readBytes = readBytes;
-		if (reserveFallback) {
+		return undefined;
+	}
+
+	private reserve(request: SearchBlobRequest): void {
+		const exceeded = this.limitExceeded(request);
+		if (exceeded) throw new Error(exceeded);
+		this.state.readBytes += request.size;
+		if (this.fallbackOids.has(request.oid) && !this.state.fallbackOids.has(request.oid)) {
 			this.state.fallbackOids.add(request.oid);
-			this.state.fallbackBytes = fallbackBytes;
+			this.state.fallbackBytes += request.size;
 		}
 	}
 
@@ -2434,6 +2451,8 @@ class GitReviewSnapshot implements ReviewSnapshot {
 	private readonly searchResults = new Map<string, SearchCacheEntry>();
 	private readonly searchInflight = new Map<string, SearchInflight>();
 	private readonly activeSearchWork = new Set<Promise<unknown>>();
+	/** Blobs a search read and found binary, by object id: later searches skip them without reading them again. */
+	private readonly binarySearchBlobs = new Set<string>();
 	private readonly disposalController = new AbortController();
 	private searchResultCacheBytes = 0;
 	private disposed = false;
@@ -2659,61 +2678,69 @@ class GitReviewSnapshot implements ReviewSnapshot {
 		throwIfSearchAborted(signal);
 		const entries = manifest.entries;
 		const firstFileIndex = options.fileIndex ?? 0;
-		const pageEntries = entries.slice(firstFileIndex, firstFileIndex + options.maxFiles);
-		const textEntries = pageEntries.filter((entry) => entry.kind === "text");
-		const fallbackEntries = pageEntries.filter((entry) => entry.kind === "unclassified" || entry.kind === "symlink");
 		const selectedPaths = new Set<string>();
 		const fallbackPaths = new Set<string>();
+		const fallbackOids = new Set<string>();
 		const ignoreCase = options.ignoreCase === true;
-		if (directGitSearchQuery(options.query)) {
-			const pathspecTextEntries = textEntries.filter((entry) => entry.pathspecSafe);
-			for (const { entry, pathspecSafe } of textEntries) {
-				if (pathspecSafe) continue;
-				selectedPaths.add(entry.path);
-				fallbackPaths.add(entry.path);
-			}
-			const directMatches = await gitGrepPaths(
-				this.source,
-				manifest.tree,
-				pathspecTextEntries.map(({ entry }) => entry.path),
-				{ pattern: options.query, binaryMode: "text", ignoreCase, signal },
+		// Why a file is skipped unsearched: the manifest's reason, or a blob an earlier search found binary.
+		const skipReason = (manifestEntry: SearchManifestEntry): string | undefined =>
+			manifestEntry.reason ??
+			(this.binarySearchBlobs.has(manifestEntry.entry.oid) ? REVIEW_SEARCH_BINARY_SKIP_REASON : undefined);
+		// Choose which files of a window to read, and which of those the host searches itself instead of Git.
+		const select = async (windowEntries: readonly SearchManifestEntry[]): Promise<void> => {
+			const searchable = windowEntries.filter((entry) => skipReason(entry) === undefined);
+			const textEntries = searchable.filter((entry) => entry.kind === "text");
+			const fallbackEntries = searchable.filter(
+				(entry) => entry.kind === "unclassified" || entry.kind === "symlink",
 			);
-			if (!directMatches) throw new Error("git grep did not return a required candidate set.");
-			for (const path of directMatches.matches) selectedPaths.add(path);
-			for (const path of directMatches.fallbackPaths) {
-				selectedPaths.add(path);
-				fallbackPaths.add(path);
-			}
-			if (ignoreCase) {
-				const nonAsciiPaths = await gitGrepPaths(
+			if (directGitSearchQuery(options.query)) {
+				const pathspecTextEntries = textEntries.filter((entry) => entry.pathspecSafe);
+				for (const { entry, pathspecSafe } of textEntries) {
+					if (pathspecSafe) continue;
+					selectedPaths.add(entry.path);
+					fallbackPaths.add(entry.path);
+				}
+				const directMatches = await gitGrepPaths(
 					this.source,
 					manifest.tree,
 					pathspecTextEntries.map(({ entry }) => entry.path),
-					{ pattern: "[^\\x00-\\x7f]", binaryMode: "text", perl: true, optional: true, signal },
+					{ pattern: options.query, binaryMode: "text", ignoreCase, signal },
 				);
-				for (const { entry } of nonAsciiPaths === undefined
-					? pathspecTextEntries
-					: pathspecTextEntries.filter(
-							({ entry }) =>
-								nonAsciiPaths.matches.has(entry.path) || nonAsciiPaths.fallbackPaths.has(entry.path),
-						)) {
+				if (!directMatches) throw new Error("git grep did not return a required candidate set.");
+				for (const path of directMatches.matches) selectedPaths.add(path);
+				for (const path of directMatches.fallbackPaths) {
+					selectedPaths.add(path);
+					fallbackPaths.add(path);
+				}
+				if (ignoreCase) {
+					const nonAsciiPaths = await gitGrepPaths(
+						this.source,
+						manifest.tree,
+						pathspecTextEntries.map(({ entry }) => entry.path),
+						{ pattern: "[^\\x00-\\x7f]", binaryMode: "text", perl: true, optional: true, signal },
+					);
+					for (const { entry } of nonAsciiPaths === undefined
+						? pathspecTextEntries
+						: pathspecTextEntries.filter(
+								({ entry }) =>
+									nonAsciiPaths.matches.has(entry.path) || nonAsciiPaths.fallbackPaths.has(entry.path),
+							)) {
+						selectedPaths.add(entry.path);
+						fallbackPaths.add(entry.path);
+					}
+				}
+			} else {
+				for (const { entry } of textEntries) {
 					selectedPaths.add(entry.path);
 					fallbackPaths.add(entry.path);
 				}
 			}
-		} else {
-			for (const { entry } of textEntries) {
+			for (const { entry } of fallbackEntries) {
 				selectedPaths.add(entry.path);
 				fallbackPaths.add(entry.path);
 			}
-		}
-		for (const { entry } of fallbackEntries) {
-			selectedPaths.add(entry.path);
-			fallbackPaths.add(entry.path);
-		}
-		const fallbackOids = new Set(
-			pageEntries.filter(({ entry }) => fallbackPaths.has(entry.path)).map(({ entry }) => entry.oid),
-		);
+			for (const { entry } of searchable) if (fallbackPaths.has(entry.path)) fallbackOids.add(entry.oid);
+		};
 		const readState: SearchBlobReadState = {
 			contents: new Map<string, Buffer | undefined>(),
 			readBytes: 0,
@@ -2727,48 +2754,65 @@ class GitReviewSnapshot implements ReviewSnapshot {
 		let nextFileIndex = firstFileIndex;
 		let nextLineIndex = options.lineIndex ?? 0;
 		let filesScanned = 0;
+		// The files this page searched, which `maxFiles` bounds; a skipped file does not count.
+		let searched = 0;
+		let selectedEnd = firstFileIndex;
 		let retainedBytes = 0;
 		const needle = ignoreCase ? options.query.toLocaleLowerCase() : options.query;
 		try {
-			while (nextFileIndex < entries.length && filesScanned < options.maxFiles && matches.length < options.limit) {
+			while (nextFileIndex < entries.length && searched < options.maxFiles && matches.length < options.limit) {
 				throwIfSearchAborted(signal);
+				if (nextFileIndex >= selectedEnd) {
+					// Select enough files to fill the rest of the page; skipped files ride along without counting. A file
+					// found binary on reading leaves the window short, and the next window makes up for it.
+					let remaining = options.maxFiles - searched;
+					let end = nextFileIndex;
+					while (end < entries.length && remaining > 0) {
+						if (skipReason(entries[end]) === undefined) remaining--;
+						end++;
+					}
+					await select(entries.slice(nextFileIndex, end));
+					throwIfSearchAborted(signal);
+					selectedEnd = end;
+				}
 				const manifestEntry = entries[nextFileIndex];
 				const { entry } = manifestEntry;
+				let skipped = skipReason(manifestEntry);
+				let content: Buffer | undefined;
+				if (skipped === undefined && selectedPaths.has(entry.path)) {
+					if (!readState.contents.has(entry.oid)) {
+						// Once the page has made progress, end it before a read that would pass its read limits: the
+						// next page reads the file with fresh limits.
+						if (nextFileIndex > firstFileIndex && !blobReader.fits(entry)) break;
+						await blobReader.read(entry);
+						throwIfSearchAborted(signal);
+					}
+					content = readState.contents.get(entry.oid);
+					if (content === undefined) {
+						skipped = `Could not read the snapshot blob: object ${entry.oid} is unavailable.`;
+					} else if (isBinary(content)) {
+						// Remember the verdict so no later search reads the blob again, and stop holding it.
+						this.binarySearchBlobs.add(entry.oid);
+						blobReader.release(entry);
+						skipped = REVIEW_SEARCH_BINARY_SKIP_REASON;
+					}
+				}
 				filesScanned++;
-				if (manifestEntry.reason) {
-					skippedPaths.push({ path: entry.path, reason: manifestEntry.reason });
-					retainedBytes +=
-						Buffer.byteLength(entry.path, "utf8") + Buffer.byteLength(manifestEntry.reason, "utf8") + 32;
+				if (skipped !== undefined) {
+					skippedPaths.push({ path: entry.path, reason: skipped });
+					retainedBytes += Buffer.byteLength(entry.path, "utf8") + Buffer.byteLength(skipped, "utf8") + 32;
 					assertSearchResultBytes(retainedBytes);
 					nextFileIndex++;
 					nextLineIndex = 0;
 					continue;
 				}
-				if (!selectedPaths.has(entry.path)) {
-					nextFileIndex++;
-					nextLineIndex = 0;
-					continue;
-				}
-				if (!readState.contents.has(entry.oid)) {
-					await blobReader.read(entry);
-					throwIfSearchAborted(signal);
-				}
-				const content = readState.contents.get(entry.oid);
-				let skipReason: string | undefined;
+				searched++;
+				// A file Git did not select holds no match.
 				if (content === undefined) {
-					skipReason = `Could not read the snapshot blob: object ${entry.oid} is unavailable.`;
-				} else if (isBinary(content)) {
-					skipReason = "Binary content was not searched.";
-				}
-				if (skipReason) {
-					skippedPaths.push({ path: entry.path, reason: skipReason });
-					retainedBytes += Buffer.byteLength(entry.path, "utf8") + Buffer.byteLength(skipReason, "utf8") + 32;
-					assertSearchResultBytes(retainedBytes);
 					nextFileIndex++;
 					nextLineIndex = 0;
 					continue;
 				}
-				if (content === undefined) throw new Error("Review snapshot search content was unexpectedly unavailable.");
 				const lines = content.toString("utf8").split("\n");
 				while (nextLineIndex < lines.length && matches.length < options.limit) {
 					const line = lines[nextLineIndex] ?? "";

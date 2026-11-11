@@ -197,8 +197,22 @@ describe("review snapshot tools", () => {
 			matches: [],
 			filesScanned: 1,
 			skippedPaths: [{ path: "large.txt", reason: expect.stringContaining("64 bytes") }],
+			binaryFilesSkipped: 0,
 		});
 		expect(resultText(search)).toContain("Skipped paths:\nlarge.txt:");
+
+		// A binary file cannot hold a text match, so it is counted rather than listed.
+		const everything = await execute(tool(tools, "review_search"), { query: "absent", revision: "head" });
+		expect(everything.details).toMatchObject({
+			skippedPaths: [
+				{ path: "large.txt", reason: expect.stringContaining("64 bytes") },
+				{ path: "src/one.ts", reason: expect.stringContaining("64 bytes") },
+			],
+			binaryFilesSkipped: 1,
+		});
+		const text = resultText(everything);
+		expect(text).toContain("Skipped 1 binary file.");
+		expect(text).not.toContain("binary.dat");
 	});
 
 	it("binds opaque cursors to a tool operation and snapshot", async () => {

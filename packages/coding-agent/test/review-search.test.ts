@@ -15,6 +15,7 @@ import { delimiter, dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	REVIEW_SEARCH_BINARY_SKIP_REASON,
 	type ReviewSnapshot,
 	type ReviewSnapshotSearchOptions,
 	type ReviewSnapshotSearchResult,
@@ -111,8 +112,10 @@ async function legacySearchPage(
 	let nextFileIndex = options.fileIndex ?? 0;
 	let nextLineIndex = options.lineIndex ?? 0;
 	let filesScanned = 0;
+	// A page holds `maxFiles` searched files; skipped files do not count toward it.
+	let searched = 0;
 	const needle = options.ignoreCase ? options.query.toLocaleLowerCase() : options.query;
-	while (nextFileIndex < entries.length && filesScanned < options.maxFiles && matches.length < options.limit) {
+	while (nextFileIndex < entries.length && searched < options.maxFiles && matches.length < options.limit) {
 		const entry = entries[nextFileIndex];
 		filesScanned++;
 		const file = await snapshot.readFile(options.revision, entry.path);
@@ -134,6 +137,7 @@ async function legacySearchPage(
 			nextLineIndex = 0;
 			continue;
 		}
+		searched++;
 		const lines = file.content.toString("utf8").split("\n");
 		while (nextLineIndex < lines.length && matches.length < options.limit) {
 			const line = lines[nextLineIndex] ?? "";
@@ -654,6 +658,74 @@ describe("direct-tree review snapshot search", () => {
 		});
 	});
 
+	it("reads a binary at most once and never charges it to the text fallback budget", async () => {
+		const repository = createRepository();
+		const binary = Buffer.alloc(20 * 1_024, 0x78);
+		binary[0] = 0;
+		for (let index = 0; index < 5; index++) {
+			binary.write(String(index), binary.length - 1, "utf8");
+			writeFixture(repository, `assets/${index}.bin`, binary);
+		}
+		writeFixture(repository, "notes.txt", "caf\u00e9 needle\n");
+		writeFixture(repository, "tracked.txt", "before\n");
+		git(repository, "add", "-A", "--", ".");
+		git(repository, "commit", "-m", "binary assets");
+		writeFixture(repository, "tracked.txt", "after\n");
+		// Together the binaries pass the 64 KiB fallback budget; each alone fits it.
+		const snapshot = await resolveSnapshot(repository, { maxMetadataBytes: 64 * 1_024 });
+		snapshots.push(snapshot);
+		const trace = join(repository, "git-trace.log");
+		process.env.GIT_TRACE = trace;
+		const batchReads = () =>
+			readFileSync(trace, "utf8")
+				.split("\n")
+				.filter((line) => line.includes("built-in: git cat-file --batch")).length;
+		const binarySkips = Array.from({ length: 5 }, (_, index) => ({
+			path: `assets/${index}.bin`,
+			reason: REVIEW_SEARCH_BINARY_SKIP_REASON,
+		}));
+
+		// A non-ASCII query makes the host read and search every file itself.
+		const first = await snapshot.search({ revision: "head", query: "\u00e9", limit: 100, maxFiles: 200 });
+		expect(first).toMatchObject({ matches: [{ path: "notes.txt", line: 1 }], complete: true });
+		expect(first.skippedPaths).toEqual(binarySkips);
+		const readsAfterFirst = batchReads();
+		expect(readsAfterFirst).toBeGreaterThan(0);
+
+		const second = await snapshot.search({ revision: "head", query: "absent", limit: 100, maxFiles: 200 });
+		expect(second).toMatchObject({ matches: [], skippedPaths: binarySkips, complete: true });
+		expect(batchReads()).toBe(readsAfterFirst);
+	});
+
+	it("fills a page with searched files while skipped files ride along", async () => {
+		const repository = createRepository();
+		const large = Buffer.alloc(9 * 1_024, 0x78);
+		large[0] = 0;
+		writeFixture(repository, "a-large.bin", large);
+		writeFixture(repository, "b-small.bin", Buffer.from([0, 1, 2]));
+		writeFixture(repository, "c.txt", "c\n");
+		writeFixture(repository, "d.txt", "d\n");
+		writeFixture(repository, "tracked.txt", "before\n");
+		git(repository, "add", "-A", "--", ".");
+		git(repository, "commit", "-m", "mixed files");
+		writeFixture(repository, "tracked.txt", "after\n");
+		const snapshot = await resolveSnapshot(repository);
+		snapshots.push(snapshot);
+
+		// The large binary is found binary only on reading, the small one when the manifest is built: neither counts.
+		await expect(snapshot.search({ revision: "head", query: "absent", limit: 100, maxFiles: 3 })).resolves.toEqual({
+			matches: [],
+			filesScanned: 5,
+			skippedPaths: [
+				{ path: "a-large.bin", reason: REVIEW_SEARCH_BINARY_SKIP_REASON },
+				{ path: "b-small.bin", reason: REVIEW_SEARCH_BINARY_SKIP_REASON },
+			],
+			nextFileIndex: 5,
+			nextLineIndex: 0,
+			complete: true,
+		});
+	});
+
 	it("returns an early bounded page before later manifest classification blobs are read", async () => {
 		const repository = createRepository();
 		const entries: Array<{ path: string; oid: string }> = [
@@ -967,28 +1039,37 @@ describe("direct-tree review snapshot search", () => {
 		rmSync(mode, { force: true });
 	});
 
-	it("bounds aggregate semantic fallback reads", async () => {
+	it("ends a page before its semantic fallback reads pass their budget", async () => {
 		const repository = createRepository();
 		const firstFallbackContent = `${"a".repeat(699)}1`;
 		writeFixture(repository, "a-duplicate.txt", firstFallbackContent);
 		writeFixture(repository, "a.txt", firstFallbackContent);
 		writeFixture(repository, "b.txt", `${"b".repeat(699)}2`);
 		writeFixture(repository, "tracked.txt", "before\n");
+		writeFixture(repository, "z-large.txt", "z".repeat(2_000));
 		git(repository, "add", "-A", "--", ".");
 		git(repository, "commit", "-m", "fallback inventory");
 		writeFixture(repository, "tracked.txt", "after\n");
-		const snapshot = await resolveSnapshot(repository, { maxMetadataBytes: 1_024, maxBlobBytes: 1_024 });
+		const snapshot = await resolveSnapshot(repository, { maxMetadataBytes: 1_024, maxBlobBytes: 4_096 });
 		snapshots.push(snapshot);
-		const trace = join(repository, "git-trace.log");
-		process.env.GIT_TRACE = trace;
+		const search = (fileIndex: number) =>
+			snapshot.search({ revision: "head", query: "é", fileIndex, limit: 100, maxFiles: 200 });
 
-		await expect(snapshot.search({ revision: "head", query: "é", limit: 100, maxFiles: 200 })).rejects.toThrow(
-			/semantic fallback exceeds the 1 KiB aggregate read limit/i,
-		);
-		const catFileBatches = readFileSync(trace, "utf8")
-			.split("\n")
-			.filter((line) => line.includes("built-in: git cat-file --batch"));
-		expect(catFileBatches).toHaveLength(1);
+		// The duplicates share one blob read; b.txt would pass the 1 KiB budget, so the next page reads it.
+		await expect(search(0)).resolves.toMatchObject({
+			matches: [],
+			filesScanned: 2,
+			nextFileIndex: 2,
+			complete: false,
+		});
+		await expect(search(2)).resolves.toMatchObject({
+			matches: [],
+			filesScanned: 2,
+			nextFileIndex: 4,
+			complete: false,
+		});
+		// A single file larger than the budget cannot be paged around.
+		await expect(search(4)).rejects.toThrow(/semantic fallback exceeds the 1 KiB aggregate read limit/i);
 	});
 
 	it("isolates caller cancellation, retries cancelled work, and drains searches before disposal", async () => {

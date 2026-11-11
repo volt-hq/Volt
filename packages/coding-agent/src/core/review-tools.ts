@@ -5,6 +5,7 @@ import { defineTool, type ToolDefinition } from "./extensions/types.ts";
 import {
 	normalizeReviewPath,
 	pageUtf8,
+	REVIEW_SEARCH_BINARY_SKIP_REASON,
 	type ReviewChangedFile,
 	type ReviewSnapshot,
 	type ReviewSnapshotHunk,
@@ -25,7 +26,12 @@ export const REVIEW_TOOL_DEFAULT_PAGE_BYTES = 32 * 1024;
 export const REVIEW_TOOL_MAX_PAGE_BYTES = 64 * 1024;
 export const REVIEW_TOOL_MAX_LIST_ENTRIES = 100;
 export const REVIEW_TOOL_MAX_SEARCH_MATCHES = 100;
-export const REVIEW_TOOL_MAX_SEARCH_FILES_PER_PAGE = 200;
+/**
+ * The files one `review_search` page searches. Skipped files do not count, and a page ends early rather than pass
+ * its read limits, so a larger page costs latency, not memory: a repository-wide search of about 4,600 files takes
+ * five pages.
+ */
+export const REVIEW_TOOL_MAX_SEARCH_FILES_PER_PAGE = 1_000;
 
 interface CursorPayload {
 	kind: string;
@@ -276,7 +282,10 @@ interface SearchDetails {
 	revision: ReviewSnapshotRevision;
 	matches: SearchMatch[];
 	filesScanned: number;
+	/** Files skipped for a reason other than binary content: each could hide a match, so each is listed. */
 	skippedPaths: Array<{ path: string; reason: string }>;
+	/** Binary files skipped, which text search cannot match: counted, not listed. */
+	binaryFilesSkipped: number;
 	nextCursor?: string;
 }
 
@@ -671,7 +680,11 @@ export function createReviewSnapshotTools(
 				maxFiles: REVIEW_TOOL_MAX_SEARCH_FILES_PER_PAGE,
 				...(signal ? { signal } : {}),
 			});
-			const { matches, filesScanned, skippedPaths, nextFileIndex, nextLineIndex, complete } = search;
+			const { matches, filesScanned, nextFileIndex, nextLineIndex, complete } = search;
+			const binaryFilesSkipped = search.skippedPaths.filter(
+				(entry) => entry.reason === REVIEW_SEARCH_BINARY_SKIP_REASON,
+			).length;
+			const skippedPaths = search.skippedPaths.filter((entry) => entry.reason !== REVIEW_SEARCH_BINARY_SKIP_REASON);
 			const nextCursor = complete
 				? undefined
 				: cursors.encode("search", {
@@ -690,13 +703,14 @@ export function createReviewSnapshotTools(
 				matches,
 				filesScanned,
 				skippedPaths,
+				binaryFilesSkipped,
 				...(nextCursor ? { nextCursor } : {}),
 			};
 			return {
 				content: [
 					{
 						type: "text",
-						text: `${matches.length === 0 ? "No matches in this page." : matches.map((match) => `${match.path}:${match.line}: ${match.text}`).join("\n")}${skippedPaths.length === 0 ? "" : `\n\nSkipped paths:\n${skippedPaths.map((entry) => `${entry.path}: ${entry.reason}`).join("\n")}`}${nextCursor ? `\n\nNext cursor: ${nextCursor}` : ""}`,
+						text: `${matches.length === 0 ? "No matches in this page." : matches.map((match) => `${match.path}:${match.line}: ${match.text}`).join("\n")}${binaryFilesSkipped === 0 ? "" : `\n\nSkipped ${binaryFilesSkipped} binary file${binaryFilesSkipped === 1 ? "" : "s"}.`}${skippedPaths.length === 0 ? "" : `\n\nSkipped paths:\n${skippedPaths.map((entry) => `${entry.path}: ${entry.reason}`).join("\n")}`}${nextCursor ? `\n\nNext cursor: ${nextCursor}` : ""}`,
 					},
 				],
 				details,
