@@ -16,6 +16,17 @@ function findingText(finding: ReviewFinding): string {
 	].join("\n");
 }
 
+/**
+ * A Markdown code span that shows `text` verbatim. A changed file's name is the author's to choose, so a reference
+ * must not render as a link, a mention, or formatting. The fence outruns every backtick run in the text, and the
+ * padding keeps a leading or trailing backtick or space from being read as part of the fence or stripped.
+ */
+function codeSpan(text: string): string {
+	const fence = "`".repeat(Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length)) + 1);
+	const pad = /^[` ]|[` ]$/.test(text) ? " " : "";
+	return `${fence}${pad}${text}${pad}${fence}`;
+}
+
 function inlineComment(finding: ReviewFinding, run: ReviewRunRecord): ReviewCodeHostInlineComment | undefined {
 	const location = finding.changeLocation;
 	const file = run.target.files.find((candidate) => candidate.path === location.path);
@@ -85,7 +96,7 @@ export async function publishReviewRun(
 		.filter((finding) => summaryOnlyFindingIds.includes(finding.id))
 		.map(
 			(finding) =>
-				`${findingText(finding)}\n\nLocation: ${finding.changeLocation.path}:${finding.changeLocation.startLine}-${finding.changeLocation.endLine} (${finding.changeLocation.side}).`,
+				`${findingText(finding)}\n\nLocation: ${codeSpan(finding.changeLocation.path)}:${finding.changeLocation.startLine}-${finding.changeLocation.endLine} (${finding.changeLocation.side}).`,
 		);
 	const body = [
 		`Volt review (${run.runId})`,

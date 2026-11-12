@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import { defineTool, type ToolDefinition } from "./extensions/types.ts";
-import { normalizeReviewPath } from "./review-path.ts";
+import { normalizeReviewPath, REVIEW_PATH_MAX_LENGTH } from "./review-path.ts";
 import type {
 	ReviewChangedFile,
 	ReviewSnapshot,
@@ -284,7 +284,7 @@ const LocationSchema = Type.Object(
 	{
 		path: Type.String({
 			minLength: 1,
-			maxLength: 4_096,
+			maxLength: REVIEW_PATH_MAX_LENGTH,
 			description: "Canonical snapshot path reference; preserve %HH escapes exactly.",
 		}),
 		side: Type.Union([Type.Literal("base"), Type.Literal("head")]),

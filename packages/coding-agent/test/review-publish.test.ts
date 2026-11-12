@@ -239,10 +239,35 @@ switch (args.slice(0, 2).join(" ")) {
 			);
 			expect(published.inlineFindingIds).toEqual(["path-0", "path-1", "path-2", "path-4"]);
 			expect(published.summaryOnlyFindingIds).toEqual(["path-3"]);
-			expect(payload.body).toContain("Location: invalid-%FF.ts:2-2 (head).");
+			expect(payload.body).toContain("Location: `invalid-%FF.ts`:2-2 (head).");
 			expect(payload.body).not.toContain("invalid-�");
 		},
 	);
+
+	it("publishes a summary-only location as an inert code span, whatever the filename holds", async () => {
+		const fixture = installGh();
+		const run = reviewRun();
+		const template = run.result!.findings[1]!;
+		// None is among the run's files, so each finding goes to the summary with its location.
+		const references = ["[sign in](docs)-@octocat-*bold*.ts", "tick`s-``two``.ts", "`edge`", " spaced "];
+		run.result!.findings = references.map((reference, index) => ({
+			...template,
+			id: `path-${index}`,
+			changeLocation: { ...template.changeLocation, path: reference },
+		}));
+		const published = await publishReviewRun(fixture.cwd, run);
+		expect(published.summaryOnlyFindingIds).toEqual(["path-0", "path-1", "path-2", "path-3"]);
+		const payload = JSON.parse(readFileSync(fixture.payloadPath, "utf8")) as { body: string };
+		const locations = payload.body.split("\n").filter((line) => line.startsWith("Location: "));
+		expect(locations).toEqual([
+			"Location: `[sign in](docs)-@octocat-*bold*.ts`:1-1 (head).",
+			// The fence is one backtick longer than the longest run inside it.
+			"Location: ```tick`s-``two``.ts```:1-1 (head).",
+			// Padding keeps an edge backtick out of the fence, and an edge space from being stripped.
+			"Location: `` `edge` ``:1-1 (head).",
+			"Location: `  spaced  `:1-1 (head).",
+		]);
+	});
 
 	it("posts through the command it is given, with the trailer after the review's body", async () => {
 		const fixture = installGh();

@@ -5,6 +5,12 @@ declare const reviewPathIdentity: unique symbol;
 /** A byte-reversible Git path reference, not an OS filename or a display label. */
 export type ReviewPath = string & { readonly [reviewPathIdentity]: true };
 
+/**
+ * The longest reference a report location may carry, in UTF-16 code units: a 4,096-byte Git path whose every byte is
+ * escaped as `%HH`. An unescaped character never takes more code units than it has UTF-8 bytes.
+ */
+export const REVIEW_PATH_MAX_LENGTH = 3 * 4_096;
+
 const ESCAPED_CHARACTERS = /[%\\:\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
 /** Construct a canonical reference from the exact bytes Git returned. No Unicode normalization is performed. */
