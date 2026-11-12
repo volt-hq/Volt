@@ -25,7 +25,6 @@ export const REVIEW_TOOL_DEFAULT_PAGE_BYTES = 32 * 1024;
 export const REVIEW_TOOL_MAX_PAGE_BYTES = 64 * 1024;
 export const REVIEW_TOOL_MAX_LIST_ENTRIES = 100;
 export const REVIEW_TOOL_MAX_SEARCH_MATCHES = 100;
-export const REVIEW_TOOL_MAX_SEARCH_FILES_PER_PAGE = 200;
 
 interface CursorPayload {
 	kind: string;
@@ -275,8 +274,6 @@ interface SearchDetails {
 	query: string;
 	revision: ReviewSnapshotRevision;
 	matches: SearchMatch[];
-	filesScanned: number;
-	skippedPaths: Array<{ path: string; reason: string }>;
 	nextCursor?: string;
 }
 
@@ -629,7 +626,7 @@ export function createReviewSnapshotTools(
 		name: "review_search",
 		label: "review_search",
 		description:
-			"Search literal text across base or head snapshot files. Results and scanning are paged and never consult the live worktree.",
+			"Search literal text across base or head snapshot files, optionally under one path. Binary files, those with a NUL byte in their first 8,000 bytes, are not searched. Matches are paged: pass the cursor for the next page. This never consults the live worktree.",
 		promptSnippet: "Search exact immutable snapshot file contents",
 		parameters: Type.Object({
 			query: Type.String({ minLength: 1, maxLength: 500 }),
@@ -657,21 +654,18 @@ export function createReviewSnapshotTools(
 			const ignoreCase = params.ignoreCase ?? cursorIgnoreCase;
 			if (params.cursor && params.ignoreCase !== undefined && ignoreCase !== cursorIgnoreCase)
 				throw new Error("Search cursor case sensitivity does not match the request.");
-			const fileIndex = numberState(state, "fileIndex") ?? 0;
-			const lineIndex = numberState(state, "lineIndex") ?? 0;
+			// The matches earlier pages returned: the snapshot skips that many to reach this page.
+			const offset = numberState(state, "offset") ?? 0;
 			const limit = clampInteger(params.limit, 50, REVIEW_TOOL_MAX_SEARCH_MATCHES);
-			const search = await snapshot.search({
+			const { matches, complete } = await snapshot.search({
 				revision,
 				query: params.query,
 				...(prefix ? { prefix } : {}),
 				ignoreCase,
-				fileIndex,
-				lineIndex,
+				offset,
 				limit,
-				maxFiles: REVIEW_TOOL_MAX_SEARCH_FILES_PER_PAGE,
 				...(signal ? { signal } : {}),
 			});
-			const { matches, filesScanned, skippedPaths, nextFileIndex, nextLineIndex, complete } = search;
 			const nextCursor = complete
 				? undefined
 				: cursors.encode("search", {
@@ -679,8 +673,7 @@ export function createReviewSnapshotTools(
 						revision,
 						prefix: prefix ?? null,
 						ignoreCase,
-						fileIndex: nextFileIndex,
-						lineIndex: nextLineIndex,
+						offset: offset + matches.length,
 					});
 			tracker.recordSearch();
 			const details: SearchDetails = {
@@ -688,17 +681,14 @@ export function createReviewSnapshotTools(
 				query: params.query,
 				revision,
 				matches,
-				filesScanned,
-				skippedPaths,
 				...(nextCursor ? { nextCursor } : {}),
 			};
+			const matchText =
+				matches.length === 0
+					? "No matches."
+					: matches.map((match) => `${match.path}:${match.line}: ${match.text}`).join("\n");
 			return {
-				content: [
-					{
-						type: "text",
-						text: `${matches.length === 0 ? "No matches in this page." : matches.map((match) => `${match.path}:${match.line}: ${match.text}`).join("\n")}${skippedPaths.length === 0 ? "" : `\n\nSkipped paths:\n${skippedPaths.map((entry) => `${entry.path}: ${entry.reason}`).join("\n")}`}${nextCursor ? `\n\nNext cursor: ${nextCursor}` : ""}`,
-					},
-				],
+				content: [{ type: "text", text: `${matchText}${nextCursor ? `\n\nNext cursor: ${nextCursor}` : ""}` }],
 				details,
 			};
 		},
