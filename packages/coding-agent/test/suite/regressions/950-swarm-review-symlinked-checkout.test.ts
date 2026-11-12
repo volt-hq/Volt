@@ -75,6 +75,8 @@ describe("swarm review tools in a checkout reached through a symlink (issue #950
 	});
 
 	it("reports a missing file in the checkout as missing, not as outside the repository", async () => {
-		await expect(read(symlinkedCheckout(), "missing.ts")).rejects.toMatchObject({ code: "ENOENT" });
+		await expect(read(symlinkedCheckout(), "missing.ts")).rejects.toThrow(
+			'Nothing is at "missing.ts" in this checkout.',
+		);
 	});
 });

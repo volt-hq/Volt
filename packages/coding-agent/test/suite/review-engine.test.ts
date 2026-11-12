@@ -521,6 +521,7 @@ describe("review engines", () => {
 		writeFileSync(join(cwd, "binary.dat"), Buffer.from([0, 1, 2, 0]));
 		let answers: Record<string, boolean> | undefined;
 		let notCanonical: unknown;
+		const spellings: unknown[] = [];
 		const { runs } = await start(
 			engine(async (ctx) => {
 				answers = {
@@ -533,6 +534,9 @@ describe("review engines", () => {
 					directory: await ctx.hasTextFile("src", "head"),
 				};
 				notCanonical = await ctx.hasTextFile("src/100%.ts", "head").catch((error: unknown) => error);
+				for (const path of ["./src/value.ts", "src/value.ts/"]) {
+					spellings.push(await ctx.hasTextFile(path, "head").catch((error: unknown) => error));
+				}
 				await reviewCarefully(ctx);
 			}),
 		);
@@ -546,6 +550,11 @@ describe("review engines", () => {
 			directory: false,
 		});
 		expect(notCanonical).toMatchObject({ message: expect.stringContaining("uppercase %HH") });
+		// A spelling the snapshot would read is still not the reference a report must carry.
+		expect(spellings).toEqual([
+			expect.objectContaining({ message: expect.stringContaining("must not traverse") }),
+			expect.objectContaining({ message: expect.stringContaining("must not traverse") }),
+		]);
 		// The engine was given the diff, and read no file: asking whether one exists is not reading it.
 		expect(runs.runs[0]?.result?.coverage.hunksInspected).toHaveLength(2);
 		expect(runs.runs[0]?.result?.coverage.filesInspected).toEqual([]);
@@ -640,6 +649,7 @@ describe("review engines", () => {
 					raw: string | undefined;
 					installed: string | undefined;
 					notCanonical: unknown;
+					spelling: unknown;
 			  }
 			| undefined;
 		const { work } = await start(
@@ -652,6 +662,12 @@ describe("review engines", () => {
 				} catch (error) {
 					notCanonical = error;
 				}
+				let spelling: unknown;
+				try {
+					checkout.nativePath("./src/100%25.ts");
+				} catch (error) {
+					spelling = error;
+				}
 				seen = {
 					path: checkout.path,
 					unrepresented: checkout.unrepresented,
@@ -660,6 +676,7 @@ describe("review engines", () => {
 					raw: checkout.nativePath("raw-%FF.ts"),
 					installed: checkout.nativePath("node_modules/pkg/index.js"),
 					notCanonical,
+					spelling,
 				};
 				await checkout.release();
 				await reviewCarefully(ctx);
@@ -677,6 +694,7 @@ describe("review engines", () => {
 		// What is not in the head, such as a dependency the setup installed, resolves to where it would be.
 		expect(seen.installed).toBe(join(seen.path, "node_modules", "pkg", "index.js"));
 		expect(seen.notCanonical).toMatchObject({ message: expect.stringContaining("uppercase %HH") });
+		expect(seen.spelling).toMatchObject({ message: expect.stringContaining("must not traverse") });
 	});
 
 	it("resets the initialized submodules of a released checkout as well", async () => {

@@ -46,6 +46,7 @@ import {
 	reviewExclusions,
 	setUpReviewCheckout,
 } from "./review.ts";
+import { reviewPathBytes } from "./review-path.ts";
 import { STATIC_REVIEW_LIMITATION } from "./review-presentation.ts";
 import {
 	buildParsedReview,
@@ -784,6 +785,8 @@ export class ReviewEngineRun {
 			pass: () => this.pass(),
 			hasTextFile: async (path, side) => {
 				this.assertLive();
+				// The snapshot also reads a spelling that normalizes to a reference, which a report may not carry.
+				reviewPathBytes(path);
 				const file = await this.snapshot.readFile(side, path);
 				return file?.available === true && !file.binary;
 			},

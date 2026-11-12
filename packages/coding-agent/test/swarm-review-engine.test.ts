@@ -613,8 +613,6 @@ describe("swarm canonical path boundaries", () => {
 			{ argument: "./plain.ts", opens: "./plain.ts", reference: undefined },
 			// The tool strips a leading "@" from what it is given; "./" keeps the name whole.
 			{ argument: "@scope/x.ts", opens: `./${join("@scope", "x.ts")}`, reference: undefined },
-			// What is not there is passed on, for the tool to report it missing.
-			{ argument: "missing.ts", opens: "./missing.ts", reference: undefined },
 			{ argument: ".", opens: ".", reference: undefined },
 		])("opens $opens for $argument", ({ argument, opens, reference }) => {
 			expect(fixture().resolve(argument)).toEqual({
@@ -640,6 +638,19 @@ describe("swarm canonical path boundaries", () => {
 			// A name that is not UTF-8 has no file in any checkout a path string can open.
 			expect(fixture().resolve("raw-%FF.ts")).toEqual({
 				refusal: expect.stringContaining("does not hold raw-%FF.ts"),
+			});
+		});
+
+		it("refuses a path nothing is at, which the tool might open under another spelling", () => {
+			const { resolve } = fixture();
+			expect(resolve("missing.ts")).toEqual({ refusal: 'Nothing is at "missing.ts" in this checkout.' });
+			expect(resolve("100%2525.ts")).toEqual({ refusal: expect.stringContaining("Nothing is at") });
+			// A native form is checked where it leads. This one has no Unicode space: the fixture's directory does.
+			const plain = mkdtempSync(join(tmpdir(), "volt-swarm-resolver-plain-"));
+			directories.push(plain);
+			const probe: CheckoutPathProbe = { confine: () => {}, exists: existsSync };
+			expect(resolveCheckoutPath(join(plain, "missing.ts"), directoryCheckout(plain), probe)).toEqual({
+				refusal: expect.stringContaining("Nothing is at"),
 			});
 		});
 
@@ -715,6 +726,15 @@ describe("swarm canonical path boundaries", () => {
 		// for a name is another file, so it is not read in its place.
 		writeFileSync(join(checkout, "invalid-%FF"), "not the raw-byte filename\n");
 		await expect(run(read, "invalid-%FF")).rejects.toThrow(/does not hold invalid-%FF/);
+
+		// The read tool looks for a file it does not find under other spellings, a curly apostrophe among them. That
+		// file has another reference, so it is not read as the one asked for, by name or by absolute path.
+		writeFileSync(join(checkout, "it\u2019s.ts"), "curly apostrophe\n");
+		await expect(run(read, "it's.ts")).rejects.toThrow(/Nothing is at "it's\.ts"/);
+		await expect(run(read, join(checkout, "it's.ts"))).rejects.toThrow(/Nothing is at/);
+		expect((await run(read, "it\u2019s.ts")).content).toEqual([
+			{ type: "text", text: expect.stringContaining("curly apostrophe") },
+		]);
 		await expect(run(read, "../outside")).rejects.toThrow(/outside the repository/);
 	});
 

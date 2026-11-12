@@ -145,8 +145,7 @@ export type CheckoutPath =
  * - A native form (see {@link nativeArgument}) goes to the tool as typed, once where it leads is confined.
  * - Anything else is first a name in the checkout, as `ls`, `find`, and `grep` print it. When it is also a canonical
  *   reference that decodes to another name (`100%25.ts` for the file `100%.ts`), that is a second reading. The one
- *   that exists is opened. When both exist the argument is refused, since guessing could read the wrong file. When
- *   neither exists the name is passed on for the tool to report missing.
+ *   that exists is opened. When both exist the argument is refused, since guessing could read the wrong file.
  * - A canonical reference the checkout does not serve is refused, whether or not some file has those characters
  *   for a name: the reviewer most likely means the head's path, and the snapshot tools read that.
  *
@@ -154,6 +153,10 @@ export type CheckoutPath =
  * the file there is not the head's (a case alias, a name Windows shortens), and it is refused. A name in the
  * checkout goes to the tool as `./name`, so the tool's own `@` and `~` handling cannot apply, and one with a Unicode
  * space the tool would rewrite is refused. Only that name is checked, never the checkout's own directory.
+ *
+ * A path nothing is at is refused too, in either form. The built-in read tool looks for a file it does not find under
+ * other spellings of its name (resolveReadPath in packages/coding-agent/src/core/tools/path-utils.ts), and the file it
+ * then opened would be one that nothing here checked, shown under the name asked for.
  */
 export function resolveCheckoutPath(argument: string, checkout: Checkout, probe: CheckoutPathProbe): CheckoutPath {
 	const cwd = checkout.path;
@@ -187,6 +190,7 @@ export function resolveCheckoutPath(argument: string, checkout: Checkout, probe:
 		probe.confine(native);
 		const { reference, refusal } = referenceOf(native);
 		if (refusal !== undefined) return { refusal };
+		if (!probe.exists(native)) return { refusal: `Nothing is at ${JSON.stringify(argument)}.` };
 		return { path: argument, ...(reference === undefined ? {} : { reference }) };
 	}
 
@@ -211,6 +215,8 @@ export function resolveCheckoutPath(argument: string, checkout: Checkout, probe:
 		if (referenceOf(named).reference !== asReference) decoded = served;
 	}
 	let chosen = named;
+	// Whether something is at `chosen`, once that has been asked.
+	let present: boolean | undefined;
 	if (decoded !== undefined) {
 		probe.confine(decoded);
 		if (probe.exists(decoded)) {
@@ -220,6 +226,7 @@ export function resolveCheckoutPath(argument: string, checkout: Checkout, probe:
 				};
 			}
 			chosen = decoded;
+			present = true;
 		}
 	}
 	const { reference, refusal } = referenceOf(chosen);
@@ -229,6 +236,9 @@ export function resolveCheckoutPath(argument: string, checkout: Checkout, probe:
 		return {
 			refusal: `These tools cannot open a name with a Unicode space other than the ASCII one. ${SNAPSHOT_TOOLS}${reference === undefined ? "" : ` Its canonical reference is ${reference}.`}`,
 		};
+	}
+	if (!(present ?? probe.exists(chosen))) {
+		return { refusal: `Nothing is at ${JSON.stringify(argument)} in this checkout.` };
 	}
 	return {
 		// A path on another drive has no relative spelling.

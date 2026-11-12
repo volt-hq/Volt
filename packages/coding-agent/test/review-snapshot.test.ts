@@ -540,6 +540,23 @@ describe("review snapshots", () => {
 		return file;
 	}
 
+	/** Writes blobs and trees straight into a repository's objects, for names no working tree there could hold. */
+	function objectWriter(repository: string) {
+		const write = (args: string[], input: string): string => {
+			const result = spawnSync("git", args, { cwd: repository, input, encoding: "utf8" });
+			if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+			return result.stdout.trim();
+		};
+		return {
+			blob: (content: string): string => write(["hash-object", "-w", "--stdin"], content),
+			tree: (entries: Array<[mode: string, type: string, oid: string, name: string]>): string =>
+				write(
+					["mktree", "-z"],
+					entries.map(([mode, type, oid, name]) => `${mode} ${type} ${oid}\t${name}\0`).join(""),
+				),
+		};
+	}
+
 	it.each([false, true])("keeps seeded repositories isolated (with commit: %s)", (withCommit) => {
 		const first = createRepository(withCommit);
 		const second = createRepository(withCommit);
@@ -684,17 +701,7 @@ describe("review snapshots", () => {
 		"checks out one file for names that differ only in case, and does not serve the others as it",
 		async () => {
 			const repository = createRepository();
-			const write = (args: string[], input: string): string => {
-				const result = spawnSync("git", args, { cwd: repository, input, encoding: "utf8" });
-				if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
-				return result.stdout.trim();
-			};
-			const blob = (content: string): string => write(["hash-object", "-w", "--stdin"], content);
-			const tree = (entries: Array<[mode: string, type: string, oid: string, name: string]>): string =>
-				write(
-					["mktree", "-z"],
-					entries.map(([mode, type, oid, name]) => `${mode} ${type} ${oid}\t${name}\0`).join(""),
-				);
+			const { blob, tree } = objectWriter(repository);
 			// Object-only: no working tree on this system could hold these names side by side.
 			const head = tree([
 				["100644", "blob", blob("a file named Docs\n"), "Docs"],
@@ -731,6 +738,146 @@ describe("review snapshots", () => {
 			expect(text(nativePath("Notes.md"))).toBe("upper notes\n");
 		},
 	);
+
+	it("leaves out what Git does not check out, for a reason nothing predicted, and checks out the rest", async () => {
+		const repository = createRepository();
+		const { blob, tree } = objectWriter(repository);
+		// One character more than a filesystem stores in a name: nothing here knows that limit, and Git meets it.
+		const long = "n".repeat(256);
+		const longDirectory = "z".repeat(256);
+		const head = tree([
+			// Git itself refuses a path through a `.git`, on every system.
+			["040000", "tree", tree([["100644", "blob", blob("not the checkout's own\n"), "config"]]), ".git"],
+			["100644", "blob", blob("kept\n"), "kept.txt"],
+			["100644", "blob", blob("long leaf\n"), long],
+			// A directory Git can create, and nothing it can check out in it.
+			["040000", "tree", tree([["100644", "blob", blob("only\n"), long]]), "only"],
+			[
+				"040000",
+				"tree",
+				tree([
+					[
+						"040000",
+						"tree",
+						tree([
+							["100644", "blob", blob("deep\n"), "x.txt"],
+							["040000", "tree", tree([["100644", "blob", blob("far\n"), "beneath.txt"]]), longDirectory],
+						]),
+						"deep",
+					],
+					["100644", "blob", blob("inner\n"), "inner.txt"],
+					["100644", "blob", blob("long inner\n"), long],
+				]),
+				"sub",
+			],
+			// A directory Git cannot create ends an ordinary checkout, where a file it cannot create does not.
+			["040000", "tree", tree([["100644", "blob", blob("beneath\n"), "beneath.txt"]]), longDirectory],
+		]);
+		const sha = git(repository, "commit-tree", head, "-p", "HEAD", "-m", "names no checkout holds");
+		const snapshot = await resolve({ kind: "commit", sha }, repository);
+
+		const checkout = await snapshot.materializeHead();
+		const { nativePath, unrepresented, omitted } = snapshot.describeCheckout(checkout);
+		// A directory Git checked nothing out of stands for all beneath it; one it checked something out of stays.
+		expect(unrepresented).toEqual([".git", long, "only", `sub/deep/${longDirectory}`, `sub/${long}`, longDirectory]);
+		expect(omitted).toBe(6);
+		for (const path of [
+			...unrepresented,
+			".git/config",
+			`only/${long}`,
+			`sub/deep/${longDirectory}/beneath.txt`,
+			`${longDirectory}/beneath.txt`,
+		]) {
+			expect(nativePath(path), path).toBeUndefined();
+		}
+		const text = (path: string | undefined): string | undefined =>
+			path === undefined ? undefined : readFileSync(path, "utf8").replaceAll("\r\n", "\n");
+		expect(text(nativePath("kept.txt"))).toBe("kept\n");
+		expect(text(nativePath("sub/inner.txt"))).toBe("inner\n");
+		expect(text(nativePath("sub/deep/x.txt"))).toBe("deep\n");
+		// Nothing of the attempts is left behind, and the checkout's own Git directory was not written into.
+		expect(readdirSync(checkout).sort()).toEqual([".git", "kept.txt", "sub"]);
+		expect(readdirSync(join(checkout, "sub")).sort()).toEqual(["deep", "inner.txt"]);
+		expect(readdirSync(join(checkout, "sub", "deep"))).toEqual(["x.txt"]);
+		expect(git(checkout, "status", "--porcelain")).toBe("");
+		expect(readFileSync(join(checkout, ".git", "config"), "utf8")).not.toContain("not the checkout's own");
+		// The snapshot still reads what the checkout does not hold.
+		expect((await readAvailableFile(snapshot, "head", `sub/${long}`)).content.toString()).toBe("long inner\n");
+		expect((await readAvailableFile(snapshot, "head", ".git/config")).content.toString()).toBe(
+			"not the checkout's own\n",
+		);
+
+		// A later checkout leaves out the same paths, and a reset returns this one to the same files.
+		const later = await snapshot.materializeHead();
+		expect(snapshot.describeCheckout(later).unrepresented).toEqual(unrepresented);
+		expect(readdirSync(later).sort()).toEqual([".git", "kept.txt", "sub"]);
+		writeFileSync(join(checkout, "kept.txt"), "edited\n");
+		await snapshot.resetHead(checkout);
+		expect(text(nativePath("kept.txt"))).toBe("kept\n");
+	});
+
+	it.runIf(process.platform === "win32")(
+		"makes a checkout of a head with a device name the list of those does not have",
+		async () => {
+			const repository = createRepository();
+			const { blob, tree } = objectWriter(repository);
+			// Windows reserves COM and LPT with a superscript digit too. Which of these it refuses is its to say.
+			const devices = ["COM\u00b9", "LPT\u00b2.txt"];
+			const head = tree([
+				...devices.map((name): [string, string, string, string] => ["100644", "blob", blob(`${name}\n`), name]),
+				["100644", "blob", blob("kept\n"), "kept.txt"],
+			]);
+			const sha = git(repository, "commit-tree", head, "-p", "HEAD", "-m", "device names");
+			const snapshot = await resolve({ kind: "commit", sha }, repository);
+
+			const checkout = await snapshot.materializeHead();
+			const { nativePath, unrepresented } = snapshot.describeCheckout(checkout);
+			expect(git(checkout, "status", "--porcelain")).toBe("");
+			expect(readFileSync(join(checkout, "kept.txt"), "utf8").replaceAll("\r\n", "\n")).toBe("kept\n");
+			// Each is in the checkout as the head has it, or is said not to be.
+			for (const name of devices) {
+				const native = nativePath(name);
+				if (native === undefined) expect(unrepresented, name).toContain(name);
+				else expect(readFileSync(native, "utf8").replaceAll("\r\n", "\n"), name).toBe(`${name}\n`);
+			}
+		},
+	);
+
+	it("makes an empty checkout of a head Git checks nothing out of", async () => {
+		const repository = createRepository();
+		const { blob, tree } = objectWriter(repository);
+		const head = tree([["040000", "tree", tree([["100644", "blob", blob("refused\n"), "config"]]), ".git"]]);
+		const sha = git(repository, "commit-tree", head, "-p", "HEAD", "-m", "only a .git");
+		const snapshot = await resolve({ kind: "commit", sha }, repository);
+
+		const checkout = await snapshot.materializeHead();
+		expect(snapshot.describeCheckout(checkout)).toMatchObject({ unrepresented: [".git"], omitted: 1 });
+		expect(readdirSync(checkout)).toEqual([".git"]);
+		expect(git(checkout, "status", "--porcelain")).toBe("");
+	});
+
+	it("still fails a checkout Git cannot make for a reason that is no path's, with what Git said", async () => {
+		const repository = createRepository();
+		const snapshot = await resolve({ kind: "commit", sha: "HEAD" }, repository);
+		const realGit =
+			process.platform === "win32"
+				? run(repository, "where.exe", "git").split(/\r?\n/u)[0]
+				: run(repository, "which", "git");
+		if (!realGit) throw new Error("Unable to locate git executable");
+		const bin = join(repository, "failing-reset-bin");
+		mkdirSync(bin);
+		// Every path checks out when asked for one by one, so the failed reset has nothing to leave out.
+		installNodeCommandShim(
+			bin,
+			"git",
+			`import { spawnSync } from "node:child_process";\nconst args = process.argv.slice(2);\nif (args[0] === "reset") {\n  process.stderr.write("fatal: the disk is on fire\\n");\n  process.exit(128);\n}\nconst result = spawnSync(${JSON.stringify(realGit)}, args, { stdio: "inherit" });\nif (result.error) throw result.error;\nprocess.exitCode = result.status ?? 1;\n`,
+		);
+		process.env.PATH = `${bin}${delimiter}${initialPath ?? ""}`;
+
+		await expect(snapshot.materializeHead()).rejects.toThrow(
+			"Could not materialize review checkout: fatal: the disk is on fire",
+		);
+	});
 
 	it("preserves ignored tracked files in uncommitted snapshots", async () => {
 		const repository = createRepository();
@@ -2957,8 +3104,9 @@ describe("which head paths a review checkout holds", () => {
 	const project = (
 		entries: ReviewSnapshotTreeEntry[],
 		filesystem: Parameters<typeof projectReviewCheckout>[1],
+		refused: string[] = [],
 	): { omitted: string[]; aliases: Record<string, string>; unrepresented: string[] } => {
-		const projection = projectReviewCheckout(entries, filesystem);
+		const projection = projectReviewCheckout(entries, filesystem, new Set(refused));
 		return {
 			omitted: [...projection.omitted],
 			aliases: Object.fromEntries(projection.aliases),
@@ -2994,6 +3142,46 @@ describe("which head paths a review checkout holds", () => {
 			omitted: [],
 			aliases: {},
 			unrepresented: [],
+		});
+	});
+
+	it("leaves out the leaves Git refused, and a directory it checked nothing out of as a whole", () => {
+		const entries = [
+			directory("gone"),
+			leaf("gone/a.txt"),
+			directory("gone/deep"),
+			leaf("gone/deep/b.txt"),
+			directory("part"),
+			leaf("part/kept.txt"),
+			leaf("part/refused.txt"),
+			leaf("top.txt"),
+		];
+		const refused = ["gone/a.txt", "gone/deep/b.txt", "part/refused.txt", "top.txt"];
+		const left = ["gone", "part/refused.txt", "top.txt"];
+		for (const filesystem of [linux, windows, mac]) {
+			expect(project(entries, filesystem, refused)).toEqual({ omitted: left, aliases: {}, unrepresented: left });
+		}
+		// A refused leaf does not keep its place from another that folds with it.
+		const folding = [leaf("Readme.md", "1".repeat(40)), leaf("readme.md", "2".repeat(40))];
+		expect(project(folding, windows, ["Readme.md"])).toEqual({
+			omitted: ["Readme.md"],
+			aliases: {},
+			unrepresented: ["Readme.md"],
+		});
+	});
+
+	it("leaves out a refused leaf beneath a directory no path string spells, which still stands for it", () => {
+		// Linux stores the directory, so its leaves are in the checkout's tree, where Git can refuse one.
+		const entries = [directory("dir-%FF"), leaf("dir-%FF/kept.txt"), leaf("dir-%FF/refused.txt")];
+		expect(project(entries, linux, ["dir-%FF/refused.txt"])).toEqual({
+			omitted: ["dir-%FF/refused.txt"],
+			aliases: {},
+			unrepresented: ["dir-%FF"],
+		});
+		expect(project(entries, linux, ["dir-%FF/kept.txt", "dir-%FF/refused.txt"])).toEqual({
+			omitted: ["dir-%FF"],
+			aliases: {},
+			unrepresented: ["dir-%FF"],
 		});
 	});
 

@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import type { Checkout } from "../../../../.volt/extensions/swarm-review/types.ts";
-import { normalizeReviewPath, reviewPathToUtf8 } from "../../src/core/review-path.ts";
+import { reviewPathToUtf8 } from "../../src/core/review-path.ts";
 
 /**
  * A checkout handle over a plain directory, for tests of the swarm's tools that need no snapshot. A reference is
@@ -12,9 +12,9 @@ export function directoryCheckout(path: string, unrepresented: readonly string[]
 		path,
 		unrepresented,
 		nativePath: (reference) => {
-			const normalized = normalizeReviewPath(reference);
-			const native = reviewPathToUtf8(normalized);
-			return native === undefined || unrepresented.includes(normalized)
+			// As the host's does, this throws for a string that is not a canonical reference.
+			const native = reviewPathToUtf8(reference);
+			return native === undefined || unrepresented.includes(reference)
 				? undefined
 				: join(path, ...native.split("/"));
 		},
