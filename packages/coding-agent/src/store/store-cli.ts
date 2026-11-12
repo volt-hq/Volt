@@ -860,7 +860,7 @@ export async function handleStoreCommand(
 		const writesProjectPackageConfig =
 			options.local &&
 			(options.command === "install" || options.command === "remove" || options.command === "update");
-		const { settingsManager, projectTrustWarnings } = await createCommandSettingsManager({
+		const { settingsManager, projectTrustWarnings, projectCwd } = await createCommandSettingsManager({
 			cwd,
 			agentDir,
 			projectTrustOverride: options.projectTrustOverride,
@@ -876,7 +876,7 @@ export async function handleStoreCommand(
 		}
 		reportSettingsErrors(settingsManager, "store command");
 
-		const packageManager = new DefaultPackageManager({ cwd, agentDir, settingsManager });
+		const packageManager = new DefaultPackageManager({ cwd: projectCwd, agentDir, settingsManager });
 		packageManager.setProgressCallback((event) => {
 			if (event.type === "start" && event.message) {
 				process.stdout.write(chalk.dim(`${formatStoreProgressMessage(event.source, event.message)}\n`));
@@ -885,13 +885,13 @@ export async function handleStoreCommand(
 
 		switch (options.command) {
 			case "show":
-				return await runShow(options, cwd, agentDir, settingsManager);
+				return await runShow(options, projectCwd, agentDir, settingsManager);
 			case "install":
-				return await runInstall(options, cwd, agentDir, settingsManager, packageManager);
+				return await runInstall(options, projectCwd, agentDir, settingsManager, packageManager);
 			case "remove":
 				return await runRemove(options, agentDir, settingsManager, packageManager);
 			case "update":
-				return await runUpdate(options, cwd, agentDir, settingsManager, packageManager);
+				return await runUpdate(options, projectCwd, agentDir, settingsManager, packageManager);
 		}
 	} catch (error: unknown) {
 		const message = error instanceof Error ? error.message : "Unknown store command error";

@@ -10,6 +10,7 @@ import { McpMetadataCache } from "./core/mcp/metadata-cache.ts";
 import { McpOAuthStore } from "./core/mcp/oauth-store.ts";
 import { McpOutputStore } from "./core/mcp/output-store.ts";
 import type { McpGatewayExecutionContext, McpGatewayInput } from "./core/mcp/types.ts";
+import { type CommandProject, resolveCommandProject } from "./core/project-trust.ts";
 import { type DefaultProjectTrust, SettingsManager } from "./core/settings-manager.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
 import { openBrowser } from "./utils/open-browser.ts";
@@ -76,19 +77,24 @@ function parseMcpCommand(args: string[]): ParsedMcpCommand {
 	return { command: rest[0] ?? "help", args: rest.slice(1), json, projectTrustOverride };
 }
 
+/**
+ * The trust of `project` for an MCP command, which asks nobody: its override,
+ * which decides a project without a trust path; else trusted when nothing in
+ * it needs trust; else the decision saved for its trust path, or
+ * `defaultProjectTrust: "always"`.
+ */
 function resolveMcpProjectTrusted(
-	cwd: string,
+	project: CommandProject,
 	agentDir: string,
 	defaultProjectTrust: DefaultProjectTrust,
-	override: boolean | undefined,
 ): boolean {
-	if (override !== undefined) {
-		return override;
+	if (project.trustOverride !== undefined) {
+		return project.trustOverride;
 	}
-	if (!hasTrustRequiringProjectResources(cwd)) {
+	if (!hasTrustRequiringProjectResources(project.projectCwd)) {
 		return true;
 	}
-	const saved = new ProjectTrustStore(agentDir).get(cwd);
+	const saved = new ProjectTrustStore(agentDir).get(project.trustPath);
 	if (saved !== undefined && saved !== null) {
 		return saved;
 	}
@@ -99,15 +105,12 @@ async function createMcpCliManager(
 	projectTrustOverride: boolean | undefined,
 	profile: string | undefined,
 ): Promise<McpManager> {
-	const cwd = resolvePath(process.cwd());
 	const agentDir = getAgentDir();
+	// The project of a conversation in this directory: its MCP config is read and written, and its servers run, there.
+	const project = resolveCommandProject(agentDir, process.cwd(), projectTrustOverride);
+	const cwd = resolvePath(project.projectCwd);
 	const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: false, profile });
-	const projectTrusted = resolveMcpProjectTrusted(
-		cwd,
-		agentDir,
-		settingsManager.getDefaultProjectTrust(),
-		projectTrustOverride,
-	);
+	const projectTrusted = resolveMcpProjectTrusted(project, agentDir, settingsManager.getDefaultProjectTrust());
 	const config = loadMcpConfig({ cwd, agentDir, projectTrusted });
 	const oauthStore = McpOAuthStore.create(agentDir);
 	return new McpManager({

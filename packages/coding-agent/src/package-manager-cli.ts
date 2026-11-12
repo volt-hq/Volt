@@ -22,7 +22,7 @@ import {
 } from "./core/extensions/permissions.ts";
 import type { ExtensionDefinition } from "./core/extensions/types.ts";
 import { DefaultPackageManager } from "./core/package-manager.ts";
-import { type AppMode, resolveProjectTrusted } from "./core/project-trust.ts";
+import { type AppMode, resolveCommandProject, resolveProjectTrusted } from "./core/project-trust.ts";
 import { DefaultResourceLoader } from "./core/resource-loader.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
@@ -544,6 +544,8 @@ export interface PackageCommandRuntimeOptions {
 export interface CommandSettingsResult {
 	settingsManager: SettingsManager;
 	projectTrustWarnings: string[];
+	/** Where the command reads and writes its project's config and packages: the project's directory. */
+	projectCwd: string;
 }
 
 export function getCommandAppMode(): AppMode {
@@ -565,6 +567,14 @@ function resolveCommandProfile(profile: string | undefined): string | undefined 
 	return normalizeCommandProfile(profile ?? process.env.VOLT_PROFILE);
 }
 
+/**
+ * The settings of a command run in `cwd`, read from its project
+ * (`resolveCommandProject`): the directory itself, or the workspace's
+ * repository in a pull request review checkout. Project trust is decided for
+ * the project's trust path, with the resources that need it looked for in the
+ * project's directory. A managed worktree the daemon has no record of has no
+ * trust path: nothing is read, asked, or saved for it.
+ */
 export async function createCommandSettingsManager(options: {
 	cwd: string;
 	agentDir: string;
@@ -574,26 +584,30 @@ export async function createCommandSettingsManager(options: {
 	loadProjectTrustExtensions?: boolean;
 	profile?: string;
 }): Promise<CommandSettingsResult> {
-	const settingsManager = SettingsManager.create(options.cwd, options.agentDir, {
+	const project = resolveCommandProject(options.agentDir, options.cwd, options.projectTrustOverride);
+	const { projectCwd, trustOverride } = project;
+	const settingsManager = SettingsManager.create(projectCwd, options.agentDir, {
 		projectTrusted: false,
 		profile: resolveCommandProfile(options.profile),
 	});
 	const projectTrustWarnings: string[] = [];
+	if (project.trustPath === undefined) {
+		settingsManager.setProjectTrusted(project.trustOverride);
+		return { settingsManager, projectTrustWarnings, projectCwd };
+	}
 	const trustStore = new ProjectTrustStore(options.agentDir);
 	if (options.useSavedProjectTrustOnly) {
-		const savedProjectTrusted = trustStore.get(options.cwd) === true;
-		settingsManager.setProjectTrusted(options.projectTrustOverride ?? savedProjectTrusted);
-		return { settingsManager, projectTrustWarnings };
+		const savedProjectTrusted = trustStore.get(project.trustPath) === true;
+		settingsManager.setProjectTrusted(trustOverride ?? savedProjectTrusted);
+		return { settingsManager, projectTrustWarnings, projectCwd };
 	}
 
 	const appMode = getCommandAppMode();
 	const shouldLoadProjectTrustExtensions = options.loadProjectTrustExtensions ?? true;
 	const extensionsResult =
-		shouldLoadProjectTrustExtensions &&
-		options.projectTrustOverride === undefined &&
-		hasTrustRequiringProjectResources(options.cwd)
+		shouldLoadProjectTrustExtensions && trustOverride === undefined && hasTrustRequiringProjectResources(projectCwd)
 			? await new DefaultResourceLoader({
-					cwd: options.cwd,
+					cwd: projectCwd,
 					agentDir: options.agentDir,
 					settingsManager,
 					extensionFactories: options.extensionFactories,
@@ -604,13 +618,14 @@ export async function createCommandSettingsManager(options: {
 	}
 
 	const projectTrusted = await resolveProjectTrusted({
-		cwd: options.cwd,
+		cwd: project.trustPath,
+		resourcesCwd: projectCwd,
 		trustStore,
-		trustOverride: options.projectTrustOverride,
+		trustOverride,
 		defaultProjectTrust: settingsManager.getDefaultProjectTrust(),
 		extensionsResult,
 		projectTrustContext: createProjectTrustContext({
-			cwd: options.cwd,
+			cwd: project.trustPath,
 			mode: appMode,
 			settingsManager,
 			hasUI: appMode === "interactive",
@@ -618,7 +633,7 @@ export async function createCommandSettingsManager(options: {
 		onExtensionError: (message) => projectTrustWarnings.push(message),
 	});
 	settingsManager.setProjectTrusted(projectTrusted);
-	return { settingsManager, projectTrustWarnings };
+	return { settingsManager, projectTrustWarnings, projectCwd };
 }
 
 /**
@@ -680,7 +695,7 @@ export async function handleConfigCommand(
 
 	const cwd = process.cwd();
 	const agentDir = getAgentDir();
-	const { settingsManager, projectTrustWarnings } = await createCommandSettingsManager({
+	const { settingsManager, projectTrustWarnings, projectCwd } = await createCommandSettingsManager({
 		cwd,
 		agentDir,
 		projectTrustOverride: parseProjectTrustOverride(args),
@@ -689,13 +704,13 @@ export async function handleConfigCommand(
 	});
 	reportProjectTrustWarnings(projectTrustWarnings);
 	reportSettingsErrors(settingsManager, "config command");
-	const packageManager = new DefaultPackageManager({ cwd, agentDir, settingsManager });
+	const packageManager = new DefaultPackageManager({ cwd: projectCwd, agentDir, settingsManager });
 	const resolvedPaths = await packageManager.resolve();
 
 	await selectConfig({
 		resolvedPaths,
 		settingsManager,
-		cwd,
+		cwd: projectCwd,
 		agentDir,
 	});
 
@@ -755,7 +770,7 @@ export async function handlePackageCommand(
 	const cwd = process.cwd();
 	const agentDir = getAgentDir();
 	const writesProjectPackageConfig = (options.command === "install" || options.command === "remove") && options.local;
-	const { settingsManager, projectTrustWarnings } = await createCommandSettingsManager({
+	const { settingsManager, projectTrustWarnings, projectCwd } = await createCommandSettingsManager({
 		cwd,
 		agentDir,
 		projectTrustOverride: options.projectTrustOverride,
@@ -772,7 +787,7 @@ export async function handlePackageCommand(
 	reportSettingsErrors(settingsManager, "package command");
 	const selfUpdateNpmCommand = settingsManager.getGlobalEffectiveSettings().npmCommand;
 
-	const packageManager = new DefaultPackageManager({ cwd, agentDir, settingsManager });
+	const packageManager = new DefaultPackageManager({ cwd: projectCwd, agentDir, settingsManager });
 
 	packageManager.setProgressCallback((event) => {
 		if (event.type === "start") {
@@ -788,7 +803,7 @@ export async function handlePackageCommand(
 				const permissions = await reviewInstalledPermissions(
 					packageManager,
 					agentDir,
-					storeReviewSource(source!, cwd),
+					storeReviewSource(source!, projectCwd),
 					scope,
 					"Declining removes the package.",
 					`${APP_NAME} install ${source}`,
