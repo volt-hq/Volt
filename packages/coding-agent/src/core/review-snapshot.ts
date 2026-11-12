@@ -2096,6 +2096,7 @@ async function readTreePatches(
 			"--no-relative",
 			"--no-textconv",
 			"--no-ext-diff",
+			"--submodule=short",
 			"--src-prefix=a/",
 			"--dst-prefix=b/",
 			"--output-indicator-new=+",

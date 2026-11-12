@@ -2479,6 +2479,66 @@ if (!args.includes("--numstat")) {
 		});
 	});
 
+	it.each(["short", "log", "diff"])(
+		"preserves text changes around a gitlink with diff.submodule=%s",
+		async (format) => {
+			const dependency = createRepository();
+			const repository = createRepository();
+			const submodulePath = "vendor/dependency";
+			const submodule = join(repository, submodulePath);
+			const textPaths = ["a.txt", "z.txt"];
+			for (const path of textPaths) writeFileSync(join(repository, path), `prefix\n${path} before\nsuffix\n`);
+			git(repository, "-c", "protocol.file.allow=always", "submodule", "add", dependency, submodulePath);
+			git(repository, "add", "--", ...textPaths);
+			git(repository, "commit", "-am", "add submodule and surrounding text fixtures");
+
+			writeFileSync(join(dependency, "tracked.txt"), "dependency after\n");
+			git(dependency, "commit", "-am", "advance dependency");
+			git(submodule, "-c", "protocol.file.allow=always", "fetch", "origin");
+			git(submodule, "checkout", git(dependency, "rev-parse", "HEAD"));
+			for (const path of textPaths) writeFileSync(join(repository, path), `prefix\n${path} after\nsuffix\n`);
+			git(repository, "add", "--", submodulePath, ...textPaths);
+			git(repository, "commit", "-m", "advance gitlink and surrounding text");
+			git(repository, "config", "--local", "diff.submodule", format);
+
+			expect(git(repository, "diff", "--name-only", "HEAD^", "HEAD").split(/\r?\n/)).toEqual([
+				"a.txt",
+				submodulePath,
+				"z.txt",
+			]);
+
+			const snapshot = await resolve({ kind: "commit", sha: "HEAD" }, repository);
+			expect(snapshot.changedFiles.map(({ path, status }) => ({ path, status }))).toEqual([
+				{ path: "a.txt", status: "modified" },
+				{ path: submodulePath, status: "modified" },
+				{ path: "z.txt", status: "modified" },
+			]);
+			for (const path of textPaths) {
+				const file = snapshot.changedFiles.find((file) => file.path === path);
+				expect(file).toMatchObject({
+					reviewable: true,
+					additions: 1,
+					deletions: 1,
+					hunks: [
+						{
+							path,
+							baseChangedLines: [{ startLine: 2, endLine: 2 }],
+							headChangedLines: [{ startLine: 2, endLine: 2 }],
+						},
+					],
+				});
+				expect(file?.hunks[0]?.patch).toContain(`-${path} before\n+${path} after\n`);
+			}
+			expect(snapshot.changedFiles.find((file) => file.path === submodulePath)).toMatchObject({
+				base: { type: "commit", mode: "160000", oid: git(dependency, "rev-parse", "HEAD^") },
+				head: { type: "commit", mode: "160000", oid: git(dependency, "rev-parse", "HEAD") },
+				reviewable: false,
+				hunks: [],
+				unsupportedReason: "Submodule changes require review in the submodule repository.",
+			});
+		},
+	);
+
 	it("resets a percent-escaped submodule through its actual checkout filename", async () => {
 		const dependency = createRepository();
 		const repository = createRepository();
