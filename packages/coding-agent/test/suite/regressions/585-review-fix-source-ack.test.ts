@@ -35,7 +35,7 @@ function reviewRecord(): ReviewRunRecord {
 		},
 	};
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		runId: RUN_ID,
 		workflowAction: "review.uncommitted",
 		status: "completed",

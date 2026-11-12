@@ -15,7 +15,7 @@ import {
 } from "./prompts.ts";
 import { runPass } from "./session.ts";
 import { candidateFor } from "./submit.ts";
-import { normalizeFile } from "./tools.ts";
+import { canonicalHeadPath } from "./tools.ts";
 import type { Cluster, ClusterOutcome, PassState, SwarmSetup, SwarmState, Verdict, VerifiedFinding } from "./types.ts";
 import { emptyUsage, errorText, lineRange, runPool } from "./util.ts";
 
@@ -34,7 +34,7 @@ const VERDICT_SCHEMA = Type.Object({
 	findings: Type.Array(
 		Type.Object({
 			title: Type.String({ description: "One-line summary of the verified defect" }),
-			file: Type.String({ description: "Repository-relative path of an existing file in the checkout" }),
+			file: Type.String({ description: "Canonical head snapshot path reference; preserve %HH escapes" }),
 			line: Type.Integer({ minimum: 1 }),
 			endLine: Type.Optional(Type.Integer({ minimum: 1 })),
 			priority: Type.Integer({
@@ -49,13 +49,13 @@ const VERDICT_SCHEMA = Type.Object({
 	),
 });
 
-function createVerdictTool(setup: SwarmSetup, cluster: Cluster, checkout: string, onReport: (verdict: Verdict) => void) {
+function createVerdictTool(setup: SwarmSetup, cluster: Cluster, pass: ReviewEnginePass, onReport: (verdict: Verdict) => void) {
 	return defineTool({
 		name: "report_verdict",
 		label: "Report verdict",
 		description: "Submit your verdict for the cluster: confirmed (with findings), rejected, or uncertain.",
 		parameters: VERDICT_SCHEMA,
-		async execute(_toolCallId, params) {
+		async execute(_toolCallId, params, signal) {
 			const errors: string[] = [];
 			const findings: VerifiedFinding[] = [];
 			if (params.verdict === "confirmed" && params.findings.length === 0) {
@@ -65,12 +65,11 @@ function createVerdictTool(setup: SwarmSetup, cluster: Cluster, checkout: string
 				errors.push(`A ${params.verdict} verdict must not include findings.`);
 			}
 			for (const finding of params.findings) {
-				const file = normalizeFile(checkout, finding.file);
-				if (file) findings.push({ ...finding, file });
-				else {
-					errors.push(
-						`Finding "${finding.title}" is anchored to ${finding.file}, which is not an existing file in the checkout.`,
-					);
+				try {
+					findings.push({ ...finding, file: await canonicalHeadPath(pass, finding.file, signal) });
+				} catch (error) {
+					if (signal?.aborted) throw error;
+					errors.push(error instanceof Error ? error.message : String(error));
 				}
 			}
 			// The host accepts a finding only anchored on a changed line of at most 10 lines: it says so now, while
@@ -229,12 +228,12 @@ export async function verifyClusters(setup: SwarmSetup, state: SwarmState): Prom
 				thinking: options.verifierThinking,
 				systemPrompt,
 				checkout,
-				reportTool: createVerdictTool(setup, cluster, checkout, (value) => {
+				reportTool: createVerdictTool(setup, cluster, hostPass, (value) => {
 					verdict = value;
 				}),
 				hasReport: () => verdict !== undefined,
 				prompt: verifierPrompt(setup, hostPass, cluster),
-				hostTools: hostPass.tools().filter((tool) => tool.name === "review_diff"),
+				hostTools: hostPass.tools(),
 				onEvent: (event) => recordCommand(state, pending, event),
 				wrapUpMessage: VERIFIER_WRAP_UP,
 				repairMessage: VERIFIER_REPAIR,

@@ -61,7 +61,7 @@ afterEach(async () => {
 
 function review(runId = "review:341", endedAt = 2): ReviewRunRecord {
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		runId,
 		workflowAction: "review.pr",
 		status: "completed",

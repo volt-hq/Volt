@@ -9,7 +9,7 @@ import type { ReviewRunRecord } from "../src/core/review-state.ts";
 
 function reviewRun(headRefOid = "head-oid"): ReviewRunRecord {
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		runId: "review:publish",
 		workflowAction: "review.pr",
 		status: "completed",
@@ -199,6 +199,50 @@ switch (args.slice(0, 2).join(" ")) {
 				.filter((line) => line.startsWith("api ")),
 		).toHaveLength(1);
 	});
+
+	it.each([undefined, "ext:swarm-review/swarm"])(
+		"publishes lossless UTF-8 paths and keeps byte-only paths summary-only (engine=%s)",
+		async (engine) => {
+			const fixture = installGh();
+			const run = reviewRun();
+			if (engine) {
+				run.engine = engine;
+				run.engineLabel = "Swarm";
+			}
+			const paths = [
+				{ reference: "src/100%25.ts", native: "src/100%.ts" },
+				{ reference: "back%5Cslash.ts", native: "back\\slash.ts" },
+				{ reference: "line%0Abreak.ts", native: "line\nbreak.ts" },
+				{ reference: "invalid-%FF.ts", native: undefined },
+				{ reference: "literal-%25FF.ts", native: "literal-%FF.ts" },
+			];
+			const template = run.result!.findings[0]!;
+			run.target.files = paths.map(({ reference }) => ({
+				path: reference,
+				baseOid: "base-blob",
+				headOid: "head-blob",
+				hunkIds: ["h1"],
+				reviewable: true,
+			}));
+			run.result!.findings = paths.map(({ reference }, index) => ({
+				...template,
+				id: `path-${index}`,
+				changeLocation: { ...template.changeLocation, path: reference },
+			}));
+			const published = await publishReviewRun(fixture.cwd, run);
+			const payload = JSON.parse(readFileSync(fixture.payloadPath, "utf8")) as {
+				body: string;
+				comments: Array<{ path: string }>;
+			};
+			expect(payload.comments.map((comment) => comment.path)).toEqual(
+				paths.flatMap(({ native }) => (native === undefined ? [] : [native])),
+			);
+			expect(published.inlineFindingIds).toEqual(["path-0", "path-1", "path-2", "path-4"]);
+			expect(published.summaryOnlyFindingIds).toEqual(["path-3"]);
+			expect(payload.body).toContain("Location: invalid-%FF.ts:2-2 (head).");
+			expect(payload.body).not.toContain("invalid-�");
+		},
+	);
 
 	it("posts through the command it is given, with the trailer after the review's body", async () => {
 		const fixture = installGh();

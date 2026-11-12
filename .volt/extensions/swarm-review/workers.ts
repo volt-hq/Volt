@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import type { ReviewEnginePass } from "@hansjm10/volt-coding-agent";
 import { changeSection, WORKER_REPAIR, WORKER_SYSTEM_PROMPT, WORKER_WRAP_UP } from "./prompts.ts";
 import { type PassControl, runPass } from "./session.ts";
-import { normalizeFile } from "./tools.ts";
+import { canonicalHeadPath } from "./tools.ts";
 import { SHARD_DELIVERY_BYTES } from "./target.ts";
 import type { Cluster, DiffShard, ReviewTarget, SwarmSetup, SwarmState, WorkerState } from "./types.ts";
 import { emptyUsage, errorText, lineRange, runPool } from "./util.ts";
@@ -19,7 +19,7 @@ const MAX_STRAGGLER_CHECK_MS = 5_000;
 
 const FINDING_SCHEMA = Type.Object({
 	title: Type.String({ description: "One-line summary of the defect" }),
-	file: Type.String({ description: "Repository-relative path of the defect location" }),
+	file: Type.String({ description: "Canonical snapshot path reference of the defect location; preserve %HH escapes" }),
 	line: Type.Integer({ minimum: 1, description: "Start line in the checkout" }),
 	endLine: Type.Optional(Type.Integer({ minimum: 1, description: "End line in the checkout" })),
 	priority: Type.Integer({ minimum: 0, maximum: 2, description: "0 blocker, 1 urgent, 2 real bounded defect" }),
@@ -43,7 +43,7 @@ export function createWorkerState(index: number, wave: number, shard: number): W
 	};
 }
 
-function createFindingsTool(worker: WorkerState, state: SwarmState, checkout: string, onReport: () => void) {
+function createFindingsTool(worker: WorkerState, state: SwarmState, pass: ReviewEnginePass, onReport: () => void) {
 	return defineTool({
 		name: "report_findings",
 		label: "Report findings",
@@ -52,27 +52,24 @@ function createFindingsTool(worker: WorkerState, state: SwarmState, checkout: st
 		parameters: Type.Object({
 			findings: Type.Array(FINDING_SCHEMA, { maxItems: MAX_FINDINGS_PER_WORKER }),
 		}),
-		async execute(_toolCallId, params) {
-			worker.candidates = [];
-			worker.dropped = 0;
+		async execute(_toolCallId, params, signal) {
+			const findings: typeof params.findings = [];
+			const errors: string[] = [];
 			for (const finding of params.findings) {
-				const file = normalizeFile(checkout, finding.file);
-				if (!file) {
-					worker.dropped++;
-					continue;
+				try {
+					findings.push({ ...finding, file: await canonicalHeadPath(pass, finding.file, signal) });
+				} catch (error) {
+					if (signal?.aborted) throw error;
+					errors.push(error instanceof Error ? error.message : String(error));
 				}
-				worker.candidates.push({
-					...finding,
-					file,
-					id: `C${++state.nextCandidate}`,
-					worker: worker.index,
-					wave: worker.wave,
-				});
 			}
+			worker.dropped = errors.length;
+			if (errors.length > 0) return { content: [{ type: "text", text: `Report rejected. Fix canonical snapshot paths and resubmit:\n${errors.join("\n")}` }], details: { accepted: false, recorded: 0, dropped: errors.length }, isError: true };
+			worker.candidates = findings.map((finding) => ({ ...finding, id: `C${++state.nextCandidate}`, worker: worker.index, wave: worker.wave }));
 			onReport();
 			return {
 				content: [{ type: "text", text: `Recorded ${worker.candidates.length} finding(s).` }],
-				details: { recorded: worker.candidates.length, dropped: worker.dropped },
+				details: { accepted: true, recorded: worker.candidates.length, dropped: worker.dropped },
 				disposition: "stop",
 			};
 		},
@@ -206,12 +203,12 @@ export async function runWave(setup: SwarmSetup, state: SwarmState, workers: Wor
 					model: setup.workerModel,
 					thinking: options.thinking,
 					systemPrompt: WORKER_SYSTEM_PROMPT,
-					reportTool: createFindingsTool(worker, state, target.checkout, () => {
+					reportTool: createFindingsTool(worker, state, hostPass, () => {
 						reportedFindings = true;
 					}),
 					hasReport: () => reportedFindings,
 					prompt: workerPrompt(target, target.shards[worker.shard], delivery, reported, options.focus),
-					hostTools: hostPass.tools().filter((tool) => tool.name === "review_diff"),
+					hostTools: hostPass.tools(),
 					wrapUpMessage: WORKER_WRAP_UP,
 					repairMessage: WORKER_REPAIR,
 					turns: WORKER_TURNS,

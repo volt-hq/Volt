@@ -3,6 +3,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { inRunScope } from "../src/core/review.ts";
 import {
 	buildParsedReview,
 	buildReviewFollowUps,
@@ -26,6 +27,7 @@ import {
 } from "../src/core/review-report.ts";
 import { type ReviewSnapshot, resolveReviewSnapshot } from "../src/core/review-snapshot.ts";
 import { deliverReviewDiff, type ReviewObservedCoverage, ReviewRunCoverage } from "../src/core/review-tools.ts";
+import { createByteReviewRepository, BYTE_REVIEW_PATHS as P } from "./utilities/byte-review-repository.ts";
 
 function git(cwd: string, ...args: string[]): string {
 	const result = spawnSync("git", args, { cwd, encoding: "utf8" });
@@ -292,6 +294,63 @@ describe("structured review reports", () => {
 		expect(traversal.errors.join(" ")).toMatch(/relative|traverse/);
 		const optional = await validateReviewCandidates(snapshot, report({ priority: 3 }), validationOptions(snapshot));
 		expect(optional.errors.join(" ")).toContain("P3");
+	});
+
+	it("validates byte-distinct anchors independently and hashes canonical identities", async () => {
+		const directory = join(tmpdir(), `volt-byte-report-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(directory);
+		directories.push(directory);
+		const sha = createByteReviewRepository(directory);
+		const snapshot = await resolveReviewSnapshot({ kind: "commit", sha }, directory, {
+			maxCommitRefBytes: 1024,
+			maxPullRequestNumber: 2147483647,
+		});
+		if ("error" in snapshot) throw new Error(snapshot.error);
+		snapshots.push(snapshot);
+		const paths = [P.fe, P.ff, P.replacement, P.literal, P.child];
+		const candidates = paths.map(
+			(path, index) =>
+				report({
+					candidateId: `c${index}`,
+					changeLocation: { path, side: "head", startLine: 1, endLine: 1 },
+					evidenceLocations: [{ path, side: "base", startLine: 1, endLine: 1 }],
+				}).candidates[0]!,
+		);
+		candidates.push(
+			report({
+				candidateId: "renamed",
+				changeLocation: { path: P.old, side: "base", startLine: 11, endLine: 11 },
+				evidenceLocations: [{ path: P.renamed, side: "head", startLine: 11, endLine: 11 }],
+			}).candidates[0]!,
+		);
+		const checked = await validateReviewCandidates(
+			snapshot,
+			{ summary: "Byte anchors", candidates, limitations: [] },
+			validationOptions(snapshot),
+		);
+		expect(checked.errors).toEqual([]);
+		expect(new Set(checked.candidates.map((candidate) => candidate.fingerprint)).size).toBe(candidates.length);
+		expect(new Set(checked.candidates.map((candidate) => candidate.hunkIds[0])).size).toBe(candidates.length);
+		const invalid = await validateReviewCandidates(
+			snapshot,
+			report({
+				changeLocation: { path: "collision-%ff.txt", side: "head", startLine: 1, endLine: 1 },
+				evidenceLocations: [],
+			}),
+			validationOptions(snapshot),
+		);
+		expect(invalid.errors.join(" ")).toMatch(/uppercase/);
+		expect(invalid.candidates).toEqual([]);
+		const controls = {
+			scope: [P.fe],
+			effort: "standard" as const,
+			includeOptional: false,
+			scopeMode: "full" as const,
+		};
+		expect(paths.filter((path) => inRunScope(path, controls, undefined))).toEqual([P.fe]);
+		expect(paths.filter((path) => inRunScope(path, { ...controls, scope: ["collision-*.txt"] }, undefined))).toEqual(
+			paths.slice(0, 4),
+		);
 	});
 
 	it("declassifies only bounded, existing, in-scope changed-code challenge anchors", async () => {

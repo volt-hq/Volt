@@ -11,6 +11,10 @@ import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	defineTool,
+	normalizeReviewPath,
+	reviewPathFromUtf8,
+	reviewPathToUtf8,
+	type ReviewEnginePass,
 	type ToolDefinition,
 	truncateHead,
 } from "@hansjm10/volt-coding-agent";
@@ -58,11 +62,14 @@ function assertInsideRoots(roots: Roots, absolutePath: string): void {
 	if (!inside) throw new Error(`Access outside the repository under review is not allowed: ${absolutePath}`);
 }
 
-/** Returns the checkout-relative path of an existing file inside the checkout, or undefined. */
-export function normalizeFile(checkout: string, raw: string): string | undefined {
-	const absolute = resolve(checkout, raw.trim().replace(/^@/, ""));
-	if (absolute === checkout || !insideRoot(checkout, absolute) || !existsSync(absolute)) return undefined;
-	return relative(checkout, absolute).split(sep).join("/");
+/** Validate a report's reference against the immutable head, not a possibly unrepresentable checkout filename. */
+export async function canonicalHeadPath(pass: ReviewEnginePass, raw: string, signal?: AbortSignal): Promise<string> {
+	const path = normalizeReviewPath(raw);
+	if (path !== raw) throw new Error("Report a canonical snapshot path reference.");
+	const file = pass.tools().find((tool) => tool.name === "review_file");
+	if (!file) throw new Error("The host's review_file tool is not available.");
+	await file.execute("swarm-anchor", { path, revision: "head", limit: 1 } as never, signal, undefined, {} as never);
+	return path;
 }
 
 function pathArgument(params: unknown): string | undefined {
@@ -98,13 +105,26 @@ function confineTool<TParams extends TSchema, TDetails>(
 ) {
 	return defineTool({
 		...tool,
+		description: `${tool.description} Repository-relative paths are canonical review references (%HH preserved); absolute paths are native OS paths. Use review_file/review_search/review_tree for names this checkout cannot represent.`,
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const raw = pathArgument(params);
+			let input = params;
+			let reference: string | undefined;
 			if (raw) {
-				assertInsideRoots(roots, resolve(cwd, raw));
-				assertInsideRoots(roots, resolveLikeBuiltinTools(cwd, raw));
+				const nativeArgument = isAbsolute(raw) || raw.startsWith("file://") || raw === "~" || raw.startsWith("~/") || raw.startsWith("../") || raw.startsWith("..\\");
+				const native = nativeArgument || raw === "." || raw === "./" ? raw : reviewPathToUtf8(normalizeReviewPath(raw));
+				if (native === undefined || (!nativeArgument && process.platform === "win32" && /[\\:]/.test(native))) {
+					throw new Error("The checkout cannot represent this review path; use the host snapshot tools.");
+				}
+				const absolute = nativeArgument ? resolveLikeBuiltinTools(cwd, native) : resolve(cwd, native);
+				assertInsideRoots(roots, resolve(cwd, native));
+				assertInsideRoots(roots, absolute);
+				if (resolveLikeBuiltinTools(cwd, absolute) !== absolute) throw new Error("Checkout path normalization would change this filename; use the host snapshot tools.");
+				input = { ...params, path: absolute } as typeof params;
+				if (nativeArgument && absolute !== cwd && insideRoot(cwd, absolute)) reference = reviewPathFromUtf8(relative(cwd, absolute).split(sep).join("/"));
 			}
-			return tool.execute(toolCallId, params, signal, onUpdate, ctx);
+			const result = await tool.execute(toolCallId, input, signal, onUpdate, ctx);
+			return reference ? { ...result, content: [...result.content, { type: "text" as const, text: `Canonical reference for the requested checkout path: ${reference}` }] } : result;
 		},
 	});
 }
@@ -163,17 +183,6 @@ export function createRepositoryTools(target: ReviewTarget, checkout: string) {
 
 export const REPOSITORY_TOOL_NAMES = ["read", "grep", "find", "ls", "read_base"];
 
-/** Rejects absolute paths and `..` segments; returns a normalized repository-relative path. */
-function repositoryPath(raw: string): string | undefined {
-	const path = raw
-		.trim()
-		.replace(/^@/, "")
-		.replace(/\\/g, "/")
-		.replace(/^(\.\/)+/, "");
-	if (!path || isAbsolute(path) || path.split("/").some((segment) => segment === "..")) return undefined;
-	return path;
-}
-
 function createReadBaseTool(target: ReviewTarget) {
 	return defineTool({
 		name: "read_base",
@@ -188,8 +197,7 @@ function createReadBaseTool(target: ReviewTarget) {
 			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines to read" })),
 		}),
 		async execute(_toolCallId, params, signal) {
-			const path = repositoryPath(params.path);
-			if (!path) throw new Error(`read_base needs a repository-relative path: ${params.path}`);
+			const path = normalizeReviewPath(params.path);
 			const content = await target.readBase(path, signal ?? new AbortController().signal);
 			if (content === undefined) {
 				throw new Error(`${path} does not exist in the base revision (it may be new in this change).`);

@@ -61,7 +61,7 @@ beforeEach(async () => {
 	git("update-ref", "refs/remotes/origin/remote-topic", "HEAD");
 	git("branch", "--set-upstream-to=origin/remote-topic");
 	record = {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		runId: "review:rerun-identity",
 		workflowAction: "review.pr",
 		status: "cancelled",

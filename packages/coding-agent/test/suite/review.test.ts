@@ -2863,7 +2863,7 @@ describe("review presentation and repository helpers", () => {
 			overallExplanation: "A verified issue remains.",
 		};
 		const record: ReviewRunRecord = {
-			schemaVersion: 1,
+			schemaVersion: 2,
 			runId: "review:format",
 			workflowAction: "review.branch",
 			status: "completed",

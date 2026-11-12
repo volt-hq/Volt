@@ -2007,6 +2007,36 @@ The host derives finding ids and fingerprints, the scope and exclusions, the com
 
 The host writes the run's record when your `run` returns: completed or incomplete with your result, failed if `run` threw or submitted nothing (a remote client sees only the host's standard failure message), and cancelled if the review was. The record names your engine; a rerun of it is refused, and the built-in pipeline's incremental reviews never build on it. Your `ctx` stops working once the review ends. Reloading the extensions, or disabling yours, removes your engines and cancels the reviews they run. Engine reviews count against the same limit of three open reviews as the built-in pipeline's.
 
+#### Review path references
+
+Every snapshot `path` and `previousPath`, candidate/evidence/follow-up location, coverage path, and scope glob uses a **canonical review reference**, not an OS filename. Copy references returned by `changedFiles()` or `pass.tools()` unchanged into subsequent reads, searches, diffs, and reports. A rename's `previousPath` names its base-side file.
+
+Ordinary printable UTF-8, spaces, and `/` separators stay readable without Unicode normalization. Invalid UTF-8 bytes, `%`, backslash, colon, and control/format characters are escaped as uppercase `%HH` bytes:
+
+| Actual Git filename | Review reference |
+|---|---|
+| `src/café.ts` | `src/café.ts` |
+| `src/100%.ts` | `src/100%25.ts` |
+| `invalid-` + byte `0xFF` + `.ts` | `invalid-%FF.ts` |
+| Literal `invalid-%FF.ts` | `invalid-%25FF.ts` |
+| A backslash or newline within a name | `%5C` or `%0A` within the reference |
+
+References are repository-relative. Empty, dot, parent, NUL, encoded slash, malformed/lowercase escapes, and noncanonical aliases are rejected. `normalizeReviewPath` handles an optional leading `./` and trailing directory slash only; it never changes backslashes into separators. Omit a tool's optional path for the root. Scope globs match references, so copy the encoded spelling of special names rather than decoding it.
+
+The package exports `ReviewPath`, `reviewPathFromBytes`, `reviewPathBytes`, `reviewPathFromUtf8`, `reviewPathToUtf8`, `normalizeReviewPath`, and `formatReviewPath`:
+
+```typescript
+import { formatReviewPath, reviewPathFromUtf8, reviewPathToUtf8 } from "@hansjm10/volt-coding-agent";
+
+const reference = reviewPathFromUtf8("src/100%.ts"); // src/100%25.ts
+const nativeFilename = reviewPathToUtf8(reference); // src/100%.ts
+const label = formatReviewPath(reference); // quoted display label, never a lookup key
+```
+
+Convert an actual native UTF-8 filename with `reviewPathFromUtf8`; do not double-encode a reference. Decode with `reviewPathToUtf8` only at a real filesystem or code-host boundary. It returns `undefined` for non-UTF-8 bytes: use the host snapshot tools instead of substituting replacement characters. Successful UTF-8 decoding does not mean the OS supports the filename; keep checkout confinement and platform checks. `checkout().path` is already a native directory, not a review reference. A checkout or command may be unsupported even though snapshot listing/read/search/diff works. Publication keeps a non-UTF-8 finding summary-only with its exact reference and location.
+
+**Migration:** obtain fresh references from a new review and adapt extension filesystem boundaries as above. Review-run schema 2 does not read or migrate pre-change schema-1 reviews; rerun them rather than using them as incremental parents. Swarm's old dismissal cache is likewise not reused. Acknowledgment, transition, publication, and client wire shapes are unchanged.
+
 ### volt.registerMessagePresenter(customType, present)
 
 Register how custom messages of `customType` look on every client: a pure, synchronous function from the message to `UiNode` data. See [Message Presentation](#message-presentation).

@@ -21,7 +21,7 @@ const INVALID_TIMESTAMPS = [-1, 1.5, Number.MAX_SAFE_INTEGER + 1];
 
 function run(runId: string, startedAt: number, endedAt: number): ReviewRunRecord {
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		runId,
 		workflowAction: "review.uncommitted",
 		status: "completed",

@@ -340,7 +340,7 @@ describe("conversation host client session lifecycle events", () => {
 		expect(originatingRef).toBeDefined();
 		const dispose = vi.spyOn(originatingSession, "dispose");
 		const record: ReviewRunRecord = {
-			schemaVersion: 1,
+			schemaVersion: 2,
 			runId: "review:replacement-persistence",
 			workflowAction: "review.uncommitted",
 			status: "completed",
@@ -555,7 +555,7 @@ describe("conversation host client session lifecycle events", () => {
 		expect(sourceSessionRef).toBeDefined();
 		const reviewOnlyMarker = "REVIEW_ONLY_FINDING_BODY";
 		const reviewRecord = (runId: string, endedAt: number, title: string): ReviewRunRecord => ({
-			schemaVersion: 1,
+			schemaVersion: 2,
 			runId,
 			workflowAction: "review.uncommitted",
 			status: "completed",

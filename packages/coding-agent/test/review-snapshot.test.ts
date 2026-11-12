@@ -25,6 +25,7 @@ import {
 import * as githubDiscovery from "../src/core/code-host/github-cli-discovery.ts";
 import { normalizeReviewPath, type ReviewSnapshot, resolveReviewSnapshot } from "../src/core/review-snapshot.ts";
 import { createReviewSnapshotTools, ReviewCoverageTracker } from "../src/core/review-tools.ts";
+import { createByteReviewRepository, BYTE_REVIEW_PATHS as P } from "./utilities/byte-review-repository.ts";
 
 const OPTIONS = { maxCommitRefBytes: 1_024, maxPullRequestNumber: 2_147_483_647 };
 
@@ -656,6 +657,7 @@ describe("review snapshots", () => {
 			]);
 			expect((await readAvailableFile(snapshot, "head", upperPath)).content.toString()).toBe("fixture\n");
 			expect((await readAvailableFile(snapshot, "head", lowerPath)).content.toString()).toBe("fixture\n");
+			await expect(snapshot.materializeHead()).rejects.toThrow(/cannot represent distinct snapshot paths/);
 		},
 	);
 
@@ -2477,6 +2479,34 @@ if (!args.includes("--numstat")) {
 		});
 	});
 
+	it("resets a percent-escaped submodule through its actual checkout filename", async () => {
+		const dependency = createRepository();
+		const repository = createRepository();
+		git(repository, "-c", "protocol.file.allow=always", "submodule", "add", dependency, "vendor/dep%");
+		git(repository, "commit", "-am", "add percent dependency");
+		const snapshot = await resolve({ kind: "commit", sha: "HEAD" }, repository);
+		expect(snapshot.changedFiles.find((file) => file.head?.type === "commit")?.path).toBe("vendor/dep%25");
+		const checkout = await snapshot.materializeHead();
+		git(checkout, "-c", "protocol.file.allow=always", "submodule", "update", "--init");
+		const submodule = join(checkout, "vendor", "dep%");
+		writeFileSync(join(submodule, "tracked.txt"), "modified\n");
+		writeFileSync(join(submodule, "untracked.txt"), "remove me\n");
+		await snapshot.resetHead(checkout);
+		expect(readFileSync(join(submodule, "tracked.txt"), "utf8").replaceAll("\r\n", "\n")).toBe("before\n");
+		expect(existsSync(join(submodule, "untracked.txt"))).toBe(false);
+	});
+
+	it.runIf(process.platform === "win32")(
+		"reports unrepresentable byte paths instead of materializing replacement names",
+		async () => {
+			const repository = createRepository(false);
+			const sha = createByteReviewRepository(repository);
+			const snapshot = await resolve({ kind: "commit", sha }, repository);
+			await expect(snapshot.materializeHead()).rejects.toThrow(/not valid UTF-8|cannot be represented/);
+			expect((await readAvailableFile(snapshot, "head", P.ff)).content.toString()).toContain("head needle ff");
+		},
+	);
+
 	it("fails closed when uncommitted state changes throughout capture", async () => {
 		const repository = createRepository();
 		const realGit =
@@ -2567,6 +2597,100 @@ if (!args.includes("--numstat")) {
 		});
 		expect(result).toMatchObject({ error: expect.stringMatching(/stdout exceeded the 8 bytes capture limit/i) });
 	});
+
+	it("preserves byte-distinct paths across inventory, reads, changes, and renamed diff sides", async () => {
+		const repository = createRepository(false);
+		const sha = createByteReviewRepository(repository);
+		const snapshot = await resolve({ kind: "commit", sha }, repository);
+		for (const revision of ["base", "head"] as const) {
+			const inventory = await snapshot.listFiles({ revision });
+			expect(new Set(inventory.map((entry) => entry.path)).size).toBe(inventory.length);
+			expect(inventory.every((entry) => entry.type !== "tree")).toBe(true);
+			for (const [path, label] of [
+				[P.fe, "fe"],
+				[P.ff, "ff"],
+				[P.replacement, "replacement"],
+				[P.literal, "literal"],
+			]) {
+				expect((await readAvailableFile(snapshot, revision, path)).content.toString()).toBe(
+					`${revision} needle ${label}\nneedle second\n`,
+				);
+			}
+			expect((await snapshot.listFiles({ revision, prefix: P.directory })).map((entry) => entry.path)).toEqual([
+				P.child,
+			]);
+			const child = await readAvailableFile(snapshot, revision, P.child);
+			const shared = await readAvailableFile(snapshot, revision, P.shared);
+			expect(child.entry.oid).toBe(shared.entry.oid);
+		}
+		for (const path of [P.fe, P.ff, P.replacement, P.literal, P.child, P.lineFeed, P.backslash]) {
+			const changed = snapshot.changedFiles.find((file) => file.path === path);
+			expect(changed).toMatchObject({ status: "modified", reviewable: true, additions: 1, deletions: 1 });
+			expect(changed?.hunks[0]).toMatchObject({
+				path,
+				baseChangedLines: [{ startLine: 1, endLine: 1 }],
+				headChangedLines: [{ startLine: 1, endLine: 1 }],
+			});
+		}
+		expect(new Set(snapshot.changedFiles.flatMap((file) => file.hunks.map((hunk) => hunk.id))).size).toBe(
+			snapshot.changedFiles.reduce((count, file) => count + file.hunks.length, 0),
+		);
+		expect(snapshot.changedFiles.find((file) => file.path === P.renamed)).toMatchObject({
+			status: "renamed",
+			previousPath: P.old,
+			reviewable: true,
+			additions: 1,
+			deletions: 1,
+		});
+		expect(snapshot.changedFiles.find((file) => file.path === P.added)).toMatchObject({
+			status: "added",
+			reviewable: true,
+		});
+		expect(snapshot.changedFiles.find((file) => file.path === P.deleted)).toMatchObject({
+			status: "deleted",
+			reviewable: true,
+		});
+		expect(snapshot.changedFiles.find((file) => file.path === P.type)?.hunks).toHaveLength(2);
+		expect(await snapshot.readFile("head", P.old)).toBeUndefined();
+		expect(await snapshot.readFile("base", P.renamed)).toBeUndefined();
+	});
+
+	it.each(["truncated-hunk", "unexpected-section", "duplicate-inventory", "truncated-inventory"])(
+		"rejects malformed Git byte framing: %s",
+		async (mode) => {
+			const repository = createRepository();
+			const realGit =
+				process.platform === "win32"
+					? run(repository, "where.exe", "git").split(/\r?\n/u)[0]
+					: run(repository, "which", "git");
+			if (!realGit) throw new Error("Unable to locate Git");
+			const bin = join(repository, "malformed-git-bin");
+			mkdirSync(bin);
+			installNodeCommandShim(
+				bin,
+				"git",
+				`import { spawnSync } from "node:child_process";
+const args = process.argv.slice(2);
+const result = spawnSync(${JSON.stringify(realGit)}, args);
+let output = result.stdout;
+const mode = ${JSON.stringify(mode)};
+if (args.includes("--raw")) {
+ if (mode === "truncated-hunk") output = output.subarray(0, output.lastIndexOf(10, output.length - 2) + 1);
+ if (mode === "unexpected-section") output = Buffer.concat([output, Buffer.from("diff --git a/alien b/alien\\n")]);
+}
+if (args[0] === "ls-tree") {
+ if (mode === "duplicate-inventory") output = Buffer.concat([output, output]);
+ if (mode === "truncated-inventory") output = output.subarray(0, output.length - 1);
+}
+process.stdout.write(output); process.stderr.write(result.stderr); process.exitCode = result.status ?? 1;
+`,
+			);
+			process.env.PATH = `${bin}${delimiter}${initialPath ?? ""}`;
+			const result = await resolveReviewSnapshot({ kind: "commit", sha: "HEAD" }, repository, OPTIONS);
+			if (!("error" in result)) snapshots.push(result);
+			expect(result).toMatchObject({ error: expect.stringMatching(/truncated|unexpected|duplicate/) });
+		},
+	);
 
 	it("rejects unsafe repository paths", () => {
 		expect(() => normalizeReviewPath("../secret")).toThrow(/traverse/);

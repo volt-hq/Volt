@@ -83,7 +83,7 @@ async function connectPhone(owned: Owned): Promise<RemotePhone> {
 
 function record(): ReviewRunRecord {
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		runId: "review-341",
 		workflowAction: "review.uncommitted",
 		status: "completed",

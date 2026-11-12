@@ -131,7 +131,7 @@ function createProvider(fixture: Fixture) {
 
 function completedRun(pullRequest: ReviewPullRequestIdentity): ReviewRunRecord {
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		runId: "review:registry",
 		workflowAction: "review.pr",
 		status: "completed",

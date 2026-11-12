@@ -141,7 +141,7 @@ function terminal(
 	accounting?: ReviewUsageAccounting,
 ): ReviewRunRecord {
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		runId,
 		workflowAction: "review.uncommitted",
 		status,

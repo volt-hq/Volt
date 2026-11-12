@@ -20,6 +20,8 @@ import {
 	resolveReviewSnapshot,
 } from "../src/core/review-snapshot.ts";
 
+import { createByteReviewRepository, BYTE_REVIEW_PATHS as P } from "./utilities/byte-review-repository.ts";
+
 const OPTIONS = { maxCommitRefBytes: 1_024, maxPullRequestNumber: 2_147_483_647 };
 
 function run(cwd: string, command: string, ...args: string[]): string {
@@ -454,12 +456,51 @@ describe("review snapshot search", () => {
 
 		await expect(head(snapshot, "odd needle")).resolves.toEqual({
 			matches: [
-				{ path: "invalid-\ufffd.txt", line: 1, text: "odd needle 1" },
-				{ path: "line\nbreak.txt", line: 1, text: "odd needle 2" },
+				{ path: "invalid-%FF.txt", line: 1, text: "odd needle 1" },
+				{ path: "line%0Abreak.txt", line: 1, text: "odd needle 2" },
 				{ path: longPath, line: 1, text: "odd needle 3" },
 			],
 			complete: true,
 		});
+	});
+
+	it("reuses byte-path inventory and search references for exact, directory, and paginated scopes", async () => {
+		const repository = createRepository();
+		const sha = createByteReviewRepository(repository);
+		const snapshot = await resolveSnapshot(repository, undefined, { kind: "commit", sha });
+		snapshots.push(snapshot);
+		for (const revision of ["base", "head"] as const) {
+			const whole = await snapshot.search({ revision, query: "needle", limit: 100 });
+			expect(whole.complete).toBe(true);
+			for (const entry of await snapshot.listFiles({ revision })) {
+				const scoped = await snapshot.search({ revision, query: "needle", prefix: entry.path, limit: 100 });
+				expect(scoped).toEqual({
+					matches: whole.matches.filter((match) => match.path === entry.path),
+					complete: true,
+				});
+			}
+			for (const prefix of [P.directory, P.fe, P.ff, P.replacement, P.literal]) {
+				const expected = whole.matches.filter(
+					(match) => match.path === prefix || match.path.startsWith(`${prefix}/`),
+				);
+				const paged: ReviewSnapshotSearchMatch[] = [];
+				let complete = false;
+				while (!complete) {
+					const page = await snapshot.search({
+						revision,
+						query: "needle",
+						prefix,
+						offset: paged.length,
+						limit: 1,
+					});
+					paged.push(...page.matches);
+					complete = page.complete;
+					expect(page.complete || page.matches.length === 1).toBe(true);
+				}
+				expect(paged).toEqual(expected);
+			}
+			expect(whole.matches.some((match) => match.path === P.link || match.path === P.module)).toBe(false);
+		}
 	});
 
 	it("answers a query no line can contain without running Git, and refuses a query or page it cannot run", async () => {

@@ -1,4 +1,5 @@
 import { type CodeHostProvider, getCodeHostProvider, type ReviewCodeHostInlineComment } from "./code-host/index.ts";
+import { reviewPathToUtf8 } from "./review-path.ts";
 import type { ReviewFinding } from "./review-report.ts";
 import { type ReviewRunRecord, reviewRunEngine, reviewRunEngineLabel, STANDARD_REVIEW_ENGINE } from "./review-state.ts";
 
@@ -23,9 +24,11 @@ function inlineComment(finding: ReviewFinding, run: ReviewRunRecord): ReviewCode
 	}
 	if (location.side === "head" && !file.headOid) return undefined;
 	if (location.side === "base" && !file.baseOid) return undefined;
+	const path = reviewPathToUtf8(location.path);
+	if (path === undefined) return undefined;
 	return {
 		findingId: finding.id,
-		path: location.path,
+		path,
 		startLine: location.startLine,
 		endLine: location.endLine,
 		side: location.side,
@@ -80,7 +83,10 @@ export async function publishReviewRun(
 	}
 	const summaryOnly = run.result.findings
 		.filter((finding) => summaryOnlyFindingIds.includes(finding.id))
-		.map((finding) => findingText(finding));
+		.map(
+			(finding) =>
+				`${findingText(finding)}\n\nLocation: ${finding.changeLocation.path}:${finding.changeLocation.startLine}-${finding.changeLocation.endLine} (${finding.changeLocation.side}).`,
+		);
 	const body = [
 		`Volt review (${run.runId})`,
 		...(reviewRunEngine(run) === STANDARD_REVIEW_ENGINE
