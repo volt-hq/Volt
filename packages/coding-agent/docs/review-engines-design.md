@@ -218,7 +218,7 @@ Review
 
 Stays in the extension: workers, waves, clustering, verification, and the report text. Changes: the prompts (they name read, grep, find, ls, `read_base`, and a frozen checkout), and the code that consumes `git.ts`'s `ReviewTarget`: `workers.ts` (shards, partial files, submodules, checkout), `verify.ts` (complete flag, per-file diffs, `createCheckout`, checkout), `prompts.ts` and `report.ts` (description, scope, stat), `session.ts` and `tools.ts` (checkout, repository root, base revision), and `memory.ts` (common directory and checkout). Its defaults (workers, wave size, models, thinking) become typed manifest settings, and its hand-written flag parser goes.
 
-What the host snapshot gives today (`changedFiles` with hunk patches, `readFile` on either side up to 8 MiB, `listFiles`, a literal-substring `search`, `materializeHead`, `root`, `identity`) leaves real gaps:
+What the host snapshot gives today is `changedFiles` with hunk patches, `readFile` on either side up to 8 MiB, `listFiles`, `search`, `materializeHead`, `root`, and `identity`. `search` runs `git grep` on the base or head tree: it matches literal text, skips the files Git reads as binary (a NUL among their first 8,000 bytes), and has no file size cap. That leaves real gaps:
 
 1. `materializeHead` creates a fresh checkout but does not link `node_modules`, which swarm's `--exec` verifiers need. An engine can link them itself if it gets `root` and a checkout.
 2. There was no diff-text API (`pathDiffText` is private), and concatenating hunk patches loses file headers. `deliverReviewDiff` (section 4.2) returns whole hunks, each with its file's first line, within a byte budget, and credits coverage; sharding the diff across passes stays the engine's.
