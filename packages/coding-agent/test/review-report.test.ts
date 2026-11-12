@@ -701,7 +701,66 @@ describe("structured review reports", () => {
 		});
 		expect(incomplete.completionStatus).toBe("incomplete");
 		expect(incomplete.overallCorrectness).toBeUndefined();
-		expect(incomplete.coverage.uncheckedAreas).toHaveLength(1);
+		expect(incomplete.coverage.uncheckedAreas).toEqual([
+			"Changed file was not fully inspected: src/divide.ts (1 of 1 hunk)",
+		]);
+		expect(incomplete.overallExplanation).toBe(
+			[
+				"1 of 1 reviewable changed file was not fully inspected.",
+				"Independent verification raised no unresolved concern, but no correctness verdict is available until these gaps are inspected.",
+			].join("\n"),
+		);
+	});
+
+	it("counts a hunk, a file, and the inventory once either discovery or verification observed them", async () => {
+		const snapshot = await setup();
+		const hunkIds = snapshot.changedFiles.flatMap((file) => file.hunks.map((hunk) => hunk.id));
+		const nothing: ReviewObservedCoverage = {
+			changedFileInventoryComplete: false,
+			contextInspectionComplete: false,
+			contextPagesRead: 0,
+			filesRead: [],
+			hunksInspected: [],
+			searchesRun: 0,
+			treePagesRead: 0,
+			diffFilesFullyRead: [],
+		};
+		const everything: ReviewObservedCoverage = {
+			...nothing,
+			changedFileInventoryComplete: true,
+			filesRead: ["docs/context.txt"],
+			hunksInspected: hunkIds,
+			diffFilesFullyRead: ["src/divide.ts"],
+		};
+		const reviewWith = (discoveryCoverage: ReviewObservedCoverage, verificationCoverage: ReviewObservedCoverage) =>
+			buildParsedReview({
+				snapshot,
+				candidateReport: { summary: "No findings.", candidates: [], limitations: [] },
+				validatedCandidates: [],
+				verificationReport: {
+					summary: "No omission found.",
+					assessment: "complete",
+					decisions: [],
+					priorFindingDecisions: [],
+					limitations: [],
+				},
+				discoveryCoverage,
+				verificationCoverage,
+				commandsRun: [],
+				failedVerificationAttempts: [],
+				excludedPaths: [],
+			});
+
+		for (const parsed of [reviewWith(everything, nothing), reviewWith(nothing, everything)]) {
+			expect(parsed).toMatchObject({ completionStatus: "complete", overallCorrectness: "correct" });
+			expect(parsed.coverage).toMatchObject({
+				changedFileInventoryComplete: true,
+				filesInspected: ["docs/context.txt", "src/divide.ts"],
+				hunksInspected: [...hunkIds].sort(),
+				uncheckedAreas: [],
+			});
+		}
+		expect(reviewWith(nothing, nothing)).toMatchObject({ completionStatus: "incomplete" });
 	});
 
 	it("withholds correctness when PR context capture or either pass inspection is incomplete", async () => {
@@ -908,7 +967,7 @@ describe("structured review reports", () => {
 			expect(parsed.coverage).toMatchObject({ uncheckedAreas: [], hunksInspected: [hunkA, hunkB].sort() });
 		});
 
-		it("is incomplete, naming the hunk, when no pass saw one", async () => {
+		it("is incomplete, naming the file, when no pass saw one of its hunks", async () => {
 			const { snapshot, hunkA, hunkB } = await setupTwoFiles();
 			const run = new ReviewRunCoverage();
 			const first = run.newPass();
@@ -922,7 +981,10 @@ describe("structured review reports", () => {
 			const parsed = reviewOf(snapshot, run.snapshot());
 			expect(parsed.completionStatus).toBe("incomplete");
 			expect(parsed).not.toHaveProperty("overallCorrectness");
-			expect(parsed.coverage.uncheckedAreas).toEqual([`Changed hunk was not fully inspected: ${hunkB}`]);
+			expect(parsed.coverage.uncheckedAreas).toEqual([
+				"Changed file was not fully inspected: src/b.ts (1 of 1 hunk)",
+			]);
+			expect(parsed.overallExplanation).toContain("1 of 2 reviewable changed files was not fully inspected.");
 		});
 
 		it("is incomplete when no pass paged the changed-file inventory, whatever the hunks", async () => {

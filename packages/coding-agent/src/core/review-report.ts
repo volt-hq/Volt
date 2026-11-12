@@ -8,7 +8,7 @@ import {
 	type ReviewSnapshotLineRange,
 	type ReviewSnapshotRevision,
 } from "./review-snapshot.ts";
-import type { ReviewObservedCoverage } from "./review-tools.ts";
+import { mergeObservedCoverage, type ReviewObservedCoverage } from "./review-tools.ts";
 
 export type ReviewPriority = 0 | 1 | 2 | 3;
 export type ReviewCompletionStatus = "complete" | "incomplete";
@@ -268,6 +268,10 @@ export interface BuildParsedReviewOptions {
 	unresolvedChallenge?: DeclassifiedReviewChallenge;
 	challengePresentation?: ReviewPresentationReport["challenge"];
 	followUpFailure?: string;
+	/**
+	 * What discovery and verification observed. A hunk, a file, or the changed-file inventory counts once either pass
+	 * observed it; code-host context paging is judged for each pass on its own.
+	 */
 	discoveryCoverage: ReviewObservedCoverage;
 	verificationCoverage: ReviewObservedCoverage;
 	commandsRun: string[];
@@ -1051,13 +1055,6 @@ function presentationFromPrivateAnalysis(
 	};
 }
 
-function expectedReviewableHunkIds(snapshot: ReviewSnapshot, excludedPaths: ReadonlySet<string>): string[] {
-	return snapshot.changedFiles
-		.filter((file) => file.reviewable && !excludedPaths.has(file.path))
-		.flatMap((file) => file.hunks.map((hunk) => hunk.id))
-		.sort();
-}
-
 const REVIEW_PRESENTATION_VERIFICATION_METHOD =
 	"Independent verification accepted this finding; a separate context-blind pass rendered the code-based rationale.";
 
@@ -1167,9 +1164,13 @@ export function buildParsedReview(options: BuildParsedReviewOptions): ParsedRevi
 		};
 	});
 	const excluded = new Set(options.excludedPaths.map((entry) => entry.path));
-	const expectedHunks = expectedReviewableHunkIds(options.snapshot, excluded);
-	const inspected = new Set(options.verificationCoverage.hunksInspected);
-	const uninspectedHunks = expectedHunks.filter((hunkId) => !inspected.has(hunkId));
+	const observed = mergeObservedCoverage([options.discoveryCoverage, options.verificationCoverage]);
+	const inspected = new Set(observed.hunksInspected);
+	const reviewableFiles = options.snapshot.changedFiles.filter((file) => file.reviewable && !excluded.has(file.path));
+	const uninspectedFiles = reviewableFiles.flatMap((file) => {
+		const missing = file.hunks.filter((hunk) => !inspected.has(hunk.id)).length;
+		return missing === 0 ? [] : [{ path: file.path, missing, total: file.hunks.length }];
+	});
 	const contextCoverage = options.snapshot.codeHostContext
 		? {
 				captureStatus: options.snapshot.codeHostContext.manifest.status,
@@ -1183,15 +1184,13 @@ export function buildParsedReview(options: BuildParsedReviewOptions): ParsedRevi
 				verificationInspectionComplete: options.verificationCoverage.contextInspectionComplete,
 			}
 		: undefined;
-	const uncheckedAreas = [
+	const coverageGaps = [
 		...options.snapshot.changedFiles.flatMap((file) =>
 			file.reviewable || excluded.has(file.path)
 				? []
 				: [`${file.path}: ${file.unsupportedReason ?? "unsupported change"}`],
 		),
-		...(options.verificationCoverage.changedFileInventoryComplete
-			? []
-			: ["Changed-file inventory was not paged to completion."]),
+		...(observed.changedFileInventoryComplete ? [] : ["Changed-file inventory was not paged to completion."]),
 		...(contextCoverage?.captureStatus === "incomplete"
 			? ["Code-host pull request context capture was incomplete."]
 			: []),
@@ -1201,7 +1200,13 @@ export function buildParsedReview(options: BuildParsedReviewOptions): ParsedRevi
 		...(contextCoverage && !contextCoverage.verificationInspectionComplete
 			? ["Verification did not page code-host pull request context to completion."]
 			: []),
-		...uninspectedHunks.map((hunkId) => `Changed hunk was not fully inspected: ${hunkId}`),
+	];
+	const uncheckedAreas = [
+		...coverageGaps,
+		...uninspectedFiles.map(
+			(file) =>
+				`Changed file was not fully inspected: ${file.path} (${file.missing} of ${file.total} hunk${file.total === 1 ? "" : "s"})`,
+		),
 	];
 	const completionStatus: ReviewCompletionStatus =
 		options.verificationReport.assessment === "complete" && uncheckedAreas.length === 0 ? "complete" : "incomplete";
@@ -1264,12 +1269,10 @@ export function buildParsedReview(options: BuildParsedReviewOptions): ParsedRevi
 			: [options.candidateReport.summary, options.verificationReport.summary].filter(Boolean).join(" "),
 		findings,
 		coverage: {
-			changedFileInventoryComplete: options.verificationCoverage.changedFileInventoryComplete,
+			changedFileInventoryComplete: observed.changedFileInventoryComplete,
 			...(contextCoverage ? { context: contextCoverage } : {}),
-			filesInspected: [
-				...new Set([...options.verificationCoverage.filesRead, ...options.verificationCoverage.diffFilesFullyRead]),
-			].sort(),
-			hunksInspected: options.verificationCoverage.hunksInspected,
+			filesInspected: [...new Set([...observed.filesRead, ...observed.diffFilesFullyRead])].sort(),
+			hunksInspected: observed.hunksInspected,
 			commandsRun,
 			failedVerificationAttempts,
 			exclusions: options.excludedPaths,
@@ -1280,7 +1283,20 @@ export function buildParsedReview(options: BuildParsedReviewOptions): ParsedRevi
 		...(overallCorrectness ? { overallCorrectness } : {}),
 		overallExplanation:
 			completionStatus === "incomplete"
-				? [challenge, ...uncheckedAreas, "No correctness verdict is available."].filter(Boolean).join("\n")
+				? [
+						challenge,
+						...coverageGaps,
+						...(uninspectedFiles.length > 0
+							? [
+									`${uninspectedFiles.length} of ${reviewableFiles.length} reviewable changed file${reviewableFiles.length === 1 ? "" : "s"} ${uninspectedFiles.length === 1 ? "was" : "were"} not fully inspected.`,
+								]
+							: []),
+						options.verificationReport.assessment === "complete"
+							? "Independent verification raised no unresolved concern, but no correctness verdict is available until these gaps are inspected."
+							: "No correctness verdict is available.",
+					]
+						.filter(Boolean)
+						.join("\n")
 				: overallCorrectness === "incorrect"
 					? `${blockingFindings.length} verified P0-P2 finding${blockingFindings.length === 1 ? " remains" : "s remain"}.`
 					: "No verified P0-P2 findings remain.",
