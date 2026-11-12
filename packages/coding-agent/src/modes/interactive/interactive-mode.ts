@@ -1432,8 +1432,9 @@ export class InteractiveMode {
 		}
 
 		try {
+			// Where its settings are read: the conversation's project, not always the directory it runs in.
 			const packageManager = new DefaultPackageManager({
-				cwd: (await this.sessions.info()).cwd,
+				cwd: this.settingsScope.cwd,
 				agentDir: getAgentDir(),
 				settingsManager: this.settingsManager,
 			});

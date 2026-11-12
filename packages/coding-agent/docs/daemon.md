@@ -261,7 +261,11 @@ asking.
 A conversation in a daemon-managed worktree takes its project trust from the
 repository in its workspace, as the daemon records the worktree. A managed
 checkout the daemon has no record of is trusted only while nothing in it needs
-trust: nothing is asked or saved for it, and `--approve` does not apply.
+trust: nothing is asked or saved for it, and `--approve` does not apply. The
+package, config, store, and MCP commands (`volt install`, `volt remove`,
+`volt update`, `volt list`, `volt config`, `volt store`, `volt mcp`) run in a
+managed worktree follow the same rules, and in a pull request review checkout
+they read and write the project config of the workspace's repository.
 
 A decision for this session only applies to that project in the same
 worker, for the same TUI's later conversations, never to another terminal's.

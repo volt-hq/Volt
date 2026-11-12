@@ -8,7 +8,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -16,6 +16,7 @@ import type { PrReviewLaunch } from "../src/core/pr-review-placement.ts";
 import { projectTrustPath, resolveConversationProject } from "../src/core/project-trust.ts";
 import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../src/core/remote/iroh/state.ts";
 import { getDaemonPaths } from "../src/daemon/paths.ts";
+import { readVoltdWorktreeRecords } from "../src/daemon/state.ts";
 import {
 	getWorktreeCheckoutPath,
 	getWorktreesRoot,
@@ -325,5 +326,206 @@ describe("a conversation's project", () => {
 		expect(
 			resolveConversationProject(agentDir, join(getWorktreesRoot(agentDir), "--elsewhere--")).trustPath,
 		).toBeUndefined();
+	});
+
+	describe("read from a state file the daemon's store would not write", () => {
+		/** Rewrite the state file as JSON: the store writes only state that parses. */
+		function editStateFile(edit: (state: Record<string, unknown>) => void): void {
+			const statePath = getDaemonPaths(agentDir).statePath;
+			const state = JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown>;
+			edit(state);
+			writeFileSync(statePath, JSON.stringify(state));
+		}
+
+		it("resolves a recorded worktree whatever the file's other sections hold", async () => {
+			const checkout = checkoutOf("fix");
+			await writeDaemonStateFile(agentDir, {
+				hostSecretKey: [1, 2, 3],
+				workspaces: [workspace],
+				worktrees: [record("fix", checkout)],
+			});
+			editStateFile((state) => {
+				state.irohSecretKey = "not bytes";
+				state.clients = [{ nodeId: 7 }];
+				state.revokedClients = "none";
+				state.pendingPairingTickets = [null];
+				state.pairingSecretTombstones = [{ outcome: "unknown" }];
+				state.workspaceGenerations = [];
+				state.settings = { relayCredential: "not a credential" };
+			});
+
+			expect(resolveConversationProject(agentDir, checkout)).toEqual({
+				projectCwd: checkout,
+				trustPath: workspace.path,
+			});
+		});
+
+		it("leaves only the checkout of a record that does not parse unrecorded", async () => {
+			const other: IrohRemoteWorkspace = { name: "other", path: join(root, "other") };
+			mkdirSync(other.path);
+			const broken = checkoutOf("broken");
+			const intact = checkoutOf("intact");
+			const orphan = checkoutOf("orphan");
+			await writeDaemonStateFile(agentDir, {
+				workspaces: [workspace, other],
+				worktrees: [
+					record("broken", broken),
+					record("intact", intact),
+					{ ...record("orphan", orphan), workspaceName: other.name },
+				],
+			});
+			editStateFile((state) => {
+				(state.worktrees as Array<Record<string, unknown>>)[0].createdAt = "yesterday";
+				(state.worktrees as unknown[]).push(null, "a string");
+				// A workspace record that does not parse registers no workspace.
+				delete (state.workspaces as Array<Record<string, unknown>>)[1].path;
+			});
+
+			expect(resolveConversationProject(agentDir, intact)).toEqual({
+				projectCwd: intact,
+				trustPath: workspace.path,
+			});
+			expect(resolveConversationProject(agentDir, broken)).toEqual({ projectCwd: broken, trustPath: undefined });
+			expect(resolveConversationProject(agentDir, orphan)).toEqual({ projectCwd: orphan, trustPath: undefined });
+		});
+
+		it.each([
+			[
+				"a launch with a field the reader does not know",
+				(launch: Record<string, unknown>) => ({ ...launch, added: 1 }),
+			],
+			["a launch without its placement", (launch: Record<string, unknown>) => ({ ...launch, placement: undefined })],
+			["launches that are not a list", () => undefined],
+		])("does not take a pull request review checkout for an ordinary one over %s", async (_name, corrupt) => {
+			const review = checkoutOf("review");
+			const ordinary = checkoutOf("ordinary");
+			await writeDaemonStateFile(agentDir, {
+				workspaces: [workspace],
+				worktrees: [
+					record("review", review, { prReviewLaunches: [reviewLaunch("review", review)] }),
+					record("ordinary", ordinary),
+				],
+			});
+			editStateFile((state) => {
+				const worktree = (state.worktrees as Array<Record<string, unknown>>)[0];
+				const launch = corrupt((worktree.prReviewLaunches as Array<Record<string, unknown>>)[0]);
+				worktree.prReviewLaunches = launch === undefined ? "none" : [launch];
+			});
+
+			// Unrecorded: neither the workspace's project, nor the checkout's under the workspace's trust.
+			expect(resolveConversationProject(agentDir, review)).toEqual({ projectCwd: review, trustPath: undefined });
+			expect(resolveConversationProject(agentDir, ordinary)).toEqual({
+				projectCwd: ordinary,
+				trustPath: workspace.path,
+			});
+		});
+
+		it("records no managed checkout in a state file of a version it does not know", async () => {
+			const ordinary = checkoutOf("ordinary");
+			const review = checkoutOf("review");
+			await writeDaemonStateFile(agentDir, {
+				workspaces: [workspace],
+				worktrees: [
+					record("ordinary", ordinary),
+					record("review", review, { prReviewLaunches: [reviewLaunch("review", review)] }),
+				],
+			});
+			editStateFile((state) => {
+				state.version = 2;
+			});
+
+			expect(resolveConversationProject(agentDir, ordinary)).toEqual({ projectCwd: ordinary, trustPath: undefined });
+			expect(resolveConversationProject(agentDir, review)).toEqual({ projectCwd: review, trustPath: undefined });
+		});
+	});
+});
+
+describe("the worktree records of the daemon's state file", () => {
+	let root: string;
+	let agentDir: string;
+	let statePath: string;
+	const workspace: IrohRemoteWorkspace = { name: "ws", path: "/repo" };
+	const worktree: IrohRemoteWorkspaceWorktree = {
+		id: "fix",
+		workspaceName: "ws",
+		path: "/worktrees/fix",
+		branch: "volt/fix",
+		createdAt: 1,
+		sessionIds: ["session-1"],
+	};
+
+	beforeEach(() => {
+		root = mkdtempSync(join(tmpdir(), "volt-worktree-records-"));
+		agentDir = join(root, "agent");
+		mkdirSync(agentDir, { recursive: true });
+		statePath = getDaemonPaths(agentDir).statePath;
+	});
+
+	afterEach(() => {
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	it("are the registered workspaces and the worktrees, and nothing else of the file", async () => {
+		await writeDaemonStateFile(agentDir, {
+			hostSecretKey: [1, 2, 3],
+			workspaces: [workspace],
+			worktrees: [worktree],
+			pairingSecretTombstones: [
+				{ secretHash: "hash", workspace: "ws", outcome: "pairing_secret_expired", retainUntil: 2, expiredAt: 1 },
+			],
+		});
+		const written = JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown>;
+		expect(written.irohSecretKey).toEqual([1, 2, 3]);
+
+		const records = readVoltdWorktreeRecords(statePath);
+
+		expect(Object.keys(records).sort()).toEqual(["workspaces", "worktrees"]);
+		expect(records).toEqual({ workspaces: [workspace], worktrees: [worktree] });
+	});
+
+	it("are none in a file that is missing, unreadable, or not the daemon's state of this version", async () => {
+		const none = { workspaces: [], worktrees: [] };
+		expect(readVoltdWorktreeRecords(statePath)).toEqual(none);
+
+		await writeDaemonStateFile(agentDir, { workspaces: [workspace], worktrees: [worktree] });
+		const valid = JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown>;
+		for (const content of [
+			"{ not json",
+			"null",
+			"[]",
+			'"state"',
+			JSON.stringify({ ...valid, version: 2 }),
+			JSON.stringify({ ...valid, version: "1" }),
+			JSON.stringify({ ...valid, version: undefined }),
+		]) {
+			writeFileSync(statePath, content);
+			expect(readVoltdWorktreeRecords(statePath)).toEqual(none);
+		}
+
+		// A directory where the file should be.
+		rmSync(statePath);
+		mkdirSync(statePath);
+		expect(readVoltdWorktreeRecords(statePath)).toEqual(none);
+	});
+
+	it("leave out each record that does not parse, and a section that is not a list", async () => {
+		await writeDaemonStateFile(agentDir, { workspaces: [workspace], worktrees: [worktree] });
+		const valid = JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown>;
+
+		writeFileSync(
+			statePath,
+			JSON.stringify({
+				...valid,
+				workspaces: [{ name: "nameless" }, workspace, 7],
+				worktrees: [{ ...worktree, id: "Not An Id" }, worktree, { ...worktree, prReviewLaunches: [{}] }, null],
+			}),
+		);
+		expect(readVoltdWorktreeRecords(statePath)).toEqual({ workspaces: [workspace], worktrees: [worktree] });
+
+		writeFileSync(statePath, JSON.stringify({ ...valid, workspaces: { ws: workspace }, worktrees: "none" }));
+		expect(readVoltdWorktreeRecords(statePath)).toEqual({ workspaces: [], worktrees: [] });
+
+		writeFileSync(statePath, JSON.stringify({ version: 1 }));
+		expect(readVoltdWorktreeRecords(statePath)).toEqual({ workspaces: [], worktrees: [] });
 	});
 });

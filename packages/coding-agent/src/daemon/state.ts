@@ -11,6 +11,8 @@ import {
 	type IrohRemoteWorkspace,
 	type IrohRemoteWorkspaceWorktree,
 	parseIrohRemoteHostState,
+	parseIrohRemoteWorkspace,
+	parseIrohRemoteWorkspaceWorktree,
 } from "../core/remote/iroh/state.ts";
 import { writeDurableAtomicFile } from "../utils/durable-atomic-write.ts";
 import {
@@ -251,6 +253,55 @@ export function parseVoltdState(value: unknown): VoltdStateFileV1 {
 		...(worktreeCleanup === undefined ? {} : { worktreeCleanup }),
 		...(irohBindPort === undefined ? {} : { irohBindPort }),
 	});
+}
+
+/** The registered workspaces and the worktree records of a daemon state file. */
+export interface VoltdWorktreeRecords {
+	workspaces: IrohRemoteWorkspace[];
+	worktrees: IrohRemoteWorkspaceWorktree[];
+}
+
+/** The entries of the list `value` that `parse` accepts; none when it is not a list. */
+function parseEachRecord<T>(value: unknown, parse: (entry: unknown) => T): T[] {
+	const records: T[] = [];
+	for (const entry of Array.isArray(value) ? value : []) {
+		try {
+			records.push(parse(entry));
+		} catch {
+			// Left out whole: a record is never returned in part.
+		}
+	}
+	return records;
+}
+
+/**
+ * Read the registered workspaces and the worktree records of the state file
+ * at `statePath`, as a process that only places a directory among them does.
+ * No other section is interpreted or returned: the host key, paired clients,
+ * pairing secrets, relay credentials, and settings stay out, and an invalid
+ * one hides no record. Each record is parsed on its own. One that does not
+ * parse is left out whole, so a worktree whose pull request review launches
+ * cannot be read is no worktree here, never one without launches. A file that
+ * is missing, unreadable, not a JSON object, or not `version: 1` has no
+ * records: a version this reader does not know is not interpreted. Never
+ * throws.
+ */
+export function readVoltdWorktreeRecords(statePath: string): VoltdWorktreeRecords {
+	try {
+		const state: unknown = JSON.parse(readFileSync(statePath, "utf8"));
+		if (typeof state === "object" && state !== null && !Array.isArray(state)) {
+			const { version, workspaces, worktrees } = state as Record<string, unknown>;
+			if (version === 1) {
+				return {
+					workspaces: parseEachRecord(workspaces, parseIrohRemoteWorkspace),
+					worktrees: parseEachRecord(worktrees, parseIrohRemoteWorkspaceWorktree),
+				};
+			}
+		}
+	} catch {
+		// No file, or none that reads as JSON.
+	}
+	return { workspaces: [], worktrees: [] };
 }
 
 export interface VoltdStateStoreOptions {

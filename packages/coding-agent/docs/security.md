@@ -32,7 +32,7 @@ Declining trust skips protected resources. `AGENTS.md` and `CLAUDE.md` context f
 
 Non-interactive modes (`-p`, `--mode json`, and `--mode rpc`) do not show a trust prompt. Without an applicable saved trust decision, `defaultProjectTrust: "ask"` and `"never"` ignore such resources, while `"always"` trusts them. Use `--approve`/`-a` or `--no-approve`/`-na` to override project trust for one run.
 
-A conversation in a daemon-managed worktree checkout takes its project trust from the repository in its registered workspace, as the daemon records the checkout, in every mode. One in a pull request review checkout also loads its project-local settings and resources from that repository, never from the pull request's head. A managed checkout the daemon has no record of is trusted only while nothing in it needs trust; `--approve` does not apply to it. See [Project trust](daemon.md#project-trust).
+A conversation in a daemon-managed worktree checkout takes its project trust from the repository in its registered workspace, as the daemon records the checkout, in every mode. One in a pull request review checkout also loads its project-local settings and resources from that repository, never from the pull request's head. A managed checkout the daemon has no record of is trusted only while nothing in it needs trust; `--approve` does not apply to it. The package, config, store, and MCP commands (`volt install`, `volt remove`, `volt update`, `volt list`, `volt config`, `volt store`, `volt mcp`) run in a managed checkout follow the same rules, and never save a trust decision for a worktree path. See [Project trust](daemon.md#project-trust).
 
 ## No Built-in Sandbox
 

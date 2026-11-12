@@ -1,7 +1,7 @@
-import { readFileSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getDaemonDir } from "../daemon/paths.ts";
-import { parseVoltdState } from "../daemon/state.ts";
+import { readVoltdWorktreeRecords } from "../daemon/state.ts";
 import { isPathInside } from "../daemon/workspace-directory.ts";
 import { getConversationProject, isPathUnderWorktreesRoot } from "../daemon/worktree-manager.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
@@ -37,11 +37,13 @@ export interface ConversationProject {
  * project, from the repository in its workspace, as the daemon's state file
  * records the checkout (`getConversationProject`): never from the checkout's
  * `.git` pointer, which names the repository's main checkout. The state file
- * is read on each call, for a managed checkout only. A review's directory
- * that the repository lacks, as one the pull request adds, takes the nearest
- * directory above it that the repository has. A state file that is missing,
- * unreadable, or without a record of the checkout or its workspace leaves the
- * conversation its own directory and no trust path. Never throws.
+ * is read on each call, for a managed checkout only, and for its workspace
+ * and worktree records only (`readVoltdWorktreeRecords`). A review's
+ * directory that the repository lacks, as one the pull request adds, takes
+ * the nearest directory above it that the repository has. A state file that
+ * is missing, unreadable, of another version, or without a record of the
+ * checkout and its workspace that parses leaves the conversation its own
+ * directory and no trust path. Never throws.
  */
 export function resolveConversationProject(agentDir: string, cwd: string): ConversationProject {
 	const directory = canonicalizePath(resolvePath(cwd));
@@ -49,7 +51,7 @@ export function resolveConversationProject(agentDir: string, cwd: string): Conve
 		return { projectCwd: cwd, trustPath: directory };
 	}
 	try {
-		const state = parseVoltdState(JSON.parse(readFileSync(join(getDaemonDir(agentDir), "state.json"), "utf8")));
+		const state = readVoltdWorktreeRecords(join(getDaemonDir(agentDir), "state.json"));
 		// The innermost checkout holding the directory, on canonical paths.
 		let checkout: IrohRemoteWorkspaceWorktree | undefined;
 		for (const worktree of state.worktrees) {
@@ -78,9 +80,42 @@ export function resolveConversationProject(agentDir: string, cwd: string): Conve
 			return { projectCwd, trustPath: canonicalizePath(resolvePath(project.trustPath)) };
 		}
 	} catch {
-		// No usable record: the state file is missing, unreadable, or not the daemon's state.
+		// No usable record: one names a path that cannot be resolved or read.
 	}
 	return { projectCwd: cwd, trustPath: undefined };
+}
+
+/**
+ * The project of a command run in a directory (`volt install`, `volt config`,
+ * `volt store`, `volt mcp`), with the trust decided before the command reads
+ * a saved decision or asks: `trustOverride`. A project without a trust path
+ * always has one, so nothing is read, asked, or saved for it.
+ */
+export type CommandProject =
+	| { readonly projectCwd: string; readonly trustPath: string; readonly trustOverride: boolean | undefined }
+	| { readonly projectCwd: string; readonly trustPath: undefined; readonly trustOverride: boolean };
+
+/**
+ * The project of a command run in `cwd`: that of a conversation there
+ * (`resolveConversationProject`). `trustOverride` is the command's
+ * `--approve` (true) or `--no-approve` (false). A managed worktree the daemon
+ * has no record of takes `--no-approve` only: it is otherwise trusted exactly
+ * while nothing in it needs trust, whatever `--approve` or
+ * `defaultProjectTrust` say.
+ */
+export function resolveCommandProject(
+	agentDir: string,
+	cwd: string,
+	trustOverride: boolean | undefined,
+): CommandProject {
+	const { projectCwd, trustPath } = resolveConversationProject(agentDir, cwd);
+	return trustPath === undefined
+		? {
+				projectCwd,
+				trustPath,
+				trustOverride: trustOverride !== false && !hasTrustRequiringProjectResources(projectCwd),
+			}
+		: { projectCwd, trustPath, trustOverride };
 }
 
 /** The path a conversation in `cwd` takes its project trust from (`resolveConversationProject`). */
