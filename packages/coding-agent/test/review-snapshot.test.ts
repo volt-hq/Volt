@@ -6,6 +6,7 @@ import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	renameSync,
 	rmSync,
@@ -23,7 +24,13 @@ import {
 	capturePullRequestIdentityWithGitHubCli,
 } from "../src/core/code-host/github-cli-context.ts";
 import * as githubDiscovery from "../src/core/code-host/github-cli-discovery.ts";
-import { normalizeReviewPath, type ReviewSnapshot, resolveReviewSnapshot } from "../src/core/review-snapshot.ts";
+import {
+	normalizeReviewPath,
+	projectReviewCheckout,
+	type ReviewSnapshot,
+	type ReviewSnapshotTreeEntry,
+	resolveReviewSnapshot,
+} from "../src/core/review-snapshot.ts";
 import { createReviewSnapshotTools, ReviewCoverageTracker } from "../src/core/review-tools.ts";
 import { createByteReviewRepository, BYTE_REVIEW_PATHS as P } from "./utilities/byte-review-repository.ts";
 
@@ -657,7 +664,71 @@ describe("review snapshots", () => {
 			]);
 			expect((await readAvailableFile(snapshot, "head", upperPath)).content.toString()).toBe("fixture\n");
 			expect((await readAvailableFile(snapshot, "head", lowerPath)).content.toString()).toBe("fixture\n");
-			await expect(snapshot.materializeHead()).rejects.toThrow(/cannot represent distinct snapshot paths/);
+
+			// The aliases do not stop a checkout. Both name one object, so the one file there serves both.
+			const checkout = await snapshot.materializeHead();
+			const { nativePath, unrepresented, omitted } = snapshot.describeCheckout(checkout);
+			expect(git(checkout, "status", "--porcelain")).toBe("");
+			const served = join(checkout, "HHHC_Shared", "PDFVerification", "BasePdfVerification.cs");
+			expect(nativePath(upperPath)).toBe(served);
+			expect(nativePath(lowerPath)).toBe(served);
+			expect(readFileSync(served, "utf8").replaceAll("\r\n", "\n")).toBe("fixture\n");
+			expect(nativePath("other.txt")).toBe(join(checkout, "other.txt"));
+			// The two directories are one on disk, so neither is served as the head has it. No content is missing.
+			expect(unrepresented).toEqual(["HHHC_Shared/PDFVerification", "HHHC_Shared/PdfVerification"]);
+			expect(omitted).toBe(0);
+		},
+	);
+
+	it.runIf(process.platform === "win32")(
+		"checks out one file for names that differ only in case, and does not serve the others as it",
+		async () => {
+			const repository = createRepository();
+			const write = (args: string[], input: string): string => {
+				const result = spawnSync("git", args, { cwd: repository, input, encoding: "utf8" });
+				if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+				return result.stdout.trim();
+			};
+			const blob = (content: string): string => write(["hash-object", "-w", "--stdin"], content);
+			const tree = (entries: Array<[mode: string, type: string, oid: string, name: string]>): string =>
+				write(
+					["mktree", "-z"],
+					entries.map(([mode, type, oid, name]) => `${mode} ${type} ${oid}\t${name}\0`).join(""),
+				);
+			// Object-only: no working tree on this system could hold these names side by side.
+			const head = tree([
+				["100644", "blob", blob("a file named Docs\n"), "Docs"],
+				["100644", "blob", blob("upper notes\n"), "Notes.md"],
+				["040000", "tree", tree([["100644", "blob", blob("guide\n"), "guide.md"]]), "docs"],
+				["100644", "blob", blob("lower notes\n"), "notes.md"],
+				["100644", "blob", blob("upper ring\n"), "\u00c5.txt"],
+				["100644", "blob", blob("lower ring\n"), "\u00e5.txt"],
+			]);
+			const sha = git(repository, "commit-tree", head, "-p", "HEAD", "-m", "case aliases");
+			const snapshot = await resolve({ kind: "commit", sha }, repository);
+
+			const checkout = await snapshot.materializeHead();
+			const { nativePath, unrepresented, omitted } = snapshot.describeCheckout(checkout);
+			expect(git(checkout, "status", "--porcelain")).toBe("");
+			const text = (path: string | undefined): string | undefined =>
+				path === undefined ? undefined : readFileSync(path, "utf8").replaceAll("\r\n", "\n");
+			// Of leaves that fold together, Git's first stays, letters outside ASCII included.
+			expect(text(nativePath("Notes.md"))).toBe("upper notes\n");
+			expect(nativePath("notes.md")).toBeUndefined();
+			expect(text(nativePath("\u00c5.txt"))).toBe("upper ring\n");
+			expect(nativePath("\u00e5.txt")).toBeUndefined();
+			// A directory keeps its place over a file of its name.
+			expect(nativePath("Docs")).toBeUndefined();
+			expect(text(nativePath("docs/guide.md"))).toBe("guide\n");
+			expect(unrepresented).toEqual(["Docs", "notes.md", "\u00e5.txt"]);
+			expect(omitted).toBe(3);
+			// The snapshot still reads what the checkout does not hold.
+			expect((await readAvailableFile(snapshot, "head", "notes.md")).content.toString()).toBe("lower notes\n");
+			expect((await readAvailableFile(snapshot, "head", "Docs")).content.toString()).toBe("a file named Docs\n");
+			// A reset returns the checkout to the same files.
+			writeFileSync(join(checkout, "Notes.md"), "edited\n");
+			await snapshot.resetHead(checkout);
+			expect(text(nativePath("Notes.md"))).toBe("upper notes\n");
 		},
 	);
 
@@ -2556,16 +2627,51 @@ if (!args.includes("--numstat")) {
 		expect(existsSync(join(submodule, "untracked.txt"))).toBe(false);
 	});
 
-	it.runIf(process.platform === "win32")(
-		"reports unrepresentable byte paths instead of materializing replacement names",
-		async () => {
-			const repository = createRepository(false);
-			const sha = createByteReviewRepository(repository);
-			const snapshot = await resolve({ kind: "commit", sha }, repository);
-			await expect(snapshot.materializeHead()).rejects.toThrow(/not valid UTF-8|cannot be represented/);
-			expect((await readAvailableFile(snapshot, "head", P.ff)).content.toString()).toContain("head needle ff");
-		},
-	);
+	it("materializes a head with byte paths, serving only what the checkout holds under its own name", async () => {
+		const repository = createRepository(false);
+		const sha = createByteReviewRepository(repository);
+		const snapshot = await resolve({ kind: "commit", sha }, repository);
+		const checkout = await snapshot.materializeHead();
+		const { nativePath, unrepresented, omitted } = snapshot.describeCheckout(checkout);
+
+		// No native path string spells a name that is not UTF-8, on any system: never a replacement name instead.
+		const bytePaths = [P.added, P.fe, P.ff, P.directory, P.link, P.module, P.renamed, P.type];
+		for (const path of [...bytePaths, P.child]) expect(nativePath(path), path).toBeUndefined();
+		expect(unrepresented).toEqual(expect.arrayContaining(bytePaths));
+		// What lies beneath a directory that is not served is not listed again.
+		expect(unrepresented).not.toContain(P.child);
+
+		// What is served is the head's own content, under the name the reference decodes to.
+		const faithful = async (path: string): Promise<void> => {
+			const native = nativePath(path);
+			if (native === undefined) throw new Error(`Expected the checkout to serve ${path}`);
+			expect(readFileSync(native, "utf8").replaceAll("\r\n", "\n"), path).toBe(
+				(await readAvailableFile(snapshot, "head", path)).content.toString(),
+			);
+		};
+		for (const path of [P.literal, P.replacement, P.shared]) await faithful(path);
+		expect(nativePath(P.literal)).toBe(join(checkout, "collision-%FF.txt"));
+		// A path outside the head, such as what a setup installs, resolves to where it would be.
+		expect(nativePath("node_modules/pkg/index.js")).toBe(join(checkout, "node_modules", "pkg", "index.js"));
+		expect(() => nativePath("collision-%ff.txt")).toThrow(/uppercase/);
+
+		if (process.platform === "win32") {
+			// NTFS cannot store a line feed or a backslash in a name either, so the checkout leaves those out too.
+			for (const path of [P.lineFeed, P.backslash]) expect(nativePath(path), path).toBeUndefined();
+			expect(unrepresented).toHaveLength(bytePaths.length + 2);
+			expect(omitted).toBe(unrepresented.length);
+			expect(readdirSync(checkout).sort()).toEqual(
+				[".git", "collision-%FF.txt", "collision-\uFFFD.txt", "dir-other.txt", "shared.txt"].sort(),
+			);
+			expect(git(checkout, "status", "--porcelain")).toBe("");
+		} else {
+			for (const path of [P.lineFeed, P.backslash]) await faithful(path);
+		}
+
+		// The snapshot serves every path, whatever the checkout holds.
+		expect((await readAvailableFile(snapshot, "head", P.ff)).content.toString()).toContain("head needle ff");
+		expect((await readAvailableFile(snapshot, "head", P.backslash)).content.toString()).toContain("needle backslash");
+	});
 
 	it("fails closed when uncommitted state changes throughout capture", async () => {
 		const repository = createRepository();
@@ -2752,10 +2858,211 @@ process.stdout.write(output); process.stderr.write(result.stderr); process.exitC
 		},
 	);
 
+	it("has Git skip the patch of a blob over the read limit, and still pairs an oversized rename", async () => {
+		const repository = createRepository();
+		const lines = (tag: string): string =>
+			`${Array.from({ length: 40 }, (_, index) => `${tag} line ${index}`).join("\n")}\n`;
+		writeFileSync(join(repository, "large.txt"), lines("large"));
+		writeFileSync(join(repository, "old-name.txt"), lines("moved"));
+		git(repository, "add", ".");
+		git(repository, "commit", "-m", "add large files");
+		// Each is over the 256-byte limit below. One is edited in place, the other renamed with a small edit.
+		writeFileSync(
+			join(repository, "large.txt"),
+			lines("large").replace("large line 20\n", "changed in the middle\n"),
+		);
+		git(repository, "mv", "old-name.txt", "new-name.txt");
+		writeFileSync(join(repository, "new-name.txt"), lines("moved").replace("moved line 5\n", "renamed and edited\n"));
+		writeFileSync(join(repository, "tracked.txt"), "after\n");
+		git(repository, "add", "-A");
+		git(repository, "commit", "-m", "change them");
+
+		// Keep what Git prints for the combined patch command, to see what it was made to generate.
+		const realGit =
+			process.platform === "win32"
+				? run(repository, "where.exe", "git").split(/\r?\n/u)[0]
+				: run(repository, "which", "git");
+		if (!realGit) throw new Error("Unable to locate Git");
+		const bin = mkdtempSync(join(tmpdir(), "volt-review-patch-log-"));
+		tempDirectories.push(bin);
+		const patchLog = join(bin, "patch-stream.bin");
+		installNodeCommandShim(
+			bin,
+			"git",
+			`import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const result = spawnSync(${JSON.stringify(realGit)}, args, { stdio: ["inherit", "pipe", "pipe"] });
+if (args.includes("--patch")) writeFileSync(${JSON.stringify(patchLog)}, result.stdout);
+process.stdout.write(result.stdout); process.stderr.write(result.stderr); process.exitCode = result.status ?? 1;
+`,
+		);
+		process.env.PATH = `${bin}${delimiter}${initialPath ?? ""}`;
+		const snapshot = await resolve({ kind: "commit", sha: "HEAD" }, repository, { maxBlobBytes: 256 });
+
+		const changed = new Map(snapshot.changedFiles.map((file) => [file.path, file]));
+		const overLimit = "File content exceeds the 256 bytes snapshot blob limit.";
+		// The statistics and the text/binary judgment come from Git's own counts, which the limit does not touch.
+		expect(changed.get("large.txt")).toMatchObject({
+			status: "modified",
+			reviewable: false,
+			unsupportedReason: overLimit,
+			hunks: [],
+			additions: 1,
+			deletions: 1,
+			binary: false,
+		});
+		// The raw record of the rename still matches the inventory: Git pairs the two files as it did without the limit.
+		expect(changed.get("new-name.txt")).toMatchObject({
+			status: "renamed",
+			previousPath: "old-name.txt",
+			reviewable: false,
+			unsupportedReason: overLimit,
+			hunks: [],
+		});
+		expect(changed.get("tracked.txt")).toMatchObject({ reviewable: true, hunks: [expect.anything()] });
+
+		const stream = readFileSync(patchLog, "utf8");
+		// Git diffed neither side of the edited file: one line stands for its patch.
+		expect(stream).toContain("Binary files a/large.txt and b/large.txt differ");
+		expect(stream).not.toContain("changed in the middle");
+		// A file within the limit keeps its patch.
+		expect(stream).toContain("+after");
+	});
+
 	it("rejects unsafe repository paths", () => {
 		expect(() => normalizeReviewPath("../secret")).toThrow(/traverse/);
 		expect(() => normalizeReviewPath("/absolute")).toThrow(/relative/);
 		expect(() => normalizeReviewPath("a//b")).toThrow(/traverse/);
 		expect(normalizeReviewPath("./src/file.ts")).toBe("src/file.ts");
+	});
+});
+
+describe("which head paths a review checkout holds", () => {
+	const leaf = (path: string, oid = "a".repeat(40), mode = "100644"): ReviewSnapshotTreeEntry => ({
+		path,
+		mode,
+		type: "blob",
+		oid,
+	});
+	const directory = (path: string): ReviewSnapshotTreeEntry => ({
+		path,
+		mode: "040000",
+		type: "tree",
+		oid: "d".repeat(40),
+	});
+	const windows = { platform: "win32", ignoreCase: true, precomposeUnicode: false } as const;
+	const linux = { platform: "linux", ignoreCase: false, precomposeUnicode: false } as const;
+	const mac = { platform: "darwin", ignoreCase: true, precomposeUnicode: true } as const;
+	const project = (
+		entries: ReviewSnapshotTreeEntry[],
+		filesystem: Parameters<typeof projectReviewCheckout>[1],
+	): { omitted: string[]; aliases: Record<string, string>; unrepresented: string[] } => {
+		const projection = projectReviewCheckout(entries, filesystem);
+		return {
+			omitted: [...projection.omitted],
+			aliases: Object.fromEntries(projection.aliases),
+			unrepresented: [...projection.unrepresented],
+		};
+	};
+
+	it("leaves out the names Windows cannot store, with all beneath them, and nothing elsewhere", () => {
+		const refused = [
+			"aux",
+			"aux .c",
+			"nul.txt",
+			"com1",
+			"CONIN$",
+			"trailing.",
+			"trailing ",
+			"back%5Cslash",
+			"line%0Abreak",
+			"star*",
+			"bad%3Adir",
+		];
+		const stored = ["auxiliary.c", "console.log", "com10", "ok.txt"];
+		const entries = [
+			...refused.slice(0, -1).map((path) => leaf(path)),
+			directory("bad%3Adir"),
+			leaf("bad%3Adir/inner.txt"),
+			...stored.map((path) => leaf(path)),
+		];
+		// The directory stands for what it holds: `inner.txt` is neither left out nor listed on its own.
+		expect(project(entries, windows)).toEqual({ omitted: refused, aliases: {}, unrepresented: refused });
+		expect(project(entries, linux)).toEqual({ omitted: [], aliases: {}, unrepresented: [] });
+		expect(project(entries, { ...mac, ignoreCase: false, precomposeUnicode: false })).toEqual({
+			omitted: [],
+			aliases: {},
+			unrepresented: [],
+		});
+	});
+
+	it("never serves a name that is not UTF-8, and leaves it out where the filesystem refuses it", () => {
+		const entries = [directory("dir-%FF"), leaf("dir-%FF/child.txt"), leaf("raw-%FF"), leaf("literal-%25FF")];
+		const unserved = ["dir-%FF", "raw-%FF"];
+		// Linux stores the bytes, so commands in the checkout find the files; no path string can name them.
+		expect(project(entries, linux)).toEqual({ omitted: [], aliases: {}, unrepresented: unserved });
+		expect(project(entries, windows)).toEqual({ omitted: unserved, aliases: {}, unrepresented: unserved });
+		expect(project(entries, mac)).toEqual({ omitted: unserved, aliases: {}, unrepresented: unserved });
+	});
+
+	it("keeps Git's first of the leaves that fold together, and serves an identical one through it", () => {
+		const entries = [
+			leaf("Mode.sh", "1".repeat(40), "100755"),
+			leaf("Readme.md", "2".repeat(40)),
+			leaf("Same.txt", "3".repeat(40)),
+			// The same object under another mode is another file.
+			leaf("mode.sh", "1".repeat(40)),
+			leaf("readme.md", "4".repeat(40)),
+			leaf("same.txt", "3".repeat(40)),
+			// Folding only ASCII letters would keep both of these, and NTFS would then write one over the other.
+			leaf("\u00c5.txt", "5".repeat(40)),
+			leaf("\u00e5.txt", "6".repeat(40)),
+		];
+		expect(project(entries, windows)).toEqual({
+			omitted: ["mode.sh", "readme.md", "same.txt", "\u00e5.txt"],
+			aliases: { "same.txt": "Same.txt" },
+			unrepresented: ["mode.sh", "readme.md", "\u00e5.txt"],
+		});
+		expect(project(entries, linux)).toEqual({ omitted: [], aliases: {}, unrepresented: [] });
+	});
+
+	it("keeps a directory over a leaf of its name, and serves neither of two directories that fold together", () => {
+		const entries = [
+			// Git lists this leaf before the directory it collides with.
+			leaf("Docs"),
+			directory("A"),
+			leaf("A/f.txt", "1".repeat(40)),
+			leaf("A/only-upper.txt"),
+			directory("a"),
+			leaf("a/f.txt", "1".repeat(40)),
+			leaf("a/only-lower.txt"),
+			directory("docs"),
+			leaf("docs/guide.md"),
+		];
+		// Git writes `A` and `a` into one directory, so both stay, and each leaf in them is judged on its own path.
+		expect(project(entries, windows)).toEqual({
+			omitted: ["Docs", "a/f.txt"],
+			aliases: { "a/f.txt": "A/f.txt" },
+			unrepresented: ["Docs", "A", "a"],
+		});
+	});
+
+	it("folds Unicode normalization where Git found the filesystem to", () => {
+		const composed = "caf\u00e9.txt";
+		const decomposed = "cafe\u0301.txt";
+		const entries = [leaf(decomposed, "1".repeat(40)), leaf(composed, "2".repeat(40)), leaf("CAF\u00c9.txt")];
+		const caseSensitive = { platform: "darwin", ignoreCase: false, precomposeUnicode: true } as const;
+		expect(project(entries, caseSensitive)).toEqual({
+			omitted: [composed],
+			aliases: {},
+			unrepresented: [composed],
+		});
+		expect(project(entries, mac)).toEqual({
+			omitted: [composed, "CAF\u00c9.txt"],
+			aliases: {},
+			unrepresented: [composed, "CAF\u00c9.txt"],
+		});
+		expect(project(entries, linux)).toEqual({ omitted: [], aliases: {}, unrepresented: [] });
 	});
 });

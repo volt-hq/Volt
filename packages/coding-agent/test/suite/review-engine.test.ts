@@ -510,6 +510,47 @@ describe("review engines", () => {
 		expect(runs.runs[0]).toMatchObject({ status: "completed", result: { coverage: { uncheckedAreas: [] } } });
 	});
 
+	it("says whether the snapshot has a text file at a path, without counting it as read", async () => {
+		const { harness, start } = await fixture();
+		const cwd = harness.tempDir;
+		// Beside the changed file: one the change deletes, and a binary one it adds.
+		writeFileSync(join(cwd, "gone.txt"), "deleted by the change\n");
+		git(cwd, "add", "gone.txt");
+		git(cwd, "commit", "-m", "add a file to delete");
+		rmSync(join(cwd, "gone.txt"));
+		writeFileSync(join(cwd, "binary.dat"), Buffer.from([0, 1, 2, 0]));
+		let answers: Record<string, boolean> | undefined;
+		let notCanonical: unknown;
+		const { runs } = await start(
+			engine(async (ctx) => {
+				answers = {
+					changedHead: await ctx.hasTextFile("src/value.ts", "head"),
+					changedBase: await ctx.hasTextFile("src/value.ts", "base"),
+					deletedHead: await ctx.hasTextFile("gone.txt", "head"),
+					deletedBase: await ctx.hasTextFile("gone.txt", "base"),
+					binary: await ctx.hasTextFile("binary.dat", "head"),
+					missing: await ctx.hasTextFile("src/missing.ts", "head"),
+					directory: await ctx.hasTextFile("src", "head"),
+				};
+				notCanonical = await ctx.hasTextFile("src/100%.ts", "head").catch((error: unknown) => error);
+				await reviewCarefully(ctx);
+			}),
+		);
+		expect(answers).toEqual({
+			changedHead: true,
+			changedBase: true,
+			deletedHead: false,
+			deletedBase: true,
+			binary: false,
+			missing: false,
+			directory: false,
+		});
+		expect(notCanonical).toMatchObject({ message: expect.stringContaining("uppercase %HH") });
+		// The engine was given the diff, and read no file: asking whether one exists is not reading it.
+		expect(runs.runs[0]?.result?.coverage.hunksInspected).toHaveLength(2);
+		expect(runs.runs[0]?.result?.coverage.filesInspected).toEqual([]);
+	});
+
 	it("hands a released checkout to the next caller reset to the head, without setting it up again", async () => {
 		const { start } = await fixture();
 		let first: ReviewEngineCheckout | undefined;
@@ -558,6 +599,84 @@ describe("review engines", () => {
 		expect(reused?.setupRuns.trim()).toBe("run");
 		// Releasing once the review ended does nothing, and never fails.
 		await expect(held!.release()).resolves.toBeUndefined();
+	});
+
+	it("says where a checkout holds a reference, and which references it does not serve", async () => {
+		const { harness, start } = await fixture();
+		const cwd = harness.tempDir;
+		const write = (args: string[], input: Buffer): string => {
+			const result = spawnSync("git", args, { cwd, input, encoding: "utf8" });
+			if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+			return result.stdout.trim();
+		};
+		const entry = (mode: string, type: string, oid: string, name: Buffer | string): Buffer =>
+			Buffer.concat([Buffer.from(`${mode} ${type} ${oid}\t`), Buffer.from(name), Buffer.from([0])]);
+		// Object-only, so no working tree has to hold the names: the changed file, one whose name has a percent sign,
+		// and one whose name is not UTF-8, which no native path string can spell on any system.
+		const blob = git(cwd, "hash-object", "-w", "--", "src/value.ts");
+		const source = write(
+			["mktree", "-z"],
+			Buffer.concat([entry("100644", "blob", blob, "value.ts"), entry("100644", "blob", blob, "100%.ts")]),
+		);
+		const tree = write(
+			["mktree", "-z"],
+			Buffer.concat([
+				entry("040000", "tree", source, "src"),
+				entry(
+					"100644",
+					"blob",
+					blob,
+					Buffer.concat([Buffer.from("raw-"), Buffer.from([0xff]), Buffer.from(".ts")]),
+				),
+			]),
+		);
+		const sha = git(cwd, "commit-tree", tree, "-p", "HEAD", "-m", "odd names");
+		let seen:
+			| {
+					path: string;
+					unrepresented: readonly string[];
+					percent: string | undefined;
+					percentText: string;
+					raw: string | undefined;
+					installed: string | undefined;
+					notCanonical: unknown;
+			  }
+			| undefined;
+		const { work } = await start(
+			engine(async (ctx) => {
+				const checkout = await ctx.checkout();
+				const percent = checkout.nativePath("src/100%25.ts");
+				let notCanonical: unknown;
+				try {
+					checkout.nativePath("src/100%.ts");
+				} catch (error) {
+					notCanonical = error;
+				}
+				seen = {
+					path: checkout.path,
+					unrepresented: checkout.unrepresented,
+					percent,
+					percentText: percent === undefined ? "" : readFileSync(percent, "utf8"),
+					raw: checkout.nativePath("raw-%FF.ts"),
+					installed: checkout.nativePath("node_modules/pkg/index.js"),
+					notCanonical,
+				};
+				await checkout.release();
+				await reviewCarefully(ctx);
+			}),
+			{ target: { kind: "commit", sha } },
+		);
+		expect(work?.outcome).toBe("completed");
+		if (!seen) throw new Error("The engine did not run");
+		// A reference resolves to the file its name decodes to, not to a file spelled like the reference.
+		expect(seen.percent).toBe(join(seen.path, "src", "100%.ts"));
+		expect(seen.percentText).toContain("if (divisor === 0) return amount;");
+		// The name that is not UTF-8 is not served under some other name, and the checkout says so.
+		expect(seen.raw).toBeUndefined();
+		expect(seen.unrepresented).toEqual(["raw-%FF.ts"]);
+		// What is not in the head, such as a dependency the setup installed, resolves to where it would be.
+		expect(seen.installed).toBe(join(seen.path, "node_modules", "pkg", "index.js"));
+		expect(seen.notCanonical).toMatchObject({ message: expect.stringContaining("uppercase %HH") });
 	});
 
 	it("resets the initialized submodules of a released checkout as well", async () => {

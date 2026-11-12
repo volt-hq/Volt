@@ -205,6 +205,7 @@ const reviewMocks = vi.hoisted(() => {
 		readFile: vi.fn(async () => undefined),
 		listFiles: vi.fn(async () => []),
 		materializeHead: vi.fn(async () => "/tmp/review"),
+		describeCheckout: () => ({ nativePath: () => undefined, unrepresented: [], omitted: 0 }),
 		dispose,
 	};
 	return {

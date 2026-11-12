@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawnProcess } from "../utils/child-process.ts";
 import { terminateProcessTree } from "../utils/shell.ts";
-import { normalizeReviewPath, reviewPathFromBytes, reviewPathToUtf8 } from "./review-path.ts";
+import { normalizeReviewPath, reviewPathBytes, reviewPathFromBytes, reviewPathToUtf8 } from "./review-path.ts";
 
 export { normalizeReviewPath } from "./review-path.ts";
 
@@ -138,6 +138,26 @@ export interface ReviewSnapshotSearchResult {
 	complete: boolean;
 }
 
+/** What a checkout {@link ReviewSnapshot.materializeHead} made holds of the reviewed head on its filesystem. */
+export interface ReviewSnapshotCheckout {
+	/**
+	 * The absolute native path of the file or directory in the checkout that holds what `reference`, a canonical path
+	 * reference, names in the head. `undefined` when the checkout does not serve it: its name is one a native path
+	 * string or this filesystem cannot spell, the checkout left it out, or it is a directory sharing its place on
+	 * disk with another. A leaf left out for a case alias of the same object and mode resolves to that alias. A
+	 * reference to nothing in the head, such as what a setup installed, resolves to where it would be. Throws for a
+	 * string that is not a canonical reference.
+	 */
+	nativePath(reference: string): string | undefined;
+	/**
+	 * The head references the checkout does not serve, in Git's order. What lies beneath a directory that is left
+	 * out or cannot be spelled is not listed again.
+	 */
+	readonly unrepresented: readonly string[];
+	/** How many of those the checkout's files leave out, a directory counting once: the head content missing there. */
+	readonly omitted: number;
+}
+
 export interface ReviewSnapshot {
 	description: string;
 	workflowDescription?: string;
@@ -159,7 +179,14 @@ export interface ReviewSnapshot {
 	 * is the first 500 characters of its line.
 	 */
 	search(options: ReviewSnapshotSearchOptions): Promise<ReviewSnapshotSearchResult>;
+	/**
+	 * Make a checkout of the reviewed head in a new directory and return it. It holds the head tree without the paths
+	 * its filesystem cannot hold faithfully (see {@link projectReviewCheckout}), so a filename never fails it:
+	 * {@link describeCheckout} says which those are.
+	 */
 	materializeHead(): Promise<string>;
+	/** What `directory`, a checkout {@link materializeHead} made, holds of the head. Throws for any other directory. */
+	describeCheckout(directory: string): ReviewSnapshotCheckout;
 	/**
 	 * Return `directory`, a checkout {@link materializeHead} made, to the reviewed head: tracked files restored and
 	 * untracked ones removed, nested repositories included, while ignored ones (what a setup installed) stay. The same
@@ -1688,6 +1715,8 @@ function parseNumstat(stdout: Buffer): Map<string, NumstatEntry> {
 interface ParsedReviewSnapshotTree {
 	entries: Map<string, ReviewSnapshotTreeEntry>;
 	directories: Map<string, ReviewSnapshotTreeEntry>;
+	/** Directories and leaves together as Git listed them: a directory comes before what it holds. */
+	ordered: ReviewSnapshotTreeEntry[];
 	pathspecUnsafeEntries: Set<ReviewSnapshotTreeEntry>;
 }
 
@@ -1695,6 +1724,7 @@ function parseTree(stdout: Buffer): ParsedReviewSnapshotTree {
 	const entries = new Map<string, ReviewSnapshotTreeEntry>();
 	const pathspecUnsafeEntries = new Set<ReviewSnapshotTreeEntry>();
 	const directories = new Map<string, ReviewSnapshotTreeEntry>();
+	const ordered: ReviewSnapshotTreeEntry[] = [];
 	for (const token of nulRecords(stdout)) {
 		const tab = token.indexOf(9);
 		if (tab < 0) throw new Error("git ls-tree returned malformed metadata.");
@@ -1721,9 +1751,127 @@ function parseTree(stdout: Buffer): ParsedReviewSnapshotTree {
 		if (entries.has(path) || directories.has(path)) throw new Error("git ls-tree returned a duplicate path.");
 		if (type === "tree") directories.set(path, entry);
 		else entries.set(path, entry);
+		ordered.push(entry);
 		if (reviewPathToUtf8(path) === undefined) pathspecUnsafeEntries.add(entry);
 	}
-	return { entries, directories, pathspecUnsafeEntries };
+	return { entries, directories, ordered, pathspecUnsafeEntries };
+}
+
+/** The properties of the filesystem a checkout is made on that decide which head paths it can hold. */
+export interface ReviewCheckoutFilesystem {
+	platform: NodeJS.Platform;
+	/** Git's `core.ignorecase` for a repository there: names that differ only in case are one file. */
+	ignoreCase: boolean;
+	/** Git's `core.precomposeunicode` there: names that differ only in Unicode normalization are one file. */
+	precomposeUnicode: boolean;
+}
+
+/** What a checkout on one filesystem holds of a head tree: see {@link projectReviewCheckout}. */
+export interface ReviewCheckoutProjection {
+	/**
+	 * The head entries left out of the checkout's tree. A directory stands for everything beneath it, which is not
+	 * listed again.
+	 */
+	omitted: ReadonlySet<string>;
+	/**
+	 * Leaves left out because another name for the same file is checked out with the same object and mode, each with
+	 * the reference of that file: their content is in the checkout, there.
+	 */
+	aliases: ReadonlyMap<string, string>;
+	/**
+	 * The head references the checkout does not serve, in Git's order: those left out whose content is nowhere in it,
+	 * directories that share one directory on disk with another, and names a native path string cannot spell. What
+	 * lies beneath a directory that is left out or cannot be spelled is not listed again.
+	 */
+	unrepresented: readonly string[];
+}
+
+/** Whether NTFS, or Git for Windows guarding it, refuses `name` as one component of a path. */
+function windowsRefusesName(name: string): boolean {
+	return (
+		/[\\:*?"<>|\u0000-\u001f]/.test(name) ||
+		/[. ]$/.test(name) ||
+		/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9]|conin\$|conout\$) *(?:\.|$)/i.test(name)
+	);
+}
+
+/**
+ * Decide which entries of a head tree a checkout on `filesystem` holds faithfully. `entries` are the tree's
+ * directories and leaves as `git ls-tree -r -t` lists them. Nothing here touches a filesystem.
+ *
+ * 1. A name the filesystem cannot store is left out with all beneath it: on Windows one that is not UTF-8 or that
+ *    NTFS refuses, on macOS one that is not UTF-8.
+ * 2. Where names fold together (case, Unicode normalization), each remaining entry is keyed by its whole path
+ *    folded. A leaf that shares a key with a directory is left out. Of leaves that share a key, Git's first stays
+ *    and the rest are left out. Directories that share a key stay: Git writes both into one directory.
+ * 3. A leaf left out under rule 2 is still served, through the leaf that stayed, when both are the same object and
+ *    mode. Every other entry left out, each directory that shares a key with another, and any name that is not
+ *    UTF-8 is not served.
+ *
+ * The folding is a prediction (`toUpperCase`, NFD), not the filesystem's own table: a pair it folds and the
+ * filesystem does not costs one of the two its place in the checkout, and a pair only the filesystem folds is
+ * missed.
+ */
+export function projectReviewCheckout(
+	entries: readonly ReviewSnapshotTreeEntry[],
+	filesystem: ReviewCheckoutFilesystem,
+): ReviewCheckoutProjection {
+	const omitted = new Set<string>();
+	const aliases = new Map<string, string>();
+	const unserved = new Set<string>();
+	const present: Array<{ entry: ReviewSnapshotTreeEntry; native: string }> = [];
+	let beneath: string | undefined;
+	for (const entry of entries) {
+		if (beneath !== undefined && entry.path.startsWith(beneath)) continue;
+		beneath = undefined;
+		const native = reviewPathToUtf8(entry.path);
+		// The directories above this entry passed already, so only its own name is in question.
+		const storable =
+			filesystem.platform === "win32"
+				? native !== undefined && !windowsRefusesName(native.slice(native.lastIndexOf("/") + 1))
+				: filesystem.platform !== "darwin" || native !== undefined;
+		if (!storable) omitted.add(entry.path);
+		if (!storable || native === undefined) {
+			unserved.add(entry.path);
+			if (entry.type === "tree") beneath = `${entry.path}/`;
+			continue;
+		}
+		present.push({ entry, native });
+	}
+	if (filesystem.ignoreCase || filesystem.precomposeUnicode) {
+		const fold = (native: string): string => {
+			const normalized = filesystem.precomposeUnicode ? native.normalize("NFD") : native;
+			return filesystem.ignoreCase ? normalized.toUpperCase() : normalized;
+		};
+		// Directories first: a leaf can come before the directory it collides with.
+		const directories = new Map<string, string>();
+		for (const { entry, native } of present) {
+			if (entry.type !== "tree") continue;
+			const key = fold(native);
+			const first = directories.get(key);
+			if (first === undefined) directories.set(key, entry.path);
+			else unserved.add(first).add(entry.path);
+		}
+		const leaves = new Map<string, ReviewSnapshotTreeEntry>();
+		for (const { entry, native } of present) {
+			if (entry.type === "tree") continue;
+			const key = fold(native);
+			const kept = leaves.get(key);
+			if (kept === undefined && !directories.has(key)) {
+				leaves.set(key, entry);
+				continue;
+			}
+			omitted.add(entry.path);
+			if (kept !== undefined && kept.oid === entry.oid && kept.mode === entry.mode)
+				aliases.set(entry.path, kept.path);
+			else unserved.add(entry.path);
+		}
+	}
+	return {
+		omitted,
+		aliases,
+		unrepresented: entries.flatMap((entry) => (unserved.has(entry.path) ? [entry.path] : [])),
+	};
 }
 
 function collectLineRanges(lines: number[]): ReviewSnapshotLineRange[] {
@@ -1985,7 +2133,15 @@ async function searchTreePage(
 	return page;
 }
 
-/** Read raw file-pair identity first, then bounded patch sections in the same Git queue order. */
+/**
+ * Read raw file-pair identity first, then bounded patch sections in the same Git queue order.
+ *
+ * A file over the blob limit is already unsupported, so its patch would only be read and thrown away. Git is told
+ * that limit as `core.bigFileThreshold`: it prints `Binary files differ` for a blob larger than that instead of
+ * diffing it. The raw records are the same either way, and so are the name-status and numstat runs, which do not
+ * get the setting. Git still diffs a large blob whose content it had loaded to score a rename or copy against a
+ * blob of similar size; that patch is read and dropped as before.
+ */
 async function readTreePatches(
 	source: GitSource,
 	baseTree: string,
@@ -2086,6 +2242,8 @@ async function readTreePatches(
 	const result = await streamCommand(
 		"git",
 		[
+			"-c",
+			`core.bigFileThreshold=${source.limits.maxBlobBytes}`,
 			"diff",
 			"--raw",
 			"-z",
@@ -2217,6 +2375,13 @@ class GitReviewSnapshot implements ReviewSnapshot {
 	private readonly treeEntries = new Map<ReviewSnapshotRevision, Map<string, ReviewSnapshotTreeEntry>>();
 	private readonly pathspecUnsafeEntries = new Map<ReviewSnapshotRevision, ReadonlySet<ReviewSnapshotTreeEntry>>();
 	private readonly directoryEntries = new Map<ReviewSnapshotRevision, Map<string, ReviewSnapshotTreeEntry>>();
+	/** The head's directories and leaves together, as Git listed them. */
+	private readonly headEntries: readonly ReviewSnapshotTreeEntry[];
+	/**
+	 * What a checkout holds of the head on the filesystem checkouts are made on. Decided when the first is made, from
+	 * what Git found out about that filesystem, and the same for every later one.
+	 */
+	private checkoutProjection: ReviewCheckoutProjection | undefined;
 	/** The searches still running. */
 	private readonly activeSearchWork = new Set<Promise<unknown>>();
 	/** Aborts when the snapshot is disposed, which stops those searches. */
@@ -2249,6 +2414,7 @@ class GitReviewSnapshot implements ReviewSnapshot {
 		this.directoryEntries.set("head", headInventory.directories);
 		this.pathspecUnsafeEntries.set("base", baseInventory.pathspecUnsafeEntries);
 		this.pathspecUnsafeEntries.set("head", headInventory.pathspecUnsafeEntries);
+		this.headEntries = headInventory.ordered;
 	}
 
 	static async create(init: SnapshotInit): Promise<GitReviewSnapshot> {
@@ -2381,23 +2547,61 @@ class GitReviewSnapshot implements ReviewSnapshot {
 		);
 	}
 
-	async materializeHead(): Promise<string> {
-		this.assertActive();
-		if (process.platform === "win32") {
-			const names = new Set<string>();
-			for (const entry of [
-				...(this.directoryEntries.get("head")?.values() ?? []),
-				...(this.treeEntries.get("head")?.values() ?? []),
-			]) {
-				const native = nativeReviewCheckoutPath(entry.path);
-				const folded = native.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
-				if (names.has(folded))
-					throw new Error(
-						`The Windows checkout cannot represent distinct snapshot paths at ${JSON.stringify(entry.path)}.`,
-					);
-				names.add(folded);
+	/**
+	 * Write the head tree without `omitted`, and without the directories that leaves empty, into the object store of
+	 * the checkout at `directory`, and return its id. Only the directories above something left out are written anew;
+	 * every other tree and blob is the head's own, which the checkout reaches through its alternates.
+	 */
+	private async writeCheckoutTree(directory: string, omitted: ReadonlySet<string>): Promise<string> {
+		const rewritten = new Set([""]);
+		for (const path of omitted) {
+			for (let end = path.lastIndexOf("/"); end !== -1; end = path.lastIndexOf("/", end - 1)) {
+				rewritten.add(path.slice(0, end));
 			}
 		}
+		const children = new Map<string, ReviewSnapshotTreeEntry[]>();
+		for (const entry of this.headEntries) {
+			const parent = entry.path.slice(0, Math.max(0, entry.path.lastIndexOf("/")));
+			if (!rewritten.has(parent) || omitted.has(entry.path)) continue;
+			const siblings = children.get(parent);
+			if (siblings) siblings.push(entry);
+			else children.set(parent, [entry]);
+		}
+		const mktree = async (records: Buffer[]): Promise<string> => {
+			const result = await runCommand("git", ["mktree", "-z"], directory, {
+				...commandOptions(this.limits, this.source.signal),
+				input: Buffer.concat(records),
+			});
+			const oid = text(result).trim();
+			if (!result.ok || !CANONICAL_GIT_OBJECT_ID_PATTERN.test(oid)) {
+				throw new Error(`Could not write the review checkout tree: ${commandError(result)}`);
+			}
+			return oid;
+		};
+		const recordsOf = async (parent: string): Promise<Buffer[]> => {
+			const records: Buffer[] = [];
+			for (const entry of children.get(parent) ?? []) {
+				let oid = entry.oid;
+				if (entry.type === "tree" && rewritten.has(entry.path)) {
+					const inner = await recordsOf(entry.path);
+					// Git has no empty directory: one that held only what is left out goes with it.
+					if (inner.length === 0) continue;
+					oid = await mktree(inner);
+				}
+				const bytes = reviewPathBytes(entry.path);
+				records.push(
+					Buffer.from(`${entry.mode} ${entry.type} ${oid}\t`),
+					bytes.subarray(bytes.lastIndexOf(47) + 1),
+					Buffer.from([0]),
+				);
+			}
+			return records;
+		};
+		return mktree(await recordsOf(""));
+	}
+
+	async materializeHead(): Promise<string> {
+		this.assertActive();
 		const directory = await mkdtemp(join(tmpdir(), "volt-review-checkout-"));
 		this.materializedDirectories.push(directory);
 		const init = await runCommand("git", ["init"], directory, commandOptions(this.limits, this.source.signal));
@@ -2409,20 +2613,39 @@ class GitReviewSnapshot implements ReviewSnapshot {
 			`${this.source.objectDirectories.map((path) => resolve(path)).join("\n")}\n`,
 			"utf8",
 		);
-		const commit = await runCommand(
-			"git",
-			["commit-tree", this.identity.headTree, "-m", "Volt review snapshot"],
-			directory,
-			{
-				...commandOptions(this.limits, this.source.signal),
-				env: {
-					GIT_AUTHOR_NAME: "Volt Review",
-					GIT_AUTHOR_EMAIL: "review@localhost",
-					GIT_COMMITTER_NAME: "Volt Review",
-					GIT_COMMITTER_EMAIL: "review@localhost",
-				},
+		if (this.checkoutProjection === undefined) {
+			// `git init` probed the directory it was given and recorded what it found there.
+			const flag = async (name: string): Promise<boolean> => {
+				const result = await runCommand(
+					"git",
+					["config", "--type=bool", "--get", name],
+					directory,
+					commandOptions(this.limits, this.source.signal),
+				);
+				// Exit code 1 says the variable is not set, which Git reads as false.
+				if (!result.ok && result.exitCode !== 1) {
+					throw new Error(`Could not read ${name} of the review checkout: ${commandError(result)}`);
+				}
+				return result.ok && text(result).trim() === "true";
+			};
+			const filesystem: ReviewCheckoutFilesystem = {
+				platform: process.platform,
+				ignoreCase: await flag("core.ignorecase"),
+				precomposeUnicode: await flag("core.precomposeunicode"),
+			};
+			this.checkoutProjection ??= projectReviewCheckout(this.headEntries, filesystem);
+		}
+		const omitted = this.checkoutProjection.omitted;
+		const tree = omitted.size === 0 ? this.identity.headTree : await this.writeCheckoutTree(directory, omitted);
+		const commit = await runCommand("git", ["commit-tree", tree, "-m", "Volt review snapshot"], directory, {
+			...commandOptions(this.limits, this.source.signal),
+			env: {
+				GIT_AUTHOR_NAME: "Volt Review",
+				GIT_AUTHOR_EMAIL: "review@localhost",
+				GIT_COMMITTER_NAME: "Volt Review",
+				GIT_COMMITTER_EMAIL: "review@localhost",
 			},
-		);
+		});
 		const commitOid = text(commit).trim();
 		if (!commit.ok || !CANONICAL_GIT_OBJECT_ID_PATTERN.test(commitOid)) {
 			throw new Error(`Could not create review checkout commit: ${commandError(commit)}`);
@@ -2438,6 +2661,29 @@ class GitReviewSnapshot implements ReviewSnapshot {
 		return directory;
 	}
 
+	describeCheckout(directory: string): ReviewSnapshotCheckout {
+		const projection = this.checkoutProjection;
+		if (projection === undefined || !this.materializedCommits.has(directory)) {
+			throw new Error("Not a checkout of this review snapshot.");
+		}
+		const unserved = new Set(projection.unrepresented);
+		return {
+			unrepresented: projection.unrepresented,
+			// An alias left out is still served, by the leaf that stayed.
+			omitted: projection.omitted.size - projection.aliases.size,
+			nativePath: (reference) => {
+				const path = normalizeReviewPath(reference);
+				const served = projection.aliases.get(path) ?? path;
+				const native = reviewPathToUtf8(served);
+				if (native === undefined || unserved.has(served)) return undefined;
+				const components = native.split("/");
+				// What lies beneath a directory left out, and a name outside the head, is not among the unserved.
+				if (process.platform === "win32" && components.some(windowsRefusesName)) return undefined;
+				return join(directory, ...components);
+			},
+		};
+	}
+
 	async resetHead(directory: string, signal?: AbortSignal): Promise<void> {
 		this.assertActive();
 		const commit = this.materializedCommits.get(directory);
@@ -2451,7 +2697,18 @@ class GitReviewSnapshot implements ReviewSnapshot {
 		const root = await realpath(directory);
 		const usedGitDirectories = new Set([await realpath(gitDirectory)]);
 		const pathspecUnsafe = this.pathspecUnsafeEntries.get("head");
-		const gitlinks = [...(this.treeEntries.get("head")?.values() ?? [])].filter((entry) => entry.type === "commit");
+		// A gitlink the checkout leaves out, or one beneath a directory it leaves out, has nothing there to reset.
+		const omitted = this.checkoutProjection?.omitted ?? new Set<string>();
+		const leftOut = (path: string): boolean => {
+			if (omitted.has(path)) return true;
+			for (let end = path.indexOf("/"); end !== -1; end = path.indexOf("/", end + 1)) {
+				if (omitted.has(path.slice(0, end))) return true;
+			}
+			return false;
+		};
+		const gitlinks = [...(this.treeEntries.get("head")?.values() ?? [])].filter(
+			(entry) => entry.type === "commit" && !leftOut(entry.path),
+		);
 		const unaddressable = gitlinks.find((gitlink) => pathspecUnsafe?.has(gitlink));
 		if (unaddressable)
 			throw new Error(`The submodule path ${JSON.stringify(unaddressable.path)} is not valid UTF-8.`);
@@ -2596,17 +2853,7 @@ function nativeReviewCheckoutPath(path: string): string {
 	const native = reviewPathToUtf8(path);
 	if (native === undefined)
 		throw new Error(`Snapshot path ${JSON.stringify(path)} is not valid UTF-8 for this checkout operation.`);
-	if (
-		process.platform === "win32" &&
-		native
-			.split("/")
-			.some(
-				(component) =>
-					/[\\:*?"<>|\u0000-\u001f]/.test(component) ||
-					/[. ]$/.test(component) ||
-					/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(component),
-			)
-	) {
+	if (process.platform === "win32" && native.split("/").some(windowsRefusesName)) {
 		throw new Error(`Snapshot path ${JSON.stringify(path)} cannot be represented in this Windows checkout.`);
 	}
 	return native;

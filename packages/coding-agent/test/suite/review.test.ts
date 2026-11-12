@@ -1725,6 +1725,56 @@ describe("review pipeline", () => {
 			expect(run.parsed?.coverage.commandsRun).toEqual(["cat setup-marker"]);
 			// The setup ran in the disposable checkout, never in the workspace.
 			expect(existsSync(join(workspace, "setup-marker"))).toBe(false);
+			// The checkout holds the whole head, so nothing is said about paths left out of it.
+			expect(run.parsed?.coverage.residualRisk.join("\n")).not.toContain("leaves out");
+		});
+
+		it("says how many paths of the head its filesystem left out", async () => {
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const snapshot = await createSnapshotRepository(harness);
+			snapshots.push(snapshot);
+			// Which paths a filesystem cannot hold depends on the host, so the count is given here.
+			const describeCheckout = snapshot.describeCheckout.bind(snapshot);
+			vi.spyOn(snapshot, "describeCheckout").mockImplementation((directory) => ({
+				...describeCheckout(directory),
+				omitted: 2,
+			}));
+			harness.setResponses([
+				() =>
+					fauxAssistantMessage(
+						fauxToolCall("report_review_candidates", { summary: "Nothing.", candidates: [], limitations: [] }),
+						{ stopReason: "toolUse" },
+					),
+				() =>
+					fauxAssistantMessage(
+						fauxToolCall("report_review_verification", {
+							summary: "Nothing omitted.",
+							assessment: "complete",
+							decisions: [],
+							priorFindingDecisions: [],
+							limitations: [],
+						}),
+						{ stopReason: "toolUse" },
+					),
+			]);
+			const run = await runReview({
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				model: harness.getModel(),
+				verifierModel: harness.getModel(),
+				authStorage: harness.authStorage,
+				modelRegistry: harness.session.modelRegistry,
+				settingsManager: harness.settingsManager,
+				resolved: snapshot,
+				controls: { scopeMode: "full", scope: ["src/**"] },
+				tools: ["bash"],
+			});
+			snapshots.splice(snapshots.indexOf(snapshot), 1);
+			expect(run.errorMessage).toBeUndefined();
+			expect(run.parsed?.coverage.residualRisk).toContainEqual(
+				expect.stringContaining("leaves out 2 path(s) of the reviewed head"),
+			);
 		});
 
 		it("fails the review, saying why, when its setup fails or runs too long", async () => {

@@ -128,6 +128,7 @@ async function fixture() {
 		listFiles: async () => [],
 		search: async () => ({ matches: [], complete: true }),
 		materializeHead: async () => cwd,
+		describeCheckout: () => ({ nativePath: () => undefined, unrepresented: [], omitted: 0 }),
 		resetHead: async () => {},
 		dispose: vi.fn(async () => {}),
 	};

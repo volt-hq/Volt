@@ -169,6 +169,7 @@ function snapshot(headOid: string, hunkId = "hunk-1"): ReviewSnapshot {
 		listFiles: async () => [],
 		search: async () => ({ matches: [], complete: true }),
 		materializeHead: async () => "/tmp/review-materialized",
+		describeCheckout: () => ({ nativePath: () => undefined, unrepresented: [], omitted: 0 }),
 		resetHead: async () => {},
 		dispose: async () => {},
 	};

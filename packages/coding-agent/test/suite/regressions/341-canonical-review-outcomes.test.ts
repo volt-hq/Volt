@@ -351,6 +351,7 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 			listFiles: async () => [],
 			search: async () => ({ matches: [], complete: true }),
 			materializeHead: async () => "/unused",
+			describeCheckout: () => ({ nativePath: () => undefined, unrepresented: [], omitted: 0 }),
 			resetHead: async () => {},
 			dispose: async () => {},
 		};

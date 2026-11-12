@@ -4,8 +4,9 @@
  * shapes. The host validates and bounds them, builds the result with the same code the built-in pipeline
  * uses (anchors checked against the snapshot, finding ids and fingerprints, completeness, caps), and
  * writes the run record: an engine supplies findings, never records. Snapshot paths are byte-reversible canonical
- * references (for example `100%25.ts`), not native filenames. Copy references into reports unchanged; use
- * `reviewPathToUtf8` only at native boundaries and `reviewPathFromUtf8` for actual UTF-8 checkout filenames.
+ * references (for example `100%25.ts`), not native filenames. Copy references into reports unchanged; get from one
+ * to a file in a checkout with {@link ReviewEngineCheckout.nativePath}, and use `reviewPathFromUtf8` for actual
+ * UTF-8 checkout filenames.
  *
  * An engine never sees patch text through its context. A pass gets the diff through {@link ReviewEnginePass.diff}
  * and the host's snapshot tools, which is what makes the run's coverage observed: a hunk counts as covered
@@ -376,10 +377,28 @@ export interface ReviewEnginePass {
 	coverage(): ReviewObservedCoverage;
 }
 
-/** A checkout of the reviewed head that the engine holds until it releases it: see {@link ReviewEngineContext.checkout}. */
+/**
+ * A checkout of the reviewed head that the engine holds until it releases it: see {@link ReviewEngineContext.checkout}.
+ * It is the head tree as far as its filesystem can hold it: {@link nativePath} and {@link unrepresented} say how far.
+ */
 export interface ReviewEngineCheckout {
 	/** The checkout's native OS directory, not a canonical snapshot path reference. */
 	readonly path: string;
+	/**
+	 * The absolute native path of the file or directory in this checkout that holds what `reference`, a canonical
+	 * path reference, names in the reviewed head: use it instead of decoding a reference and joining it to
+	 * {@link path}. `undefined` when the checkout does not serve that reference (see {@link unrepresented}); read it
+	 * through the pass's snapshot tools then. A reference to nothing in the head, such as a dependency the setup
+	 * installed, resolves to where it would be. Throws for a string that is not a canonical reference.
+	 */
+	nativePath(reference: string): string | undefined;
+	/**
+	 * The references of the reviewed head this checkout does not serve, in Git's order: names its filesystem or a
+	 * native path string cannot spell, files left out because another name already has their place (names that
+	 * differ only in case, on a filesystem that ignores case), and directories that share one directory on disk.
+	 * What lies beneath a directory that is left out or cannot be spelled is not listed again. Empty on most trees.
+	 */
+	readonly unrepresented: readonly string[];
 	/**
 	 * Hand the checkout back once done with it. The host resets it to the reviewed head (tracked files restored,
 	 * untracked ones removed, ignored ones such as what the setup installed kept) and gives it to a later
@@ -481,6 +500,13 @@ export interface ReviewEngineContext {
 	changedFiles(): ReviewEngineChangedFile[];
 	/** Start one more independent pass. */
 	pass(): ReviewEnginePass;
+	/**
+	 * Whether the snapshot has a text file the host can read at `path`, a canonical path reference, on `side`: one
+	 * that is there, within the snapshot's read limit, and not binary. For an engine to check a path a reviewer names
+	 * before it anchors a finding there. It counts as nothing read: unlike a read through a pass's tools, the run's
+	 * coverage stays as it was. Rejects for a string that is not a canonical reference.
+	 */
+	hasTextFile(path: string, side: "base" | "head"): Promise<boolean>;
 	/** Check a candidate report as {@link submit} would, without keeping anything: for an engine to repair its reports. */
 	validate(candidates: ReviewCandidateReport): Promise<ReviewEngineValidation>;
 	/**
@@ -500,8 +526,10 @@ export interface ReviewEngineContext {
 	 * one. When the review was started with a setup (such as installing dependencies), it has run there once, when the
 	 * checkout was made, so commands find what a working copy has; a setup that fails rejects with its output. Release
 	 * a checkout once done with it, so a later call reuses it instead of setting up another. Every checkout is removed
-	 * when the review ends. A platform that cannot represent snapshot filenames rejects checkout access; use
-	 * the pass's snapshot tools instead, without decoding their path references.
+	 * when the review ends. A filename never makes this reject: the checkout holds the head without the paths its
+	 * filesystem cannot hold faithfully, and says which those are. Get from a path reference to a file there with
+	 * {@link ReviewEngineCheckout.nativePath}, never by decoding the reference, and read what it does not serve through
+	 * a pass's snapshot tools.
 	 */
 	checkout(): Promise<ReviewEngineCheckout>;
 }
@@ -754,6 +782,11 @@ export class ReviewEngineRun {
 			}),
 			changedFiles: () => this.changedFiles(),
 			pass: () => this.pass(),
+			hasTextFile: async (path, side) => {
+				this.assertLive();
+				const file = await this.snapshot.readFile(side, path);
+				return file?.available === true && !file.binary;
+			},
 			validate: (candidates) => this.validate(candidates),
 			submit: (result) => this.submit(result),
 			checkout: () => this.checkout(channels.signal),
@@ -766,9 +799,12 @@ export class ReviewEngineRun {
 		const reused = this.idleCheckouts.pop();
 		const path = reused ?? (await this.snapshot.materializeHead());
 		if (reused === undefined && this.setup) await setUpReviewCheckout(path, this.setup, this.shellPath, signal);
+		const { nativePath, unrepresented } = this.snapshot.describeCheckout(path);
 		let released = false;
 		return Object.freeze({
 			path,
+			nativePath,
+			unrepresented,
 			release: async () => {
 				if (released || this.ended) return;
 				released = true;

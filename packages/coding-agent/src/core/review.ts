@@ -1571,10 +1571,13 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 	);
 	const commandCapable = requestedAuxiliaryTools.includes("bash");
 	let reviewCwd = snapshot.root;
+	// How many paths of the head the checkout the tools run in leaves out, when there is one.
+	let checkoutOmissions = 0;
 	let phase: ReviewPass | "preparation" = "preparation";
 	try {
 		if (requestedAuxiliaryTools.length > 0) {
 			reviewCwd = await snapshot.materializeHead();
+			checkoutOmissions = snapshot.describeCheckout(reviewCwd).omitted;
 			if (options.setup) {
 				options.onSetup?.();
 				await setUpReviewCheckout(reviewCwd, options.setup, options.settingsManager.getShellPath(), options.signal);
@@ -1942,6 +1945,11 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 			excludedPaths: reviewExclusions(snapshot, controls, options.incrementalPlan),
 		});
 		if (staticInspectionOnly) parsed.coverage.residualRisk.unshift(STATIC_REVIEW_LIMITATION);
+		if (checkoutOmissions > 0) {
+			parsed.coverage.residualRisk.push(
+				`The checkout the review's tools ran in leaves out ${checkoutOmissions} path(s) of the reviewed head that its filesystem cannot hold: unrepresentable names, or names that differ only in case.`,
+			);
+		}
 		parsed.findings = reconcileFindingIdentities(parsed.findings, options.incrementalPlan);
 		let fixedPriorFindings: ReviewPriorFindingDecision[] | undefined;
 		if (decidesPreviousFindings(options.incrementalPlan)) {
