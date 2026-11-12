@@ -268,6 +268,8 @@ async function openConversation(
 			? {
 					toolPolicy: spec.toolPolicy,
 					projectTrusted: spec.projectTrusted,
+					// The tree the conversation works in: a pull request review loads its project from another.
+					workRoot: spec.root,
 					...(spec.profile === undefined ? {} : { profile: spec.profile }),
 				}
 			: {

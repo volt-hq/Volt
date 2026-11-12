@@ -141,7 +141,7 @@ function servicesForHarness(harness: Harness, cwd: string, agentDir = harness.te
 	return {
 		cwd,
 		projectCwd: cwd,
-		lexicalProjectCwd: cwd,
+		workRoot: cwd,
 		agentDir,
 		authStorage: harness.authStorage,
 		settingsManager: harness.settingsManager,

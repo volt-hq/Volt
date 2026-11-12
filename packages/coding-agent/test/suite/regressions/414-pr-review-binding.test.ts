@@ -242,7 +242,7 @@ async function hostedFixture() {
 			services: {
 				cwd,
 				projectCwd: cwd,
-				lexicalProjectCwd: cwd,
+				workRoot: cwd,
 				agentDir,
 				authStorage: h.authStorage,
 				modelRegistry: h.session.modelRegistry,

@@ -200,14 +200,14 @@ export type SessionToolRuntimeOptions = Pick<
 	| "mcpManager"
 	| "mcpManagerFactory"
 > & {
-	/** Project/config root and hard LSP workspace boundary. */
-	projectCwd: string;
+	/** Root of the tree the session works in: the language servers' project root. */
+	workRoot: string;
 };
 
 export class SessionToolRuntime {
 	private readonly host: SessionToolRuntimeHost;
 	private readonly customTools: ToolDefinition<any, any>[];
-	private readonly lexicalProjectCwd: string;
+	private readonly workRoot: string;
 	private readonly allowedToolNames?: Set<string>;
 	private readonly allowUnlistedExtensionTools: boolean;
 	private readonly excludedToolNames?: Set<string>;
@@ -254,7 +254,7 @@ export class SessionToolRuntime {
 	constructor(host: SessionToolRuntimeHost, options: SessionToolRuntimeOptions) {
 		this.host = host;
 		this.customTools = options.customTools ?? [];
-		this.lexicalProjectCwd = options.projectCwd;
+		this.workRoot = options.workRoot;
 		this.allowedToolNames = options.allowedToolNames ? new Set(options.allowedToolNames) : undefined;
 		this.allowUnlistedExtensionTools = options.allowUnlistedExtensionTools ?? false;
 		this.excludedToolNames = options.excludedToolNames ? new Set(options.excludedToolNames) : undefined;
@@ -958,12 +958,12 @@ export class SessionToolRuntime {
 		const previousLspManager = this.lspManager;
 		this.lspManager = new LspManager({
 			cwd: this.host.cwd,
-			projectCwd: this.lexicalProjectCwd,
+			projectCwd: this.workRoot,
 			config: lspConfig,
 			hostActions: this.host.hostActions,
 			installAllowed: () => !this.host.isDisposed() && this.host.operationGrantProfile() === undefined,
 			...(this.lspServerPool
-				? { server: this.lspServerPool.acquire({ projectCwd: this.lexicalProjectCwd, config: lspConfig }) }
+				? { server: this.lspServerPool.acquire({ projectCwd: this.workRoot, config: lspConfig }) }
 				: {}),
 		});
 		if (previousLspManager?.sharesServersWith(this.lspManager)) this.lspManager.resetFailures();

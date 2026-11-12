@@ -177,6 +177,97 @@ describe("AgentSession projectCwd propagation", () => {
 		}
 	});
 
+	it("defaults the work root to the project root, and to cwd when neither is given", async () => {
+		const root = mkdtempSync(join(tmpdir(), "volt-agent-work-root-default-"));
+		tempDirs.push(root);
+		const projectCwd = join(root, "workspace");
+		const runtimeCwd = join(projectCwd, "packages", "app");
+		const agentDir = join(root, "agent");
+		mkdirSync(runtimeCwd, { recursive: true });
+		mkdirSync(agentDir);
+		const shared = {
+			cwd: runtimeCwd,
+			agentDir,
+			settingsManager: SettingsManager.inMemory(),
+			resourceLoaderOptions: { noSkills: true, noPromptTemplates: true, noThemes: true },
+		};
+		const inProject = await createAgentSessionServices({ ...shared, projectCwd });
+		const inCwd = await createAgentSessionServices(shared);
+		try {
+			expect(inProject.workRoot).toBe(projectCwd);
+			expect(inCwd.workRoot).toBe(runtimeCwd);
+		} finally {
+			inProject.releaseGitContextProvider();
+			inCwd.releaseGitContextProvider();
+		}
+	});
+
+	it("roots language servers at a work root apart from the project root across reload", async () => {
+		const root = mkdtempSync(join(tmpdir(), "volt-agent-work-root-"));
+		tempDirs.push(root);
+		const projectCwd = join(root, "workspace");
+		const workRoot = join(root, "checkout");
+		const runtimeCwd = join(workRoot, "packages", "app");
+		const agentDir = join(root, "agent");
+		mkdirSync(projectCwd);
+		mkdirSync(runtimeCwd, { recursive: true });
+		mkdirSync(agentDir);
+		const services = await createAgentSessionServices({
+			cwd: runtimeCwd,
+			workRoot,
+			projectCwd,
+			agentDir,
+			settingsManager: SettingsManager.inMemory({ lsp: { enabled: true } }),
+			resourceLoaderOptions: {
+				noSkills: true,
+				noPromptTemplates: true,
+				noThemes: true,
+			},
+		});
+		const { session } = await createAgentSessionFromServices({
+			services,
+			sessionManager: SessionManager.inMemory(runtimeCwd),
+		});
+		try {
+			expect(services.projectCwd).toBe(realpathSync.native(projectCwd));
+			expect(session.getLspStatus().workspaceRoot).toBe(realpathSync.native(workRoot));
+			expect(services.workRoot).toBe(workRoot);
+
+			await session.reload();
+			expect(session.getLspStatus().workspaceRoot).toBe(realpathSync.native(workRoot));
+		} finally {
+			session.dispose();
+			await session.waitForClosed();
+		}
+	});
+
+	it("roots language servers at a work root apart from the project root through the SDK construction path", async () => {
+		const root = mkdtempSync(join(tmpdir(), "volt-agent-work-root-sdk-"));
+		tempDirs.push(root);
+		const projectCwd = join(root, "workspace");
+		const workRoot = join(root, "checkout");
+		const runtimeCwd = join(workRoot, "packages", "app");
+		const agentDir = join(root, "agent");
+		mkdirSync(projectCwd);
+		mkdirSync(runtimeCwd, { recursive: true });
+		mkdirSync(agentDir);
+		const { session } = await createAgentSession({
+			cwd: runtimeCwd,
+			workRoot,
+			projectCwd,
+			agentDir,
+			settingsManager: SettingsManager.inMemory({ lsp: { enabled: true } }),
+			sessionManager: SessionManager.inMemory(runtimeCwd),
+			disableMcp: true,
+		});
+		try {
+			expect(session.getLspStatus().workspaceRoot).toBe(realpathSync.native(workRoot));
+		} finally {
+			session.dispose();
+			await session.waitForClosed();
+		}
+	});
+
 	it("preserves a lexical project-root alias through session services and reload", async () => {
 		const paths = createSymlinkedProject();
 		if (!paths) return;
