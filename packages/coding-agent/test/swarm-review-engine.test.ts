@@ -4,24 +4,27 @@
  * as a whole runs in test/suite/swarm-review-engine.test.ts.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-	ReviewEngineChangedFile,
-	ReviewEngineContext,
-	ReviewEnginePass,
-	ToolDefinition,
-} from "@hansjm10/volt-coding-agent";
+import { pathToFileURL } from "node:url";
+import type { ReviewEngineChangedFile, ReviewEngineContext, ToolDefinition } from "@hansjm10/volt-coding-agent";
 import { Check } from "typebox/value";
 import { afterEach, describe, expect, it } from "vitest";
 import { createBaseReader } from "../../../.volt/extensions/swarm-review/base.ts";
 import { resolveOptions } from "../../../.volt/extensions/swarm-review/index.ts";
 import { loadDismissals, recordDismissals } from "../../../.volt/extensions/swarm-review/memory.ts";
+import { changeSection } from "../../../.volt/extensions/swarm-review/prompts.ts";
 import { buildReport, type ReportedFinding, reportSummary } from "../../../.volt/extensions/swarm-review/report.ts";
 import { buildSubmission, candidateFor, slug } from "../../../.volt/extensions/swarm-review/submit.ts";
 import { MAX_SHARD_BYTES, packShards } from "../../../.volt/extensions/swarm-review/target.ts";
-import { canonicalHeadPath, createRepositoryTools } from "../../../.volt/extensions/swarm-review/tools.ts";
+import {
+	type CheckoutPathProbe,
+	canonicalHeadPath,
+	createRepositoryTools,
+	insideRoot,
+	resolveCheckoutPath,
+} from "../../../.volt/extensions/swarm-review/tools.ts";
 import type {
 	Candidate,
 	Cluster,
@@ -33,8 +36,8 @@ import type {
 } from "../../../.volt/extensions/swarm-review/types.ts";
 import { ReviewCandidateReportSchema, ReviewVerificationReportSchema } from "../src/core/review-report.ts";
 import { type ReviewSnapshot, resolveReviewSnapshot } from "../src/core/review-snapshot.ts";
-import { createReviewSnapshotTools, ReviewCoverageTracker } from "../src/core/review-tools.ts";
 import { createByteReviewRepository, BYTE_REVIEW_PATHS as P } from "./utilities/byte-review-repository.ts";
+import { directoryCheckout } from "./utilities/swarm-checkout.ts";
 
 function file(
 	path: string,
@@ -523,10 +526,10 @@ describe("swarm canonical path boundaries", () => {
 		for (const snapshot of snapshots.splice(0)) await snapshot.dispose();
 		for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 	});
-	function target(checkout: string): ReviewTarget {
+	function target(directory: string, unrepresented: readonly string[] = []): ReviewTarget {
 		return {
-			repoRoot: checkout,
-			checkout,
+			repoRoot: directory,
+			checkout: directoryCheckout(directory, unrepresented),
 			description: "paths",
 			stat: "",
 			scope: [],
@@ -535,12 +538,13 @@ describe("swarm canonical path boundaries", () => {
 			hunkBytes: new Map(),
 			complete: true,
 			submodules: false,
-			commonDir: join(checkout, ".git"),
+			commonDir: join(directory, ".git"),
 			readBase: async () => undefined,
 		};
 	}
+	const NO_BREAK_SPACE = "\u00a0";
 
-	it("validates byte paths through the host without a corresponding checkout file", async () => {
+	it("validates a reported path against the head through the host, and names the reference of a checkout filename", async () => {
 		const repository = mkdtempSync(join(tmpdir(), "volt-swarm-byte-host-"));
 		directories.push(repository);
 		const sha = createByteReviewRepository(repository);
@@ -550,46 +554,168 @@ describe("swarm canonical path boundaries", () => {
 		});
 		if ("error" in snapshot) throw new Error(snapshot.error);
 		snapshots.push(snapshot);
-		const tracker = new ReviewCoverageTracker();
-		const pass: ReviewEnginePass = {
-			tools: () => createReviewSnapshotTools(snapshot, tracker),
-			coverage: () => tracker.snapshot(),
-			diff: () => ({ sections: [], text: "", delivered: [], omitted: [] }),
+		// The host's answer, as its engine context gives it: whether the snapshot has a text file there.
+		const engine: Pick<ReviewEngineContext, "hasTextFile"> = {
+			hasTextFile: async (path, side) => {
+				const file = await snapshot.readFile(side, path);
+				return file?.available === true && !file.binary;
+			},
 		};
+		// None of these has a file of its name in any checkout on this system; the head has them all.
 		for (const path of [P.fe, P.ff, P.replacement, P.literal])
-			await expect(canonicalHeadPath(pass, path)).resolves.toBe(path);
-		await expect(canonicalHeadPath(pass, "collision-%ff.txt")).rejects.toThrow(/uppercase/);
-		await expect(canonicalHeadPath(pass, P.deleted)).rejects.toThrow(/does not exist/);
+			await expect(canonicalHeadPath(engine, path)).resolves.toBe(path);
+		await expect(canonicalHeadPath(engine, "collision-%ff.txt")).rejects.toThrow(/uppercase/);
+		await expect(canonicalHeadPath(engine, P.deleted)).rejects.toThrow(/does not exist/);
+		await expect(canonicalHeadPath(engine, `./${P.shared}`)).rejects.toThrow(
+			`Report the canonical snapshot path reference ${P.shared}.`,
+		);
+		// A reviewer that read the file with a checkout tool may report the name it saw there.
+		await expect(canonicalHeadPath(engine, "back\\slash.txt")).rejects.toThrow(`Report ${P.backslash}.`);
 	});
 
-	it("decodes canonical checkout inputs, encodes native absolute inputs, and never reads a lossy substitute", async () => {
+	describe("what a checkout tool opens for its path argument", () => {
+		/**
+		 * A checkout under a directory with a no-break space in its name, holding a file named with a percent sign, one
+		 * named like an escape, a pair where the reference of one spells the name of the other, and a scoped directory.
+		 */
+		function fixture(unrepresented: readonly string[] = []) {
+			const root = mkdtempSync(join(tmpdir(), "volt-swarm-resolver-"));
+			directories.push(root);
+			const directory = join(root, `check${NO_BREAK_SPACE}out`);
+			mkdirSync(join(directory, "@scope"), { recursive: true });
+			for (const name of ["100%.ts", "a%25.ts", "both%.ts", "both%25.ts", "plain.ts", "Notes.md", "@scope/x.ts"]) {
+				writeFileSync(join(directory, name), `${name}\n`);
+			}
+			const checkout = directoryCheckout(directory, unrepresented);
+			const asked: string[] = [];
+			const probe: CheckoutPathProbe = {
+				confine: (path) => {
+					asked.push(`confine ${path}`);
+					if (!insideRoot(directory, path)) throw new Error(`Access outside the repository: ${path}`);
+				},
+				exists: (path) => {
+					asked.push(`exists ${path}`);
+					return existsSync(path);
+				},
+			};
+			return { directory, asked, resolve: (argument: string) => resolveCheckoutPath(argument, checkout, probe) };
+		}
+
+		it.each([
+			// The name ls prints is taken back, and the result says what its reference is.
+			{ argument: "100%.ts", opens: "./100%.ts", reference: "100%25.ts" },
+			// A reference copied from the diff opens the file it names, when no file has those characters for a name.
+			{ argument: "100%25.ts", opens: "./100%.ts", reference: undefined },
+			// A name that reads as a reference to a file that is not there is the name.
+			{ argument: "a%25.ts", opens: "./a%25.ts", reference: "a%2525.ts" },
+			// Only the name is checked for the spaces the tool rewrites, never the checkout's own directory.
+			{ argument: "plain.ts", opens: "./plain.ts", reference: undefined },
+			{ argument: "./plain.ts", opens: "./plain.ts", reference: undefined },
+			// The tool strips a leading "@" from what it is given; "./" keeps the name whole.
+			{ argument: "@scope/x.ts", opens: `./${join("@scope", "x.ts")}`, reference: undefined },
+			// What is not there is passed on, for the tool to report it missing.
+			{ argument: "missing.ts", opens: "./missing.ts", reference: undefined },
+			{ argument: ".", opens: ".", reference: undefined },
+		])("opens $opens for $argument", ({ argument, opens, reference }) => {
+			expect(fixture().resolve(argument)).toEqual({
+				path: opens,
+				...(reference === undefined ? {} : { reference }),
+			});
+		});
+
+		it("refuses a string that names one file and, as a reference, another", () => {
+			const { directory, resolve } = fixture();
+			const resolved = resolve("both%25.ts");
+			expect(resolved).toEqual({ refusal: expect.stringContaining("names two files in this checkout") });
+			// Each is still reached by its absolute path, which the refusal gives.
+			expect(resolved).toEqual({ refusal: expect.stringContaining(JSON.stringify(join(directory, "both%25.ts"))) });
+			expect(resolved).toEqual({ refusal: expect.stringContaining(JSON.stringify(join(directory, "both%.ts"))) });
+		});
+
+		it("refuses a reference the checkout does not serve, though a file answers to that name", () => {
+			// On a system that ignores case, "notes.md" opens the file checked out for "Notes.md": another file's content.
+			const resolved = fixture(["notes.md"]).resolve("notes.md");
+			expect(resolved).toEqual({ refusal: expect.stringContaining("does not hold notes.md") });
+			expect(resolved).toEqual({ refusal: expect.stringContaining("review_file") });
+			// A name that is not UTF-8 has no file in any checkout a path string can open.
+			expect(fixture().resolve("raw-%FF.ts")).toEqual({
+				refusal: expect.stringContaining("does not hold raw-%FF.ts"),
+			});
+		});
+
+		it("refuses a name with a space the tool would rewrite, and a native path with one", () => {
+			const { directory, resolve } = fixture();
+			expect(resolve(`nb${NO_BREAK_SPACE}sp.ts`)).toEqual({ refusal: expect.stringContaining("Unicode space") });
+			// The tool would open the checkout's directory under another name: it is reached by relative names instead.
+			expect(resolve(join(directory, "plain.ts"))).toEqual({
+				refusal: expect.stringContaining("relative to the checkout"),
+			});
+		});
+
+		it("confines where a native path leads, in every form the tool expands", () => {
+			const { resolve } = fixture();
+			expect(() => resolve("../outside")).toThrow(/outside the repository/);
+			expect(() => resolve("~/notes.txt")).toThrow(/outside the repository/);
+			expect(() => resolve("~")).toThrow(/outside the repository/);
+			expect(() => resolve(pathToFileURL(join(homedir(), "notes.txt")).href)).toThrow(/outside the repository/);
+			// On Windows the tool expands "~\" as well; elsewhere a backslash is an ordinary character of a name.
+			if (process.platform === "win32") expect(() => resolve("~\\notes.txt")).toThrow(/outside the repository/);
+			else expect(resolve("~\\notes.txt")).toEqual({ path: "./~\\notes.txt", reference: "~%5Cnotes.txt" });
+		});
+
+		it("confines each path before it asks whether the path exists", () => {
+			const { asked, resolve } = fixture();
+			resolve("100%25.ts");
+			const probes = asked.filter((entry) => entry.startsWith("exists "));
+			expect(probes).toHaveLength(2);
+			for (const probe of probes) {
+				expect(asked.indexOf(probe.replace("exists ", "confine "))).toBeGreaterThanOrEqual(0);
+				expect(asked.indexOf(probe.replace("exists ", "confine "))).toBeLessThan(asked.indexOf(probe));
+			}
+		});
+	});
+
+	it("reads through the tools by the name they print and by reference, and never a substitute for a head path", async () => {
 		const checkout = mkdtempSync(join(tmpdir(), "volt-swarm-byte-checkout-"));
 		directories.push(checkout);
 		writeFileSync(join(checkout, "100%.ts"), "actual percent\n");
-		writeFileSync(join(checkout, "100%25.ts"), "literal escape spelling\n");
-		writeFileSync(join(checkout, "invalid-%FF"), "not the raw-byte filename\n");
-		const tools: ToolDefinition[] = createRepositoryTools(target(checkout), checkout);
+		const tools: ToolDefinition[] = createRepositoryTools(target(checkout), directoryCheckout(checkout));
 		const read = tools.find((tool) => tool.name === "read");
-		if (!read) throw new Error("Expected read tool");
-		const first = await read.execute("read", { path: "100%25.ts" }, undefined, undefined, {} as never);
-		expect(first.content).toEqual([{ type: "text", text: expect.stringContaining("actual percent") }]);
-		const native = await read.execute(
-			"read",
-			{ path: join(checkout, "100%25.ts") },
-			undefined,
-			undefined,
-			{} as never,
-		);
-		expect(native.content).toContainEqual({
+		const ls = tools.find((tool) => tool.name === "ls");
+		if (!read || !ls) throw new Error("Expected the read and ls tools");
+		const run = (tool: ToolDefinition, path?: string) =>
+			tool.execute("call", path === undefined ? {} : { path }, undefined, undefined, {} as never);
+		const reference = (path: string) => ({
 			type: "text",
-			text: "Canonical reference for the requested checkout path: 100%2525.ts",
+			text: `Canonical reference for the requested checkout path: ${path}`,
 		});
-		await expect(read.execute("read", { path: "invalid-%FF" }, undefined, undefined, {} as never)).rejects.toThrow(
-			/cannot represent/,
-		);
-		await expect(read.execute("read", { path: "../outside" }, undefined, undefined, {} as never)).rejects.toThrow(
-			/outside the repository/,
-		);
+
+		// ls prints the checkout's own filename, and read takes it back as printed.
+		expect((await run(ls)).content).toEqual([{ type: "text", text: expect.stringContaining("100%.ts") }]);
+		expect((await run(read, "100%.ts")).content).toEqual([
+			{ type: "text", text: expect.stringContaining("actual percent") },
+			reference("100%25.ts"),
+		]);
+		// The reference a reviewer copies from the diff opens the same file.
+		expect((await run(read, "100%25.ts")).content).toEqual([
+			{ type: "text", text: expect.stringContaining("actual percent") },
+		]);
+		expect((await run(read, join(checkout, "100%.ts"))).content).toContainEqual(reference("100%25.ts"));
+
+		// Once a file has the escape spelling for its own name, that string names two files and is refused.
+		writeFileSync(join(checkout, "100%25.ts"), "literal escape spelling\n");
+		await expect(run(read, "100%25.ts")).rejects.toThrow(/names two files/);
+		const literal = await run(read, join(checkout, "100%25.ts"));
+		expect(literal.content).toEqual([
+			{ type: "text", text: expect.stringContaining("literal escape spelling") },
+			reference("100%2525.ts"),
+		]);
+
+		// "invalid-%FF" is the reference of a head path whose name is not UTF-8. A checkout file with those characters
+		// for a name is another file, so it is not read in its place.
+		writeFileSync(join(checkout, "invalid-%FF"), "not the raw-byte filename\n");
+		await expect(run(read, "invalid-%FF")).rejects.toThrow(/does not hold invalid-%FF/);
+		await expect(run(read, "../outside")).rejects.toThrow(/outside the repository/);
 	});
 
 	it("keeps canonical dismissal identity while reading the actual percent filename", async () => {
@@ -607,6 +733,19 @@ describe("swarm canonical path boundaries", () => {
 			]),
 		).resolves.toBe(1);
 		expect(loadDismissals(review)).toMatchObject([{ file: "100%25.ts", reason: "Intended" }]);
+		// A dismissal anchored where the checkout serves nothing is not remembered, and none there is recalled.
+		const unserved = target(checkout, ["100%25.ts"]);
+		expect(loadDismissals(unserved)).toEqual([]);
+	});
+
+	it("tells reviewers which head paths the checkout tools cannot open, listing the first twenty", () => {
+		const unrepresented = Array.from({ length: 23 }, (_, index) => `odd-${String(index).padStart(2, "0")}-%FF.ts`);
+		const prompt = changeSection(target("checkout", unrepresented), "diff text", []);
+		expect(prompt).toContain("cannot open 23 path(s) of the reviewed head");
+		expect(prompt).toContain("odd-19-%FF.ts, and 3 more");
+		expect(prompt).not.toContain("odd-20-%FF.ts");
+		expect(prompt).toContain("review_file");
+		expect(changeSection(target("checkout"), "diff text", [])).not.toContain("cannot open");
 	});
 });
 

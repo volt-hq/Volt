@@ -49,7 +49,7 @@ const VERDICT_SCHEMA = Type.Object({
 	),
 });
 
-function createVerdictTool(setup: SwarmSetup, cluster: Cluster, pass: ReviewEnginePass, onReport: (verdict: Verdict) => void) {
+function createVerdictTool(setup: SwarmSetup, cluster: Cluster, onReport: (verdict: Verdict) => void) {
 	return defineTool({
 		name: "report_verdict",
 		label: "Report verdict",
@@ -66,7 +66,7 @@ function createVerdictTool(setup: SwarmSetup, cluster: Cluster, pass: ReviewEngi
 			}
 			for (const finding of params.findings) {
 				try {
-					findings.push({ ...finding, file: await canonicalHeadPath(pass, finding.file, signal) });
+					findings.push({ ...finding, file: await canonicalHeadPath(setup.engine, finding.file) });
 				} catch (error) {
 					if (signal?.aborted) throw error;
 					errors.push(error instanceof Error ? error.message : String(error));
@@ -221,14 +221,14 @@ export async function verifyClusters(setup: SwarmSetup, state: SwarmState): Prom
 		let privateCheckout: ReviewEngineCheckout | undefined;
 		try {
 			if (options.exec) privateCheckout = await setup.engine.checkout();
-			const checkout = privateCheckout?.path ?? target.checkout;
+			const checkout = privateCheckout ?? target.checkout;
 			await runPass(setup, {
 				label: `Swarm review verifier ${cluster.id}.${slot + 1}`,
 				model: setup.verifierModel,
 				thinking: options.verifierThinking,
 				systemPrompt,
 				checkout,
-				reportTool: createVerdictTool(setup, cluster, hostPass, (value) => {
+				reportTool: createVerdictTool(setup, cluster, (value) => {
 					verdict = value;
 				}),
 				hasReport: () => verdict !== undefined,

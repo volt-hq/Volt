@@ -66,7 +66,7 @@ export async function buildTarget(engine: ReviewEngineContext): Promise<ReviewTa
 	return {
 		repoRoot: engine.target.root,
 		// Held for the whole review: every pass reads it, and none changes it.
-		checkout: (await engine.checkout()).path,
+		checkout: await engine.checkout(),
 		description: engine.target.description,
 		stat: files.map(statLine).join("\n"),
 		scope: engine.target.controls.scope,

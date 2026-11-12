@@ -13,13 +13,12 @@ import {
 	defineTool,
 	normalizeReviewPath,
 	reviewPathFromUtf8,
-	reviewPathToUtf8,
-	type ReviewEnginePass,
+	type ReviewEngineContext,
 	type ToolDefinition,
 	truncateHead,
 } from "@hansjm10/volt-coding-agent";
 import { type TSchema, Type } from "typebox";
-import type { ReviewTarget } from "./types.ts";
+import type { Checkout, ReviewTarget } from "./types.ts";
 
 export function insideRoot(root: string, path: string): boolean {
 	const rel = relative(root, path);
@@ -62,14 +61,34 @@ function assertInsideRoots(roots: Roots, absolutePath: string): void {
 	if (!inside) throw new Error(`Access outside the repository under review is not allowed: ${absolutePath}`);
 }
 
-/** Validate a report's reference against the immutable head, not a possibly unrepresentable checkout filename. */
-export async function canonicalHeadPath(pass: ReviewEnginePass, raw: string, signal?: AbortSignal): Promise<string> {
-	const path = normalizeReviewPath(raw);
-	if (path !== raw) throw new Error("Report a canonical snapshot path reference.");
-	const file = pass.tools().find((tool) => tool.name === "review_file");
-	if (!file) throw new Error("The host's review_file tool is not available.");
-	await file.execute("swarm-anchor", { path, revision: "head", limit: 1 } as never, signal, undefined, {} as never);
-	return path;
+/**
+ * Validate the path a report names against the immutable head, not a possibly unrepresentable checkout filename:
+ * it must be the canonical reference of a text file there. The host is asked whether that file exists, which reads
+ * nothing as far as the review's coverage goes. A reviewer that read the file with a checkout tool may report the
+ * name it saw there; the error then names the reference to report instead.
+ */
+export async function canonicalHeadPath(engine: Pick<ReviewEngineContext, "hasTextFile">, raw: string): Promise<string> {
+	let failure: string;
+	try {
+		const path = normalizeReviewPath(raw);
+		if (path !== raw) failure = `Report the canonical snapshot path reference ${path}.`;
+		else if (await engine.hasTextFile(path, "head")) return path;
+		else failure = `${path} does not exist in the head snapshot, or is not a text file the host can read.`;
+	} catch (error) {
+		failure = error instanceof Error ? error.message : String(error);
+	}
+	let encoded: string | undefined;
+	try {
+		encoded = reviewPathFromUtf8(raw);
+	} catch {
+		// Not a filename either.
+	}
+	if (encoded !== undefined && encoded !== raw && (await engine.hasTextFile(encoded, "head"))) {
+		throw new Error(
+			`${JSON.stringify(raw)} is the checkout's filename, not a canonical snapshot path reference. Report ${encoded}.`,
+		);
+	}
+	throw new Error(failure);
 }
 
 function pathArgument(params: unknown): string | undefined {
@@ -78,53 +97,182 @@ function pathArgument(params: unknown): string | undefined {
 		: undefined;
 }
 
-const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+/** The spaces the built-in tools rewrite to an ASCII space before they resolve a path (utils/paths.ts). */
+const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/;
+
+const SNAPSHOT_TOOLS = "Read it with review_file, search it with review_search, or list it with review_tree.";
 
 /**
- * Mirrors the built-in tools' resolveToCwd (normalizePath in packages/coding-agent/src/utils/paths.ts):
- * Unicode spaces become ASCII spaces, then `@` is stripped, then `~`, `~/`, `~\` (Windows), and file URLs expand.
+ * Where the built-in tools resolve `argument` when it is in one of the forms they read as a native OS path: an
+ * absolute path, a `file://` URL, `~`, `~/`, `~\` on Windows, or one that climbs out with `../` or `..\`. Undefined
+ * for any other argument, which names something in the checkout. This is the one place that decides which it is, and
+ * it follows normalizePath and resolvePath in packages/coding-agent/src/utils/paths.ts, Unicode spaces included. Their
+ * leading `@` is left out on purpose: an argument that starts with one is a name in the checkout here.
  */
-function resolveLikeBuiltinTools(root: string, raw: string): string {
-	let path = raw.replace(UNICODE_SPACES, " ");
-	if (path.startsWith("@")) path = path.slice(1);
-	if (path === "~") path = homedir();
-	else if (path.startsWith("~/") || (process.platform === "win32" && path.startsWith("~\\"))) {
-		path = join(homedir(), path.slice(2));
-	} else if (path.startsWith("file://")) path = fileURLToPath(path);
-	return resolve(root, path);
+function nativeArgument(argument: string, cwd: string): string | undefined {
+	const path = argument.replace(new RegExp(UNICODE_SPACES, "g"), " ");
+	if (path === "~") return homedir();
+	if (path.startsWith("~/") || (process.platform === "win32" && path.startsWith("~\\"))) {
+		return join(homedir(), path.slice(2));
+	}
+	if (path.startsWith("file://")) return fileURLToPath(path);
+	if (isAbsolute(path)) return resolve(path);
+	if (path.startsWith("../") || path.startsWith("..\\")) return resolve(cwd, path);
+	return undefined;
+}
+
+/** What {@link resolveCheckoutPath} asks of the filesystem. */
+export interface CheckoutPathProbe {
+	/** Throws unless `path` stays inside the roots the tools may reach. Called for a path before anything else is. */
+	confine(path: string): void;
+	exists(path: string): boolean;
+}
+
+/** What a checkout tool does with its `path` argument. */
+export type CheckoutPath =
+	| {
+			/** The argument to give the built-in tool. */
+			path: string;
+			/** The canonical reference of what it opens, when that is in the checkout and is not what was typed. */
+			reference?: string;
+	  }
+	| { refusal: string };
+
+/**
+ * Decide what a checkout tool opens for `argument`. The tools print the checkout's own filenames, and a reviewer
+ * copies references out of the diff, so both spellings are taken:
+ *
+ * - A native form (see {@link nativeArgument}) goes to the tool as typed, once where it leads is confined.
+ * - Anything else is first a name in the checkout, as `ls`, `find`, and `grep` print it. When it is also a canonical
+ *   reference that decodes to another name (`100%25.ts` for the file `100%.ts`), that is a second reading. The one
+ *   that exists is opened. When both exist the argument is refused, since guessing could read the wrong file. When
+ *   neither exists the name is passed on for the tool to report missing.
+ * - A canonical reference the checkout does not serve is refused, whether or not some file has those characters
+ *   for a name: the reviewer most likely means the head's path, and the snapshot tools read that.
+ *
+ * Whatever is chosen inside the checkout must be a path the host says the checkout serves under that name: otherwise
+ * the file there is not the head's (a case alias, a name Windows shortens), and it is refused. A name in the
+ * checkout goes to the tool as `./name`, so the tool's own `@` and `~` handling cannot apply, and one with a Unicode
+ * space the tool would rewrite is refused. Only that name is checked, never the checkout's own directory.
+ */
+export function resolveCheckoutPath(argument: string, checkout: Checkout, probe: CheckoutPathProbe): CheckoutPath {
+	const cwd = checkout.path;
+	/** The canonical reference of `absolute` when it is inside the checkout and not its root, or why it has none. */
+	const referenceOf = (absolute: string): { reference?: string; refusal?: string } => {
+		if (absolute === cwd || !insideRoot(cwd, absolute)) return {};
+		let reference: string;
+		try {
+			reference = reviewPathFromUtf8(relative(cwd, absolute).split(sep).join("/"));
+		} catch {
+			return { refusal: `No canonical reference names ${JSON.stringify(argument)}. ${SNAPSHOT_TOOLS}` };
+		}
+		return checkout.nativePath(reference) === undefined
+			? {
+					refusal: `The checkout does not hold ${reference} under a name these tools can open. ${SNAPSHOT_TOOLS}`,
+				}
+			: { reference };
+	};
+	const typed = argument.replace(/^\.\//, "").replace(/\/+$/, "");
+
+	const native = nativeArgument(argument, cwd);
+	if (native !== undefined) {
+		// The tool would open the rewritten path, not the one typed: a checkout under such a directory is reached by
+		// names relative to it instead.
+		if (UNICODE_SPACES.test(argument)) {
+			return {
+				refusal:
+					"These tools rewrite a Unicode space other than the ASCII one in a native path. Pass a path relative to the checkout instead.",
+			};
+		}
+		probe.confine(native);
+		const { reference, refusal } = referenceOf(native);
+		if (refusal !== undefined) return { refusal };
+		return { path: argument, ...(reference === undefined ? {} : { reference }) };
+	}
+
+	const named = resolve(cwd, argument);
+	probe.confine(named);
+	let asReference: string | undefined;
+	try {
+		asReference = normalizeReviewPath(argument);
+	} catch {
+		// Not a canonical reference: a name only.
+	}
+	// Where the argument leads when read as a reference, if that is another file than the one of its name.
+	let decoded: string | undefined;
+	if (asReference !== undefined) {
+		const served = checkout.nativePath(asReference);
+		if (served === undefined) {
+			const literal = probe.exists(named) && referenceOf(named).refusal === undefined;
+			return {
+				refusal: `The checkout does not hold ${asReference} under a name these tools can open. ${SNAPSHOT_TOOLS}${literal ? ` For the checkout's own file named ${JSON.stringify(argument)}, pass its absolute path ${JSON.stringify(named)}.` : ""}`,
+			};
+		}
+		if (referenceOf(named).reference !== asReference) decoded = served;
+	}
+	let chosen = named;
+	if (decoded !== undefined) {
+		probe.confine(decoded);
+		if (probe.exists(decoded)) {
+			if (probe.exists(named)) {
+				return {
+					refusal: `${JSON.stringify(argument)} names two files in this checkout: the file of that name, and the file that reference names. Pass an absolute path: ${JSON.stringify(named)} for the first, or ${JSON.stringify(decoded)} for the second.`,
+				};
+			}
+			chosen = decoded;
+		}
+	}
+	const { reference, refusal } = referenceOf(chosen);
+	if (refusal !== undefined) return { refusal };
+	const name = relative(cwd, chosen);
+	if (UNICODE_SPACES.test(name)) {
+		return {
+			refusal: `These tools cannot open a name with a Unicode space other than the ASCII one. ${SNAPSHOT_TOOLS}${reference === undefined ? "" : ` Its canonical reference is ${reference}.`}`,
+		};
+	}
+	return {
+		// A path on another drive has no relative spelling.
+		path: name === "" ? "." : isAbsolute(name) ? chosen : `./${name}`,
+		...(reference === undefined || reference === typed ? {} : { reference }),
+	};
 }
 
 /**
- * Rejects `path` arguments that escape the allowed roots with a clear error. Both the raw spelling and the built-in
- * tools' normalized resolution are checked, so neither side of a normalization mismatch can escape.
+ * Gives a built-in tool the `path` {@link resolveCheckoutPath} settles on, refuses what it refuses, and adds the
+ * canonical reference of what was opened when that is not what was typed.
  */
 function confineTool<TParams extends TSchema, TDetails>(
 	tool: ToolDefinition<TParams, TDetails>,
-	cwd: string,
+	checkout: Checkout,
 	roots: Roots,
 ) {
+	const probe: CheckoutPathProbe = { confine: (path) => assertInsideRoots(roots, path), exists: existsSync };
 	return defineTool({
 		...tool,
-		description: `${tool.description} Repository-relative paths are canonical review references (%HH preserved); absolute paths are native OS paths. Use review_file/review_search/review_tree for names this checkout cannot represent.`,
+		description: `${tool.description} A relative path is a name in this checkout, as these tools print it. A canonical review reference (%HH escapes) is accepted too: when it decodes to another name, the file that exists is opened, and it is refused when both do. Printed names are the checkout's filenames, not references; the result names the reference of the path you pass when it is not what you typed. Use review_file, review_search, and review_tree for what this checkout does not hold.`,
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
-			const raw = pathArgument(params);
-			let input = params;
-			let reference: string | undefined;
-			if (raw) {
-				const nativeArgument = isAbsolute(raw) || raw.startsWith("file://") || raw === "~" || raw.startsWith("~/") || raw.startsWith("../") || raw.startsWith("..\\");
-				const native = nativeArgument || raw === "." || raw === "./" ? raw : reviewPathToUtf8(normalizeReviewPath(raw));
-				if (native === undefined || (!nativeArgument && process.platform === "win32" && /[\\:]/.test(native))) {
-					throw new Error("The checkout cannot represent this review path; use the host snapshot tools.");
-				}
-				const absolute = nativeArgument ? resolveLikeBuiltinTools(cwd, native) : resolve(cwd, native);
-				assertInsideRoots(roots, resolve(cwd, native));
-				assertInsideRoots(roots, absolute);
-				if (resolveLikeBuiltinTools(cwd, absolute) !== absolute) throw new Error("Checkout path normalization would change this filename; use the host snapshot tools.");
-				input = { ...params, path: absolute } as typeof params;
-				if (nativeArgument && absolute !== cwd && insideRoot(cwd, absolute)) reference = reviewPathFromUtf8(relative(cwd, absolute).split(sep).join("/"));
-			}
-			const result = await tool.execute(toolCallId, input, signal, onUpdate, ctx);
-			return reference ? { ...result, content: [...result.content, { type: "text" as const, text: `Canonical reference for the requested checkout path: ${reference}` }] } : result;
+			const argument = pathArgument(params);
+			if (!argument) return tool.execute(toolCallId, params, signal, onUpdate, ctx);
+			const resolved = resolveCheckoutPath(argument, checkout, probe);
+			if ("refusal" in resolved) throw new Error(resolved.refusal);
+			const result = await tool.execute(
+				toolCallId,
+				{ ...params, path: resolved.path } as typeof params,
+				signal,
+				onUpdate,
+				ctx,
+			);
+			if (resolved.reference === undefined) return result;
+			return {
+				...result,
+				content: [
+					...result.content,
+					{
+						type: "text" as const,
+						text: `Canonical reference for the requested checkout path: ${resolved.reference}`,
+					},
+				],
+			};
 		},
 	});
 }
@@ -135,9 +283,9 @@ function confineTool<TParams extends TSchema, TDetails>(
  * pull host files into findings. read, grep, and ls also check the resolved paths they actually open; find relies
  * on confineTool alone because guarding its resolved path would require replacing the fd backend.
  */
-export function createRepositoryTools(target: ReviewTarget, checkout: string) {
-	const cwd = checkout;
-	const roots = rootsOf([checkout, target.repoRoot]);
+export function createRepositoryTools(target: ReviewTarget, checkout: Checkout) {
+	const cwd = checkout.path;
+	const roots = rootsOf([cwd, target.repoRoot]);
 	const guard = (path: string): string => {
 		assertInsideRoots(roots, path);
 		return path;
@@ -150,7 +298,7 @@ export function createRepositoryTools(target: ReviewTarget, checkout: string) {
 					readFile: (path) => readFile(guard(path)),
 				},
 			}),
-			cwd,
+			checkout,
 			roots,
 		),
 		confineTool(
@@ -160,10 +308,10 @@ export function createRepositoryTools(target: ReviewTarget, checkout: string) {
 					readFile: (path) => readFileSync(guard(path), "utf8"),
 				},
 			}),
-			cwd,
+			checkout,
 			roots,
 		),
-		confineTool(createFindToolDefinition(cwd), cwd, roots),
+		confineTool(createFindToolDefinition(cwd), checkout, roots),
 		confineTool(
 			createLsToolDefinition(cwd, {
 				// Only the listed directory is guarded. ls stats each entry just for a "/" suffix and skips entries whose
@@ -174,7 +322,7 @@ export function createRepositoryTools(target: ReviewTarget, checkout: string) {
 					readdir: (path) => readdirSync(guard(path)),
 				},
 			}),
-			cwd,
+			checkout,
 			roots,
 		),
 		createReadBaseTool(target),

@@ -214,6 +214,9 @@ describe("the swarm review as an engine", () => {
 		// The host observed the diff delivered and the changed-file inventory given: no unchecked area.
 		expect(run.result?.coverage).toMatchObject({ changedFileInventoryComplete: true, uncheckedAreas: [] });
 		expect(run.result?.coverage.hunksInspected).toHaveLength(1);
+		// The only file read is the policy the engine gives every pass. The worker's report and each verdict had their
+		// anchor in src/value.ts checked against the head, and checking that a file exists is not inspecting it.
+		expect(run.result?.coverage.filesInspected).toEqual(["AGENTS.md"]);
 
 		// The report with everything the host has no field for is the work's output. The record is written
 		// before the work's executor returns, so wait for the work to settle.

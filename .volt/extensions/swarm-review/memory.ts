@@ -2,8 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { getAgentDir, reviewPathToUtf8 } from "@hansjm10/volt-coding-agent";
-import type { Cluster, ReviewTarget } from "./types.ts";
+import { getAgentDir } from "@hansjm10/volt-coding-agent";
+import type { Checkout, Cluster, ReviewTarget } from "./types.ts";
 
 const MAX_ENTRIES_PER_REPOSITORY = 300;
 const MAX_PROMPT_ENTRIES = 100;
@@ -79,11 +79,10 @@ function readStore(): MemoryStore {
 	return { version: 2, repositories: {} };
 }
 
-function fileLines(checkout: string, file: string): string[] | undefined {
-	const native = reviewPathToUtf8(file);
-	if (native === undefined || (process.platform === "win32" && /[\\:]/.test(native))) return undefined;
-	const path = join(checkout, native);
-	return existsSync(path) ? readFileSync(path, "utf8").split("\n") : undefined;
+/** The lines of the file `file`, a canonical path reference, names: undefined when the checkout does not serve it. */
+function fileLines(checkout: Checkout, file: string): string[] | undefined {
+	const path = checkout.nativePath(file);
+	return path !== undefined && existsSync(path) ? readFileSync(path, "utf8").split("\n") : undefined;
 }
 
 function hashLines(lines: string[]): string {
@@ -97,7 +96,7 @@ function hashLines(lines: string[]): string {
  * the code (or its immediate context) changing.
  */
 function snippet(
-	checkout: string,
+	checkout: Checkout,
 	file: string,
 	line: number,
 	endLine: number | undefined,
@@ -111,7 +110,7 @@ function snippet(
 	return { hash: hashLines(selected), lines: selected.length };
 }
 
-function snippetPresent(checkout: string, entry: StoredDismissal): boolean {
+function snippetPresent(checkout: Checkout, entry: StoredDismissal): boolean {
 	const lines = fileLines(checkout, entry.file);
 	if (!lines) return false;
 	for (let start = 0; start + entry.snippetLines <= lines.length; start++) {

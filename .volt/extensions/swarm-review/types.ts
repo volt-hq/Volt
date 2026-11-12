@@ -1,5 +1,10 @@
 import type { Api, Model, ModelThinkingLevel } from "@hansjm10/volt-ai";
-import type { ModelRegistry, ReviewEngineContext, SettingsManager } from "@hansjm10/volt-coding-agent";
+import type {
+	ModelRegistry,
+	ReviewEngineCheckout,
+	ReviewEngineContext,
+	SettingsManager,
+} from "@hansjm10/volt-coding-agent";
 
 export interface SwarmOptions {
 	/** The review's path scope: where the host limits the change to. */
@@ -34,11 +39,18 @@ export interface DiffShard {
 	partialFiles: string[];
 }
 
+/**
+ * A checkout of the reviewed head as the host describes it: its directory, where it holds what a canonical path
+ * reference names, and the head references it does not serve. The host decides both; nothing here decodes a
+ * reference into a filename on its own.
+ */
+export type Checkout = Pick<ReviewEngineCheckout, "path" | "nativePath" | "unrepresented">;
+
 export interface ReviewTarget {
 	/** Original repository root. */
 	repoRoot: string;
-	/** Frozen, materialized checkout of the reviewed state; the working directory of every pass. */
-	checkout: string;
+	/** Frozen, materialized checkout of the reviewed state; its directory is the working directory of every pass. */
+	checkout: Checkout;
 	description: string;
 	stat: string;
 	scope: string[];

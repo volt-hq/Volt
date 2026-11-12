@@ -10,7 +10,7 @@ import {
 	type ToolDefinition,
 } from "@hansjm10/volt-coding-agent";
 import { createRepositoryTools, REPOSITORY_TOOL_NAMES } from "./tools.ts";
-import type { PassState, SwarmSetup } from "./types.ts";
+import type { Checkout, PassState, SwarmSetup } from "./types.ts";
 import { SwarmCancelled, sessionUsage } from "./util.ts";
 
 function isolatedResourceLoader(
@@ -65,7 +65,7 @@ export interface PassOptions {
 	/** Built-in tools to enable in addition, such as bash for verifiers the review lets run commands. */
 	extraTools?: string[];
 	/** Working checkout for this pass (default: the shared frozen checkout). */
-	checkout?: string;
+	checkout?: Checkout;
 	/** The host's tools this pass may call, from the host pass it reads through (such as review_diff). */
 	hostTools?: ToolDefinition[];
 	onEvent?: (event: DeepReadonly<AgentSessionEvent>) => void;
@@ -75,10 +75,10 @@ export interface PassOptions {
 /** Runs one isolated, extension-free agent session until its report tool is called. Throws on failure. */
 export async function runPass(setup: SwarmSetup, pass: PassOptions): Promise<void> {
 	const checkout = pass.checkout ?? setup.target.checkout;
-	const sessionManager = SessionManager.inMemory(checkout);
+	const sessionManager = SessionManager.inMemory(checkout.path);
 	const inspect = pass.inspect ?? true;
 	const { session } = await createAgentSession({
-		cwd: checkout,
+		cwd: checkout.path,
 		agentDir: getAgentDir(),
 		authStorage: setup.modelRegistry.authStorage,
 		modelRegistry: setup.modelRegistry,

@@ -5,13 +5,26 @@ function codeFence(text: string): string {
 	return "`".repeat(Math.max(3, longest + 1));
 }
 
+/** How many of the references the checkout does not serve a prompt lists; the rest are counted. */
+const MAX_UNREPRESENTED_LISTED = 20;
+
+/** Says which paths of the head the checkout tools refuse, when there are any, so a reviewer goes to the host's. */
+function unrepresentedNote(target: ReviewTarget): string[] {
+	const unrepresented = target.checkout.unrepresented;
+	if (unrepresented.length === 0) return [];
+	const more = unrepresented.length - MAX_UNREPRESENTED_LISTED;
+	return [
+		`The checkout tools cannot open ${unrepresented.length} path(s) of the reviewed head, because this system cannot spell or store the name, or another path that differs only in case has its place: ${unrepresented.slice(0, MAX_UNREPRESENTED_LISTED).join(", ")}${more > 0 ? `, and ${more} more` : ""}. A directory stands for all beneath it. Read them with review_file, review_search, and review_tree.`,
+	];
+}
+
 /** Target, scope, stat, notes, and a diff. Workers in the same shard and wave receive identical text. */
 export function changeSection(target: ReviewTarget, diff: string, notes: string[]): string {
 	const fence = codeFence(diff);
 	return [
 		"# Change under review",
 		`Target: ${target.description}`,
-		"Review paths are canonical byte-preserving references. Copy %HH escapes unchanged into reports, read_base, and host snapshot tools. Checkout tools accept canonical relative references or explicit native absolute paths; their printed filenames are display data. Use review_tree to obtain references, and review_file/review_search for names the checkout cannot represent.",
+		"Paths in this prompt and in the host's snapshot tools (review_file, review_search, review_tree, review_diff) are canonical references: a filename with a percent sign, backslash, colon, control character, or bytes that are not UTF-8 is written with uppercase %HH escapes. Report findings by reference, and pass references unchanged to read_base and the snapshot tools. The checkout tools (read, grep, find, ls) take and print the checkout's own filenames. They also accept a reference, and name the reference of the path you pass when it is not what you typed. Use the snapshot tools for a file the checkout does not hold.",
 		...(target.scope.length > 0 ? [`Scope: ${target.scope.join(", ")}`] : []),
 		"",
 		"## Changed files",
@@ -20,6 +33,7 @@ export function changeSection(target: ReviewTarget, diff: string, notes: string[
 		"```",
 		"",
 		"## Diff",
+		...unrepresentedNote(target),
 		...notes,
 		`${fence}diff`,
 		diff.trimEnd(),

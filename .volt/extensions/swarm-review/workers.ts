@@ -43,7 +43,12 @@ export function createWorkerState(index: number, wave: number, shard: number): W
 	};
 }
 
-function createFindingsTool(worker: WorkerState, state: SwarmState, pass: ReviewEnginePass, onReport: () => void) {
+function createFindingsTool(
+	worker: WorkerState,
+	state: SwarmState,
+	engine: SwarmSetup["engine"],
+	onReport: () => void,
+) {
 	return defineTool({
 		name: "report_findings",
 		label: "Report findings",
@@ -57,7 +62,7 @@ function createFindingsTool(worker: WorkerState, state: SwarmState, pass: Review
 			const errors: string[] = [];
 			for (const finding of params.findings) {
 				try {
-					findings.push({ ...finding, file: await canonicalHeadPath(pass, finding.file, signal) });
+					findings.push({ ...finding, file: await canonicalHeadPath(engine, finding.file) });
 				} catch (error) {
 					if (signal?.aborted) throw error;
 					errors.push(error instanceof Error ? error.message : String(error));
@@ -203,7 +208,7 @@ export async function runWave(setup: SwarmSetup, state: SwarmState, workers: Wor
 					model: setup.workerModel,
 					thinking: options.thinking,
 					systemPrompt: WORKER_SYSTEM_PROMPT,
-					reportTool: createFindingsTool(worker, state, hostPass, () => {
+					reportTool: createFindingsTool(worker, state, setup.engine, () => {
 						reportedFindings = true;
 					}),
 					hasReport: () => reportedFindings,

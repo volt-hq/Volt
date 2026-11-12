@@ -11,6 +11,7 @@ import type { ExtensionContext, ToolDefinition } from "@hansjm10/volt-coding-age
 import { afterEach, describe, expect, it } from "vitest";
 import { createRepositoryTools } from "../../../../../.volt/extensions/swarm-review/tools.ts";
 import type { ReviewTarget } from "../../../../../.volt/extensions/swarm-review/types.ts";
+import { directoryCheckout } from "../../utilities/swarm-checkout.ts";
 
 const DIRECTORY_LINK = process.platform === "win32" ? "junction" : "dir";
 
@@ -37,9 +38,10 @@ describe("swarm review tools in a checkout reached through a symlink (issue #950
 		return checkout;
 	}
 
-	function readTool(checkout: string): ToolDefinition {
+	function readTool(directory: string): ToolDefinition {
+		const checkout = directoryCheckout(directory);
 		const target: ReviewTarget = {
-			repoRoot: checkout,
+			repoRoot: directory,
 			checkout,
 			description: "test change",
 			stat: "",
@@ -49,7 +51,7 @@ describe("swarm review tools in a checkout reached through a symlink (issue #950
 			hunkBytes: new Map(),
 			complete: true,
 			submodules: false,
-			commonDir: join(checkout, ".git"),
+			commonDir: join(directory, ".git"),
 			readBase: async () => undefined,
 		};
 		const tools: ToolDefinition[] = createRepositoryTools(target, checkout);

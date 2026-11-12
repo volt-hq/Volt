@@ -434,6 +434,11 @@ async function runSwarmReview(engine: ReviewEngineContext, settings: Settings): 
 			limitations: [
 				...warnings,
 				...(target.submodules ? ["The change updates submodule commits; their contents were not available to reviewers."] : []),
+				...(target.checkout.unrepresented.length > 0
+					? [
+							`The reviewers' checkout did not serve ${target.checkout.unrepresented.length} path(s) of the reviewed head under their own names; reviewers could read those through the host's snapshot tools only.`,
+						]
+					: []),
 				...(target.shards.some((shard) => shard.partialFiles.length > 0)
 					? ["Some hunks were too large to include in a prompt; reviewers paged them."]
 					: []),
