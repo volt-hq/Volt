@@ -32,6 +32,8 @@ Declining trust skips protected resources. `AGENTS.md` and `CLAUDE.md` context f
 
 Non-interactive modes (`-p`, `--mode json`, and `--mode rpc`) do not show a trust prompt. Without an applicable saved trust decision, `defaultProjectTrust: "ask"` and `"never"` ignore such resources, while `"always"` trusts them. Use `--approve`/`-a` or `--no-approve`/`-na` to override project trust for one run.
 
+A conversation in a daemon-managed worktree checkout takes its project trust from the repository in its registered workspace, as the daemon records the checkout, in every mode. One in a pull request review checkout also loads its project-local settings and resources from that repository, never from the pull request's head. A managed checkout the daemon has no record of is trusted only while nothing in it needs trust; `--approve` does not apply to it. See [Project trust](daemon.md#project-trust).
+
 ## No Built-in Sandbox
 
 Volt does not include a built-in sandbox. Built-in tools can read files, write files, edit files, and run shell commands with the permissions of the volt process. Extensions are TypeScript modules that run with the same permissions. Package installs, shell commands, language servers, test commands, and other developer tools behave as ordinary local processes.

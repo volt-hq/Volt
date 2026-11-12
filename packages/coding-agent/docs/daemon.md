@@ -258,6 +258,11 @@ own display settings with the trust the worker decided. `--approve` and
 `--no-approve` decide trust for the startup conversation's project without
 asking.
 
+A conversation in a daemon-managed worktree takes its project trust from the
+repository in its workspace, as the daemon records the worktree. A managed
+checkout the daemon has no record of is trusted only while nothing in it needs
+trust: nothing is asked or saved for it, and `--approve` does not apply.
+
 A decision for this session only applies to that project in the same
 worker, for the same TUI's later conversations, never to another terminal's.
 It is asked again after the worker exits or crashes, or when the
@@ -637,7 +642,8 @@ Conversations in a review checkout work on the PR's files but load project
 settings, extensions, skills, prompts, MCP servers, and context files
 (`AGENTS.md`) from the same repository in the workspace, with its trust, never
 from the PR head. A pull request's own `.volt`, `.mcp.json`, or
-`.agents/skills` changes therefore never run on the host from the app.
+`.agents/skills` changes therefore never run on the host, from the app or from
+a terminal, print, JSON, or RPC conversation in that checkout.
 
 The app keeps one session ID for each launch intent. Preparation durably binds
 that ID to its checkout; identical retries retain the placement across daemon

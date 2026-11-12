@@ -7,15 +7,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { GitContextProvider } from "../src/core/git-context-provider.ts";
 import { ConversationHost } from "../src/core/host/conversation-host.ts";
+import type { PrReviewLaunch } from "../src/core/pr-review-placement.ts";
 import { DEFAULT_IROH_REMOTE_ALLOW_TOOLS } from "../src/core/remote/iroh/index.ts";
 import { CURRENT_SESSION_VERSION, SessionManager } from "../src/core/session-manager.ts";
 import { LogWriter } from "../src/core/session-writer.ts";
 import { DEFAULT_SUBAGENT_TURN_LIMITS, SubagentManager } from "../src/core/subagents/index.ts";
+import { ProjectTrustStore } from "../src/core/trust-manager.ts";
 import {
 	createIrohRemoteAgentRuntime,
 	createIrohRemoteAgentRuntimeWithSessionSelection,
 	type IrohRemoteSubagentRuntimeCreatedEvent,
+	type WorkerCliOptions,
 } from "../src/daemon/worker/conversation-factory.ts";
+import { getWorktreeCheckoutPath } from "../src/daemon/worktree-manager.ts";
+import { writeDaemonStateFile } from "./utilities/iroh-host-state.ts";
 import { registerOnCreatedModelRegistries } from "./utilities.ts";
 
 const SAVED_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "HOME"] as const;
@@ -178,6 +183,105 @@ export default function (volt) {
 				2,
 			)}\n`,
 		);
+	}
+
+	/** A project in `dir`: an extension registering `tool`, which needs trust, and `instructions` as its context file. */
+	function writeProject(dir: string, tool: string, instructions: string): void {
+		mkdirSync(join(dir, ".volt", "extensions"), { recursive: true });
+		writeFileSync(
+			join(dir, ".volt", "extensions", `${tool}.ts`),
+			`import { Type } from "typebox";
+
+export const manifest = { id: "${tool.replaceAll("_", "-")}", displayName: "${tool}" };
+export default function (volt) {
+	volt.registerTool({
+		name: "${tool}",
+		label: "${tool}",
+		description: "${tool}",
+		parameters: Type.Object({}),
+		execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
+	});
+}
+`,
+		);
+		writeFileSync(join(dir, "AGENTS.md"), `${instructions}\n`);
+	}
+
+	/** A TUI's options, its opener answering no trust prompt. */
+	function tuiOptions(): WorkerCliOptions {
+		return {
+			config: {},
+			sessionOptions: {},
+			trust: {
+				opener: (trustCwd) => ({
+					cwd: trustCwd,
+					mode: "rpc",
+					hasUI: false,
+					ui: {
+						select: async () => undefined,
+						confirm: async () => false,
+						input: async () => undefined,
+						notify: () => {},
+					},
+				}),
+				session: new Map(),
+			},
+		};
+	}
+
+	/**
+	 * A managed checkout of the trusted workspace `repo`, as the daemon's state file records it: one that
+	 * holds a pull request review when `review`. Both hold a project of their own.
+	 */
+	async function managedCheckout(repo: string, review: boolean): Promise<string> {
+		const checkout = getWorktreeCheckoutPath(agentDir, repo, "head");
+		writeProject(repo, "workspace_tool", "Workspace instructions.");
+		writeProject(checkout, "head_tool", "Head instructions.");
+		// As `git worktree add` leaves it: the checkout points at the repository it was created from.
+		writeFileSync(join(checkout, ".git"), `gitdir: ${join(repo, ".git", "worktrees", "head")}\n`);
+		const launch: PrReviewLaunch = {
+			sessionId: "review-session",
+			requestFingerprint: "a".repeat(64),
+			disposition: "created",
+			sessionGeneration: "generation-1",
+			storeId: "store-1",
+			placement: {
+				workspaceName: "ws",
+				workspaceGeneration: 1,
+				worktreeId: "head",
+				cwd: checkout,
+				sourceCwd: repo,
+				commonDirectory: join(repo, ".git"),
+				pullRequest: {
+					provider: "github",
+					url: "https://github.com/owner/repo/pull/7",
+					number: 7,
+					title: "Fork change",
+					repository: "owner/repo",
+					headRefName: "topic",
+					headRefOid: "b".repeat(40),
+				},
+				repositoryId: "github:github.com/owner/repo",
+				headRepositoryId: "github:github.com/contributor/repo",
+				remote: "origin",
+			},
+		};
+		await writeDaemonStateFile(agentDir, {
+			workspaces: [{ name: "ws", path: repo }],
+			worktrees: [
+				{
+					id: "head",
+					workspaceName: "ws",
+					path: checkout,
+					branch: "volt/head",
+					createdAt: 1,
+					sessionIds: [],
+					...(review ? { prReviewLaunches: [launch] } : {}),
+				},
+			],
+		});
+		new ProjectTrustStore(agentDir).set(repo, true);
+		return checkout;
 	}
 
 	function writeRuntimeModelConfig(providerConfig: Record<string, unknown>, providerName = "iroh-runtime-test"): void {
@@ -413,6 +517,137 @@ export default function (volt) {
 
 			expect(session.getLspStatus().workspaceRoot).toBe(realpathSync.native(workingDirectory));
 			expect(services.workRoot).toBe(workingDirectory);
+		} finally {
+			errorSpy.mockRestore();
+			await runtime?.host.close(runtime.conversation);
+		}
+	});
+
+	it("loads a TUI conversation in a pull request review checkout from its workspace, not the head (#1041)", async () => {
+		writeRuntimeConfig({});
+		const repo = join(tempDir, "main");
+		const checkout = await managedCheckout(repo, true);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		let runtime: Awaited<ReturnType<typeof createIrohRemoteAgentRuntime>> | undefined;
+		try {
+			runtime = await createIrohRemoteAgentRuntime({
+				agentDir,
+				cwd: checkout,
+				cli: tuiOptions(),
+				// A managed checkout that exists needs nothing of the daemon.
+				worktreeDaemon: { restore: async () => async () => {} },
+			});
+			const { session, services } = runtime.conversation;
+
+			expect(session.sessionManager.getCwd()).toBe(checkout);
+			// The workspace is trusted, and it is the workspace's project that loads: the head's extension never runs.
+			expect(session.settingsManager.isProjectTrusted()).toBe(true);
+			expect(services.projectCwd).toBe(realpathSync.native(repo));
+			const tools = session.getAllTools().map((tool) => tool.name);
+			expect(tools).toContain("workspace_tool");
+			expect(tools).not.toContain("head_tool");
+			expect(session.systemPrompt).toContain("Workspace instructions.");
+			expect(session.systemPrompt).not.toContain("Head instructions.");
+			// Its language servers stay in the checkout it works in.
+			expect(session.getLspStatus().workspaceRoot).toBe(realpathSync.native(checkout));
+			expect(services.workRoot).toBe(checkout);
+			expect(runtime.projectTrusted(checkout)).toBe(true);
+		} finally {
+			errorSpy.mockRestore();
+			await runtime?.host.close(runtime.conversation);
+		}
+	});
+
+	it("loads a TUI conversation in a subdirectory of a pull request review from the same place in its workspace", async () => {
+		writeRuntimeConfig({});
+		const repo = join(tempDir, "main");
+		const checkout = await managedCheckout(repo, true);
+		writeProject(join(repo, "packages", "app"), "workspace_app_tool", "Workspace app instructions.");
+		writeProject(join(checkout, "packages", "app"), "head_app_tool", "Head app instructions.");
+		const workingDirectory = join(checkout, "packages", "app");
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		let runtime: Awaited<ReturnType<typeof createIrohRemoteAgentRuntime>> | undefined;
+		try {
+			runtime = await createIrohRemoteAgentRuntime({
+				agentDir,
+				cwd: workingDirectory,
+				cli: tuiOptions(),
+				worktreeDaemon: { restore: async () => async () => {} },
+			});
+			const { session, services } = runtime.conversation;
+
+			expect(services.projectCwd).toBe(realpathSync.native(join(repo, "packages", "app")));
+			const tools = session.getAllTools().map((tool) => tool.name);
+			expect(tools).toContain("workspace_app_tool");
+			expect(tools).not.toContain("head_app_tool");
+			expect(tools).not.toContain("head_tool");
+			expect(session.systemPrompt).toContain("Workspace app instructions.");
+			expect(session.systemPrompt).not.toContain("Head app instructions.");
+			expect(session.systemPrompt).not.toContain("Head instructions.");
+			expect(session.getLspStatus().workspaceRoot).toBe(realpathSync.native(workingDirectory));
+			expect(runtime.projectTrusted(workingDirectory)).toBe(true);
+		} finally {
+			errorSpy.mockRestore();
+			await runtime?.host.close(runtime.conversation);
+		}
+	});
+
+	it("keeps loading a TUI conversation in a checkout that held no pull request review from the checkout", async () => {
+		writeRuntimeConfig({});
+		const repo = join(tempDir, "main");
+		const checkout = await managedCheckout(repo, false);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		let runtime: Awaited<ReturnType<typeof createIrohRemoteAgentRuntime>> | undefined;
+		try {
+			runtime = await createIrohRemoteAgentRuntime({
+				agentDir,
+				cwd: checkout,
+				cli: tuiOptions(),
+				worktreeDaemon: { restore: async () => async () => {} },
+			});
+			const { session, services } = runtime.conversation;
+
+			// Trusted as its workspace is, it loads its own project.
+			expect(session.settingsManager.isProjectTrusted()).toBe(true);
+			expect(services.projectCwd).toBe(realpathSync.native(checkout));
+			const tools = session.getAllTools().map((tool) => tool.name);
+			expect(tools).toContain("head_tool");
+			expect(tools).not.toContain("workspace_tool");
+			expect(session.systemPrompt).toContain("Head instructions.");
+			expect(session.systemPrompt).not.toContain("Workspace instructions.");
+			expect(session.getLspStatus().workspaceRoot).toBe(realpathSync.native(checkout));
+		} finally {
+			errorSpy.mockRestore();
+			await runtime?.host.close(runtime.conversation);
+		}
+	});
+
+	it("runs a TUI conversation in a managed checkout the daemon's state does not record untrusted", async () => {
+		writeRuntimeConfig({});
+		const repo = join(tempDir, "main");
+		const checkout = await managedCheckout(repo, true);
+		// The daemon's state is unreadable: the checkout's pointer to a trusted repository decides nothing.
+		writeFileSync(join(agentDir, "daemon", "state.json"), "{ not json");
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		let runtime: Awaited<ReturnType<typeof createIrohRemoteAgentRuntime>> | undefined;
+		try {
+			runtime = await createIrohRemoteAgentRuntime({
+				agentDir,
+				cwd: checkout,
+				cli: tuiOptions(),
+				worktreeDaemon: { restore: async () => async () => {} },
+			});
+			const { session } = runtime.conversation;
+
+			expect(session.settingsManager.isProjectTrusted()).toBe(false);
+			const tools = session.getAllTools().map((tool) => tool.name);
+			expect(tools).not.toContain("head_tool");
+			expect(tools).not.toContain("workspace_tool");
+			expect(runtime.projectTrusted(checkout)).toBe(false);
 		} finally {
 			errorSpy.mockRestore();
 			await runtime?.host.close(runtime.conversation);

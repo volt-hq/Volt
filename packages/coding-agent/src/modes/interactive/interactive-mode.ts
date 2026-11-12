@@ -130,6 +130,7 @@ import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import { findExactModelReferenceMatch } from "../../core/model-resolver.ts";
 import { type ConfiguredPackage, DefaultPackageManager } from "../../core/package-manager.ts";
 import { DEFAULT_PLANNING_STATE, type PlanningState, type PlanPhase, type PlanState } from "../../core/planning.ts";
+import { resolveConversationProject } from "../../core/project-trust.ts";
 import { BEDROCK_PROVIDER_ID } from "../../core/provider-auth.ts";
 import { MUTABLE_WORKSPACE_REVIEW_TOOLS } from "../../core/review.ts";
 import { formatMissingSessionCwdPrompt } from "../../core/session-cwd.ts";
@@ -140,7 +141,7 @@ import { formatDuration } from "../../core/tools/render-utils.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { stripTerminalControls } from "../../core/ui/ansi-tokens.ts";
 import type { UserInputResponse } from "../../core/user-input.ts";
-import { isPathUnderWorktreesRoot, resolveWorktreeParentCheckout } from "../../daemon/worktree-manager.ts";
+import { isPathUnderWorktreesRoot } from "../../daemon/worktree-manager.ts";
 import {
 	findCatalogPackage,
 	loadDefaultStoreCatalog,
@@ -341,7 +342,10 @@ interface ActiveViewDescriptor {
 	fullscreenRoot: Component;
 }
 
-/** Where the TUI reads its own settings: a conversation's cwd, its project trust, and the settings profile. */
+/**
+ * Where the TUI reads its own settings: the directory a conversation loads its project from (its cwd, or for a
+ * pull request review checkout the repository in its workspace), its project trust, and the settings profile.
+ */
 export interface TuiSettingsScope {
 	readonly cwd: string;
 	readonly projectTrusted: boolean;
@@ -453,9 +457,9 @@ export interface InteractiveModeOptions {
 	/**
 	 * Where the TUI reads its own settings until its client says where the
 	 * conversation runs and how its host decided its project trust
-	 * (`conversation_info`): the startup conversation's cwd, the trust known
-	 * before it opened, and the settings profile. By default the process's
-	 * cwd, untrusted, without a profile.
+	 * (`conversation_info`): the startup conversation's project directory, the
+	 * trust known before it opened, and the settings profile. By default the
+	 * process's cwd, untrusted, without a profile.
 	 */
 	settingsScope?: TuiSettingsScope;
 	/** A name for the conversation the TUI opens (`--name`). */
@@ -2193,17 +2197,17 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Where the conversation the store shows runs, as its client tells: its
-	 * cwd and the project trust its host decided for it (`conversation_info`),
-	 * and the settings profile (`settings`); undefined when the client could
-	 * not tell.
+	 * Where the conversation the store shows loads its project, as its client
+	 * tells: the project of its cwd, as its host resolves it, and the project
+	 * trust its host decided for it (`conversation_info`), and the settings
+	 * profile (`settings`); undefined when the client could not tell.
 	 */
 	private async readSettingsScope(): Promise<TuiSettingsScope | undefined> {
 		const client = this.store.client;
 		try {
 			const [info, settings] = await Promise.all([client.query("conversation_info"), client.query("settings")]);
 			return {
-				cwd: info.cwd,
+				cwd: resolveConversationProject(getAgentDir(), info.cwd).projectCwd,
 				projectTrusted: info.projectTrusted,
 				...(settings.profile === "" ? {} : { profile: settings.profile }),
 			};
@@ -6615,21 +6619,20 @@ export class InteractiveMode {
 		}
 	}
 
-	/** `/trust`: save a trust decision for the project the conversation runs in, or its worktree's parent checkout. */
+	/** `/trust`: save a trust decision for the project the conversation runs in, or its worktree's workspace repository. */
 	private async showTrustSelector(): Promise<void> {
 		await this.clientConnected.promise;
 		const agentDir = getAgentDir();
 		const sessionCwd = (await this.sessions.info()).cwd;
-		// Worktree sessions pin trust to the PARENT checkout; entries are never
+		// Worktree sessions take their trust from their workspace; entries are never
 		// prompted for or persisted on worktree paths (§5.2.1).
-		const worktreeParent = resolveWorktreeParentCheckout(agentDir, sessionCwd);
-		if (worktreeParent === undefined && isPathUnderWorktreesRoot(agentDir, sessionCwd)) {
+		const cwd = resolveConversationProject(agentDir, sessionCwd).trustPath;
+		if (cwd === undefined) {
 			this.showWarning(
-				"This session runs in a daemon-managed worktree and its parent checkout could not be resolved; trust decisions are managed on the parent workspace.",
+				"This session runs in a daemon-managed worktree the daemon has no record of; trust decisions are managed on the parent workspace.",
 			);
 			return;
 		}
-		const cwd = worktreeParent ?? sessionCwd;
 		const trustStore = new ProjectTrustStore(agentDir);
 		const savedDecision = trustStore.getEntry(cwd);
 		this.showSelector((done) => {

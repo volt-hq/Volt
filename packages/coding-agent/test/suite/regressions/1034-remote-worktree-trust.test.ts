@@ -15,7 +15,7 @@ import { ProjectTrustStore } from "../../../src/core/trust-manager.ts";
 import { type ConversationOpenServices, resolveConversationOpen } from "../../../src/daemon/conversation-open.ts";
 import { WorkspaceSessions } from "../../../src/daemon/workspace-sessions.ts";
 import {
-	getConversationProjectRoot,
+	getConversationProject,
 	getWorktreeCheckoutPath,
 	WorktreeManager,
 } from "../../../src/daemon/worktree-manager.ts";
@@ -256,8 +256,13 @@ describe("#1034 remote worktree conversations take project trust and resources f
 			sourceRootRelativePath: "apps/web",
 			prReviewLaunches: [reviewLaunch(reviewCheckout)],
 		};
-		expect(getConversationProjectRoot(workspace, review)).toBe(join(workspace.path, "apps", "web"));
-		expect(getConversationProjectRoot(workspace, { ...review, prReviewLaunches: undefined })).toBe(reviewCheckout);
-		expect(getConversationProjectRoot(workspace, undefined)).toBe(workspace.path);
+		// A phone's conversations load their project at the root of the tree they work in.
+		expect(getConversationProject(workspace, review, reviewCheckout).projectCwd).toBe(
+			join(workspace.path, "apps", "web"),
+		);
+		expect(
+			getConversationProject(workspace, { ...review, prReviewLaunches: undefined }, reviewCheckout).projectCwd,
+		).toBe(reviewCheckout);
+		expect(getConversationProject(workspace, undefined, workspace.path).projectCwd).toBe(workspace.path);
 	});
 });

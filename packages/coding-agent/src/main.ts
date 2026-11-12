@@ -35,7 +35,7 @@ import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dis
 import { LspServerPool } from "./core/lsp/server-pool.ts";
 import { resolveModelScope } from "./core/model-resolver.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
-import { type AppMode, projectTrustPath, resolveProjectTrusted } from "./core/project-trust.ts";
+import { type AppMode, resolveConversationProject, resolveProjectTrusted } from "./core/project-trust.ts";
 import { getMissingSessionCwdIssue, MissingSessionCwdError } from "./core/session-cwd.ts";
 import { findLocalSessionByExactId, type ResolvedSession, resolveSessionArgument } from "./core/session-lookup.ts";
 import { assertValidSessionId, SessionManager } from "./core/session-manager.ts";
@@ -48,7 +48,6 @@ import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/tru
 import { handleDaemonCommand } from "./daemon/cli.ts";
 import { handleRemoteControlCommand } from "./daemon/remote-cli.ts";
 import { closeLocalSessionManager, restoreLocalSessionWorktree } from "./daemon/session-worktree.ts";
-import { isPathUnderWorktreesRoot, resolveWorktreeParentCheckout } from "./daemon/worktree-manager.ts";
 import { handleMcpCommand } from "./mcp-cli.ts";
 import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
 import { DaemonConnector } from "./modes/interactive/daemon-connector.ts";
@@ -473,12 +472,17 @@ async function runInteractive(parsed: Args, context: InteractiveStartupContext):
 		return;
 	}
 	time("resolveStartupTarget");
+	// The project its conversation loads, as its worker resolves it: the workspace's for a pull request review checkout.
+	const project = resolveConversationProject(agentDir, startup.cwd);
 	// Until the worker decides, the TUI reads a project's settings only when nothing in it needs trust, or
 	// `--approve` trusts it: the worker's `project_trust` hooks may decide otherwise than the saved decision.
 	const projectTrusted =
-		!hasTrustRequiringProjectResources(startup.cwd) ||
-		(parsed.projectTrustOverride === true && projectTrustPath(agentDir, startup.cwd) !== undefined);
-	const displaySettings = SettingsManager.create(startup.cwd, agentDir, { projectTrusted, profile: requestedProfile });
+		!hasTrustRequiringProjectResources(project.projectCwd) ||
+		(parsed.projectTrustOverride === true && project.trustPath !== undefined);
+	const displaySettings = SettingsManager.create(project.projectCwd, agentDir, {
+		projectTrusted,
+		profile: requestedProfile,
+	});
 	reportDiagnostics(collectSettingsDiagnostics(displaySettings, "interactive startup"));
 	const { initialMessage, initialImages } = await prepareInitialMessage(parsed, displaySettings.getImageAutoResize());
 	const connector = new DaemonConnector({
@@ -492,14 +496,14 @@ async function runInteractive(parsed: Args, context: InteractiveStartupContext):
 		...(sessionDir === undefined ? {} : { sessionDir }),
 	});
 	const interactiveMode = new InteractiveMode(connector, {
-		// The TUI reads its own settings where its conversation starts, then with the trust its worker decided.
+		// The TUI reads its own settings in the project its conversation starts in, then with the trust its worker decided.
 		settingsScope: {
-			cwd: startup.cwd,
+			cwd: project.projectCwd,
 			projectTrusted,
 			...(requestedProfile === undefined ? {} : { profile: requestedProfile }),
 		},
 		autoTrustOnReloadCwd:
-			parsed.projectTrustOverride === undefined && !hasTrustRequiringProjectResources(startup.cwd)
+			parsed.projectTrustOverride === undefined && !hasTrustRequiringProjectResources(project.projectCwd)
 				? startup.cwd
 				: undefined,
 		initialMessage,
@@ -755,31 +759,35 @@ export async function main(args: string[], options?: MainOptions) {
 		const runtimeProfile = Object.hasOwn(runtimeOptions, "profile") ? runtimeOptions.profile : requestedProfile;
 		const isInitialRuntime = sessionStartEvent === undefined;
 		const projectTrustDiagnostics: AgentSessionDiagnostic[] = [];
-		// Daemon-managed worktree checkouts pin trust to the PARENT checkout:
-		// prompts and trust.json entries always target the parent workspace path,
-		// never a path under ~/.volt/agent/worktrees (worktrees-design §5.2.1).
-		// When the parent cannot be resolved, the worktree runs untrusted rather
-		// than prompting for (or persisting) the worktree path.
-		const worktreeParentPath = resolveWorktreeParentCheckout(agentDir, cwd);
-		const trustPath = worktreeParentPath ?? (isPathUnderWorktreesRoot(agentDir, cwd) ? undefined : cwd);
+		// The conversation's project, as the daemon's workers resolve it (worktrees-design §5.2.1): a managed
+		// worktree checkout takes its trust from its workspace, so prompts and trust.json entries never target a
+		// path under ~/.volt/agent/worktrees, and a pull request review checkout loads its project there too.
+		// A checkout the daemon has no record of has no trust path: it runs untrusted, whatever `--approve` says,
+		// rather than prompting for (or persisting) the worktree path.
+		const { projectCwd, trustPath } = resolveConversationProject(agentDir, cwd);
+		const trustOverride =
+			trustPath === undefined && parsed.projectTrustOverride ? undefined : parsed.projectTrustOverride;
 		const cachedProjectTrust = trustPath === undefined ? undefined : projectTrustByCwd.get(trustPath);
-		const hasTrustRequiringResources = hasTrustRequiringProjectResources(cwd);
+		const hasTrustRequiringResources = hasTrustRequiringProjectResources(projectCwd);
 		const shouldResolveProjectTrust =
-			parsed.projectTrustOverride === undefined &&
+			trustOverride === undefined &&
 			cachedProjectTrust === undefined &&
 			hasTrustRequiringResources &&
 			trustPath !== undefined;
 		const projectTrusted = shouldResolveProjectTrust
 			? false
 			: (cachedProjectTrust ??
-				parsed.projectTrustOverride ??
+				trustOverride ??
 				(!hasTrustRequiringResources || (trustPath !== undefined && trustStore.get(trustPath) === true)));
-		const runtimeSettingsManager = SettingsManager.create(cwd, agentDir, {
+		const runtimeSettingsManager = SettingsManager.create(projectCwd, agentDir, {
 			projectTrusted,
 			profile: runtimeProfile,
 		});
 		const services = await createAgentSessionServices({
 			cwd,
+			projectCwd,
+			// Its language servers run in the tree it works in, whatever its project.
+			workRoot: cwd,
 			agentDir,
 			authStorage,
 			settingsManager: runtimeSettingsManager,
@@ -793,9 +801,9 @@ export async function main(args: string[], options?: MainOptions) {
 							resolveProjectTrust: async ({ extensionsResult }) => {
 								const trusted = await resolveProjectTrusted({
 									cwd: trustPath,
-									resourcesCwd: cwd,
+									resourcesCwd: projectCwd,
 									trustStore,
-									trustOverride: parsed.projectTrustOverride,
+									trustOverride,
 									defaultProjectTrust: startupSettingsManager.getDefaultProjectTrust(),
 									extensionsResult,
 									projectTrustContext:
