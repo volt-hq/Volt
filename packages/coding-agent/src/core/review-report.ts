@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import { defineTool, type ToolDefinition } from "./extensions/types.ts";
-import {
-	normalizeReviewPath,
-	type ReviewChangedFile,
-	type ReviewSnapshot,
-	type ReviewSnapshotLineRange,
-	type ReviewSnapshotRevision,
+import { normalizeReviewPath, REVIEW_PATH_MAX_LENGTH } from "./review-path.ts";
+import type {
+	ReviewChangedFile,
+	ReviewSnapshot,
+	ReviewSnapshotLineRange,
+	ReviewSnapshotRevision,
 } from "./review-snapshot.ts";
 import { mergeObservedCoverage, type ReviewObservedCoverage } from "./review-tools.ts";
 
@@ -17,6 +17,7 @@ export type ReviewFindingStatus = "open" | "accepted" | "fixed" | "dismissed" | 
 export type ReviewFindingOutcomeReason = "false_positive" | "intentional" | "not_actionable" | "other";
 
 export interface ReviewLocation {
+	/** Canonical review-path reference copied from the snapshot, never a decoded display or checkout filename. */
 	path: string;
 	side: ReviewSnapshotRevision;
 	startLine: number;
@@ -281,7 +282,11 @@ export interface BuildParsedReviewOptions {
 
 const LocationSchema = Type.Object(
 	{
-		path: Type.String({ minLength: 1, maxLength: 4_096 }),
+		path: Type.String({
+			minLength: 1,
+			maxLength: REVIEW_PATH_MAX_LENGTH,
+			description: "Canonical snapshot path reference; preserve %HH escapes exactly.",
+		}),
 		side: Type.Union([Type.Literal("base"), Type.Literal("head")]),
 		startLine: Type.Integer({ minimum: 1 }),
 		endLine: Type.Integer({ minimum: 1 }),

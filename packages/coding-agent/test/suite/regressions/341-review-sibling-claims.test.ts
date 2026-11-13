@@ -236,7 +236,7 @@ async function fixture() {
 	hosted.adoptTop(worker.spec, { host: source.host, conversation: source.conversation, projectTrusted: () => false });
 
 	const record: ReviewRunRecord = {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		runId: "run",
 		workflowAction: "review.uncommitted",
 		status: "completed",

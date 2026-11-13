@@ -90,7 +90,7 @@ function result(findings: ReviewFinding[] = [finding()]): ParsedReview {
 
 function record(runId: string, endedAt: number, findings: ReviewFinding[] = [finding()]): ReviewRunRecord {
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		runId,
 		workflowAction: "review.branch",
 		status: "completed",
@@ -1188,6 +1188,104 @@ describe("durable review state", () => {
 				parentRunId: uncovered.runId,
 			}),
 		).toMatchObject({ mode: "full", fallbackReason: expect.stringContaining("lacks verified coverage") });
+	});
+
+	it("preserves encoded rename and collision identity through restart and incremental planning", async () => {
+		const root = join(tmpdir(), `volt-byte-state-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(root);
+		directories.push(root);
+		const manager = await SessionManager.create(root, join(root, "sessions"));
+		const source = snapshot("same-blob");
+		const paths = ["collision-%FE.txt", "collision-%FF.txt", "new-%FF.txt"];
+		source.changedFiles = paths.map((path, index) => ({
+			...source.changedFiles[0]!,
+			path,
+			...(index === 2 ? { previousPath: "old-%FE.txt", status: "renamed" as const } : {}),
+			base: { ...source.changedFiles[0]!.base!, path: index === 2 ? "old-%FE.txt" : path },
+			head: { ...source.changedFiles[0]!.head!, path },
+			hunks: [{ ...source.changedFiles[0]!.hunks[0]!, path, id: `byte-hunk-${index}` }],
+		}));
+		const parsed = result(
+			paths.map((path, index) =>
+				finding({
+					id: `byte-finding-${index}`,
+					fingerprint: String(index).repeat(64),
+					changeLocation: { path, side: "head", startLine: 1, endLine: 1 },
+				}),
+			),
+		);
+		parsed.coverage.filesInspected = paths;
+		parsed.coverage.hunksInspected = source.changedFiles.flatMap((file) => file.hunks.map((hunk) => hunk.id));
+		const controls = {
+			scope: [],
+			effort: "standard" as const,
+			includeOptional: false,
+			scopeMode: "incremental" as const,
+		};
+		const run = createReviewRunRecord({
+			workflowId: "byte-state",
+			workflowAction: "review.branch",
+			startedAt: 1,
+			endedAt: 2,
+			snapshot: source,
+			controls,
+			status: "completed",
+			result: parsed,
+		});
+		await appendReviewRun(manager.logWriter, run);
+		const ref = manager.getSessionRef()!;
+		await manager.closePersistence();
+		const reopened = await SessionManager.open(ref);
+		expect(getReviewRun(reopened, run.runId)).toEqual(run);
+		expect(planIncrementalReview(reopened, source, controls)).toMatchObject({
+			mode: "incremental",
+			changedPaths: [],
+			priorOpenFindings: parsed.findings,
+		});
+		const changed = structuredClone(source.changedFiles);
+		changed[0]!.head!.oid = "changed-blob";
+		changed[0]!.hunks[0]!.id = "changed-hunk";
+		const next = planIncrementalReview(reopened, { ...source, changedFiles: changed }, controls);
+		expect(next.changedPaths).toEqual([paths[0]]);
+		expect(next.priorOpenFindings.map((finding) => finding.changeLocation.path)).toEqual(paths.slice(1));
+	});
+
+	it("refuses schema-1 or noncanonical runs as incremental path authority", async () => {
+		const manager = SessionManager.inMemory("/workspace");
+		await manager.logWriter.appendCustomEntry(REVIEW_RUN_CUSTOM_ENTRY_TYPE, {
+			...record("old", 1),
+			schemaVersion: 1,
+		});
+		const invalid = record("invalid", 2);
+		invalid.target.files[0]!.path = "literal%name";
+		await appendReviewRun(manager.logWriter, invalid);
+		expect(listReviewRuns(manager).runs).toEqual([]);
+		expect(planIncrementalReview(manager, snapshot("new"), invalid.options)).toMatchObject({ mode: "full" });
+	});
+
+	it("omits whole long coverage references without truncating finding or inventory identities", () => {
+		const long = `long-${"%FF".repeat(400)}`;
+		const source = snapshot("long-blob");
+		source.changedFiles[0]!.path = long;
+		const parsed = result([finding({ changeLocation: { path: long, side: "head", startLine: 1, endLine: 1 } })]);
+		parsed.coverage.filesInspected = ["kept-%FE", long];
+		parsed.coverage.exclusions = [{ path: long, reason: "long exclusion" }];
+		const run = createReviewRunRecord({
+			workflowId: "long-path",
+			workflowAction: "review.branch",
+			startedAt: 1,
+			snapshot: source,
+			controls: { scope: [], effort: "standard", includeOptional: false, scopeMode: "full" },
+			status: "completed",
+			result: parsed,
+		});
+		expect(run.result?.coverage.filesInspected).toEqual(["kept-%FE"]);
+		expect(run.result?.coverage.exclusions).toEqual([]);
+		expect(run.result?.coverage.residualRisk).toContain(
+			"Durable coverage details were compacted to the host persistence bound.",
+		);
+		expect(run.target.files[0]?.path).toBe(long);
+		expect(run.result?.findings[0]?.changeLocation.path).toBe(long);
 	});
 
 	it("records bounded run snapshots through the host record builder", () => {

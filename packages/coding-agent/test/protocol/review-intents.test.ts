@@ -49,7 +49,7 @@ function durableRecord(): ReviewRunRecord {
 		},
 	};
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		runId: "review:test",
 		workflowAction: "review.uncommitted",
 		status: "completed",

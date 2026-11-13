@@ -510,6 +510,56 @@ describe("review engines", () => {
 		expect(runs.runs[0]).toMatchObject({ status: "completed", result: { coverage: { uncheckedAreas: [] } } });
 	});
 
+	it("says whether the snapshot has a text file at a path, without counting it as read", async () => {
+		const { harness, start } = await fixture();
+		const cwd = harness.tempDir;
+		// Beside the changed file: one the change deletes, and a binary one it adds.
+		writeFileSync(join(cwd, "gone.txt"), "deleted by the change\n");
+		git(cwd, "add", "gone.txt");
+		git(cwd, "commit", "-m", "add a file to delete");
+		rmSync(join(cwd, "gone.txt"));
+		writeFileSync(join(cwd, "binary.dat"), Buffer.from([0, 1, 2, 0]));
+		let answers: Record<string, boolean> | undefined;
+		let notCanonical: unknown;
+		const spellings: unknown[] = [];
+		const { runs } = await start(
+			engine(async (ctx) => {
+				answers = {
+					changedHead: await ctx.hasTextFile("src/value.ts", "head"),
+					changedBase: await ctx.hasTextFile("src/value.ts", "base"),
+					deletedHead: await ctx.hasTextFile("gone.txt", "head"),
+					deletedBase: await ctx.hasTextFile("gone.txt", "base"),
+					binary: await ctx.hasTextFile("binary.dat", "head"),
+					missing: await ctx.hasTextFile("src/missing.ts", "head"),
+					directory: await ctx.hasTextFile("src", "head"),
+				};
+				notCanonical = await ctx.hasTextFile("src/100%.ts", "head").catch((error: unknown) => error);
+				for (const path of ["./src/value.ts", "src/value.ts/"]) {
+					spellings.push(await ctx.hasTextFile(path, "head").catch((error: unknown) => error));
+				}
+				await reviewCarefully(ctx);
+			}),
+		);
+		expect(answers).toEqual({
+			changedHead: true,
+			changedBase: true,
+			deletedHead: false,
+			deletedBase: true,
+			binary: false,
+			missing: false,
+			directory: false,
+		});
+		expect(notCanonical).toMatchObject({ message: expect.stringContaining("uppercase %HH") });
+		// A spelling the snapshot would read is still not the reference a report must carry.
+		expect(spellings).toEqual([
+			expect.objectContaining({ message: expect.stringContaining("must not traverse") }),
+			expect.objectContaining({ message: expect.stringContaining("must not traverse") }),
+		]);
+		// The engine was given the diff, and read no file: asking whether one exists is not reading it.
+		expect(runs.runs[0]?.result?.coverage.hunksInspected).toHaveLength(2);
+		expect(runs.runs[0]?.result?.coverage.filesInspected).toEqual([]);
+	});
+
 	it("hands a released checkout to the next caller reset to the head, without setting it up again", async () => {
 		const { start } = await fixture();
 		let first: ReviewEngineCheckout | undefined;

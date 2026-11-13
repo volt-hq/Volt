@@ -6,6 +6,10 @@ import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawnProcess } from "../utils/child-process.ts";
 import { terminateProcessTree } from "../utils/shell.ts";
+import { normalizeReviewPath, reviewPathFromBytes, reviewPathToUtf8 } from "./review-path.ts";
+
+export { normalizeReviewPath } from "./review-path.ts";
+
 import {
 	type CodeHostProvider,
 	type PullRequestFetchPlan,
@@ -1588,21 +1592,35 @@ interface NameStatusEntry {
 	status: ReviewChangedFileStatus;
 }
 
+function nulRecords(stdout: Buffer): Buffer[] {
+	if (stdout.length > 0 && stdout.at(-1) !== 0) throw new Error("Git returned a truncated NUL-delimited record.");
+	const records: Buffer[] = [];
+	let start = 0;
+	for (let index = 0; index < stdout.length; index++) {
+		if (stdout[index] !== 0) continue;
+		records.push(stdout.subarray(start, index));
+		start = index + 1;
+	}
+	return records;
+}
+
 function parseNameStatus(stdout: Buffer): NameStatusEntry[] {
-	const tokens = stdout.toString("utf8").split("\0");
+	const tokens = nulRecords(stdout);
 	const entries: NameStatusEntry[] = [];
+	const seen = new Set<string>();
 	let index = 0;
 	while (index < tokens.length) {
-		const statusToken = tokens[index++];
-		if (!statusToken) continue;
-		if (statusToken.startsWith("R") || statusToken.startsWith("C")) {
-			const previousPath = tokens[index++];
-			const path = tokens[index++];
-			if (previousPath && path) entries.push({ path, previousPath, status: statusFromGit(statusToken) });
-			continue;
-		}
-		const path = tokens[index++];
-		if (path) entries.push({ path, status: statusFromGit(statusToken) });
+		const statusToken = tokens[index++]!.toString("ascii");
+		if (!/^(?:[ADMT]|[RC][0-9]{1,3})$/.test(statusToken)) throw new Error("git diff returned an invalid status.");
+		const first = tokens[index++];
+		if (!first) throw new Error("git diff returned a missing path.");
+		const previousPath = /^[RC]/.test(statusToken) ? reviewPathFromBytes(first) : undefined;
+		const pathBytes = previousPath ? tokens[index++] : first;
+		if (!pathBytes) throw new Error("git diff returned a missing rename path.");
+		const path = reviewPathFromBytes(pathBytes);
+		if (seen.has(path)) throw new Error("git diff returned a duplicate path.");
+		seen.add(path);
+		entries.push({ path, ...(previousPath ? { previousPath } : {}), status: statusFromGit(statusToken) });
 	}
 	return entries;
 }
@@ -1620,22 +1638,22 @@ function numstatKey(path: string, previousPath?: string): string {
 }
 
 function parseNumstat(stdout: Buffer): Map<string, NumstatEntry> {
-	const tokens = stdout.toString("utf8").split("\0");
+	const tokens = nulRecords(stdout);
 	const entries = new Map<string, NumstatEntry>();
 	let index = 0;
 	while (index < tokens.length) {
 		const token = tokens[index++];
-		if (!token) continue;
-		const firstTab = token.indexOf("\t");
-		const secondTab = firstTab < 0 ? -1 : token.indexOf("\t", firstTab + 1);
+		if (!token) throw new Error("git diff --numstat returned a missing record.");
+		const firstTab = token.indexOf(9);
+		const secondTab = firstTab < 0 ? -1 : token.indexOf(9, firstTab + 1);
 		if (firstTab < 0 || secondTab < 0) throw new Error("git diff --numstat returned malformed output.");
-		const additionsText = token.slice(0, firstTab);
-		const deletionsText = token.slice(firstTab + 1, secondTab);
+		const additionsText = token.subarray(0, firstTab).toString("ascii");
+		const deletionsText = token.subarray(firstTab + 1, secondTab).toString("ascii");
 		const binary = additionsText === "-" && deletionsText === "-";
 		const additions = binary ? 0 : Number(additionsText);
 		const deletions = binary ? 0 : Number(deletionsText);
 		if (
-			(!binary && (additionsText === "-" || deletionsText === "-")) ||
+			(!binary && (!/^[0-9]+$/.test(additionsText) || !/^[0-9]+$/.test(deletionsText))) ||
 			!Number.isSafeInteger(additions) ||
 			additions < 0 ||
 			!Number.isSafeInteger(deletions) ||
@@ -1643,15 +1661,16 @@ function parseNumstat(stdout: Buffer): Map<string, NumstatEntry> {
 		) {
 			throw new Error("git diff --numstat returned invalid line counts.");
 		}
-		let path = token.slice(secondTab + 1);
+		let pathBytes = token.subarray(secondTab + 1);
 		let previousPath: string | undefined;
-		if (!path) {
-			previousPath = tokens[index++];
-			path = tokens[index++] ?? "";
+		if (pathBytes.length === 0) {
+			const previous = tokens[index++];
+			const current = tokens[index++];
+			if (!previous || !current) throw new Error("git diff --numstat returned malformed rename paths.");
+			previousPath = reviewPathFromBytes(previous);
+			pathBytes = current;
 		}
-		if (!path || (previousPath !== undefined && !previousPath)) {
-			throw new Error("git diff --numstat returned malformed rename paths.");
-		}
+		const path = reviewPathFromBytes(pathBytes);
 		const entry = {
 			path,
 			...(previousPath ? { previousPath } : {}),
@@ -1668,23 +1687,20 @@ function parseNumstat(stdout: Buffer): Map<string, NumstatEntry> {
 
 interface ParsedReviewSnapshotTree {
 	entries: Map<string, ReviewSnapshotTreeEntry>;
+	directories: Map<string, ReviewSnapshotTreeEntry>;
 	pathspecUnsafeEntries: Set<ReviewSnapshotTreeEntry>;
 }
 
 function parseTree(stdout: Buffer): ParsedReviewSnapshotTree {
 	const entries = new Map<string, ReviewSnapshotTreeEntry>();
 	const pathspecUnsafeEntries = new Set<ReviewSnapshotTreeEntry>();
-	let start = 0;
-	while (start < stdout.length) {
-		const nul = stdout.indexOf(0, start);
-		const token = stdout.subarray(start, nul < 0 ? stdout.length : nul);
-		start = nul < 0 ? stdout.length : nul + 1;
-		if (token.length === 0) continue;
+	const directories = new Map<string, ReviewSnapshotTreeEntry>();
+	for (const token of nulRecords(stdout)) {
 		const tab = token.indexOf(9);
-		if (tab < 0) continue;
+		if (tab < 0) throw new Error("git ls-tree returned malformed metadata.");
 		const metadata = token.subarray(0, tab).toString("utf8").split(/\s+/);
 		const pathBytes = token.subarray(tab + 1);
-		const path = pathBytes.toString("utf8");
+		const path = reviewPathFromBytes(pathBytes);
 		const [mode, type, oid, sizeText] = metadata;
 		if (
 			!mode ||
@@ -1692,7 +1708,7 @@ function parseTree(stdout: Buffer): ParsedReviewSnapshotTree {
 			!oid ||
 			!CANONICAL_GIT_OBJECT_ID_PATTERN.test(oid)
 		) {
-			continue;
+			throw new Error("git ls-tree returned invalid object metadata.");
 		}
 		const size = sizeText && sizeText !== "-" ? Number(sizeText) : undefined;
 		const entry: ReviewSnapshotTreeEntry = {
@@ -1702,10 +1718,12 @@ function parseTree(stdout: Buffer): ParsedReviewSnapshotTree {
 			oid,
 			...(Number.isSafeInteger(size) && size !== undefined && size >= 0 ? { size } : {}),
 		};
-		entries.set(path, entry);
-		if (!Buffer.from(path, "utf8").equals(pathBytes)) pathspecUnsafeEntries.add(entry);
+		if (entries.has(path) || directories.has(path)) throw new Error("git ls-tree returned a duplicate path.");
+		if (type === "tree") directories.set(path, entry);
+		else entries.set(path, entry);
+		if (reviewPathToUtf8(path) === undefined) pathspecUnsafeEntries.add(entry);
 	}
-	return { entries, pathspecUnsafeEntries };
+	return { entries, directories, pathspecUnsafeEntries };
 }
 
 function collectLineRanges(lines: number[]): ReviewSnapshotLineRange[] {
@@ -1744,15 +1762,24 @@ function parseHunks(path: string, patch: string): ReviewSnapshotHunk[] {
 			const line = lines[index] ?? "";
 			if (line.startsWith("diff --git ")) break;
 			hunkLines.push(line);
+			if (line === "" && index === lines.length - 1) {
+				index++;
+				break;
+			}
 			if (line.startsWith("-")) {
 				baseLines.push(oldLine++);
 			} else if (line.startsWith("+")) {
 				headLines.push(newLine++);
-			} else if (!line.startsWith("\\")) {
+			} else if (line.startsWith(" ") || line === "") {
 				oldLine++;
 				newLine++;
+			} else if (!line.startsWith("\\")) {
+				throw new Error("git diff returned malformed hunk content.");
 			}
 			index++;
+		}
+		if (oldLine - oldStart !== oldCount || newLine - newStart !== newCount) {
+			throw new Error("git diff returned a truncated or malformed hunk.");
 		}
 		const patchText = hunkLines.join("\n");
 		const id = createHash("sha256")
@@ -1875,21 +1902,21 @@ class GrepRecordReader {
 }
 
 /**
- * One page of the lines under `tree` that contain `query`, in Git's order: a single `git grep` on the tree
- * object, read as it prints and stopped once the page is full. Git decides what matches. It does not search a
+ * One page of the lines in the resolved tree/blob scope that contain `query`, in Git's order: one `git grep`
+ * addressed by object ID, read as it prints and stopped once the page is full. Git decides what matches. It does not search a
  * binary file, one with a NUL among its first 8,000 bytes: for a tree object it never consults `.gitattributes`.
  * A page skips the `offset` matches before it, so a later page costs a scan of what precedes it.
  */
 async function searchTreePage(
 	source: GitSource,
-	tree: string,
-	options: { query: string; prefix: string; ignoreCase: boolean; offset: number; limit: number },
+	scope: { oid: string; path: string; type: "tree" | "blob" },
+	options: { query: string; ignoreCase: boolean; offset: number; limit: number },
 	signal: AbortSignal,
 ): Promise<ReviewSnapshotSearchResult> {
 	if (signal.aborted) throw searchAbortError();
 	const env: Record<string, string> = {
 		...source.env,
-		// The pathspec below carries its own magic, which an inherited pathspec mode must not reinterpret.
+		// Isolate Git's pathspec settings even though this search is addressed entirely by object ID.
 		GIT_LITERAL_PATHSPECS: "0",
 		GIT_GLOB_PATHSPECS: "0",
 		GIT_NOGLOB_PATHSPECS: "0",
@@ -1897,20 +1924,25 @@ async function searchTreePage(
 	};
 	// Git folds the case of letters outside ASCII only in a UTF-8 locale.
 	if (options.ignoreCase && !gitLocaleIsUtf8({ ...process.env, ...env })) env.LC_ALL = "C.UTF-8";
-	const namePrefix = Buffer.from(`${tree}:`, "latin1");
+	const namePrefix = Buffer.from(scope.type === "tree" ? `${scope.oid}:` : scope.oid, "ascii");
 	const page: ReviewSnapshotSearchResult = { matches: [], complete: true };
 	let seen = 0;
 	const reader = new GrepRecordReader((name, line, text) => {
-		if (!name.subarray(0, namePrefix.length).equals(namePrefix)) {
-			throw new Error("git grep returned a match outside the requested snapshot tree.");
+		if (
+			!name.subarray(0, namePrefix.length).equals(namePrefix) ||
+			(scope.type === "blob" && name.length !== namePrefix.length)
+		) {
+			throw new Error("git grep returned a match outside the requested snapshot object.");
 		}
+		const relative = scope.type === "tree" ? reviewPathFromBytes(name.subarray(namePrefix.length)) : "";
+		const path = relative ? (scope.path ? `${scope.path}/${relative}` : relative) : scope.path;
 		if (seen++ < options.offset) return true;
 		if (page.matches.length === options.limit) {
 			page.complete = false;
 			return false;
 		}
 		page.matches.push({
-			path: name.subarray(namePrefix.length).toString("utf8"),
+			path,
 			line,
 			text: text.toString("utf8").slice(0, SEARCH_MATCH_TEXT_MAX_CHARS),
 		});
@@ -1933,9 +1965,8 @@ async function searchTreePage(
 			...(options.ignoreCase ? ["-i"] : []),
 			"-e",
 			options.query,
-			tree,
+			scope.oid,
 			"--",
-			options.prefix ? `:(top,literal)${options.prefix}` : ":(top)",
 		],
 		source.cwd,
 		{
@@ -1954,6 +1985,181 @@ async function searchTreePage(
 	return page;
 }
 
+/**
+ * Read raw file-pair identity first, then bounded patch sections in the same Git queue order.
+ *
+ * A file over the blob limit is already unsupported, so its patch would only be read and thrown away. Git is told
+ * that limit as `core.bigFileThreshold`: it prints `Binary files differ` for a blob larger than that instead of
+ * diffing it. The raw records are the same either way, and so are the name-status and numstat runs, which do not
+ * get the setting. Git still diffs a large blob whose content it had loaded to score a rename or copy against a
+ * blob of similar size; that patch is read and dropped as before.
+ */
+async function readTreePatches(
+	source: GitSource,
+	baseTree: string,
+	headTree: string,
+	files: ReviewChangedFile[],
+): Promise<void> {
+	if (files.length === 0) return;
+	const byPath = new Map(files.map((file) => [file.path, file]));
+	const seen = new Set<string>();
+	const sections: ReviewChangedFile[] = [];
+	let metadataBytes = 0;
+	let raw = true;
+	let header: RegExpMatchArray | undefined;
+	let previousPath: string | undefined;
+	let parts: Buffer[] = [];
+	let keptBytes = 0;
+	let lineBytes = 0;
+	let sectionIndex = -1;
+	let current: ReviewChangedFile | undefined;
+	let patchParts: Buffer[] = [];
+	let patchBytes = 0;
+	let retainedBytes = 0;
+	const finishFile = (): void => {
+		if (!current?.reviewable) return;
+		if (patchBytes > source.limits.maxPatchBytes) {
+			current.unsupportedReason = `Text patch exceeds the ${formatByteLimit(source.limits.maxPatchBytes)} per-file review limit.`;
+		} else {
+			const hunks = parseHunks(current.path, Buffer.concat(patchParts).toString("utf8"));
+			const bytes = hunks.reduce((total, hunk) => total + Buffer.byteLength(hunk.patch, "utf8"), 0);
+			if (retainedBytes + bytes > source.limits.maxRetainedPatchBytes) {
+				current.unsupportedReason = `Text patch exceeds the ${formatByteLimit(source.limits.maxRetainedPatchBytes)} aggregate review budget.`;
+			} else if (hunks.length === 0) {
+				current.unsupportedReason = "The change has no textual diff hunk (for example, a mode-only change).";
+			} else {
+				current.hunks = hunks;
+				retainedBytes += bytes;
+			}
+		}
+		current.reviewable = current.unsupportedReason === undefined;
+	};
+	const patchLine = (line: Buffer, bytes: number): void => {
+		if (line.subarray(0, 11).equals(Buffer.from("diff --git "))) {
+			const next = sections[++sectionIndex];
+			if (!next) throw new Error("git diff returned an unexpected patch section.");
+			if (next !== current) {
+				finishFile();
+				current = next;
+				patchParts = [];
+				patchBytes = 0;
+			}
+		}
+		if (!current) throw new Error("git diff returned patch text without a file-pair record.");
+		patchBytes += bytes;
+		if (current.reviewable && patchBytes <= source.limits.maxPatchBytes) patchParts.push(line);
+		else patchParts = [];
+	};
+	const rawRecord = (record: Buffer): void => {
+		if (!header) {
+			if (record.length === 0) {
+				if (seen.size !== files.length) throw new Error("git diff omitted a raw file-pair record.");
+				raw = false;
+				return;
+			}
+			header =
+				record
+					.toString("utf8")
+					.match(
+						/^:([0-7]{6}) ([0-7]{6}) ([0-9a-f]{40}|[0-9a-f]{64}) ([0-9a-f]{40}|[0-9a-f]{64}) ([ADMT]|[RC][0-9]{1,3})$/,
+					) ?? undefined;
+			if (!header) throw new Error("git diff returned malformed raw metadata.");
+			return;
+		}
+		const path = reviewPathFromBytes(record);
+		if (/^[RC]/.test(header[5]) && previousPath === undefined) {
+			previousPath = path;
+			return;
+		}
+		const file = byPath.get(path);
+		if (
+			!file ||
+			seen.has(path) ||
+			file.previousPath !== previousPath ||
+			file.status !== statusFromGit(header[5]) ||
+			header[1] !== (file.base?.mode ?? "000000") ||
+			header[2] !== (file.head?.mode ?? "000000") ||
+			(file.base ? header[3] !== file.base.oid : /[^0]/.test(header[3])) ||
+			(file.head ? header[4] !== file.head.oid : /[^0]/.test(header[4]))
+		) {
+			throw new Error("git diff raw identity does not match the snapshot inventory.");
+		}
+		seen.add(path);
+		sections.push(file);
+		// Git emits a deletion and an addition for a change between file types.
+		if (file.status === "type-changed") sections.push(file);
+		header = undefined;
+		previousPath = undefined;
+	};
+	const result = await streamCommand(
+		"git",
+		[
+			"-c",
+			`core.bigFileThreshold=${source.limits.maxBlobBytes}`,
+			"diff",
+			"--raw",
+			"-z",
+			"--patch",
+			"--no-abbrev",
+			"--full-index",
+			"--no-color",
+			"--no-relative",
+			"--no-textconv",
+			"--no-ext-diff",
+			"--submodule=short",
+			"--src-prefix=a/",
+			"--dst-prefix=b/",
+			"--output-indicator-new=+",
+			"--output-indicator-old=-",
+			"--output-indicator-context= ",
+			`--unified=${DEFAULT_DIFF_CONTEXT_LINES}`,
+			"--find-renames",
+			baseTree,
+			headTree,
+			"--",
+		],
+		source.cwd,
+		{
+			env: source.env,
+			signal: source.signal,
+			maxStderrBytes: source.limits.maxStderrBytes,
+			onStdout: (chunk) => {
+				let start = 0;
+				while (start < chunk.length) {
+					const end = chunk.indexOf(raw ? 0 : 10, start);
+					const piece = chunk.subarray(start, end < 0 ? chunk.length : end + (raw ? 0 : 1));
+					if (raw) {
+						metadataBytes += piece.length + (end < 0 ? 0 : 1);
+						if (metadataBytes > source.limits.maxMetadataBytes)
+							throw new Error("git diff raw metadata exceeded its capture limit.");
+					}
+					lineBytes += piece.length;
+					const keep = raw ? piece : piece.subarray(0, Math.max(64, source.limits.maxPatchBytes) - keptBytes);
+					if (keep.length > 0) {
+						parts.push(keep);
+						keptBytes += keep.length;
+					}
+					if (end < 0) break;
+					const value = Buffer.concat(parts, keptBytes);
+					parts = [];
+					keptBytes = 0;
+					const bytes = lineBytes;
+					lineBytes = 0;
+					if (raw) rawRecord(value);
+					else patchLine(value, bytes);
+					start = end + 1;
+				}
+				return true;
+			},
+		},
+	);
+	throwIfResolutionCancelled(source.signal);
+	if (result.failure || result.exitCode !== 0) throw new Error(`git diff failed: ${commandError(result)}`);
+	if (raw || lineBytes !== 0 || sectionIndex + 1 !== sections.length)
+		throw new Error("git diff returned a truncated patch stream.");
+	finishFile();
+}
+
 async function buildChangedFiles(
 	source: GitSource,
 	baseTree: string,
@@ -1967,7 +2173,6 @@ async function buildChangedFiles(
 	if (!numstatResult.ok) throw new Error(`git diff --numstat failed: ${commandError(numstatResult)}`);
 	const numstat = parseNumstat(numstatResult.stdout);
 	const changed: ReviewChangedFile[] = [];
-	let retainedPatchBytes = 0;
 	for (const statusEntry of parseNameStatus(statusResult.stdout)) {
 		const basePath = statusEntry.previousPath ?? statusEntry.path;
 		const base = baseEntries.get(basePath);
@@ -1978,7 +2183,6 @@ async function buildChangedFiles(
 		const oversized = [base, head].some(
 			(entry) => entry?.type === "blob" && (entry.size === undefined || entry.size > source.limits.maxBlobBytes),
 		);
-		let hunks: ReviewSnapshotHunk[] = [];
 		let unsupportedReason: string | undefined;
 		if (base?.type === "commit" || head?.type === "commit") {
 			unsupportedReason = "Submodule changes require review in the submodule repository.";
@@ -1986,48 +2190,12 @@ async function buildChangedFiles(
 			unsupportedReason = "Binary content has no reviewable text hunks.";
 		} else if (oversized) {
 			unsupportedReason = `File content exceeds the ${formatByteLimit(source.limits.maxBlobBytes)} snapshot blob limit.`;
-		} else {
-			const pathspecs = statusEntry.previousPath ? [statusEntry.previousPath, statusEntry.path] : [statusEntry.path];
-			const patchResult = await git(
-				source,
-				[
-					"diff",
-					"--no-color",
-					"--no-textconv",
-					"--no-ext-diff",
-					`--unified=${DEFAULT_DIFF_CONTEXT_LINES}`,
-					"--find-renames",
-					baseTree,
-					headTree,
-					"--",
-					...pathspecs,
-				],
-				undefined,
-				source.limits.maxPatchBytes,
-			);
-			if (patchResult.failure?.stream === "stdout") {
-				unsupportedReason = `Text patch exceeds the ${formatByteLimit(source.limits.maxPatchBytes)} per-file review limit.`;
-			} else if (!patchResult.ok) {
-				throw new Error(`git diff failed for ${statusEntry.path}: ${commandError(patchResult)}`);
-			} else {
-				const parsedHunks = parseHunks(statusEntry.path, text(patchResult));
-				const patchBytes = parsedHunks.reduce((total, hunk) => total + Buffer.byteLength(hunk.patch, "utf8"), 0);
-				if (retainedPatchBytes + patchBytes > source.limits.maxRetainedPatchBytes) {
-					unsupportedReason = `Text patch exceeds the ${formatByteLimit(source.limits.maxRetainedPatchBytes)} aggregate review budget.`;
-				} else {
-					hunks = parsedHunks;
-					retainedPatchBytes += patchBytes;
-					if (hunks.length === 0) {
-						unsupportedReason = "The change has no textual diff hunk (for example, a mode-only change).";
-					}
-				}
-			}
 		}
 		changed.push({
 			...statusEntry,
 			...(base ? { base } : {}),
 			...(head ? { head } : {}),
-			hunks,
+			hunks: [],
 			additions,
 			deletions,
 			binary,
@@ -2035,6 +2203,7 @@ async function buildChangedFiles(
 			...(unsupportedReason ? { unsupportedReason } : {}),
 		});
 	}
+	await readTreePatches(source, baseTree, headTree, changed);
 	return changed;
 }
 
@@ -2057,6 +2226,7 @@ class GitReviewSnapshot implements ReviewSnapshot {
 	private readonly materializedCommits = new Map<string, string>();
 	private readonly treeEntries = new Map<ReviewSnapshotRevision, Map<string, ReviewSnapshotTreeEntry>>();
 	private readonly pathspecUnsafeEntries = new Map<ReviewSnapshotRevision, ReadonlySet<ReviewSnapshotTreeEntry>>();
+	private readonly directoryEntries = new Map<ReviewSnapshotRevision, Map<string, ReviewSnapshotTreeEntry>>();
 	/** The searches still running. */
 	private readonly activeSearchWork = new Set<Promise<unknown>>();
 	/** Aborts when the snapshot is disposed, which stops those searches. */
@@ -2085,6 +2255,8 @@ class GitReviewSnapshot implements ReviewSnapshot {
 		this.changedFiles = changedFiles;
 		this.treeEntries.set("base", baseInventory.entries);
 		this.treeEntries.set("head", headInventory.entries);
+		this.directoryEntries.set("base", baseInventory.directories);
+		this.directoryEntries.set("head", headInventory.directories);
 		this.pathspecUnsafeEntries.set("base", baseInventory.pathspecUnsafeEntries);
 		this.pathspecUnsafeEntries.set("head", headInventory.pathspecUnsafeEntries);
 	}
@@ -2092,8 +2264,8 @@ class GitReviewSnapshot implements ReviewSnapshot {
 	static async create(init: SnapshotInit): Promise<GitReviewSnapshot> {
 		const commonDirectory = await repositoryCommonDirectory(init.root, init.limits, init.source.signal);
 		if (!commonDirectory) throw new Error("Could not resolve the Git common directory.");
-		const baseTreeResult = await git(init.source, ["ls-tree", "-r", "-z", "-l", init.identity.baseTree]);
-		const headTreeResult = await git(init.source, ["ls-tree", "-r", "-z", "-l", init.identity.headTree]);
+		const baseTreeResult = await git(init.source, ["ls-tree", "-r", "-t", "-z", "-l", init.identity.baseTree]);
+		const headTreeResult = await git(init.source, ["ls-tree", "-r", "-t", "-z", "-l", init.identity.headTree]);
 		if (!baseTreeResult.ok || !headTreeResult.ok) {
 			throw new Error(
 				`Could not inventory review snapshot trees: ${commandError(baseTreeResult.ok ? headTreeResult : baseTreeResult)}`,
@@ -2189,11 +2361,21 @@ class GitReviewSnapshot implements ReviewSnapshot {
 		const prefix = options.prefix === undefined || options.prefix === "" ? "" : normalizeReviewPath(options.prefix);
 		// No line contains a line feed, and `git grep -F` would read one as the boundary between two patterns.
 		if (options.query.includes("\n")) return { matches: [], complete: true };
+		const entry = prefix
+			? (this.treeEntries.get(options.revision)?.get(prefix) ??
+				this.directoryEntries.get(options.revision)?.get(prefix))
+			: undefined;
+		if (prefix && (!entry || (entry.type !== "tree" && !entry.mode.startsWith("100")))) {
+			return { matches: [], complete: true };
+		}
+		const scope: { oid: string; path: string; type: "tree" | "blob" } = entry
+			? { oid: entry.oid, path: prefix, type: entry.type === "tree" ? "tree" : "blob" }
+			: { oid: searchTree(this.identity, options.revision), path: "", type: "tree" };
 		const disposal = this.disposalController.signal;
 		const page = searchTreePage(
 			this.source,
-			searchTree(this.identity, options.revision),
-			{ query: options.query, prefix, ignoreCase: options.ignoreCase === true, offset, limit: options.limit },
+			scope,
+			{ query: options.query, ignoreCase: options.ignoreCase === true, offset, limit: options.limit },
 			options.signal ? AbortSignal.any([options.signal, disposal]) : disposal,
 		);
 		this.trackSearchWork(page);
@@ -2211,6 +2393,21 @@ class GitReviewSnapshot implements ReviewSnapshot {
 
 	async materializeHead(): Promise<string> {
 		this.assertActive();
+		if (process.platform === "win32") {
+			const names = new Set<string>();
+			for (const entry of [
+				...(this.directoryEntries.get("head")?.values() ?? []),
+				...(this.treeEntries.get("head")?.values() ?? []),
+			]) {
+				const native = nativeReviewCheckoutPath(entry.path);
+				const folded = native.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+				if (names.has(folded))
+					throw new Error(
+						`The Windows checkout cannot represent distinct snapshot paths at ${JSON.stringify(entry.path)}.`,
+					);
+				names.add(folded);
+			}
+		}
 		const directory = await mkdtemp(join(tmpdir(), "volt-review-checkout-"));
 		this.materializedDirectories.push(directory);
 		const init = await runCommand("git", ["init"], directory, commandOptions(this.limits, this.source.signal));
@@ -2285,7 +2482,13 @@ class GitReviewSnapshot implements ReviewSnapshot {
 		const clean = await runCommand("git", ["clean", "-d", "--force", "--force", "--quiet"], directory, options);
 		if (!clean.ok) throw new Error(`Could not clean review checkout: ${commandError(clean)}`);
 		for (const gitlink of gitlinks) {
-			await this.resetGitlink(root, join(directory, gitlink.path), gitlink.oid, usedGitDirectories, options);
+			await this.resetGitlink(
+				root,
+				join(directory, nativeReviewCheckoutPath(gitlink.path)),
+				gitlink.oid,
+				usedGitDirectories,
+				options,
+			);
 		}
 	}
 
@@ -2351,14 +2554,12 @@ class GitReviewSnapshot implements ReviewSnapshot {
 			const [mode, nestedOid] = record.subarray(0, tab).toString("utf8").split(" ");
 			if (mode !== "160000") continue;
 			const pathBytes = record.subarray(tab + 1);
-			const path = pathBytes.toString("utf8");
-			if (!Buffer.from(path, "utf8").equals(pathBytes)) {
-				throw new Error(`A submodule path in the repository at ${workTree} is not valid UTF-8.`);
-			}
+			const path = reviewPathFromBytes(pathBytes);
+			const nativePath = nativeReviewCheckoutPath(path);
 			if (nestedOid === undefined || !CANONICAL_GIT_OBJECT_ID_PATTERN.test(nestedOid)) {
 				throw new Error(`The repository at ${workTree} records submodule ${path} at no valid commit.`);
 			}
-			await this.resetGitlink(root, join(realWorkTree, path), nestedOid, used, options);
+			await this.resetGitlink(root, join(realWorkTree, nativePath), nestedOid, used, options);
 		}
 	}
 
@@ -2380,18 +2581,6 @@ class GitReviewSnapshot implements ReviewSnapshot {
 	}
 }
 
-export function normalizeReviewPath(path: string): string {
-	if (path.includes("\0")) throw new Error("Review paths must not contain NUL bytes.");
-	if (isAbsolute(path)) throw new Error("Review paths must be repository-relative.");
-	const normalized = path.replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/+$/, "");
-	if (!normalized || normalized === ".") throw new Error("Review path must identify a repository entry.");
-	const segments = normalized.split("/");
-	if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
-		throw new Error("Review path must not traverse outside the repository.");
-	}
-	return segments.join("/");
-}
-
 export function pageUtf8(textValue: string, offset: number, maxBytes: number): ReviewSnapshotPage {
 	if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Page offset must be a non-negative integer.");
 	if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error("Page size must be a positive integer.");
@@ -2410,6 +2599,27 @@ export function pageUtf8(textValue: string, offset: number, maxBytes: number): R
 		totalBytes: buffer.length,
 		...(end < buffer.length ? { nextOffset: end } : {}),
 	};
+}
+
+/** A path for a string-based checkout operation, never a lossy replacement or a Windows path alias. */
+function nativeReviewCheckoutPath(path: string): string {
+	const native = reviewPathToUtf8(path);
+	if (native === undefined)
+		throw new Error(`Snapshot path ${JSON.stringify(path)} is not valid UTF-8 for this checkout operation.`);
+	if (
+		process.platform === "win32" &&
+		native
+			.split("/")
+			.some(
+				(component) =>
+					/[\\:*?"<>|\u0000-\u001f]/.test(component) ||
+					/[. ]$/.test(component) ||
+					/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(component),
+			)
+	) {
+		throw new Error(`Snapshot path ${JSON.stringify(path)} cannot be represented in this Windows checkout.`);
+	}
+	return native;
 }
 
 /** What is at `path`, a final symbolic link not followed, or `undefined` when nothing is. */

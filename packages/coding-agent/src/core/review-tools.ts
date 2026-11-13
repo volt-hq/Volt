@@ -2,8 +2,8 @@ import { Buffer } from "node:buffer";
 import { createHash, randomBytes } from "node:crypto";
 import { Type } from "typebox";
 import { defineTool, type ToolDefinition } from "./extensions/types.ts";
+import { formatReviewPath, normalizeReviewPath, reviewPathToUtf8 } from "./review-path.ts";
 import {
-	normalizeReviewPath,
 	pageUtf8,
 	type ReviewChangedFile,
 	type ReviewSnapshot,
@@ -79,10 +79,11 @@ export class ReviewCoverageTracker {
 	}
 
 	recordFile(path: string): void {
-		this.filesReadValue.add(path);
+		this.filesReadValue.add(normalizeReviewPath(path));
 	}
 
 	recordDiffPage(path: string, start: number, end: number, totalBytes: number, hunkIds: string[]): void {
+		path = normalizeReviewPath(path);
 		const current = this.diffCoverage.get(path) ?? { totalBytes, intervals: [], hunkIds };
 		current.totalBytes = totalBytes;
 		current.hunkIds = hunkIds;
@@ -314,6 +315,9 @@ function changedFileText(file: ReviewChangedFile): string {
 		`  head: ${file.head ? `${file.head.mode} ${file.head.oid}` : "absent"}`,
 		`  reviewable: ${file.reviewable ? "yes" : "no"}`,
 	];
+	if (reviewPathToUtf8(file.path) !== undefined && reviewPathToUtf8(file.path) !== file.path) {
+		metadata.push(`  display only: ${formatReviewPath(file.path)}`);
+	}
 	if (file.unsupportedReason) metadata.push(`  unchecked: ${file.unsupportedReason}`);
 	for (const hunk of file.hunks) {
 		metadata.push(`  hunk ${hunk.id}: ${hunk.header}`);
@@ -428,7 +432,10 @@ function numberState(state: CursorPayload["state"], key: string): number | undef
 }
 
 function treeEntryText(entry: ReviewSnapshotTreeEntry): string {
-	return `${entry.mode} ${entry.type} ${entry.oid}${entry.size === undefined ? "" : ` ${entry.size}`}\t${entry.path}`;
+	const native = reviewPathToUtf8(entry.path);
+	const display =
+		native !== undefined && native !== entry.path ? `\n  display only: ${formatReviewPath(entry.path)}` : "";
+	return `${entry.mode} ${entry.type} ${entry.oid}${entry.size === undefined ? "" : ` ${entry.size}`}\t${entry.path}${display}`;
 }
 
 export function createReviewSnapshotTools(
@@ -766,6 +773,7 @@ export function reviewSnapshotToolGuidelines(commandCapable: boolean, contextReq
 		"Call review_changed_files and page to completion before finalizing.",
 		"Call review_diff with each in-scope reviewable changed path and page every file diff to completion; a partial diff page leaves the review incomplete.",
 		"Use review_file, review_search, and review_tree for surrounding code. These tools read the immutable base/head snapshot, never the live worktree.",
+		"Every review path is a canonical byte-preserving reference. Copy path/previousPath values from the snapshot tools into other tools and finding anchors without decoding %HH escapes. Display labels are not paths. Run-scope globs match these references. Checkout filenames belong to a different boundary.",
 		commandCapable
 			? "Optional command tools run in a disposable checkout of the captured head tree; report command failures rather than assuming the user's live dependencies are present."
 			: "No command-capable tool is available. Verify statically and state runtime checks as residual risk; do not ask for or claim test execution.",

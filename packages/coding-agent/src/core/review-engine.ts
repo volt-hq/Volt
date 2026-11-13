@@ -3,7 +3,9 @@
  * snapshot with passes of its own and submits a candidate report and a verification report in the host's
  * shapes. The host validates and bounds them, builds the result with the same code the built-in pipeline
  * uses (anchors checked against the snapshot, finding ids and fingerprints, completeness, caps), and
- * writes the run record: an engine supplies findings, never records.
+ * writes the run record: an engine supplies findings, never records. Snapshot paths are byte-reversible canonical
+ * references (for example `100%25.ts`), not native filenames. Copy references into reports unchanged; use
+ * `reviewPathToUtf8` only at native boundaries and `reviewPathFromUtf8` for actual UTF-8 checkout filenames.
  *
  * An engine never sees patch text through its context. A pass gets the diff through {@link ReviewEnginePass.diff}
  * and the host's snapshot tools, which is what makes the run's coverage observed: a hunk counts as covered
@@ -43,6 +45,7 @@ import {
 	reviewExclusions,
 	setUpReviewCheckout,
 } from "./review.ts";
+import { reviewPathBytes } from "./review-path.ts";
 import { STATIC_REVIEW_LIMITATION } from "./review-presentation.ts";
 import {
 	buildParsedReview,
@@ -326,7 +329,9 @@ export interface ReviewEngineHunk {
 
 /** One changed file of the reviewed snapshot, without patch text. */
 export interface ReviewEngineChangedFile {
+	/** Canonical review-path reference, not an OS filename. Preserve escapes when submitting anchors. */
 	path: string;
+	/** A rename's canonical base-side reference. */
 	previousPath?: string;
 	status: ReviewChangedFileStatus;
 	/** The host can review it: not binary and not unsupported. */
@@ -361,7 +366,7 @@ export interface ReviewEngineTarget {
 
 /** One independent pass over the snapshot: what it reads through the host is what the run's coverage counts. */
 export interface ReviewEnginePass {
-	/** The host's snapshot tools for this pass (changed files, diff, file, tree, search), whose reads are observed. */
+	/** The host's snapshot tools (changed files, diff, file, tree, search): canonical references work without an OS checkout. Reads are observed. */
 	tools(): ToolDefinition[];
 	/**
 	 * The diff text of `hunkIds`, within `maxBytes` of UTF-8: a hunk is delivered whole or left in `omitted`, and
@@ -374,7 +379,7 @@ export interface ReviewEnginePass {
 
 /** A checkout of the reviewed head that the engine holds until it releases it: see {@link ReviewEngineContext.checkout}. */
 export interface ReviewEngineCheckout {
-	/** The checkout's directory. */
+	/** The checkout's native OS directory, not a canonical snapshot path reference. */
 	readonly path: string;
 	/**
 	 * Hand the checkout back once done with it. The host resets it to the reviewed head (tracked files restored,
@@ -477,6 +482,13 @@ export interface ReviewEngineContext {
 	changedFiles(): ReviewEngineChangedFile[];
 	/** Start one more independent pass. */
 	pass(): ReviewEnginePass;
+	/**
+	 * Whether the snapshot has a text file the host can read at `path`, a canonical path reference, on `side`: one
+	 * that is there, within the snapshot's read limit, and not binary. For an engine to check a path a reviewer names
+	 * before it anchors a finding there. It counts as nothing read: unlike a read through a pass's tools, the run's
+	 * coverage stays as it was. Rejects for a string that is not a canonical reference.
+	 */
+	hasTextFile(path: string, side: "base" | "head"): Promise<boolean>;
 	/** Check a candidate report as {@link submit} would, without keeping anything: for an engine to repair its reports. */
 	validate(candidates: ReviewCandidateReport): Promise<ReviewEngineValidation>;
 	/**
@@ -496,7 +508,8 @@ export interface ReviewEngineContext {
 	 * one. When the review was started with a setup (such as installing dependencies), it has run there once, when the
 	 * checkout was made, so commands find what a working copy has; a setup that fails rejects with its output. Release
 	 * a checkout once done with it, so a later call reuses it instead of setting up another. Every checkout is removed
-	 * when the review ends.
+	 * when the review ends. A platform that cannot represent snapshot filenames rejects checkout access; use
+	 * the pass's snapshot tools instead, without decoding their path references.
 	 */
 	checkout(): Promise<ReviewEngineCheckout>;
 }
@@ -749,6 +762,13 @@ export class ReviewEngineRun {
 			}),
 			changedFiles: () => this.changedFiles(),
 			pass: () => this.pass(),
+			hasTextFile: async (path, side) => {
+				this.assertLive();
+				// The snapshot also reads a spelling that normalizes to a reference, which a report may not carry.
+				reviewPathBytes(path);
+				const file = await this.snapshot.readFile(side, path);
+				return file?.available === true && !file.binary;
+			},
 			validate: (candidates) => this.validate(candidates),
 			submit: (result) => this.submit(result),
 			checkout: () => this.checkout(channels.signal),

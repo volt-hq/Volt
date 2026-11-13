@@ -181,7 +181,7 @@ async function fixture() {
 			currentModel: harness.getModel(),
 		});
 	const record: ReviewRunRecord = {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		runId: "review:414",
 		workflowAction: "review.pr",
 		status: "failed",

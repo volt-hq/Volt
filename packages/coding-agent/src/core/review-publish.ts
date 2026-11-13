@@ -1,4 +1,5 @@
 import { type CodeHostProvider, getCodeHostProvider, type ReviewCodeHostInlineComment } from "./code-host/index.ts";
+import { reviewPathToUtf8 } from "./review-path.ts";
 import type { ReviewFinding } from "./review-report.ts";
 import { type ReviewRunRecord, reviewRunEngine, reviewRunEngineLabel, STANDARD_REVIEW_ENGINE } from "./review-state.ts";
 
@@ -15,6 +16,17 @@ function findingText(finding: ReviewFinding): string {
 	].join("\n");
 }
 
+/**
+ * A Markdown code span that shows `text` verbatim. A changed file's name is the author's to choose, so a reference
+ * must not render as a link, a mention, or formatting. The fence outruns every backtick run in the text, and the
+ * padding keeps a leading or trailing backtick or space from being read as part of the fence or stripped.
+ */
+function codeSpan(text: string): string {
+	const fence = "`".repeat(Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length)) + 1);
+	const pad = /^[` ]|[` ]$/.test(text) ? " " : "";
+	return `${fence}${pad}${text}${pad}${fence}`;
+}
+
 function inlineComment(finding: ReviewFinding, run: ReviewRunRecord): ReviewCodeHostInlineComment | undefined {
 	const location = finding.changeLocation;
 	const file = run.target.files.find((candidate) => candidate.path === location.path);
@@ -23,9 +35,11 @@ function inlineComment(finding: ReviewFinding, run: ReviewRunRecord): ReviewCode
 	}
 	if (location.side === "head" && !file.headOid) return undefined;
 	if (location.side === "base" && !file.baseOid) return undefined;
+	const path = reviewPathToUtf8(location.path);
+	if (path === undefined) return undefined;
 	return {
 		findingId: finding.id,
-		path: location.path,
+		path,
 		startLine: location.startLine,
 		endLine: location.endLine,
 		side: location.side,
@@ -80,7 +94,10 @@ export async function publishReviewRun(
 	}
 	const summaryOnly = run.result.findings
 		.filter((finding) => summaryOnlyFindingIds.includes(finding.id))
-		.map((finding) => findingText(finding));
+		.map(
+			(finding) =>
+				`${findingText(finding)}\n\nLocation: ${codeSpan(finding.changeLocation.path)}:${finding.changeLocation.startLine}-${finding.changeLocation.endLine} (${finding.changeLocation.side}).`,
+		);
 	const body = [
 		`Volt review (${run.runId})`,
 		...(reviewRunEngine(run) === STANDARD_REVIEW_ENGINE

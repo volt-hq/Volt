@@ -1999,6 +1999,7 @@ The declaration:
 - `changedFiles()`: the changed files with their statuses, whether each is reviewable and in scope, and their hunks' ids and sizes. It carries no patch text. Receiving it counts as your engine getting the changed-file inventory, which a complete run needs.
 - `pass()`: starts an independent pass. `pass.diff(hunkIds, maxBytes)` returns the diff text of those hunks within the budget, each whole or left in `omitted`; `pass.tools()` returns the host's snapshot tools (changed files, diff, file, tree, search) for a pass to call; `pass.coverage()` says what the pass has seen.
 - `validate(candidates)`: checks a candidate report as `submit` would, without keeping anything, so your own reporting tools can send a reviewer back to fix an anchor.
+- `hasTextFile(path, side)`: whether the snapshot has a text file the host can read at that [path reference](#review-path-references) on `"base"` or `"head"`: one that is there, within the read limit, and not binary. Use it to check a path a reviewer names before you anchor a finding there. It counts as nothing read, so the run's coverage stays as it was, unlike a read through `pass.tools()`. It rejects for a string that is not a canonical reference.
 - `submit({ candidates, verification, commandsRun?, failedVerificationAttempts? })`: submits the result once. The reports have the host's shapes: a candidate has a title, body, trigger, impact, kebab-case `category` and `rootCauseKey`, a priority from 0 to 2 (3 only when the review includes optional findings), a confidence, and a `changeLocation` on a changed line of at most 10 lines; the verification has a decision for every candidate, an `assessment` of `complete` or `incomplete` (with a `challenge`), and `priorFindingDecisions` for the `previousFindings` you settle (`[]` for none). A candidate the host's checks complain about is dropped with its decision, and `submit` returns which (`rejected`) and why (`errors`). A result that cannot stand at all (not the host's shape, a candidate without a decision, an incomplete assessment without a challenge) throws a `ReviewEngineSubmissionError`, and you may submit again; a successful submit is final.
 - `tools`: the tools of the conversation the review may use beside the snapshot tools, such as `bash` to run the project's checks and tests; empty unless whoever started the review granted them (the TUI's `reviewTools` setting, with `reviewSetup` for the checkout, or `tools` and `setup` of [`ctx.reviews.start`](#ctxreviews)), and always empty for a remote review. Give them to the sessions your engine starts, and run them only in a `checkout()`, never in the workspace.
 - `checkout()`: a checkout of the reviewed head that nothing else holds, as `{ path, release() }`: one released earlier, or else a new one. When the review was started with a `setup` (such as installing dependencies), the host has run it there once, when the checkout was made, so commands find what a working copy has; a setup that fails rejects with its output, and what the review does then is your engine's to decide. Call `release()` once a pass is done with the checkout: the host resets it to the head (tracked files restored, untracked ones removed, ignored ones such as what the setup installed kept; every populated submodule, initialized or cloned there by the setup and nested ones included, gets the same reset at the commit the head records and stays populated) and hands it to a later `checkout()` instead of setting up another. Once the review is cancelled, `release()` leaves the checkout as it is. `release()` never rejects, and every checkout is removed when the review ends.
@@ -2006,6 +2007,36 @@ The declaration:
 The host derives finding ids and fingerprints, the scope and exclusions, the completion status, and the target's files from git; you supply what only you know: the verification method and rationale, the assessment, limitations, and the commands you ran. A run is `complete` when your verification assessment is complete and nothing is left unchecked: every reviewable hunk was delivered to at least one pass through `pass.diff` or the pass's tools, and you received the changed-file inventory. That says what the host observed delivering and what you reported; it does not say a model read the diff or that your passes were independent. A run without a command in `commandsRun` is marked as a static review. The pull request review the user posts names your engine and says its coverage is reported by the engine.
 
 The host writes the run's record when your `run` returns: completed or incomplete with your result, failed if `run` threw or submitted nothing (a remote client sees only the host's standard failure message), and cancelled if the review was. The record names your engine; a rerun of it is refused, and the built-in pipeline's incremental reviews never build on it. Your `ctx` stops working once the review ends. Reloading the extensions, or disabling yours, removes your engines and cancels the reviews they run. Engine reviews count against the same limit of three open reviews as the built-in pipeline's.
+
+#### Review path references
+
+Every snapshot `path` and `previousPath`, candidate/evidence/follow-up location, coverage path, and scope glob uses a **canonical review reference**, not an OS filename. Copy references returned by `changedFiles()` or `pass.tools()` unchanged into subsequent reads, searches, diffs, and reports. A rename's `previousPath` names its base-side file.
+
+Ordinary printable UTF-8, spaces, and `/` separators stay readable without Unicode normalization. Invalid UTF-8 bytes, `%`, backslash, colon, and control/format characters are escaped as uppercase `%HH` bytes:
+
+| Actual Git filename | Review reference |
+|---|---|
+| `src/café.ts` | `src/café.ts` |
+| `src/100%.ts` | `src/100%25.ts` |
+| `invalid-` + byte `0xFF` + `.ts` | `invalid-%FF.ts` |
+| Literal `invalid-%FF.ts` | `invalid-%25FF.ts` |
+| A backslash or newline within a name | `%5C` or `%0A` within the reference |
+
+References are repository-relative. Empty, dot, parent, NUL, encoded slash, malformed/lowercase escapes, and noncanonical aliases are rejected. `normalizeReviewPath` handles an optional leading `./` and trailing directory slash only; it never changes backslashes into separators. Omit a tool's optional path for the root. Scope globs match references, so copy the encoded spelling of special names rather than decoding it.
+
+The package exports `ReviewPath`, `reviewPathFromBytes`, `reviewPathBytes`, `reviewPathFromUtf8`, `reviewPathToUtf8`, `normalizeReviewPath`, and `formatReviewPath`:
+
+```typescript
+import { formatReviewPath, reviewPathFromUtf8, reviewPathToUtf8 } from "@hansjm10/volt-coding-agent";
+
+const reference = reviewPathFromUtf8("src/100%.ts"); // src/100%25.ts
+const nativeFilename = reviewPathToUtf8(reference); // src/100%.ts
+const label = formatReviewPath(reference); // quoted display label, never a lookup key
+```
+
+Convert an actual native UTF-8 filename with `reviewPathFromUtf8`; do not double-encode a reference. Decode with `reviewPathToUtf8` only at a real filesystem or code-host boundary. It returns `undefined` for non-UTF-8 bytes: use the host snapshot tools instead of substituting replacement characters. Successful UTF-8 decoding does not mean the OS supports the filename; keep checkout confinement and platform checks. `checkout().path` is already a native directory, not a review reference. A checkout or command may be unsupported even though snapshot listing/read/search/diff works: on Windows, `checkout()` rejects a head with a name that is not UTF-8 or that NTFS refuses, or with names that differ only in ASCII case. Filenames a checkout tool or command prints are native names, not references: encode one with `reviewPathFromUtf8` before you report it. Publication keeps a non-UTF-8 finding summary-only with its exact reference and location.
+
+**Migration:** obtain fresh references from a new review and adapt extension filesystem boundaries as above. Review-run schema 2 does not read or migrate pre-change schema-1 reviews; rerun them rather than using them as incremental parents. Swarm's old dismissal cache is likewise not reused. Acknowledgment, transition, publication, and client wire shapes are unchanged.
 
 ### volt.registerMessagePresenter(customType, present)
 

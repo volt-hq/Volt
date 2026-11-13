@@ -398,7 +398,7 @@ describe("durable review General publication", () => {
 	it("serves the required query shape as a read, rejects malformed input and forwards explicit General replacement", async () => {
 		const { client, original } = await fixture();
 		await appendReviewRunDurably(client.session.sessionWriter, {
-			schemaVersion: 1,
+			schemaVersion: 2,
 			runId: "run",
 			workflowAction: "review.uncommitted",
 			status: "completed",

@@ -14,6 +14,8 @@ import {
 	ReviewRunCoverage,
 } from "../src/core/review-tools.ts";
 
+import { createByteReviewRepository, BYTE_REVIEW_PATHS as P } from "./utilities/byte-review-repository.ts";
+
 function git(cwd: string, ...args: string[]): string {
 	const result = spawnSync("git", args, { cwd, encoding: "utf8" });
 	if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
@@ -256,6 +258,64 @@ describe("review snapshot tools", () => {
 		await expect(
 			execute(tool(tools, "review_tree"), { prefix: "other", revision: "head", cursor: treeCursor }),
 		).rejects.toThrow(/prefix does not match/);
+	});
+
+	it("round-trips canonical byte paths through tree, file, search, diff, cursors, and coverage", async () => {
+		const directory = join(tmpdir(), `volt-byte-tools-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(directory);
+		directories.push(directory);
+		const sha = createByteReviewRepository(directory);
+		const snapshot = await resolveReviewSnapshot({ kind: "commit", sha }, directory, {
+			maxCommitRefBytes: 1024,
+			maxPullRequestNumber: 2147483647,
+		});
+		if ("error" in snapshot) throw new Error(snapshot.error);
+		snapshots.push(snapshot);
+		const tracker = new ReviewCoverageTracker();
+		const tools = createReviewSnapshotTools(snapshot, tracker);
+		const selected: string[] = [P.fe, P.ff, P.replacement, P.literal, P.child, P.lineFeed, P.backslash];
+		const tree = await execute(tool(tools, "review_tree"), { limit: 100 });
+		expect((tree.details as { paths: string[] }).paths).toEqual(expect.arrayContaining(selected));
+		await execute(tool(tools, "review_changed_files"), { limit: 100 });
+		for (const path of selected) {
+			const file = await execute(tool(tools, "review_file"), { path });
+			expect(file.details).toMatchObject({ path, revision: "head" });
+			expect(resultText(file)).toContain("head needle");
+			const search = await execute(tool(tools, "review_search"), { query: "needle", path, limit: 1 });
+			const details = search.details as { matches: Array<{ path: string }>; nextCursor?: string };
+			expect(details.matches).toEqual([expect.objectContaining({ path })]);
+			if (details.nextCursor) {
+				const next = await execute(tool(tools, "review_search"), { query: "needle", cursor: details.nextCursor });
+				expect(next.details).toMatchObject({ matches: [{ path, line: 2 }] });
+				await expect(
+					execute(tool(tools, "review_search"), {
+						query: "needle",
+						path: path === P.ff ? P.fe : P.ff,
+						cursor: details.nextCursor,
+					}),
+				).rejects.toThrow(/path does not match/);
+			}
+			let cursor: string | undefined;
+			do {
+				const diff = await execute(tool(tools, "review_diff"), {
+					path,
+					...(cursor ? { cursor } : {}),
+					maxBytes: 64,
+				});
+				cursor = (diff.details as { nextCursor?: string }).nextCursor;
+			} while (cursor);
+		}
+		expect(tracker.snapshot()).toMatchObject({
+			changedFileInventoryComplete: true,
+			filesRead: [...selected].sort(),
+			diffFilesFullyRead: [...selected].sort(),
+		});
+		expect(tracker.snapshot().hunksInspected).toEqual(
+			snapshot.changedFiles
+				.filter((file) => selected.includes(file.path))
+				.flatMap((file) => file.hunks.map((hunk) => hunk.id))
+				.sort(),
+		);
 	});
 
 	it("rejects unsafe paths and aborts without reading", async () => {

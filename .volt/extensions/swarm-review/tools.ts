@@ -11,6 +11,9 @@ import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	defineTool,
+	normalizeReviewPath,
+	reviewPathFromUtf8,
+	type ReviewEngineContext,
 	type ToolDefinition,
 	truncateHead,
 } from "@hansjm10/volt-coding-agent";
@@ -58,11 +61,34 @@ function assertInsideRoots(roots: Roots, absolutePath: string): void {
 	if (!inside) throw new Error(`Access outside the repository under review is not allowed: ${absolutePath}`);
 }
 
-/** Returns the checkout-relative path of an existing file inside the checkout, or undefined. */
-export function normalizeFile(checkout: string, raw: string): string | undefined {
-	const absolute = resolve(checkout, raw.trim().replace(/^@/, ""));
-	if (absolute === checkout || !insideRoot(checkout, absolute) || !existsSync(absolute)) return undefined;
-	return relative(checkout, absolute).split(sep).join("/");
+/**
+ * Validate the path a report names against the immutable head, not the checkout: it must be the canonical reference
+ * of a text file there. The host is asked whether that file exists, which reads nothing as far as the review's
+ * coverage goes. A reviewer that read the file with a checkout tool may report the name it saw there; the error then
+ * names the reference to report instead.
+ */
+export async function canonicalHeadPath(engine: Pick<ReviewEngineContext, "hasTextFile">, raw: string): Promise<string> {
+	let failure: string;
+	try {
+		const path = normalizeReviewPath(raw);
+		if (path !== raw) failure = `Report the canonical snapshot path reference ${path}.`;
+		else if (await engine.hasTextFile(path, "head")) return path;
+		else failure = `${path} does not exist in the head snapshot, or is not a text file the host can read.`;
+	} catch (error) {
+		failure = error instanceof Error ? error.message : String(error);
+	}
+	let encoded: string | undefined;
+	try {
+		encoded = reviewPathFromUtf8(raw);
+	} catch {
+		// Not a filename either.
+	}
+	if (encoded !== undefined && encoded !== raw && (await engine.hasTextFile(encoded, "head"))) {
+		throw new Error(
+			`${JSON.stringify(raw)} is the checkout's filename, not a canonical snapshot path reference. Report ${encoded}.`,
+		);
+	}
+	throw new Error(failure);
 }
 
 function pathArgument(params: unknown): string | undefined {
@@ -98,6 +124,7 @@ function confineTool<TParams extends TSchema, TDetails>(
 ) {
 	return defineTool({
 		...tool,
+		description: `${tool.description} Paths are this checkout's own filenames, as these tools print them, not review path references: read a reference with a %HH escape through review_file, review_search, or review_tree.`,
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const raw = pathArgument(params);
 			if (raw) {
@@ -163,17 +190,6 @@ export function createRepositoryTools(target: ReviewTarget, checkout: string) {
 
 export const REPOSITORY_TOOL_NAMES = ["read", "grep", "find", "ls", "read_base"];
 
-/** Rejects absolute paths and `..` segments; returns a normalized repository-relative path. */
-function repositoryPath(raw: string): string | undefined {
-	const path = raw
-		.trim()
-		.replace(/^@/, "")
-		.replace(/\\/g, "/")
-		.replace(/^(\.\/)+/, "");
-	if (!path || isAbsolute(path) || path.split("/").some((segment) => segment === "..")) return undefined;
-	return path;
-}
-
 function createReadBaseTool(target: ReviewTarget) {
 	return defineTool({
 		name: "read_base",
@@ -188,8 +204,7 @@ function createReadBaseTool(target: ReviewTarget) {
 			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines to read" })),
 		}),
 		async execute(_toolCallId, params, signal) {
-			const path = repositoryPath(params.path);
-			if (!path) throw new Error(`read_base needs a repository-relative path: ${params.path}`);
+			const path = normalizeReviewPath(params.path);
 			const content = await target.readBase(path, signal ?? new AbortController().signal);
 			if (content === undefined) {
 				throw new Error(`${path} does not exist in the base revision (it may be new in this change).`);

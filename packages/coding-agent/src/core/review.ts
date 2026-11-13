@@ -36,6 +36,7 @@ import {
 import type { PrReviewPlacement } from "./pr-review-placement.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import type { ReviewPasses } from "./review-passes.ts";
+import { reviewPathFromUtf8 } from "./review-path.ts";
 import { reviewUsageDetail, STATIC_REVIEW_LIMITATION } from "./review-presentation.ts";
 import { createReviewPrivateDiagnostics } from "./review-private-diagnostics.ts";
 import {
@@ -669,7 +670,16 @@ async function loadReviewContextFiles(
 	const withinRoot =
 		relativeCwd === "" ||
 		(!relativeCwd.startsWith(`..${sep}`) && relativeCwd !== ".." && !relativeCwd.startsWith(".."));
-	const segments = withinRoot && relativeCwd ? relativeCwd.split(sep).filter(Boolean) : [];
+	// The snapshot names a directory by its review path, so each name on disk is encoded. One that has no review path
+	// (not UTF-8) holds nothing in the snapshot, and neither does anything beneath it.
+	const segments: string[] = [];
+	for (const name of withinRoot && relativeCwd ? relativeCwd.split(sep).filter(Boolean) : []) {
+		try {
+			segments.push(reviewPathFromUtf8(name));
+		} catch {
+			break;
+		}
+	}
 	const directories = ["", ...segments.map((_, index) => segments.slice(0, index + 1).join("/"))];
 	for (const directory of directories) {
 		for (const name of ["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"]) {

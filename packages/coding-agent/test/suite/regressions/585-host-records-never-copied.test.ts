@@ -32,7 +32,7 @@ const HOST_RECORD = /^(work_|review_)/;
 
 function run(runId: string): ReviewRunRecord {
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		runId,
 		workflowAction: "review.uncommitted",
 		status: "completed",

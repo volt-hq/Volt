@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { getAgentDir } from "@hansjm10/volt-coding-agent";
+import { getAgentDir, reviewPathToUtf8 } from "@hansjm10/volt-coding-agent";
 import type { Cluster, ReviewTarget } from "./types.ts";
 
 const MAX_ENTRIES_PER_REPOSITORY = 300;
@@ -28,7 +28,7 @@ interface StoredDismissal {
 }
 
 interface MemoryStore {
-	version: 1;
+	version: 2;
 	repositories: Record<string, StoredDismissal[]>;
 }
 
@@ -66,7 +66,7 @@ function readStore(): MemoryStore {
 			typeof parsed === "object" &&
 			parsed !== null &&
 			"version" in parsed &&
-			parsed.version === 1 &&
+			parsed.version === 2 &&
 			"repositories" in parsed &&
 			typeof parsed.repositories === "object" &&
 			parsed.repositories !== null
@@ -76,11 +76,13 @@ function readStore(): MemoryStore {
 	} catch {
 		// Missing or unreadable memory starts empty.
 	}
-	return { version: 1, repositories: {} };
+	return { version: 2, repositories: {} };
 }
 
 function fileLines(checkout: string, file: string): string[] | undefined {
-	const path = join(checkout, file);
+	const native = reviewPathToUtf8(file);
+	if (native === undefined || (process.platform === "win32" && /[\\:]/.test(native))) return undefined;
+	const path = join(checkout, native);
 	return existsSync(path) ? readFileSync(path, "utf8").split("\n") : undefined;
 }
 

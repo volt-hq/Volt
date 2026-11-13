@@ -79,7 +79,7 @@ function parsedReview(): ParsedReview {
 
 function durableRecord(runId = "review:test"): ReviewRunRecord {
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		runId,
 		workflowAction: "review.uncommitted",
 		status: "completed",

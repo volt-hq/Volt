@@ -62,7 +62,7 @@ const finding = {
 	evidence: "The added guard returns amount.",
 };
 
-const verdict = (line: number) =>
+const verdict = (line: number, file = "src/value.ts") =>
 	fauxAssistantMessage(
 		fauxToolCall("report_verdict", {
 			verdict: "confirmed",
@@ -70,7 +70,7 @@ const verdict = (line: number) =>
 			findings: [
 				{
 					title: "Zero divisor returns the numerator",
-					file: "src/value.ts",
+					file,
 					line,
 					priority: 2,
 					explanation: "The guard returns amount instead of signalling an invalid division.",
@@ -223,6 +223,55 @@ describe("the swarm review as an engine", () => {
 		const output = conversation.session.work.output(workId)?.text ?? "";
 		expect(output).toContain("**Swarm review**");
 		expect(output).toContain("Zero divisor returns the numerator");
+	}, 60_000);
+
+	test("repairs invalid worker references and retains an encoded filename through host submission", async () => {
+		const path = "src/value%25.ts";
+		const encodedFinding = { ...finding, file: path };
+		let repair = "";
+		const { client, conversation } = await setup([
+			fauxAssistantMessage(
+				fauxToolCall("report_findings", { findings: [{ ...finding, file: "src/value%zz.ts" }] }),
+				{ stopReason: "toolUse" },
+			),
+			(context) => {
+				repair = JSON.stringify(context.messages.at(-1));
+				return fauxAssistantMessage(fauxToolCall("report_findings", { findings: [encodedFinding] }), {
+					stopReason: "toolUse",
+				});
+			},
+			fauxAssistantMessage(
+				fauxToolCall("report_clusters", { clusters: [{ title: "Zero divisor", claims: ["C1"] }] }),
+				{ stopReason: "toolUse" },
+			),
+			verdict(2, path),
+			verdict(2, path),
+		]);
+		const original = "export function divide(amount: number, divisor: number) {\n\treturn amount / divisor;\n}\n";
+		writeFileSync(join(conversation.cwd, "src/value.ts"), original);
+		writeFileSync(join(conversation.cwd, "src/value%.ts"), original);
+		git(conversation.cwd, "add", "--", "src/value%.ts");
+		git(conversation.cwd, "commit", "-m", "percent path base");
+		writeFileSync(
+			join(conversation.cwd, "src/value%.ts"),
+			"export function divide(amount: number, divisor: number) {\n\tif (divisor === 0) return amount;\n\treturn amount / divisor;\n}\n",
+		);
+		const started = await client.intent("review", {
+			target: "uncommitted",
+			engine: ENGINE,
+			engineParams: SEQUENTIAL,
+		});
+		const workId = (started as { result: { workId: string } }).result.workId;
+		await vi.waitFor(
+			() => expect(getReviewRun(conversation.session.sessionManager, workId)?.status).toBe("completed"),
+			{ timeout: 30_000 },
+		);
+		await conversation.session.work.settled(workId);
+		expect(repair).toContain("Report rejected");
+		const run = getReviewRun(conversation.session.sessionManager, workId)!;
+		expect(run.result?.findings).toMatchObject([{ changeLocation: { path } }]);
+		expect(run.target.files).toMatchObject([{ path }]);
+		expect(run.result?.completionStatus).toBe("complete");
 	}, 60_000);
 
 	test.each([
