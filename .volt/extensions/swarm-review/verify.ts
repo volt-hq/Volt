@@ -114,9 +114,8 @@ function patchBytes(target: SwarmSetup["target"], hunkIds: readonly string[]): n
 /** The whole diff when small (more context); otherwise only the hunks of the cluster's files. Delivered through `pass`. */
 function verifierDiff(setup: SwarmSetup, pass: ReviewEnginePass, cluster: Cluster): { diff: string; notes: string[] } {
 	const { target } = setup;
-	const all = target.shards.flatMap((shard) => shard.hunkIds);
-	if (target.complete && patchBytes(target, all) <= FULL_DIFF_FOR_VERIFIERS) {
-		return { diff: pass.diff(all, FULL_DIFF_FOR_VERIFIERS * 2).text, notes: [] };
+	if (patchBytes(target, target.hunkIds) <= FULL_DIFF_FOR_VERIFIERS) {
+		return { diff: pass.diff(target.hunkIds, FULL_DIFF_FOR_VERIFIERS * 2).text, notes: [] };
 	}
 	const files = [...new Set(cluster.candidates.map((candidate) => candidate.file))];
 	const ids: string[] = [];
