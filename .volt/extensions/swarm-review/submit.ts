@@ -79,7 +79,7 @@ function methodText(finding: ReportedFinding, completedWorkers: number): string 
 }
 
 /** What the run could not settle, which makes the engine's own assessment incomplete: empty when nothing is open. */
-function openConcerns(state: SwarmState, shardCount: number, unreviewedFiles: readonly string[]): string[] {
+function openConcerns(state: SwarmState, fullReviews: number, unreviewedFiles: readonly string[]): string[] {
 	const count = (outcome: Cluster["outcome"]): number =>
 		state.clusters.filter((cluster) => cluster.outcome === outcome).length;
 	const concerns: string[] = [];
@@ -88,8 +88,9 @@ function openConcerns(state: SwarmState, shardCount: number, unreviewedFiles: re
 	if (count("unverified") > 0) concerns.push(`${count("unverified")} cluster(s) no verifier finished`);
 	const failedWave = state.waves.find((summary) => summary.failed);
 	if (failedWave) concerns.push(`every worker in wave ${failedWave.wave} failed`);
+	if (fullReviews === 0) concerns.push("no successful worker reviewed the whole change");
 	if (unreviewedFiles.length > 0) {
-		concerns.push(`${unreviewedFiles.length} file(s) in a part of the diff (of ${shardCount}) had no successful worker`);
+		concerns.push(`${unreviewedFiles.length} file(s) had diff no successful worker read`);
 	}
 	return concerns;
 }
@@ -97,7 +98,7 @@ function openConcerns(state: SwarmState, shardCount: number, unreviewedFiles: re
 /**
  * The result the engine submits to the host: the confirmed findings as candidates, a decision to accept each with
  * the verifiers' agreement as its method, and an assessment that is complete unless a cluster was left unsettled or
- * part of the diff had no successful worker. What the verifiers rejected, disputed, or could not settle stays in
+ * no successful worker reviewed the whole change. What the verifiers rejected, disputed, or could not settle stays in
  * the report text, which the host has no field for.
  */
 export function buildSubmission(
@@ -105,7 +106,8 @@ export function buildSubmission(
 	findings: readonly ReportedFinding[],
 	context: {
 		summary: string;
-		shardCount: number;
+		/** Successful workers that read every hunk of the change. */
+		fullReviews: number;
 		unreviewedFiles: readonly string[];
 		completedWorkers: number;
 		limitations: readonly string[];
@@ -131,7 +133,7 @@ export function buildSubmission(
 			confidence: AGREEMENT_CONFIDENCE[finding.agreement],
 		});
 	}
-	const concerns = openConcerns(state, context.shardCount, context.unreviewedFiles);
+	const concerns = openConcerns(state, context.fullReviews, context.unreviewedFiles);
 	const omitted = findings.length - kept.length;
 	const limitations = [
 		...context.limitations,

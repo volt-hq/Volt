@@ -3,11 +3,13 @@ import type { UiNode, UiNodeStyledText, WorkProgress, WorkProgressStep } from "@
 import type {
 	Cluster,
 	PassState,
+	ReviewTarget,
 	SwarmOptions,
 	SwarmSetup,
 	SwarmState,
 	Verdict,
 	VerifiedFinding,
+	WorkerState,
 } from "./types.ts";
 import { addUsage, emptyUsage, formatCost, formatDuration, lineRange } from "./util.ts";
 
@@ -39,6 +41,35 @@ function otherCounts(state: SwarmState): string[] {
 		const count = state.clusters.filter((cluster) => effectiveKind(cluster) === kind).length;
 		return count > 0 ? [`${count} ${kind}`] : [];
 	});
+}
+
+/** What the finished workers reviewed, as the host saw them read it. */
+export interface DiscoveryCoverage {
+	/** Workers that finished. */
+	completed: number;
+	/** Finished workers that read every hunk of the change: each an independent review of all of it. */
+	fullReviews: number;
+	/** Files with a hunk no finished worker read. */
+	unreviewedFiles: string[];
+}
+
+export function discoveryCoverage(
+	target: Pick<ReviewTarget, "hunkIds" | "fileHunks">,
+	workers: readonly WorkerState[],
+): DiscoveryCoverage {
+	const done = workers.filter((worker) => worker.status === "done");
+	const unread = new Set(target.hunkIds);
+	for (const worker of done) {
+		const missed = new Set(worker.missedHunks);
+		for (const id of unread) if (!missed.has(id)) unread.delete(id);
+	}
+	return {
+		completed: done.length,
+		fullReviews: done.filter((worker) => worker.missedHunks.length === 0).length,
+		unreviewedFiles: [...target.fileHunks]
+			.filter(([, ids]) => ids.some((id) => unread.has(id)))
+			.map(([file]) => file),
+	};
 }
 
 export interface ReportedFinding extends VerifiedFinding {
@@ -104,7 +135,8 @@ export function buildReport(
 	remembered: number,
 ): { markdown: string; findings: ReportedFinding[] } {
 	const { options, target } = setup;
-	const completedWorkers = state.workers.filter((worker) => worker.status === "done").length;
+	const coverage = discoveryCoverage(target, state.workers);
+	const completedWorkers = coverage.completed;
 	const byKind = (kind: string): Cluster[] => state.clusters.filter((cluster) => effectiveKind(cluster) === kind);
 	const confirmed: ReportedFinding[] = byKind("confirmed")
 		.flatMap((cluster) =>
@@ -125,8 +157,10 @@ export function buildReport(
 	if (state.saturated && waves < Math.ceil(options.workers / options.waveSize)) {
 		lines.push(`Stopped after wave ${waves}: it added no new issues.`);
 	}
-	if (target.shards.length > 1) {
-		lines.push(`The diff was split into ${target.shards.length} parts across workers.`);
+	if (target.pagedFiles.length > 0 || coverage.fullReviews < completedWorkers) {
+		lines.push(
+			`${coverage.fullReviews} of ${completedWorkers} workers reviewed the whole change${target.pagedFiles.length > 0 ? `; the diffs of ${target.pagedFiles.length} file(s) did not fit the prompt and were paged` : ""}.`,
+		);
 	}
 	const failedWave = state.waves.find((summary) => summary.failed);
 	if (failedWave) lines.push(`Every worker in wave ${failedWave.wave} failed, so the run stopped early.`);
@@ -143,19 +177,10 @@ export function buildReport(
 			`Clustering failed for wave(s) ${fallbackWaves.join(", ")}; those claims were grouped by file and nearby lines instead.`,
 		);
 	}
-	const partial = target.shards.flatMap((shard) => shard.partialFiles);
-	if (partial.length > 0) {
+	const unreviewed = coverage.unreviewedFiles;
+	if (unreviewed.length > 0) {
 		lines.push(
-			`Diffs of ${partial.length} file(s) were cut to fit (${partial.slice(0, 5).join(", ")}${partial.length > 5 ? ", ..." : ""}); reviewers could read their current and previous versions.`,
-		);
-	}
-	const unreviewedShards = target.shards.filter(
-		(shard) => !state.workers.some((worker) => worker.shard === shard.index && worker.status === "done"),
-	);
-	if (unreviewedShards.length > 0) {
-		const files = unreviewedShards.flatMap((shard) => shard.files);
-		lines.push(
-			`**Not reviewed:** ${files.length} file(s) in ${unreviewedShards.length} part(s) had no successful worker (${files.slice(0, 5).join(", ")}${files.length > 5 ? ", ..." : ""}).`,
+			`**Not reviewed:** no finished worker read the whole diff of ${unreviewed.length} file(s) (${unreviewed.slice(0, 5).join(", ")}${unreviewed.length > 5 ? ", ..." : ""}).`,
 		);
 	}
 
