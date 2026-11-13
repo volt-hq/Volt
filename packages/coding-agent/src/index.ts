@@ -685,6 +685,15 @@ export type {
 	ReviewEngineValidation,
 } from "./core/review-engine.ts";
 export { ReviewEngineSubmissionError } from "./core/review-engine.ts";
+export {
+	formatReviewPath,
+	normalizeReviewPath,
+	type ReviewPath,
+	reviewPathBytes,
+	reviewPathFromBytes,
+	reviewPathFromUtf8,
+	reviewPathToUtf8,
+} from "./core/review-path.ts";
 export type {
 	ReviewCandidate,
 	ReviewCandidateReport,

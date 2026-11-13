@@ -41,7 +41,7 @@ function finding(
 
 function record(findings: ReviewFinding[] = []): ReviewRunRecord {
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		runId: "review:sample",
 		workflowAction: "review.pr",
 		status: "completed",

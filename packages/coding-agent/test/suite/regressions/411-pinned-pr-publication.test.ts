@@ -21,7 +21,7 @@ function response(value: unknown): GitHubCliResult {
 
 function publish() {
 	const run: ReviewRunRecord = {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		runId: "review:pinned-publication",
 		workflowAction: "review.pr",
 		status: "completed",

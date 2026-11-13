@@ -3,6 +3,7 @@ import { EXTENSION_WORK_KIND_PATTERN, type ReviewUsageAccounting } from "@hansjm
 import { minimatch } from "minimatch";
 import type { ReviewRunControls } from "./review.ts";
 import { ReviewSourceUnavailableError, resolveCanonicalReviewSource } from "./review-links.ts";
+import { normalizeReviewPath } from "./review-path.ts";
 import { createReviewAccountingMessage } from "./review-presentation.ts";
 import {
 	type ParsedReview,
@@ -29,6 +30,8 @@ export const REVIEW_ACKNOWLEDGMENT_CUSTOM_ENTRY_TYPE = "volt.review.acknowledgme
 export const REVIEW_FINDING_TRANSITION_CUSTOM_ENTRY_TYPE = "volt.review.finding-transition";
 export const REVIEW_PUBLICATION_CUSTOM_ENTRY_TYPE = "volt.review.publication";
 export const REVIEW_STATE_SCHEMA_VERSION = 1;
+/** Runs now carry canonical byte-path references; other review-state record formats are unchanged. */
+export const REVIEW_RUN_SCHEMA_VERSION = 2;
 export const MAX_REVIEW_STATE_RECORD_BYTES = 512 * 1024;
 export const MAX_HYDRATED_REVIEW_RUNS = 32;
 export const MAX_REVIEW_INVENTORY_FILES = 5_000;
@@ -105,7 +108,7 @@ export interface ReviewRunContextMetadata {
 }
 
 export interface ReviewRunRecord {
-	schemaVersion: 1;
+	schemaVersion: 2;
 	runId: string;
 	workflowAction: string;
 	/**
@@ -269,16 +272,26 @@ function cloneControls(controls: ReviewRunControls): ReviewRunControls {
 /** Bounds an already-declassified public result; private analysis reports must never reach persistence. */
 function boundPublicReviewResult(result: ParsedReview, includeEvidence: boolean): ParsedReview {
 	const maximumCoverageItems = includeEvidence ? MAX_PERSISTED_COVERAGE_ITEMS : MAX_COMPACT_COVERAGE_ITEMS;
-	const coverageWasCompacted = [
-		result.coverage.filesInspected.length,
-		result.coverage.hunksInspected.length,
-		result.coverage.commandsRun.length,
-		result.coverage.failedVerificationAttempts.length,
-		result.coverage.exclusions.length,
-		result.coverage.uncheckedAreas.length,
-		result.coverage.residualRisk.length,
-		result.coverage.modelReportedLimitations.length,
-	].some((length) => length > maximumCoverageItems);
+	const filesInspected = result.coverage.filesInspected
+		.slice(0, maximumCoverageItems)
+		.filter((path) => Buffer.byteLength(path, "utf8") <= 1_000);
+	const exclusions = result.coverage.exclusions
+		.slice(0, maximumCoverageItems)
+		.filter((entry) => Buffer.byteLength(entry.path, "utf8") <= 1_000)
+		.map((entry) => ({ path: entry.path, reason: truncateUtf8(entry.reason, 1_000) }));
+	const coverageWasCompacted =
+		filesInspected.length !== result.coverage.filesInspected.length ||
+		exclusions.length !== result.coverage.exclusions.length ||
+		[
+			result.coverage.filesInspected.length,
+			result.coverage.hunksInspected.length,
+			result.coverage.commandsRun.length,
+			result.coverage.failedVerificationAttempts.length,
+			result.coverage.exclusions.length,
+			result.coverage.uncheckedAreas.length,
+			result.coverage.residualRisk.length,
+			result.coverage.modelReportedLimitations.length,
+		].some((length) => length > maximumCoverageItems);
 	return {
 		...structuredClone(result),
 		summary: truncateUtf8(result.summary, 4_000),
@@ -310,7 +323,7 @@ function boundPublicReviewResult(result: ParsedReview, includeEvidence: boolean)
 						},
 					}
 				: {}),
-			filesInspected: boundedStrings(result.coverage.filesInspected, 1_000, maximumCoverageItems),
+			filesInspected,
 			hunksInspected: boundedStrings(result.coverage.hunksInspected, 500, maximumCoverageItems),
 			commandsRun: boundedStrings(result.coverage.commandsRun, 1_000, maximumCoverageItems),
 			failedVerificationAttempts: boundedStrings(
@@ -318,10 +331,7 @@ function boundPublicReviewResult(result: ParsedReview, includeEvidence: boolean)
 				1_000,
 				maximumCoverageItems,
 			),
-			exclusions: result.coverage.exclusions.slice(0, maximumCoverageItems).map((entry) => ({
-				path: truncateUtf8(entry.path, 1_000),
-				reason: truncateUtf8(entry.reason, 1_000),
-			})),
+			exclusions,
 			uncheckedAreas: boundedStrings(result.coverage.uncheckedAreas, 1_000, maximumCoverageItems),
 			residualRisk: [
 				...boundedStrings(result.coverage.residualRisk, 1_000, maximumCoverageItems),
@@ -364,8 +374,25 @@ function isEpochMilliseconds(value: unknown): value is number {
 	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
+function assertRecordPaths(record: ReviewRunRecord): void {
+	const paths = record.target.files.flatMap((file) => [file.path, ...(file.previousPath ? [file.previousPath] : [])]);
+	if (record.result) {
+		paths.push(
+			...record.result.coverage.filesInspected,
+			...record.result.coverage.exclusions.map((entry) => entry.path),
+		);
+		for (const finding of record.result.findings) {
+			paths.push(finding.changeLocation.path, ...finding.evidenceLocations.map((location) => location.path));
+		}
+		paths.push(...(record.result.followUps ?? []).map((followUp) => followUp.location.path));
+	}
+	for (const path of paths) {
+		if (normalizeReviewPath(path) !== path) throw new Error("Persisted review paths must be canonical.");
+	}
+}
+
 function parseRun(value: unknown): ReviewRunRecord | undefined {
-	if (!isObject(value) || value.schemaVersion !== REVIEW_STATE_SCHEMA_VERSION) return undefined;
+	if (!isObject(value) || value.schemaVersion !== REVIEW_RUN_SCHEMA_VERSION) return undefined;
 	if (typeof value.runId !== "string" || typeof value.workflowAction !== "string") return undefined;
 	if (value.engine !== undefined && !isExtensionReviewEngine(value.engine)) return undefined;
 	if (value.engine === undefined ? value.engineLabel !== undefined : !isReviewEngineLabel(value.engineLabel))
@@ -392,6 +419,11 @@ function parseRun(value: unknown): ReviewRunRecord | undefined {
 	)
 		return undefined;
 	const record = structuredClone(value) as unknown as ReviewRunRecord;
+	try {
+		assertRecordPaths(record);
+	} catch {
+		return undefined;
+	}
 	delete record.usage;
 	const usage = parseReviewUsage(value.usage);
 	if (usage) record.usage = usage;
@@ -840,7 +872,7 @@ export function createReviewRunRecord(options: {
 	}
 	const fileInventory = snapshotFileInventory(options.snapshot);
 	const createRecord = (includeEvidence: boolean): ReviewRunRecord => ({
-		schemaVersion: REVIEW_STATE_SCHEMA_VERSION,
+		schemaVersion: REVIEW_RUN_SCHEMA_VERSION,
 		runId: options.workflowId,
 		workflowAction: options.workflowAction,
 		...(options.engine === undefined ? {} : { engine: options.engine.id, engineLabel: options.engine.label }),
@@ -867,6 +899,7 @@ export function createReviewRunRecord(options: {
 	});
 	let record = createRecord(true);
 	if (serializedBytes(record) > MAX_REVIEW_STATE_RECORD_BYTES) record = createRecord(false);
+	assertRecordPaths(record);
 	assertRecordSize(record);
 	return record;
 }

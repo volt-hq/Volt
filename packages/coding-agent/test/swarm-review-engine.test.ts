@@ -4,23 +4,31 @@
  * as a whole runs in test/suite/swarm-review-engine.test.ts.
  */
 
-import type { ReviewEngineChangedFile, ReviewEngineContext } from "@hansjm10/volt-coding-agent";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { ReviewEngineChangedFile, ReviewEngineContext, ToolDefinition } from "@hansjm10/volt-coding-agent";
 import { Check } from "typebox/value";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { createBaseReader } from "../../../.volt/extensions/swarm-review/base.ts";
 import { resolveOptions } from "../../../.volt/extensions/swarm-review/index.ts";
+import { loadDismissals, recordDismissals } from "../../../.volt/extensions/swarm-review/memory.ts";
 import { buildReport, type ReportedFinding, reportSummary } from "../../../.volt/extensions/swarm-review/report.ts";
 import { buildSubmission, candidateFor, slug } from "../../../.volt/extensions/swarm-review/submit.ts";
 import { MAX_SHARD_BYTES, packShards } from "../../../.volt/extensions/swarm-review/target.ts";
+import { canonicalHeadPath, createRepositoryTools } from "../../../.volt/extensions/swarm-review/tools.ts";
 import type {
 	Candidate,
 	Cluster,
 	PassState,
+	ReviewTarget,
 	SwarmSetup,
 	SwarmState,
 	WorkerState,
 } from "../../../.volt/extensions/swarm-review/types.ts";
 import { ReviewCandidateReportSchema, ReviewVerificationReportSchema } from "../src/core/review-report.ts";
+import { type ReviewSnapshot, resolveReviewSnapshot } from "../src/core/review-snapshot.ts";
+import { createByteReviewRepository, BYTE_REVIEW_PATHS as P } from "./utilities/byte-review-repository.ts";
 
 function file(
 	path: string,
@@ -499,6 +507,95 @@ describe("the report", () => {
 		expect(reportSummary(state([confirmed, rejected]), [reported()])).toBe(
 			"1 confirmed finding(s), 1 rejected.\n1. [P2] Zero returns the numerator (src/value.ts:2)",
 		);
+	});
+});
+
+describe("swarm canonical path boundaries", () => {
+	const directories: string[] = [];
+	const snapshots: ReviewSnapshot[] = [];
+	afterEach(async () => {
+		for (const snapshot of snapshots.splice(0)) await snapshot.dispose();
+		for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
+	});
+	function target(checkout: string): ReviewTarget {
+		return {
+			repoRoot: checkout,
+			checkout,
+			description: "paths",
+			stat: "",
+			scope: [],
+			shards: [],
+			fileHunks: new Map(),
+			hunkBytes: new Map(),
+			complete: true,
+			submodules: false,
+			commonDir: join(checkout, ".git"),
+			readBase: async () => undefined,
+		};
+	}
+
+	it("validates a reported path against the head through the host, and names the reference of a checkout filename", async () => {
+		const repository = mkdtempSync(join(tmpdir(), "volt-swarm-byte-host-"));
+		directories.push(repository);
+		const sha = createByteReviewRepository(repository);
+		const snapshot = await resolveReviewSnapshot({ kind: "commit", sha }, repository, {
+			maxCommitRefBytes: 1024,
+			maxPullRequestNumber: 2147483647,
+		});
+		if ("error" in snapshot) throw new Error(snapshot.error);
+		snapshots.push(snapshot);
+		// The host's answer, as its engine context gives it: whether the snapshot has a text file there.
+		const engine: Pick<ReviewEngineContext, "hasTextFile"> = {
+			hasTextFile: async (path, side) => {
+				const file = await snapshot.readFile(side, path);
+				return file?.available === true && !file.binary;
+			},
+		};
+		// None of these has a file of its name in any checkout on this system; the head has them all.
+		for (const path of [P.fe, P.ff, P.replacement, P.literal])
+			await expect(canonicalHeadPath(engine, path)).resolves.toBe(path);
+		await expect(canonicalHeadPath(engine, "collision-%ff.txt")).rejects.toThrow(/uppercase/);
+		await expect(canonicalHeadPath(engine, P.deleted)).rejects.toThrow(/does not exist/);
+		await expect(canonicalHeadPath(engine, `./${P.shared}`)).rejects.toThrow(
+			`Report the canonical snapshot path reference ${P.shared}.`,
+		);
+		// A reviewer that read the file with a checkout tool may report the name it saw there.
+		await expect(canonicalHeadPath(engine, "back\\slash.txt")).rejects.toThrow(`Report ${P.backslash}.`);
+	});
+
+	it("opens the checkout's own filenames, never a name decoded from a reference", async () => {
+		const checkout = mkdtempSync(join(tmpdir(), "volt-swarm-byte-checkout-"));
+		directories.push(checkout);
+		writeFileSync(join(checkout, "100%.ts"), "actual percent\n");
+		writeFileSync(join(checkout, "100%25.ts"), "literal escape spelling\n");
+		const tools: ToolDefinition[] = createRepositoryTools(target(checkout), checkout);
+		const read = tools.find((tool) => tool.name === "read");
+		if (!read) throw new Error("Expected read tool");
+		const percent = await read.execute("read", { path: "100%.ts" }, undefined, undefined, {} as never);
+		expect(percent.content).toEqual([{ type: "text", text: expect.stringContaining("actual percent") }]);
+		// A string spelled like the reference of 100%.ts is the name of another file here.
+		const literal = await read.execute("read", { path: "100%25.ts" }, undefined, undefined, {} as never);
+		expect(literal.content).toEqual([{ type: "text", text: expect.stringContaining("literal escape spelling") }]);
+		await expect(read.execute("read", { path: "../outside" }, undefined, undefined, {} as never)).rejects.toThrow(
+			/outside the repository/,
+		);
+	});
+
+	it("keeps canonical dismissal identity while reading the actual percent filename", async () => {
+		const checkout = mkdtempSync(join(tmpdir(), "volt-swarm-byte-memory-"));
+		directories.push(checkout);
+		writeFileSync(join(checkout, "100%.ts"), "anchored source\ncontext\n");
+		const review = target(checkout);
+		await expect(
+			recordDismissals(review, [
+				cluster({
+					outcome: "rejected",
+					candidates: [claim({ file: "100%25.ts", line: 1 })],
+					verdicts: [{ verdict: "rejected", reason: "Intended", findings: [] }],
+				}),
+			]),
+		).resolves.toBe(1);
+		expect(loadDismissals(review)).toMatchObject([{ file: "100%25.ts", reason: "Intended" }]);
 	});
 });
 

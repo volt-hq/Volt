@@ -11,6 +11,7 @@ export function changeSection(target: ReviewTarget, diff: string, notes: string[
 	return [
 		"# Change under review",
 		`Target: ${target.description}`,
+		"Review paths are canonical byte-preserving references. Copy them, %HH escapes included, unchanged into reports, read_base, and the host snapshot tools (review_file, review_search, review_tree). The checkout tools (read, grep, find, ls) take and print the checkout's own filenames, which differ from a reference only where it has a %HH escape: read such a path with the host snapshot tools.",
 		...(target.scope.length > 0 ? [`Scope: ${target.scope.join(", ")}`] : []),
 		"",
 		"## Changed files",
@@ -44,7 +45,7 @@ export const WORKER_SYSTEM_PROMPT = `<reviewer_prompt>
 </precision_rules>
 <workflow>
 1. Read the complete diff and the list of changed files.
-2. Your working directory is a frozen checkout of the changed code. Use read, grep, find, and ls to inspect surrounding code, contracts, callers, configuration, and tests. Use read_base for the code before the change, including removed lines and deleted files. These tools only reach the repository.
+2. Your working directory is a frozen checkout of the changed code. Use read, grep, find, and ls to inspect surrounding code, contracts, callers, configuration, and tests. Use review_file, review_search, and review_tree for exact snapshot references and names the checkout tools cannot represent. Use read_base for the code before the change, including removed lines and deleted files. These tools only reach the repository.
 3. Verify suspected behavior against the code before reporting it. You cannot modify files or run commands.
 4. Call report_findings exactly once with the complete report.
 </workflow>

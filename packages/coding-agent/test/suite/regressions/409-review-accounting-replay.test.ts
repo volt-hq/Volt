@@ -25,7 +25,7 @@ const usage: Usage = {
 
 function run(status: "failed" | "cancelled", accounting: ReviewRunRecord["usage"]): ReviewRunRecord {
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		runId: "review:replayed",
 		workflowAction: "review.uncommitted",
 		status,

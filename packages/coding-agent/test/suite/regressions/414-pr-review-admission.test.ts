@@ -345,7 +345,7 @@ async function interruptedLaunch(f: Awaited<ReturnType<typeof fixture>>, persist
 function reviewRecord(source: string, base: string, target: ResolvedPullRequestCheckout): ReviewRunRecord {
 	const head = target.pullRequest.headRefOid;
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		runId: "run-414",
 		workflowAction: "review.pr",
 		status: "completed",
