@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
-import { getAgentDir, loadProjectContextFiles } from "@hansjm10/volt-coding-agent";
+import { getAgentDir, loadProjectContextFiles, reviewPathFromUtf8 } from "@hansjm10/volt-coding-agent";
 
 const CONTEXT_FILE_NAMES = ["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
 
@@ -28,7 +28,16 @@ export async function loadContextFiles(
 		files.push({ path: userReviewPolicy, content: readFileSync(userReviewPolicy, "utf8") });
 	}
 	const relativeCwd = relative(repoRoot, resolvedCwd);
-	const segments = insideRoot(repoRoot, resolvedCwd) ? relativeCwd.split(sep).filter(Boolean) : [];
+	// The base names a directory by its review path, so each name on disk is encoded. One that has no review path
+	// (not UTF-8) holds nothing in the base, and neither does anything beneath it.
+	const segments: string[] = [];
+	for (const name of insideRoot(repoRoot, resolvedCwd) ? relativeCwd.split(sep).filter(Boolean) : []) {
+		try {
+			segments.push(reviewPathFromUtf8(name));
+		} catch {
+			break;
+		}
+	}
 	const directories = ["", ...segments.map((_, index) => segments.slice(0, index + 1).join("/"))];
 	for (const directory of directories) {
 		for (const name of CONTEXT_FILE_NAMES) {

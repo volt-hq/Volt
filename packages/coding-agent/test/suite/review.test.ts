@@ -1462,6 +1462,58 @@ describe("review pipeline", () => {
 		});
 	});
 
+	it("loads the scoped policy of a working directory whose name a review path escapes", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const cwd = harness.tempDir;
+		// `%` is escaped in a review path: the directory is 100%25 in the snapshot.
+		const scoped = join(cwd, "100%");
+		mkdirSync(join(cwd, "src"), { recursive: true });
+		mkdirSync(scoped, { recursive: true });
+		git(cwd, "init", "--initial-branch=main");
+		git(cwd, "config", "user.email", "review@example.com");
+		git(cwd, "config", "user.name", "Review Test");
+		writeFileSync(join(scoped, "AGENTS.md"), "SCOPED AGENT POLICY\n");
+		writeFileSync(join(scoped, "REVIEW.md"), "SCOPED REVIEW POLICY\n");
+		writeFileSync(join(cwd, "src", "value.ts"), "export const value = 1;\n");
+		git(cwd, "add", ".");
+		git(cwd, "commit", "-m", "initial");
+		writeFileSync(join(cwd, "src", "value.ts"), "export const value = 2;\n");
+		const snapshot = await resolveReviewSnapshot({ kind: "uncommitted" }, cwd, {
+			maxCommitRefBytes: 1_024,
+			maxPullRequestNumber: MAX_PULL_REQUEST_NUMBER,
+		});
+		if ("error" in snapshot) throw new Error(snapshot.error);
+		snapshots.push(snapshot);
+		const systemPrompts: string[] = [];
+		const [first, ...rest] = privateReviewResponses("scoped policy review");
+		harness.setResponses([
+			(context) => {
+				systemPrompts.push(context.systemPrompt ?? "");
+				return first!;
+			},
+			...rest,
+		]);
+
+		const run = await runReview({
+			cwd: scoped,
+			agentDir: join(cwd, "agent"),
+			model: harness.getModel(),
+			verifierModel: harness.getModel(),
+			authStorage: harness.authStorage,
+			modelRegistry: harness.session.modelRegistry,
+			settingsManager: harness.settingsManager,
+			resolved: snapshot,
+			controls: { scopeMode: "full" },
+			workflowId: "review:escaped-cwd",
+			workflowAction: "review.uncommitted",
+		});
+		snapshots.splice(snapshots.indexOf(snapshot), 1);
+		expect(run.errorMessage).toBeUndefined();
+		expect(systemPrompts[0]).toContain("SCOPED AGENT POLICY");
+		expect(systemPrompts[0]).toContain("SCOPED REVIEW POLICY");
+	});
+
 	it("updates a prior PR finding status without replacing its safe prose", async () => {
 		const privateMarker = "private-prior-decision-marker";
 		const harness = await createHarness();

@@ -4,13 +4,14 @@
  * as a whole runs in test/suite/swarm-review-engine.test.ts.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ReviewEngineChangedFile, ReviewEngineContext, ToolDefinition } from "@hansjm10/volt-coding-agent";
 import { Check } from "typebox/value";
 import { afterEach, describe, expect, it } from "vitest";
 import { createBaseReader } from "../../../.volt/extensions/swarm-review/base.ts";
+import { loadContextFiles } from "../../../.volt/extensions/swarm-review/context-files.ts";
 import { resolveOptions } from "../../../.volt/extensions/swarm-review/index.ts";
 import { loadDismissals, recordDismissals } from "../../../.volt/extensions/swarm-review/memory.ts";
 import { buildReport, type ReportedFinding, reportSummary } from "../../../.volt/extensions/swarm-review/report.ts";
@@ -579,6 +580,32 @@ describe("swarm canonical path boundaries", () => {
 		await expect(read.execute("read", { path: "../outside" }, undefined, undefined, {} as never)).rejects.toThrow(
 			/outside the repository/,
 		);
+	});
+
+	it("looks up the scoped policy of a working directory by its review path", async () => {
+		const repository = realpathSync(mkdtempSync(join(tmpdir(), "volt-swarm-context-")));
+		directories.push(repository);
+		mkdirSync(join(repository, "100%"));
+		// The base's policy files under the directory named 100%, by their review paths.
+		const base: Record<string, string> = {
+			"100%25/AGENTS.md": "SCOPED AGENT POLICY\n",
+			"100%25/REVIEW.md": "SCOPED REVIEW POLICY\n",
+		};
+		const asked: string[] = [];
+		const files = await loadContextFiles(
+			repository,
+			async (path) => {
+				asked.push(path);
+				return base[path];
+			},
+			join(repository, "100%"),
+			new AbortController().signal,
+		);
+		expect(files.filter((file) => file.path.startsWith("base:"))).toEqual([
+			{ path: "base:100%25/AGENTS.md", content: "SCOPED AGENT POLICY\n" },
+			{ path: "base:100%25/REVIEW.md", content: "SCOPED REVIEW POLICY\n" },
+		]);
+		expect(asked.some((path) => path.startsWith("100%/"))).toBe(false);
 	});
 
 	it("keeps canonical dismissal identity while reading the actual percent filename", async () => {
