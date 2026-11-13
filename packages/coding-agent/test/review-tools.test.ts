@@ -46,7 +46,7 @@ describe("review snapshot tools", () => {
 		writeFileSync(join(directory, "src", "one.ts"), "export const one = 1;\n");
 		writeFileSync(join(directory, "src", "two.ts"), "export const two = 2;\n");
 		writeFileSync(join(directory, "large.txt"), "x".repeat(256));
-		writeFileSync(join(directory, "binary.dat"), Buffer.from([0, 1, 2, 3]));
+		writeFileSync(join(directory, "binary.dat"), Buffer.from("\0binary needle\n"));
 		git(directory, "add", ".");
 		git(directory, "commit", "-m", "initial");
 		writeFileSync(join(directory, "src", "one.ts"), `export const one = "${"x".repeat(200)}";\n`);
@@ -164,41 +164,46 @@ describe("review snapshot tools", () => {
 		expect(resultText(await execute(read, { path: "src/one.ts", revision: "head" }))).toContain(
 			'1: export const one = "xxx',
 		);
-		let searchCursor: string | undefined;
-		const searchLines: number[] = [];
-		do {
-			const search = await execute(tool(tools, "review_search"), {
-				query: "one + 2",
-				path: "src",
-				revision: "head",
-				limit: 1,
-				...(searchCursor ? { cursor: searchCursor } : {}),
-			});
-			const details = search.details as { matches: Array<{ line: number }>; nextCursor?: string };
-			searchLines.push(...details.matches.map((match) => match.line));
-			searchCursor = details.nextCursor;
-		} while (searchCursor);
-		expect(searchLines).toEqual([1, 2]);
+		const search = tool(tools, "review_search");
+		const first = await execute(search, { query: "one + 2", path: "src", revision: "head", limit: 1 });
+		const firstDetails = first.details as { nextCursor?: string };
+		if (!firstDetails.nextCursor) throw new Error("Expected a search cursor");
+		expect(first.details).toEqual({
+			kind: "search",
+			query: "one + 2",
+			revision: "head",
+			matches: [{ path: "src/two.ts", line: 1, text: "export const two = one + 2;" }],
+			nextCursor: firstDetails.nextCursor,
+		});
+		expect(resultText(first)).toBe(
+			`src/two.ts:1: export const two = one + 2;\n\nNext cursor: ${firstDetails.nextCursor}`,
+		);
+		// The second page ends the search: it knows nothing follows, so it carries no cursor.
+		const second = await execute(search, { query: "one + 2", cursor: firstDetails.nextCursor, limit: 1 });
+		expect(second.details).toEqual({
+			kind: "search",
+			query: "one + 2",
+			revision: "head",
+			matches: [{ path: "src/two.ts", line: 2, text: "export const three = one + 2;" }],
+		});
+		expect(resultText(second)).toBe("src/two.ts:2: export const three = one + 2;");
+		expect(resultText(await execute(search, { query: "one + 2", revision: "base" }))).toBe("No matches.");
 		expect(tracker.snapshot()).toMatchObject({ filesRead: ["src/one.ts"], searchesRun: 3 });
 	});
 
-	it("reports unavailable and binary reads and discloses skipped search paths", async () => {
+	it("reports unavailable and binary reads, and searches a file too large to read but no binary file", async () => {
 		const { tools } = await setup({ maxBlobBytes: 64 });
 		const read = tool(tools, "review_file");
 		await expect(execute(read, { path: "large.txt", revision: "head" })).rejects.toThrow(/unavailable.*64 bytes/i);
 		await expect(execute(read, { path: "binary.dat", revision: "head" })).rejects.toThrow(/binary/i);
 
-		const search = await execute(tool(tools, "review_search"), {
-			query: "x",
-			path: "large.txt",
-			revision: "head",
-		});
-		expect(search.details).toMatchObject({
-			matches: [],
-			filesScanned: 1,
-			skippedPaths: [{ path: "large.txt", reason: expect.stringContaining("64 bytes") }],
-		});
-		expect(resultText(search)).toContain("Skipped paths:\nlarge.txt:");
+		const search = tool(tools, "review_search");
+		const large = await execute(search, { query: "x", path: "large.txt", revision: "head" });
+		expect(large.details).toMatchObject({ matches: [{ path: "large.txt", line: 1, text: "x".repeat(256) }] });
+		// Git does not search a binary file, and the tool says nothing of the files it passed over.
+		const binary = await execute(search, { query: "binary needle", revision: "head" });
+		expect(binary.details).toEqual({ kind: "search", query: "binary needle", revision: "head", matches: [] });
+		expect(resultText(binary)).toBe("No matches.");
 	});
 
 	it("binds opaque cursors to a tool operation and snapshot", async () => {
@@ -237,6 +242,13 @@ describe("review snapshot tools", () => {
 				cursor: searchCursor,
 			}),
 		).rejects.toThrow(/revision does not match/);
+		await expect(
+			execute(tool(tools, "review_search"), { query: "one + 3", path: "src", cursor: searchCursor }),
+		).rejects.toThrow(/query does not match/);
+		await expect(
+			execute(tool(tools, "review_search"), { query: "one + 2", ignoreCase: true, cursor: searchCursor }),
+		).rejects.toThrow(/case sensitivity does not match/);
+		await expect(execute(tool(tools, "review_tree"), { cursor: searchCursor })).rejects.toThrow(/another operation/);
 
 		const tree = await execute(tool(tools, "review_tree"), { prefix: "src", revision: "head", limit: 1 });
 		const treeCursor = (tree.details as { nextCursor?: string }).nextCursor;
