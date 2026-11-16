@@ -76,9 +76,11 @@ describe("BashExecutionComponent width handling (#2569)", () => {
 		const success = new BashExecutionComponent("npm run check", stub);
 		success.appendOutput("No errors found");
 		success.setComplete(0, false);
-		const successLines = success.render(120).lines.map(stripAnsi);
-		expect(successLines.join("\n")).toContain("$ npm run check [success]");
-		expect(successLines.filter((line) => line.trim()).every((line) => line.startsWith("│ "))).toBe(true);
+		const successLines = success.render(120).lines.filter((line) => stripAnsi(line).trim());
+		const successText = successLines.map(stripAnsi).join("\n");
+		expect(successText).toContain("$ npm run check [success]");
+		expect(successLines.every((line) => /^\x1b\[48;[\d;]+m \x1b\[49m /.test(line))).toBe(true);
+		expect(successText).not.toContain("│");
 
 		const failure = new BashExecutionComponent("npm run check", stub);
 		failure.appendOutput("Type error");
