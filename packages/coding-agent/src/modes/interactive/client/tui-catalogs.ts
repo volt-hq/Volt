@@ -34,7 +34,8 @@ export class TuiCatalogs {
 					this.conversationInfo = undefined;
 					return;
 				case "changed":
-					if (change.catalog === "models" || change.catalog === "settings") this.refresh(change.catalog);
+					if (change.catalog === "models") this.refresh("models");
+					else if (change.catalog === "settings") this.refresh("settings");
 					return;
 				default:
 					return;

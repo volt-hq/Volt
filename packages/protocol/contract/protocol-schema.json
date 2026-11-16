@@ -278,7 +278,7 @@
 		},
 		"CatalogName": {
 			"type": "string",
-			"enum": [
+			"x-volt-known-values": [
 				"models",
 				"intents",
 				"sessions",
@@ -5311,7 +5311,7 @@
 		},
 		"FatalCode": {
 			"type": "string",
-			"enum": [
+			"x-volt-known-values": [
 				"invalid_frame",
 				"frame_too_large",
 				"protocol_mismatch",
@@ -5537,9 +5537,25 @@
 						"hostRequests": {
 							"type": "array",
 							"items": {
-								"$ref": "#/$defs/HostRequestKind"
+								"minLength": 1,
+								"maxLength": 64,
+								"type": "string",
+								"x-volt-known-values": [
+									"select",
+									"confirm",
+									"input",
+									"editor",
+									"form",
+									"dialog",
+									"approval",
+									"mcp_auth",
+									"provider_auth",
+									"editor_text",
+									"user_input"
+								]
 							},
-							"uniqueItems": true
+							"uniqueItems": true,
+							"maxItems": 64
 						}
 					},
 					"additionalProperties": false
@@ -10588,7 +10604,7 @@
 		},
 		"IntentCategory": {
 			"type": "string",
-			"enum": [
+			"x-volt-known-values": [
 				"session",
 				"model",
 				"context",
@@ -12104,7 +12120,9 @@
 		"IntentName": {
 			"anyOf": [
 				{
-					"$ref": "#/$defs/BuiltinIntentName"
+					"type": "string",
+					"maxLength": 160,
+					"pattern": "^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)*$"
 				},
 				{
 					"$ref": "#/$defs/DynamicIntentName"
@@ -12815,7 +12833,7 @@
 		},
 		"IntentSource": {
 			"type": "string",
-			"enum": [
+			"x-volt-known-values": [
 				"builtin",
 				"extension",
 				"prompt",
@@ -17049,7 +17067,7 @@
 		},
 		"QueryErrorCode": {
 			"type": "string",
-			"enum": [
+			"x-volt-known-values": [
 				"invalid_input",
 				"unknown_query",
 				"not_allowed",
@@ -18440,7 +18458,7 @@
 		},
 		"RejectionCode": {
 			"type": "string",
-			"enum": [
+			"x-volt-known-values": [
 				"invalid_input",
 				"unknown_intent",
 				"not_allowed",

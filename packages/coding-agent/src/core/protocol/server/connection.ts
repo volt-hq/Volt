@@ -56,8 +56,8 @@ import {
 	DYNAMIC_INTENT_PATTERN,
 	DynamicIntentFrameSchema,
 	ExtensionIntentFrameSchema,
-	type FatalCode,
 	HelloFrameSchema,
+	HOST_REQUEST_KINDS,
 	type HostFrame,
 	type HostRequestKind,
 	type HostResponse,
@@ -65,10 +65,13 @@ import {
 	INPUT_INTENT_NAMES,
 	INTENT_FRAME_SCHEMAS,
 	INTENT_OUTCOME_WINDOW,
+	type KnownCatalogName,
+	type KnownFatalCode,
+	type KnownQueryErrorCode,
+	type KnownRejectionCode,
 	LogSessionIdSchema,
 	PROTOCOL_VERSION,
 	QUERY_FRAME_SCHEMAS,
-	type QueryErrorCode,
 	RELAY_INTENT_NAMES,
 	RELAY_QUERY_NAMES,
 	RESERVED_FRAME_TYPES,
@@ -160,7 +163,9 @@ const MODELS_INTENTS: ReadonlySet<string> = new Set(["set_model_scope", "set_pro
 const HOST_INTENTS: ReadonlySet<string> = new Set(["set_keep_awake", "set_web_search_key"]);
 
 /** Intents whose acceptance ends the connection: its `accepted` is the last frame before this fatal. */
-const ENDING_INTENTS: ReadonlyMap<string, FatalCode> = new Map([["unregister_workspace", "workspace_unregistered"]]);
+const ENDING_INTENTS: ReadonlyMap<string, KnownFatalCode> = new Map([
+	["unregister_workspace", "workspace_unregistered"],
+]);
 
 const INPUT_INTENTS: ReadonlySet<string> = new Set(INPUT_INTENT_NAMES);
 const DYNAMIC_INTENT = new RegExp(DYNAMIC_INTENT_PATTERN);
@@ -168,6 +173,7 @@ const EXTENSION_INTENT_PREFIX = "extension.intent.";
 const RESERVED: ReadonlySet<string> = new Set(RESERVED_FRAME_TYPES);
 const RELAY_INTENTS: ReadonlySet<string> = new Set(RELAY_INTENT_NAMES);
 const RELAY_QUERIES: ReadonlySet<string> = new Set(RELAY_QUERY_NAMES);
+const HOST_REQUESTS: ReadonlySet<string> = new Set(HOST_REQUEST_KINDS);
 
 export interface ProtocolPeer {
 	readonly name: string;
@@ -175,7 +181,7 @@ export interface ProtocolPeer {
 }
 
 /** Why a connection's authority no longer holds: the fatal code it ends with. */
-export type AuthorityLoss = Extract<FatalCode, "revoked" | "workspace_unregistered">;
+export type AuthorityLoss = Extract<KnownFatalCode, "revoked" | "workspace_unregistered">;
 
 export interface ServeConnectionOptions {
 	/** The host of the conversation; a connection without a conversation needs none. */
@@ -261,13 +267,13 @@ export interface ProtocolConnection {
 	/** The conversation the client is on, if any. */
 	readonly conversation: HostedConversation | undefined;
 	/** Tell the client to refetch a catalog. */
-	changed(catalog: CatalogName): void;
+	changed(catalog: KnownCatalogName): void;
 	/** End every subscription with `ended{shutdown}`, then the connection with `fatal{host_shutdown}`. */
 	shutdown(message?: string): Promise<void>;
 	/** End every subscription with `ended{closed}`, then the connection: the host stopped serving the conversation here. */
 	end(): Promise<void>;
 	/** End the connection; with a code, the client is told why first, and nothing follows. */
-	close(fatal?: { readonly code: FatalCode; readonly message?: string }): Promise<void>;
+	close(fatal?: { readonly code: KnownFatalCode; readonly message?: string }): Promise<void>;
 }
 
 interface IntentEnvelope {
@@ -287,7 +293,6 @@ interface QueryEnvelope {
 }
 
 type IntentOutcomeFrame = Extract<HostFrame, { type: "accepted" | "rejected" }>;
-type CatalogName = Extract<HostFrame, { type: "changed" }>["catalog"];
 
 /** Outcomes of non-input intents a conversation remembers, so a retried intent id answers the same. */
 class IntentOutcomeWindow {
@@ -369,7 +374,7 @@ function errorMessage(error: unknown): string {
 }
 
 /** Rejection codes of the coded errors a run can fail with; any other failure is `failed`. */
-const CODED_REJECTIONS: Readonly<Record<string, RejectionReason["code"]>> = {
+const CODED_REJECTIONS: Readonly<Record<string, KnownRejectionCode>> = {
 	client_input_conflict: "conflict",
 	client_input_recovery_blocked: "unavailable",
 	conversation_locked: "locked",
@@ -378,7 +383,7 @@ const CODED_REJECTIONS: Readonly<Record<string, RejectionReason["code"]>> = {
 };
 
 /** The rejection code of a coded error, or none for any other error. */
-function codedRejection(error: unknown): RejectionReason["code"] | undefined {
+function codedRejection(error: unknown): KnownRejectionCode | undefined {
 	return isRecord(error) && typeof error.code === "string" ? CODED_REJECTIONS[error.code] : undefined;
 }
 
@@ -398,7 +403,7 @@ export function rejectionReason(error: unknown): RejectionReason {
 /** The query error a failed admission or run answers with. */
 export function queryErrorReason(
 	error: unknown,
-): { code: QueryErrorCode; message: string } & Pick<QueryRejectedError, "requiredCapability"> {
+): { code: KnownQueryErrorCode; message: string } & Pick<QueryRejectedError, "requiredCapability"> {
 	if (error instanceof QueryRejectedError) {
 		return {
 			code: error.code,
@@ -570,7 +575,7 @@ export function serveConnection(
 	let helloReceived = false;
 	let welcomeWritten = false;
 	let flushingCatalogs = false;
-	const pendingCatalogChanges: CatalogName[] = [];
+	const pendingCatalogChanges: Extract<HostFrame, { type: "changed" }>["catalog"][] = [];
 	let closing: Promise<void> | undefined;
 	/** A fatal frame was written: nothing follows it. */
 	let fatalWritten = false;
@@ -1252,7 +1257,7 @@ export function serveConnection(
 	};
 
 	const runQuery = async (frame: QueryEnvelope): Promise<void> => {
-		const refuse = (code: QueryErrorCode, message: string, retryAfterMs?: number): void => {
+		const refuse = (code: KnownQueryErrorCode, message: string, retryAfterMs?: number): void => {
 			write({
 				type: "query_error",
 				queryId: frame.queryId,
@@ -1305,7 +1310,7 @@ export function serveConnection(
 	const runClosedQuery = async (
 		frame: QueryEnvelope,
 		id: string,
-		refuse: (code: QueryErrorCode, message: string, retryAfterMs?: number) => void,
+		refuse: (code: KnownQueryErrorCode, message: string, retryAfterMs?: number) => void,
 	): Promise<void> => {
 		const notOpen = (): void => refuse("unavailable", `Conversation ${id} is not open`);
 		if (!queryRegistry.has(frame.query)) {
@@ -1551,7 +1556,10 @@ export function serveConnection(
 		}
 		const frame = value as Static<typeof HelloFrameSchema>;
 		helloReceived = true;
-		accepts = profile.hostRequests(frame.accepts.hostRequests);
+		// A newer client may name kinds this host does not know: it is never asked those.
+		accepts = profile.hostRequests(
+			frame.accepts.hostRequests.filter((kind): kind is HostRequestKind => HOST_REQUESTS.has(kind)),
+		);
 		let joined: Promise<void>;
 		if (home && host) {
 			observeHome(home);
@@ -1695,7 +1703,7 @@ export function serveConnection(
 		else closed.reject(errors.length === 1 ? errors[0] : new AggregateError(errors, "Protocol connection ended"));
 	};
 
-	function close(fatal?: { readonly code: FatalCode; readonly message?: string }): Promise<void> {
+	function close(fatal?: { readonly code: KnownFatalCode; readonly message?: string }): Promise<void> {
 		if (closing) return closing;
 		if (fatal)
 			write({ type: "fatal", code: fatal.code, ...(fatal.message === undefined ? {} : { message: fatal.message }) });

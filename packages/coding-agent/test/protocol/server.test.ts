@@ -245,6 +245,45 @@ describe("protocol server on the local profile", () => {
 		);
 	});
 
+	it("welcomes a client naming host request kinds this host does not know, and asks it the kinds it does", async () => {
+		const answers: boolean[] = [];
+		const { harness, conversation } = await setup({
+			extension: (volt) => {
+				volt.registerCommand("ask", {
+					handler: async (_args, ctx) => {
+						answers.push(await ctx.ui.confirm("Proceed?", "Continue with the change?"));
+					},
+				});
+			},
+		});
+		const pair = createLoopbackRpcTransportPair();
+		const connection = serveConnection(pair.server, localProfile, { host: harness.host, conversation });
+		const raw = rawClient(pair.client);
+		cleanups.push(async () => {
+			await pair.client.close();
+			await connection.closed.catch(() => undefined);
+		});
+		raw.send({ ...HELLO, accepts: { hostRequests: ["confirm", "future_kind"] } });
+		await vi.waitFor(() => expect(raw.frames.map((frame) => frame.type)).toEqual(["welcome"]));
+		await connection.ready;
+
+		raw.send({ type: "subscribe", subscriptionId: "s1", conversation: conversation.id, after: "snapshot" });
+		raw.send({ type: "prompt", intentId: "c-1", input: { message: "/ask" } });
+		let requestId: string | undefined;
+		await vi.waitFor(() => {
+			for (const frame of raw.frames) {
+				if (frame.type !== "live") continue;
+				for (const item of frame.items) {
+					if (item.type === "set" && item.value.kind === "host_request") requestId = item.value.requestId;
+				}
+			}
+			expect(requestId).toBeDefined();
+		});
+		raw.send({ type: "host_response", requestId, response: { confirmed: true } });
+		await vi.waitFor(() => expect(answers).toEqual([true]));
+		expect(raw.frames.some((frame) => frame.type === "fatal")).toBe(false);
+	});
+
 	it("tells the client about extension errors as notices", async () => {
 		const { harness, conversation } = await setup({
 			extension: (volt) => {

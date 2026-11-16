@@ -6,7 +6,7 @@
  */
 
 import type { WorkRecord } from "@hansjm10/volt-agent-core";
-import type { RejectionCode } from "@hansjm10/volt-protocol";
+import type { KnownRejectionCode } from "@hansjm10/volt-protocol";
 import { WorkError, type WorkErrorCode, type WorkRegistry } from "../../work/registry.ts";
 import { targetOf } from "./conversation.ts";
 import {
@@ -22,7 +22,7 @@ import {
 const control = ["conversation.control.v1"] as const;
 
 /** The rejection a refused work operation answers with. */
-const WORK_REJECTIONS: Readonly<Record<WorkErrorCode, RejectionCode>> = {
+const WORK_REJECTIONS: Readonly<Record<WorkErrorCode, KnownRejectionCode>> = {
 	unknown_kind: "unavailable",
 	unknown_work: "invalid_input",
 	invalid: "invalid_input",
