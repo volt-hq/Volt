@@ -14,6 +14,7 @@ import {
 	decisionComment,
 	decisionFingerprint,
 	describeBaseline,
+	describeBuild,
 	formatChange,
 	IROH_BINDING,
 	PROTOCOL_CONTRACT_PATH,
@@ -22,31 +23,54 @@ import {
 	runGate,
 } from "./ios-app-compat.mjs";
 
-const baselineContract = '{"contract":"baseline"}\n';
-const baseline = {
+const sha256 = (text) => createHash("sha256").update(text).digest("hex");
+
+/** A protocol contract whose result frame (which the app receives) has `fields`, beside a control message it never sees. */
+function contractText({ fields = {}, control = ["tui"] } = {}) {
+	return `${JSON.stringify({
+		$defs: {
+			HostFrame: { anyOf: [{ $ref: "#/$defs/Frame.result" }] },
+			"Frame.result": {
+				type: "object",
+				properties: { type: { type: "string", const: "result" }, ...fields },
+				required: ["type"],
+				additionalProperties: false,
+			},
+			"Control.ClientKind": { type: "string", enum: control },
+		},
+	})}\n`;
+}
+
+const baselineContract = contractText();
+const cachedContract = contractText({ fields: { cached: { type: "boolean" } } });
+const build = {
 	build: "15",
 	version: "1.0.0",
 	status: "in App Review",
 	appCommit: "a".repeat(40),
-	protocolContract: {
-		voltCommit: "b".repeat(40),
-		sha256: createHash("sha256").update(baselineContract).digest("hex"),
-	},
+	protocolContract: { voltCommit: "b".repeat(40), sha256: sha256(baselineContract) },
 	voltIroh: "1.1.1-volt.2",
+	tolerance: "strict",
 };
+const baseline = { builds: [build] };
 const baselineText = JSON.stringify(baseline);
 const brokerPath = "services/relay-credential-broker/internal/broker/broker.go";
+const cachedFinding = "build 15: Frame.result: new field `cached` (host to app)";
 
 function packageJson(irohVersion, extra = {}) {
 	return JSON.stringify({ dependencies: { ...extra, ...(irohVersion ? { [IROH_BINDING]: irohVersion } : {}) } });
 }
 
-function changes(paths, { base = {}, head = {} } = {}) {
+function changes(
+	paths,
+	{ base = {}, head = {}, commits = { [build.protocolContract.voltCommit]: baselineContract }, against = baseline } = {},
+) {
 	return appFacingChanges({
 		paths,
-		baseline,
+		baseline: against,
 		readBase: (path) => base[path],
 		readHead: (path) => head[path],
+		readCommit: (commit, path) => (path === PROTOCOL_CONTRACT_PATH ? commits[commit] : undefined),
 	});
 }
 
@@ -56,19 +80,74 @@ test("the committed baseline is well formed", () => {
 });
 
 test("rejects an incomplete baseline", () => {
-	const { voltIroh: _voltIroh, ...missingIroh } = baseline;
-	assert.throws(() => parseBaseline(JSON.stringify(missingIroh)), /must record/);
-	assert.throws(
-		() => parseBaseline(JSON.stringify({ ...baseline, protocolContract: { ...baseline.protocolContract, sha256: "x" } })),
-		/must record/,
+	const { voltIroh: _voltIroh, ...missingIroh } = build;
+	const { tolerance: _tolerance, ...missingTolerance } = build;
+	for (const builds of [
+		[missingIroh],
+		[missingTolerance],
+		[{ ...build, tolerance: "lenient" }],
+		[{ ...build, protocolContract: { ...build.protocolContract, sha256: "x" } }],
+		[build, build],
+		[],
+	]) {
+		assert.throws(() => parseBaseline(JSON.stringify({ builds })), /must list builds/);
+	}
+	assert.throws(() => parseBaseline(JSON.stringify(build)), /must list builds/, "the single-build format");
+	assert.equal(describeBuild(build), "Volt iOS 1.0.0 (15), in App Review");
+});
+
+test("a protocol contract change a supported build cannot handle is app-facing, listing what it breaks", () => {
+	const result = changes([PROTOCOL_CONTRACT_PATH], { head: { [PROTOCOL_CONTRACT_PATH]: cachedContract } });
+	assert.equal(result.length, 1);
+	assert.match(formatChange(result[0]), /1 protocol contract change\(s\) a supported build cannot handle/);
+	assert.deepEqual(result[0].details, [cachedFinding]);
+	assert.equal(result[0].state, sha256(cachedContract));
+});
+
+test("a protocol contract change no supported build is affected by is not app-facing", () => {
+	const head = { [PROTOCOL_CONTRACT_PATH]: contractText({ control: ["daemon"] }) };
+	assert.deepEqual(changes([PROTOCOL_CONTRACT_PATH], { head }), []);
+});
+
+test("incompatibilities the base already had are not flagged again; a baseline change checks them all", () => {
+	const base = { [PROTOCOL_CONTRACT_PATH]: cachedContract };
+	const unrelated = contractText({ fields: { cached: { type: "boolean" } }, control: ["daemon"] });
+	assert.deepEqual(changes([PROTOCOL_CONTRACT_PATH], { base, head: { [PROTOCOL_CONTRACT_PATH]: unrelated } }), []);
+	const stale = contractText({ fields: { cached: { type: "boolean" }, stale: { type: "boolean" } } });
+	assert.deepEqual(
+		changes([PROTOCOL_CONTRACT_PATH], { base, head: { [PROTOCOL_CONTRACT_PATH]: stale } })[0].details,
+		["build 15: Frame.result: new field `stale` (host to app)"],
+	);
+	assert.deepEqual(
+		changes([BASELINE_PATH], { base, head: { [PROTOCOL_CONTRACT_PATH]: cachedContract } })[0].details,
+		[cachedFinding],
 	);
 });
 
-test("a protocol contract that differs from the baseline is app-facing", () => {
-	const result = changes([PROTOCOL_CONTRACT_PATH], { head: { [PROTOCOL_CONTRACT_PATH]: '{"contract":"next"}\n' } });
-	assert.equal(result.length, 1);
-	assert.match(formatChange(result[0]), /protocol contract differs/);
-	assert.match(formatChange(result[0]), /Volt bbbbbbbbb/);
+test("each supported build is checked against the contract it pinned, with its tolerance", () => {
+	const later = {
+		...build,
+		build: "16",
+		protocolContract: { voltCommit: "e".repeat(40), sha256: sha256(cachedContract) },
+		tolerance: "additive",
+	};
+	const head = { [PROTOCOL_CONTRACT_PATH]: contractText({ fields: { stale: { type: "boolean" } } }) };
+	const result = changes([PROTOCOL_CONTRACT_PATH], {
+		head,
+		commits: { [build.protocolContract.voltCommit]: baselineContract, [later.protocolContract.voltCommit]: cachedContract },
+		against: { builds: [build, later] },
+	});
+	// Build 16 ignores the new field; dropping `cached` is a narrowing for both.
+	assert.deepEqual(result[0].details, ["build 15: Frame.result: new field `stale` (host to app)"]);
+});
+
+test("a pinned contract that cannot be read or does not match its recorded hash fails closed", () => {
+	const head = { [PROTOCOL_CONTRACT_PATH]: cachedContract };
+	assert.throws(() => changes([PROTOCOL_CONTRACT_PATH], { head, commits: {} }), /Cannot read the protocol contract/);
+	assert.throws(
+		() => changes([PROTOCOL_CONTRACT_PATH], { head, commits: { [build.protocolContract.voltCommit]: cachedContract } }),
+		/does not match the SHA-256/,
+	);
 });
 
 test("restoring the baseline protocol contract is not app-facing", () => {
@@ -148,6 +227,15 @@ test("changing the Iroh binding away from the baseline is app-facing", () => {
 	assert.match(formatChange(result[0]), /@hansjm10\/volt-iroh 1\.2\.0-volt\.1 \(baseline 1\.1\.1-volt\.2\)/);
 });
 
+test("the Iroh binding must match every supported build", () => {
+	const result = changes([CODING_AGENT_PACKAGE_PATH], {
+		base: { [CODING_AGENT_PACKAGE_PATH]: packageJson("1.1.1-volt.2") },
+		head: { [CODING_AGENT_PACKAGE_PATH]: packageJson("1.2.0-volt.1") },
+		against: { builds: [build, { ...build, build: "16", voltIroh: "1.2.0-volt.1" }] },
+	});
+	assert.match(formatChange(result[0]), /\(baseline 1\.1\.1-volt\.2, 1\.2\.0-volt\.1\)/);
+});
+
 test("other dependency changes and a return to the baseline Iroh binding are not app-facing", () => {
 	assert.deepEqual(
 		changes([CODING_AGENT_PACKAGE_PATH], {
@@ -189,7 +277,7 @@ test("the decision fingerprint tracks app-facing content and the baseline, nothi
 		"another app-facing file needs a new decision",
 	);
 	assert.notEqual(
-		decisionFingerprint(JSON.stringify({ ...baseline, build: "16" }), reviewed),
+		decisionFingerprint(JSON.stringify({ builds: [{ ...build, build: "16" }] }), reviewed),
 		fingerprint,
 		"a new baseline build needs a new decision",
 	);
@@ -212,6 +300,14 @@ test("decision comments round-trip their fingerprint and name what they cover", 
 	assert.match(body, new RegExp(`\`${brokerPath}\``));
 	assert.match(body, /c{40}/);
 	assert.equal(parseDecision("ios-app-compat-decision fingerprint=abc"), undefined);
+
+	const contract = changes([PROTOCOL_CONTRACT_PATH], { head: { [PROTOCOL_CONTRACT_PATH]: cachedContract } });
+	const listed = decisionComment({ fingerprint, headSha: "c".repeat(40), baseline, changes: contract });
+	assert.ok(listed.includes(`  - ${cachedFinding}`));
+	const many = [{ ...contract[0], details: Array.from({ length: 25 }, (_, index) => `finding ${index}`) }];
+	const capped = decisionComment({ fingerprint, headSha: "c".repeat(40), baseline, changes: many });
+	assert.ok(capped.includes("  - finding 19") && !capped.includes("  - finding 20"));
+	assert.ok(capped.includes("  - and 5 more"));
 });
 
 const fp = "f".repeat(64);
@@ -232,7 +328,7 @@ test("pull requests without app-facing changes pass unless held by hand", () => 
 	assert.equal(gate({ appFacing: false, labels: [BREAKS_LABEL] }).ok, false);
 });
 
-test("app-facing changes without a decision are labeled on code events only", () => {
+test("app-facing changes without a decision are labeled, except on the gate's own label events", () => {
 	for (const action of ["opened", "synchronize", "reopened"]) {
 		const result = gate({ action });
 		assert.equal(result.ok, false);
@@ -241,6 +337,16 @@ test("app-facing changes without a decision are labeled on code events only", ()
 	const unlabeled = gate({ action: "unlabeled", labelName: BREAKS_LABEL });
 	assert.equal(unlabeled.ok, false);
 	assert.deepEqual(unlabeled.addLabels, []);
+});
+
+// Regression: #1091 was opened with a label. Its opened run was cancelled by
+// the run for the labeled event, which did not add breaks-ios-app.
+test("a pull request opened with an unrelated label is labeled by the run for that label", () => {
+	for (const action of ["labeled", "unlabeled"]) {
+		const result = gate({ action, labelName: "pkg:coding-agent" });
+		assert.equal(result.ok, false);
+		assert.deepEqual(result.addLabels, [BREAKS_LABEL], action);
+	}
 });
 
 test("adding ios-compat-checked records a decision for the current changes", () => {
@@ -425,6 +531,8 @@ test("the workflow gates every pull request event and never cancels a decision r
 	assert.match(workflow.concurrency.group, /github\.run_id/);
 	const job = workflow.jobs["ios-app-compat"];
 	assert.equal(job.permissions["pull-requests"], "write");
+	const checkout = job.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
+	assert.equal(checkout.with["fetch-depth"], 0, "the gate reads each baseline build's pinned contract from history");
 	const gateStep = job.steps.find((step) => step.run?.includes("scripts/ios-app-compat.mjs"));
 	assert.equal(gateStep.run, "node scripts/ios-app-compat.mjs --base HEAD^1 --gate");
 	assert.equal(gateStep.env.GH_TOKEN, "${{ github.token }}");
