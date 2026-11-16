@@ -6,13 +6,15 @@
  * another session directory, asks before registering a sensitive directory
  * (D17), and reconnects after the daemon announced its shutdown only once it
  * is back (D16). Against a daemon of another version (D7), it restarts an
- * idle one in place, once, and refuses a busy one with guidance.
+ * idle one in place, once, and refuses a busy one with guidance. Two
+ * connectors in one process, one per pane of a TUI, serve their conversations
+ * at once and apart: a move or a close in one leaves the other as it was.
  */
 
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fauxAssistantMessage } from "@hansjm10/volt-ai";
+import { type FauxResponseFactory, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	ConversationUnavailableError,
@@ -99,6 +101,44 @@ function messageTexts(client: ProtocolClient, role: "user" | "assistant"): strin
 			typeof content === "string" ? content : content.map((block) => ("text" in block ? block.text : "")).join(""),
 		];
 	});
+}
+
+/** The text of the newest user message in a turn's `context`. */
+function latestPrompt(context: Parameters<FauxResponseFactory>[0]): string {
+	for (let index = context.messages.length - 1; index >= 0; index -= 1) {
+		const message = context.messages[index];
+		if (message?.role !== "user") continue;
+		return typeof message.content === "string"
+			? message.content
+			: message.content.map((part) => (part.type === "text" ? part.text : "")).join("");
+	}
+	return "";
+}
+
+/**
+ * Turn responses that each wait until `count` turns are in flight together, then answer the pane their
+ * prompt names. `overlapped` is the most turns that were in flight at once; turns that never overlap
+ * answer after `waitMs` instead of hanging.
+ */
+function overlappingTurns(count: number, waitMs = 15_000): { steps: FauxResponseFactory[]; overlapped(): number } {
+	const together = Promise.withResolvers<void>();
+	let inFlight = 0;
+	let most = 0;
+	const step: FauxResponseFactory = async (context) => {
+		inFlight += 1;
+		most = Math.max(most, inFlight);
+		if (inFlight === count) together.resolve();
+		const timer = setTimeout(together.resolve, waitMs);
+		try {
+			await together.promise;
+		} finally {
+			clearTimeout(timer);
+			inFlight -= 1;
+		}
+		const pane = /question from the (\w+) pane/.exec(latestPrompt(context))?.[1] ?? "unknown";
+		return fauxAssistantMessage(`answer for the ${pane} pane`);
+	};
+	return { steps: Array.from({ length: count }, () => step), overlapped: () => most };
 }
 
 describe("the daemon connector", () => {
@@ -266,6 +306,64 @@ describe("the daemon connector", () => {
 		expect(await tui.hostRestarting()).toBe(true);
 		expect(shutdownRequested).not.toHaveBeenCalled();
 		expect(client.disconnected).toBe(true);
+	}, 60_000);
+});
+
+describe("a daemon connector per pane, two in one process", () => {
+	it("serves both panes' conversations at once, each client hearing only its own turn", async () => {
+		const harness = await startHarness();
+		const turns = overlappingTurns(2);
+		harness.faux.setResponses(turns.steps);
+		const left = await connect(connector(harness, harness.workspacePath));
+		const right = await connect(connector(harness, harness.workspacePath));
+		expect(left.conversation).toBeDefined();
+		expect(right.conversation).not.toBe(left.conversation);
+
+		await Promise.all([
+			left.promptAndWait("question from the left pane"),
+			right.promptAndWait("question from the right pane"),
+		]);
+		expect(turns.overlapped()).toBe(2);
+		expect(messageTexts(left, "user")).toEqual(["question from the left pane"]);
+		expect(messageTexts(left, "assistant")).toEqual(["answer for the left pane"]);
+		expect(messageTexts(right, "user")).toEqual(["question from the right pane"]);
+		expect(messageTexts(right, "assistant")).toEqual(["answer for the right pane"]);
+		expect((await harness.status()).workers.flatMap((worker) => worker.sessionIds)).toEqual(
+			expect.arrayContaining([left.conversation, right.conversation]),
+		);
+	}, 60_000);
+
+	it("moves one pane to a new session and closes it, leaving the other pane's conversation serving", async () => {
+		const harness = await startHarness();
+		harness.faux.setResponses([fauxAssistantMessage("the right pane still serves")]);
+		const leftPane = connector(harness, harness.workspacePath);
+		const left = await connect(leftPane);
+		const right = await connect(connector(harness, harness.workspacePath));
+		const rightConversation = right.conversation;
+
+		// /new in the left pane moves only its client.
+		const target = (await left.intent("new_session", {})).conversation;
+		await vi.waitFor(
+			() => {
+				expect(left.moving).toBeUndefined();
+				expect(left.conversation).toBe(target);
+			},
+			{ timeout: 15_000 },
+		);
+		expect(target).not.toBe(rightConversation);
+		expect(right.conversation).toBe(rightConversation);
+		expect(right.moving).toBeUndefined();
+
+		// Closing the left pane detaches its stream as quitting the TUI does; the right pane's stays attached.
+		leftPane.stopServing();
+		await leftPane.dispose();
+		await expect
+			.poll(async () => (await harness.status()).workers.reduce((sum, worker) => sum + worker.clients.local, 0), {
+				timeout: 10_000,
+			})
+			.toBe(1);
+		await right.promptAndWait("still there?");
+		expect(messageTexts(right, "assistant")).toEqual(["the right pane still serves"]);
 	}, 60_000);
 });
 
