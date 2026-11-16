@@ -162,6 +162,14 @@ const ALL_NODES: UiNode[] = [
 ];
 
 describe("UiNode mapping", () => {
+	it("renders the code gutter as a painted cell instead of a copyable glyph", () => {
+		const nodeView = view();
+		nodeView.update([{ type: "code", key: "code", code: "const answer = 42;" }]);
+		const rendered = nodeView.render(60).lines;
+		expect(rendered[0]).toMatch(/^\x1b\[48;[\d;]+m \x1b\[49m /);
+		expect(lines(nodeView, 60)).toEqual(["  const answer = 42;"]);
+	});
+
 	it("renders every node type within the width", () => {
 		const nodeView = view();
 		nodeView.update(ALL_NODES);

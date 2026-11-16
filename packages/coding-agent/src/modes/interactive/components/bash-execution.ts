@@ -23,6 +23,7 @@ import {
 } from "../../../core/tools/truncate.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
+import { railPrefix } from "./rail.ts";
 import { truncateToVisualLines } from "./visual-truncate.ts";
 
 // Preview line limit when not expanded (matches tool execution behavior)
@@ -39,7 +40,7 @@ class BashOutputRail implements Component {
 
 	render(width: number): RenderFrame {
 		if (width <= 2) return this.component.render(width);
-		return prefixRenderFrame(this.component.render(width - 2), `${theme.fg(this.colorKey, "│")} `);
+		return prefixRenderFrame(this.component.render(width - 2), railPrefix(this.colorKey));
 	}
 
 	invalidate(): void {

@@ -16,7 +16,9 @@ describe("UserMessageComponent", () => {
 		expect(lines).toHaveLength(2);
 		expect(lines[0]).toContain(OSC133_ZONE_START);
 		expect(lines[0]).not.toContain(OSC133_ZONE_END);
-		expect(stripAnsi(lines[1])).toContain("│ hello");
+		expect(lines[1]).toMatch(/\x1b\[48;[\d;]+m \x1b\[49m /);
+		expect(stripAnsi(lines[1])).toContain("  hello");
+		expect(stripAnsi(lines[1])).not.toContain("│");
 		expect(stripAnsi(lines[1])).not.toContain("YOU");
 		expect(lines[1].startsWith(OSC133_ZONE_END + OSC133_ZONE_FINAL)).toBe(true);
 	});

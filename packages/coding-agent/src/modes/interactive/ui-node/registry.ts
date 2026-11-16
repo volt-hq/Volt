@@ -65,6 +65,7 @@ import {
 } from "@hansjm10/volt-tui";
 import { getMarkdownTheme, highlightCode, theme } from "../../../core/theme/runtime.ts";
 import { formatDuration } from "../../../core/tools/render-utils.ts";
+import { railPrefix } from "../components/rail.ts";
 import { formSubmitIntent, type UiIntentSink } from "./intents.ts";
 import { TUI_SEMANTIC_THEME } from "./semantic-theme.ts";
 
@@ -325,7 +326,7 @@ class CodeView implements Component {
 
 	render(width: number): RenderFrame {
 		if (this.cache?.width === width) return this.cache.frame;
-		const gutter = theme.fg("mdCodeBlockBorder", "│ ");
+		const gutter = railPrefix("mdCodeBlockBorder");
 		const code = this.node.code.replace(/\t/g, "   ");
 		const lines = highlightCode(code, this.node.language)
 			.flatMap((line) => wrapTextWithAnsi(line, Math.max(1, width - 2)))

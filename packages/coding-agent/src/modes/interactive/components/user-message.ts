@@ -9,6 +9,7 @@ import {
 	Spacer,
 } from "@hansjm10/volt-tui";
 import { getMarkdownTheme, theme } from "../../../core/theme/runtime.ts";
+import { railPrefix } from "./rail.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -23,7 +24,7 @@ class UserMessageRail implements Component {
 
 	render(width: number): RenderFrame {
 		if (width <= 2) return this.content.render(width);
-		return prefixRenderFrame(this.content.render(width - 2), `${theme.fg("borderAccent", "│")} `);
+		return prefixRenderFrame(this.content.render(width - 2), railPrefix("borderAccent"));
 	}
 
 	invalidate(): void {
