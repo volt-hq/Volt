@@ -34,6 +34,8 @@ export default defineConfig({
 			VOLT_CODING_AGENT_DIR: testAgentDir,
 			VOLT_CODING_AGENT_SESSION_DIR: "",
 			VOLT_TEST_SESSION_STORE_WORKER: sessionStoreWorkerBundle,
+			// Reviews keep private diagnostics by default; tests that check them opt in.
+			VOLT_REVIEW_PRIVATE_DIAGNOSTICS: "0",
 		},
 		// Local runs use half the host's cores; set VITEST_MAX_WORKERS to share a busy host. CLI and pool overrides still apply.
 		maxWorkers: process.env.CI && process.env.CI !== "false" ? 8 : "50%",

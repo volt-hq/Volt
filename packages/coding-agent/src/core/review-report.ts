@@ -430,7 +430,7 @@ export function createReviewCandidateReportCollector(): ReviewReportCollector<Re
 		name: "report_review_candidates",
 		label: "report_review_candidates",
 		description:
-			"Submit the complete candidate finding report. This terminates the discovery pass. Use an empty candidates array when no substantiated P0-P2 findings remain (P3 only when explicitly enabled).",
+			'Submit the complete candidate finding report. This terminates the discovery pass. Use an empty candidates array when no substantiated findings remain: P0-P2, plus P3 optional improvements only when the controls set include_optional="true".',
 		parameters: ReviewCandidateReportSchema,
 		async execute(_toolCallId, params) {
 			report = structuredClone(params);

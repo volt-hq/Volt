@@ -213,6 +213,22 @@ function attachGitHubContext(snapshot: ReviewSnapshot, marker: string): void {
 
 const DIAGNOSTIC_RETENTION_WARNING = "Could not retain optional private review diagnostics.";
 
+/** A run's private diagnostics, read from its one file: the pass transcripts apart from the other records. */
+function readPrivateDiagnostics(directory: string): {
+	records: Array<Record<string, unknown>>;
+	transcripts: Array<Record<string, unknown>>;
+} {
+	const files = readdirSync(directory);
+	expect(files).toHaveLength(1);
+	const all = readFileSync(join(directory, files[0]!), "utf8")
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line) as Record<string, unknown>);
+	const isTranscript = (record: Record<string, unknown>) =>
+		record.kind === "pass_message" || record.kind === "pass_end";
+	return { records: all.filter((record) => !isTranscript(record)), transcripts: all.filter(isTranscript) };
+}
+
 function privateReviewResponses(marker: string, assessment: "complete" | "incomplete" = "complete") {
 	const responses = [
 		fauxAssistantMessage(fauxToolCall("review_context", {}), { stopReason: "toolUse" }),
@@ -814,9 +830,37 @@ describe("review pipeline", () => {
 			expect(publicData).not.toContain(forbidden);
 		}
 		if (delivery === "retained") {
-			const files = readdirSync(diagnosticsDirectory);
-			expect(files).toHaveLength(1);
-			expect(readFileSync(join(diagnosticsDirectory, files[0]!), "utf8").trim().split("\n")).toHaveLength(4);
+			const { records, transcripts } = readPrivateDiagnostics(diagnosticsDirectory);
+			expect(records).toHaveLength(4);
+			// What each pass reasoned, ran, and reported stays private, for audits.
+			expect(transcripts).toContainEqual(
+				expect.objectContaining({
+					kind: "pass_message",
+					phase: "discovery",
+					message: expect.objectContaining({
+						role: "assistant",
+						content: [expect.objectContaining({ type: "toolCall", name: "report_review_candidates" })],
+					}),
+				}),
+			);
+			const ends = transcripts.filter((record) => record.kind === "pass_end");
+			expect(ends).toEqual([
+				expect.objectContaining({
+					phase: "discovery",
+					outcome: "completed",
+					report: expect.objectContaining({ summary: privateMarker, candidates: [] }),
+				}),
+				expect.objectContaining({
+					phase: "verification",
+					outcome: "completed",
+					report: expect.objectContaining({ assessment: "complete", decisions: [] }),
+				}),
+			]);
+			for (const end of ends) {
+				expect(
+					transcripts.filter((record) => record.kind === "pass_message" && record.phase === end.phase),
+				).toHaveLength(end.messageCount as number);
+			}
 		}
 	});
 
@@ -1296,13 +1340,7 @@ describe("review pipeline", () => {
 			{ pass: "presentation", round: 1 },
 		]);
 		expect(harness.session.messages).toHaveLength(0);
-		const diagnosticsDirectory = getReviewPrivateDiagnosticsDirectory(agentDir);
-		const diagnosticFiles = readdirSync(diagnosticsDirectory);
-		expect(diagnosticFiles).toHaveLength(1);
-		const privateRecords = readFileSync(join(diagnosticsDirectory, diagnosticFiles[0]!), "utf8")
-			.trim()
-			.split("\n")
-			.map((line): unknown => JSON.parse(line));
+		const { records: privateRecords } = readPrivateDiagnostics(getReviewPrivateDiagnosticsDirectory(agentDir));
 		expect(privateRecords).toEqual([
 			expect.objectContaining({ kind: "model_limitation", phase: "discovery", message: privateMarker }),
 			expect.objectContaining({ kind: "model_limitation", phase: "verification", message: privateMarker }),
@@ -1442,13 +1480,7 @@ describe("review pipeline", () => {
 			expect(checkpoint.detail).toMatchObject({ type: "keyValue", key: "review-usage" });
 		}
 		expect(harness.session.messages).toHaveLength(0);
-		const diagnosticsDirectory = getReviewPrivateDiagnosticsDirectory(harness.tempDir);
-		const diagnosticFiles = readdirSync(diagnosticsDirectory);
-		expect(diagnosticFiles).toHaveLength(1);
-		const privateRecords = readFileSync(join(diagnosticsDirectory, diagnosticFiles[0]!), "utf8")
-			.trim()
-			.split("\n")
-			.map((line): unknown => JSON.parse(line));
+		const { records: privateRecords } = readPrivateDiagnostics(getReviewPrivateDiagnosticsDirectory(harness.tempDir));
 		expect(privateRecords).toHaveLength(withLimitations ? 6 : 2);
 		expect(privateRecords.at(-1)).toEqual({
 			schemaVersion: 1,
