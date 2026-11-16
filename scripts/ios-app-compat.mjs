@@ -1,8 +1,14 @@
 #!/usr/bin/env node
 /**
- * Flags changes that can break the Volt iOS build recorded in
- * .github/ios-app-baseline.json (the latest build submitted to App Review or
- * released). See "iOS app compatibility" in AGENTS.md.
+ * Flags changes that can break a Volt iOS build recorded in
+ * .github/ios-app-baseline.json (every build Volt still supports). See "iOS
+ * app compatibility" in AGENTS.md.
+ *
+ * A protocol contract change is app-facing when a supported build cannot
+ * handle it (scripts/protocol-contract-compat.mjs, against the contract the
+ * build pinned) and the pull request's base did not already have it: an
+ * earlier decision covered what is on the base. A pull request that changes
+ * the baseline is checked against all of it.
  *
  *   node scripts/ios-app-compat.mjs --base <git-ref>
  *     Print the app-facing changes from <git-ref> to HEAD. Pull requests pass
@@ -20,6 +26,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { contractIncompatibilities, formatIncompatibility, TOLERANCES } from "./protocol-contract-compat.mjs";
 
 export const BASELINE_PATH = ".github/ios-app-baseline.json";
 export const PROTOCOL_CONTRACT_PATH = "packages/protocol/contract/protocol-schema.json";
@@ -55,33 +62,50 @@ export const APP_FACING_PATHS = [
 ];
 
 const HOLD_MESSAGE = `Labeled ${BREAKS_LABEL}. Hold until a Volt iOS build that supports this change is released, then update ${BASELINE_PATH} and remove the label.`;
-const NEEDS_DECISION_MESSAGE = `This pull request changes what the Volt iOS baseline build depends on (listed above). If that build keeps working, label it ${CHECKED_LABEL}; otherwise leave ${BREAKS_LABEL} until a supporting build is released.`;
-const STALE_DECISION_MESSAGE = `The app-facing changes differ from those recorded when ${CHECKED_LABEL} was added, so that decision no longer applies. Review the current changes; if the baseline build keeps working, remove ${BREAKS_LABEL} and add ${CHECKED_LABEL} again.`;
+const NEEDS_DECISION_MESSAGE = `This pull request changes what a supported Volt iOS build depends on (listed above). If every listed build keeps working, label it ${CHECKED_LABEL}; otherwise leave ${BREAKS_LABEL} until a supporting build is released.`;
+const STALE_DECISION_MESSAGE = `The app-facing changes differ from those recorded when ${CHECKED_LABEL} was added, so that decision no longer applies. Review the current changes; if every listed build keeps working, remove ${BREAKS_LABEL} and add ${CHECKED_LABEL} again.`;
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const COMMIT_RE = /^[0-9a-f]{40}$/;
 const DECISION_MARKER_RE = /<!-- ios-app-compat-decision fingerprint=([0-9a-f]{64}) -->/;
 
-/** @returns {{ build: string, version: string, status: string, appCommit: string, protocolContract: { voltCommit: string, sha256: string }, voltIroh: string }} */
+/**
+ * @typedef {{ build: string, version: string, status: string, appCommit: string, protocolContract: { voltCommit: string, sha256: string }, voltIroh: string, tolerance: "strict" | "additive" }} BaselineBuild
+ * @returns {{ builds: BaselineBuild[] }}
+ */
 export function parseBaseline(text) {
 	const baseline = JSON.parse(text);
+	const builds = baseline?.builds;
+	const validBuild = (build) =>
+		typeof build?.build === "string" &&
+		/^[1-9][0-9]*$/.test(build.build) &&
+		typeof build.version === "string" &&
+		typeof build.status === "string" &&
+		COMMIT_RE.test(build.appCommit ?? "") &&
+		COMMIT_RE.test(build.protocolContract?.voltCommit ?? "") &&
+		SHA256_RE.test(build.protocolContract?.sha256 ?? "") &&
+		typeof build.voltIroh === "string" &&
+		build.voltIroh.length > 0 &&
+		TOLERANCES.includes(build.tolerance);
 	const valid =
-		typeof baseline?.build === "string" &&
-		/^[1-9][0-9]*$/.test(baseline.build) &&
-		typeof baseline.version === "string" &&
-		typeof baseline.status === "string" &&
-		COMMIT_RE.test(baseline.appCommit ?? "") &&
-		COMMIT_RE.test(baseline.protocolContract?.voltCommit ?? "") &&
-		SHA256_RE.test(baseline.protocolContract?.sha256 ?? "") &&
-		typeof baseline.voltIroh === "string" &&
-		baseline.voltIroh.length > 0;
+		Array.isArray(builds) &&
+		builds.length > 0 &&
+		builds.every(validBuild) &&
+		new Set(builds.map((build) => build.build)).size === builds.length;
 	if (!valid) {
-		throw new Error(`${BASELINE_PATH} must record build, version, status, appCommit, protocolContract, and voltIroh.`);
+		throw new Error(
+			`${BASELINE_PATH} must list builds, each once, recording build, version, status, appCommit, protocolContract, voltIroh, and tolerance (${TOLERANCES.join(" or ")}).`,
+		);
 	}
 	return baseline;
 }
 
+/** @param {BaselineBuild} build */
+export function describeBuild(build) {
+	return `Volt iOS ${build.version} (${build.build}), ${build.status}`;
+}
+
 export function describeBaseline(baseline) {
-	return `Volt iOS ${baseline.version} (${baseline.build}), ${baseline.status}`;
+	return baseline.builds.map(describeBuild).join("; ");
 }
 
 function sha256(text) {
@@ -98,10 +122,54 @@ function irohBinding(packageJson) {
 }
 
 /**
- * @typedef {{ path: string, description: string, state: string }} AppFacingChange
+ * @typedef {{ path: string, description: string, state: string, details?: string[] }} AppFacingChange
  *   `state` identifies the reviewed content: a SHA-256 of the file at HEAD,
- *   "absent", or the Iroh binding version.
+ *   "absent", or the Iroh binding version. `details` lists what a protocol
+ *   contract change breaks.
  */
+
+/**
+ * The contract a baseline build pinned, verified against its recorded hash.
+ * @param {BaselineBuild} build
+ * @param {(commit: string, path: string) => string | undefined} readCommit
+ */
+function pinnedContract(build, readCommit) {
+	const { voltCommit, sha256: recorded } = build.protocolContract;
+	const text = readCommit(voltCommit, PROTOCOL_CONTRACT_PATH);
+	if (text === undefined) {
+		throw new Error(`Cannot read the protocol contract build ${build.build} pins at ${voltCommit}; fetch full history.`);
+	}
+	if (sha256(text) !== recorded) {
+		throw new Error(`The protocol contract at ${voltCommit} does not match the SHA-256 recorded for build ${build.build}.`);
+	}
+	return JSON.parse(text);
+}
+
+/** The protocol contract changes a supported build cannot handle that the base did not already have. */
+function contractChange({ baseline, readBase, readHead, readCommit, baselineChanged }) {
+	const headText = readHead(PROTOCOL_CONTRACT_PATH);
+	if (headText === undefined) {
+		return { path: PROTOCOL_CONTRACT_PATH, description: "protocol contract deleted", state: "absent" };
+	}
+	const head = JSON.parse(headText);
+	const baseText = baselineChanged ? undefined : readBase(PROTOCOL_CONTRACT_PATH);
+	const base = baseText === undefined ? undefined : JSON.parse(baseText);
+	const details = [];
+	for (const build of baseline.builds) {
+		const pinned = pinnedContract(build, readCommit);
+		const lines = (current) =>
+			contractIncompatibilities({ baseline: pinned, current, tolerance: build.tolerance }).map(formatIncompatibility);
+		const known = new Set(base === undefined ? [] : lines(base));
+		for (const line of lines(head)) if (!known.has(line)) details.push(`build ${build.build}: ${line}`);
+	}
+	if (details.length === 0) return undefined;
+	return {
+		path: PROTOCOL_CONTRACT_PATH,
+		description: `${details.length} protocol contract change(s) a supported build cannot handle`,
+		state: contentState(headText),
+		details,
+	};
+}
 
 /**
  * @param {object} input
@@ -109,20 +177,21 @@ function irohBinding(packageJson) {
  * @param {ReturnType<typeof parseBaseline>} input.baseline
  * @param {(path: string) => string | undefined} input.readBase file contents at the base, or undefined if absent
  * @param {(path: string) => string | undefined} input.readHead file contents at HEAD, or undefined if absent
+ * @param {(commit: string, path: string) => string | undefined} input.readCommit file contents at a commit
  * @returns {AppFacingChange[]} empty when nothing app-facing changed
  */
-export function appFacingChanges({ paths, baseline, readBase, readHead }) {
+export function appFacingChanges({ paths, baseline, readBase, readHead, readCommit }) {
 	const changes = [];
 	const changed = new Set(paths);
-	if (changed.has(PROTOCOL_CONTRACT_PATH)) {
-		const state = contentState(readHead(PROTOCOL_CONTRACT_PATH));
-		if (state !== baseline.protocolContract.sha256) {
-			changes.push({
-				path: PROTOCOL_CONTRACT_PATH,
-				description: `protocol contract differs from the one the baseline pins (Volt ${baseline.protocolContract.voltCommit.slice(0, 9)})`,
-				state,
-			});
-		}
+	if (changed.has(PROTOCOL_CONTRACT_PATH) || changed.has(BASELINE_PATH)) {
+		const change = contractChange({
+			baseline,
+			readBase,
+			readHead,
+			readCommit,
+			baselineChanged: changed.has(BASELINE_PATH),
+		});
+		if (change) changes.push(change);
 	}
 	for (const path of paths) {
 		const rule = APP_FACING_PATHS.find(({ pattern }) => pattern.test(path));
@@ -131,10 +200,11 @@ export function appFacingChanges({ paths, baseline, readBase, readHead }) {
 	if (changed.has(CODING_AGENT_PACKAGE_PATH)) {
 		const before = irohBinding(readBase(CODING_AGENT_PACKAGE_PATH));
 		const after = irohBinding(readHead(CODING_AGENT_PACKAGE_PATH));
-		if (after !== before && after !== baseline.voltIroh) {
+		if (after !== before && baseline.builds.some((build) => build.voltIroh !== after)) {
+			const versions = [...new Set(baseline.builds.map((build) => build.voltIroh))].join(", ");
 			changes.push({
 				path: CODING_AGENT_PACKAGE_PATH,
-				description: `${IROH_BINDING} ${after ?? "removed"} (baseline ${baseline.voltIroh})`,
+				description: `${IROH_BINDING} ${after ?? "removed"} (baseline ${versions})`,
 				state: `${IROH_BINDING}@${after ?? "absent"}`,
 			});
 		}
@@ -145,6 +215,9 @@ export function appFacingChanges({ paths, baseline, readBase, readHead }) {
 export function formatChange(change) {
 	return `${change.path}: ${change.description}`;
 }
+
+/** Most details a decision comment lists per change. */
+const COMMENT_DETAILS_MAX = 20;
 
 /**
  * Identifies exactly what a compatibility decision reviewed: the app-facing
@@ -165,7 +238,15 @@ export function decisionComment({ fingerprint, headSha, baseline, changes }) {
 			: [
 					`It covers these app-facing changes, checked against ${describeBaseline(baseline)}:`,
 					"",
-					...changes.map((change) => `- \`${change.path}\`: ${change.description}`),
+					...changes.flatMap((change) => {
+						const details = change.details ?? [];
+						const more = details.length - COMMENT_DETAILS_MAX;
+						return [
+							`- \`${change.path}\`: ${change.description}`,
+							...details.slice(0, COMMENT_DETAILS_MAX).map((detail) => `  - ${detail}`),
+							...(more > 0 ? [`  - and ${more} more`] : []),
+						];
+					}),
 				];
 	return [
 		`<!-- ios-app-compat-decision fingerprint=${fingerprint} -->`,
@@ -216,10 +297,12 @@ export function decideGate({ appFacing, fingerprint, labels, action, labelName, 
 	if (removeLabels.length > 0) {
 		return outcome(false, STALE_DECISION_MESSAGE, { removeLabels, addLabels: [BREAKS_LABEL] });
 	}
-	// Label only on code changes, so removing breaks-ios-app before adding
-	// ios-compat-checked does not put it back.
-	const labelEvent = action === "labeled" || action === "unlabeled";
-	return outcome(false, NEEDS_DECISION_MESSAGE, { addLabels: labelEvent ? [] : [BREAKS_LABEL] });
+	// Not on the gate's own label events, so removing breaks-ios-app before
+	// adding ios-compat-checked does not put it back. Any other event labels: a
+	// pull request opened with labels may only get a run for its labeled event.
+	const gateLabelEvent =
+		(action === "labeled" || action === "unlabeled") && (labelName === BREAKS_LABEL || labelName === CHECKED_LABEL);
+	return outcome(false, NEEDS_DECISION_MESSAGE, { addLabels: gateLabelEvent ? [] : [BREAKS_LABEL] });
 }
 
 /**
@@ -391,13 +474,17 @@ async function main(argv) {
 		baseline,
 		readBase: (path) => readAt(base, path),
 		readHead: (path) => readAt("HEAD", path),
+		readCommit: readAt,
 	});
 	console.log(`ios-app-compat: baseline ${describeBaseline(baseline)}.`);
 	if (changes.length === 0) {
 		console.log("ios-app-compat: no app-facing changes.");
 	} else {
 		console.log(`ios-app-compat: ${changes.length} app-facing change(s):`);
-		for (const change of changes) console.log(`- ${formatChange(change)}`);
+		for (const change of changes) {
+			console.log(`- ${formatChange(change)}`);
+			for (const detail of change.details ?? []) console.log(`  - ${detail}`);
+		}
 	}
 	if (process.env.GITHUB_OUTPUT) {
 		appendFileSync(process.env.GITHUB_OUTPUT, `app-facing=${changes.length > 0}\n`);
