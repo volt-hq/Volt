@@ -2,6 +2,10 @@
  * The swarm review engine: run the same code review many times with an inexpensive model in waves, cluster the
  * combined claims by root cause, and have two independent verifiers confirm or reject each cluster.
  *
+ * Every worker is an independent review of the whole change: each gets the same prompt, pages what of the diff the
+ * prompt leaves out, and never sees what another worker reported. Workers' claims meet only after discovery, in
+ * clustering, the remembered dismissals, and verification.
+ *
  * Run it from `/review --engine swarm`, with the review's own options (`--focus`, `--scope`, `--effort`) and
  * its own:
  *
@@ -17,10 +21,10 @@
  * The host resolves what is reviewed (uncommitted changes, a branch with or without its uncommitted changes, a
  * commit, or a pull request's code) and runs the engine as `review` work, so every client sees its progress (a step
  * per wave and for verification) and its detail (the target and models), and can cancel it. The engine reads the
- * change through the host: its hunks are delivered to each worker and verifier as diff text the host counts as
- * reviewed. The confirmed findings are submitted in the host's report shapes, which validates them (anchors on
- * changed lines) and writes the run's record, so the review opens into the same findings conversation as any
- * review's. The full report, with what the verifiers disputed or rejected, is the work's output.
+ * change through the host: its hunks reach each worker and verifier as diff text in the prompt or as review_diff
+ * pages, which the host counts as reviewed. The confirmed findings are submitted in the host's report shapes, which
+ * validates them (anchors on changed lines) and writes the run's record, so the review opens into the same findings
+ * conversation as any review's. The full report, with what the verifiers disputed or rejected, is the work's output.
  *
  * Defaults for models, thinking, and counts are this extension's settings; a flag overrides one for a run.
  */
@@ -36,7 +40,7 @@ import {
 import { clusterWave } from "./cluster.ts";
 import { loadContextFiles } from "./context-files.ts";
 import { type Dismissal, loadDismissals, recordDismissals } from "./memory.ts";
-import { buildReport, modelRef, reportSummary, runDetail, workProgress } from "./report.ts";
+import { buildReport, discoveryCoverage, modelRef, reportSummary, runDetail, workProgress } from "./report.ts";
 import { buildSubmission } from "./submit.ts";
 import { buildTarget } from "./target.ts";
 import type { SwarmOptions, SwarmSetup, SwarmState } from "./types.ts";
@@ -244,8 +248,8 @@ function selectModel(
 type SwarmResult = { status: "completed" } | { status: "cancelled" } | { status: "failed"; error: string };
 
 /**
- * Runs waves until the worker budget is spent or a wave adds no new cluster (once every diff part has had a
- * successful worker), then verifies all clusters. `checkpoint` records each wave's start and the verification's.
+ * Runs waves until the worker budget is spent or a wave adds no new cluster (once some worker has reviewed the whole
+ * change), then verifies all clusters. `checkpoint` records each wave's start and the verification's.
  */
 async function runSwarm(
 	setup: SwarmSetup,
@@ -259,7 +263,7 @@ async function runSwarm(
 	for (let wave = 1; wave <= maxWaves; wave++) {
 		const count = Math.min(options.waveSize, options.workers - nextIndex);
 		const workers = Array.from({ length: count }, (_, offset) =>
-			createWorkerState(nextIndex + offset, wave, (nextIndex + offset) % target.shards.length),
+			createWorkerState(nextIndex + offset, wave, target.hunkIds),
 		);
 		nextIndex += count;
 		state.workers.push(...workers);
@@ -289,10 +293,8 @@ async function runSwarm(
 			newClusters,
 			clusteringFallback: fallback,
 		});
-		const covered = target.shards.every((shard) =>
-			state.workers.some((worker) => worker.shard === shard.index && worker.status === "done"),
-		);
-		if (newClusters === 0 && covered && options.stopWhenSaturated) {
+		const reviewedWhole = state.workers.some((worker) => worker.status === "done" && worker.missedHunks.length === 0);
+		if (newClusters === 0 && reviewedWhole && options.stopWhenSaturated) {
 			state.saturated = true;
 			break;
 		}
@@ -422,21 +424,16 @@ async function runSwarmReview(engine: ReviewEngineContext, settings: Settings): 
 		state.clusters.filter((cluster) => cluster.outcome === "rejected"),
 	).catch(() => 0);
 	const built = buildReport(setup, state, Date.now() - startedAt, remembered);
-	const unreviewedFiles = target.shards
-		.filter((shard) => !state.workers.some((entry) => entry.shard === shard.index && entry.status === "done"))
-		.flatMap((shard) => shard.files);
+	const coverage = discoveryCoverage(target, state.workers);
 	const submission = await engine.submit(
 		buildSubmission(state, built.findings, {
 			summary: reportSummary(state, built.findings),
-			shardCount: target.shards.length,
-			unreviewedFiles,
-			completedWorkers: state.workers.filter((entry) => entry.status === "done").length,
+			fullReviews: coverage.fullReviews,
+			unreviewedFiles: coverage.unreviewedFiles,
+			completedWorkers: coverage.completed,
 			limitations: [
 				...warnings,
 				...(target.submodules ? ["The change updates submodule commits; their contents were not available to reviewers."] : []),
-				...(target.shards.some((shard) => shard.partialFiles.length > 0)
-					? ["Some hunks were too large to include in a prompt; reviewers paged them."]
-					: []),
 			],
 		}),
 	);

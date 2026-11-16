@@ -25,15 +25,6 @@ export interface SwarmOptions {
 	focus?: string;
 }
 
-export interface DiffShard {
-	index: number;
-	files: string[];
-	/** The hunks of those files this shard holds, in order. Their diff text is delivered to a worker when it starts. */
-	hunkIds: string[];
-	/** Files with a hunk too large for any shard to hold whole: its diff text is not delivered, so reviewers page it. */
-	partialFiles: string[];
-}
-
 export interface ReviewTarget {
 	/** Original repository root. */
 	repoRoot: string;
@@ -42,13 +33,16 @@ export interface ReviewTarget {
 	description: string;
 	stat: string;
 	scope: string[];
-	shards: DiffShard[];
-	/** The hunks of each reviewable changed file in scope, for cluster-scoped verifier prompts. */
+	/** Every reviewable hunk in scope, in order: what each worker reviews, all of it. */
+	hunkIds: string[];
+	/** The hunks whose diff text every worker's prompt carries: those of whole files, in order, within a budget. */
+	inlineHunkIds: string[];
+	/** The files whose diff text the prompt leaves out: every worker pages them with review_diff. */
+	pagedFiles: string[];
+	/** The hunks of each reviewable changed file in scope. */
 	fileHunks: Map<string, string[]>;
 	/** Each hunk's patch size in bytes, to budget what a prompt carries. */
 	hunkBytes: Map<string, number>;
-	/** Whether a single shard holds the whole change. */
-	complete: boolean;
 	/** Whether the diff changes submodule gitlinks, whose contents reviewers cannot inspect. */
 	submodules: boolean;
 	/** Git common directory; identifies the repository across worktrees. */
@@ -95,7 +89,11 @@ export interface Candidate {
 export interface WorkerState extends PassState {
 	index: number;
 	wave: number;
-	shard: number;
+	/**
+	 * The hunks of the change the host did not see this worker read whole, recorded when it finishes. A finished worker
+	 * with none reviewed the whole change.
+	 */
+	missedHunks: string[];
 	candidates: Candidate[];
 	dropped: number;
 }

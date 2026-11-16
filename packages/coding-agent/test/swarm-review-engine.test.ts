@@ -1,7 +1,7 @@
 /**
- * The swarm review engine's pure parts: how it packs the host's hunks into shards, maps verified findings onto the
- * host's report shapes, resolves its options, writes its report, and reads base files through the host. The engine
- * as a whole runs in test/suite/swarm-review-engine.test.ts.
+ * The swarm review engine's pure parts: how it lays out the host's hunks for each worker, what its workers reviewed,
+ * how it maps verified findings onto the host's report shapes, resolves its options, writes its report, and reads
+ * base files through the host. The engine as a whole runs in test/suite/swarm-review-engine.test.ts.
  */
 
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -14,9 +14,19 @@ import { createBaseReader } from "../../../.volt/extensions/swarm-review/base.ts
 import { loadContextFiles } from "../../../.volt/extensions/swarm-review/context-files.ts";
 import { resolveOptions } from "../../../.volt/extensions/swarm-review/index.ts";
 import { loadDismissals, recordDismissals } from "../../../.volt/extensions/swarm-review/memory.ts";
-import { buildReport, type ReportedFinding, reportSummary } from "../../../.volt/extensions/swarm-review/report.ts";
+import {
+	buildReport,
+	discoveryCoverage,
+	type ReportedFinding,
+	reportSummary,
+} from "../../../.volt/extensions/swarm-review/report.ts";
 import { buildSubmission, candidateFor, slug } from "../../../.volt/extensions/swarm-review/submit.ts";
-import { MAX_SHARD_BYTES, packShards } from "../../../.volt/extensions/swarm-review/target.ts";
+import {
+	DIFF_PAGE_BYTES,
+	layoutDiff,
+	MAX_INLINE_BYTES,
+	pageCount,
+} from "../../../.volt/extensions/swarm-review/target.ts";
 import { canonicalHeadPath, createRepositoryTools } from "../../../.volt/extensions/swarm-review/tools.ts";
 import type {
 	Candidate,
@@ -54,12 +64,15 @@ function file(
 	};
 }
 
-describe("packing the host's hunks into shards", () => {
-	it("keeps a small change in one shard, with each file's hunks and sizes", () => {
-		const { shards, fileHunks, hunkBytes } = packShards([file("a.ts", [100, 200]), file("b.ts", [50])]);
-		expect(shards).toEqual([
-			{ index: 0, files: ["a.ts", "b.ts"], hunkIds: ["a.ts#0", "a.ts#1", "b.ts#0"], partialFiles: [] },
+describe("laying out the change for every worker", () => {
+	it("carries a small change in the prompt whole, with each file's hunks and sizes", () => {
+		const { hunkIds, inlineHunkIds, pagedFiles, fileHunks, hunkBytes } = layoutDiff([
+			file("a.ts", [100, 200]),
+			file("b.ts", [50]),
 		]);
+		expect(hunkIds).toEqual(["a.ts#0", "a.ts#1", "b.ts#0"]);
+		expect(inlineHunkIds).toEqual(hunkIds);
+		expect(pagedFiles).toEqual([]);
 		expect(fileHunks).toEqual(
 			new Map([
 				["a.ts", ["a.ts#0", "a.ts#1"]],
@@ -69,29 +82,68 @@ describe("packing the host's hunks into shards", () => {
 		expect(hunkBytes.get("a.ts#1")).toBe(200);
 	});
 
-	it("starts a new shard when the next hunk would not fit, and splits a file's hunks across shards", () => {
-		const half = MAX_SHARD_BYTES / 2 - 600;
-		const { shards } = packShards([file("a.ts", [half, half]), file("b.ts", [half, half])]);
-		expect(shards.map((shard) => shard.hunkIds)).toEqual([
-			["a.ts#0", "a.ts#1"],
-			["b.ts#0", "b.ts#1"],
-		]);
-		const split = packShards([file("a.ts", [half, half, half])]);
-		expect(split.shards.map((shard) => shard.hunkIds)).toEqual([["a.ts#0", "a.ts#1"], ["a.ts#2"]]);
-		expect(split.shards.map((shard) => shard.files)).toEqual([["a.ts"], ["a.ts"]]);
+	it("pages a file that no longer fits whole, and keeps carrying later files that do", () => {
+		const half = MAX_INLINE_BYTES / 2 - 600;
+		const layout = layoutDiff([file("a.ts", [half]), file("b.ts", [half, half]), file("c.ts", [half - 1_000])]);
+		// Every worker reviews every hunk; only how they reach it differs.
+		expect(layout.hunkIds).toEqual(["a.ts#0", "b.ts#0", "b.ts#1", "c.ts#0"]);
+		expect(layout.inlineHunkIds).toEqual(["a.ts#0", "c.ts#0"]);
+		expect(layout.pagedFiles).toEqual(["b.ts"]);
 	});
 
-	it("gives a hunk too large for any shard a shard of its own and marks its file partial", () => {
-		const { shards } = packShards([file("a.ts", [10]), file("big.ts", [MAX_SHARD_BYTES + 1]), file("c.ts", [10])]);
-		expect(shards.map((shard) => ({ files: shard.files, partial: shard.partialFiles }))).toEqual([
-			{ files: ["a.ts"], partial: [] },
-			{ files: ["big.ts"], partial: ["big.ts"] },
-			{ files: ["c.ts"], partial: [] },
-		]);
+	it("pages a file with a hunk larger than the prompt's budget", () => {
+		const layout = layoutDiff([file("a.ts", [10]), file("big.ts", [MAX_INLINE_BYTES + 1]), file("c.ts", [10])]);
+		expect(layout.inlineHunkIds).toEqual(["a.ts#0", "c.ts#0"]);
+		expect(layout.pagedFiles).toEqual(["big.ts"]);
+	});
+
+	it("counts the review_diff pages it takes to read files whole, each file on its own", () => {
+		const layout = layoutDiff([file("big.ts", [DIFF_PAGE_BYTES * 2]), file("small.ts", [10])]);
+		expect(pageCount(layout, ["big.ts"])).toBe(3);
+		expect(pageCount(layout, ["small.ts"])).toBe(1);
+		expect(pageCount(layout, ["big.ts", "small.ts"])).toBe(4);
+		expect(pageCount(layout, [])).toBe(0);
 	});
 
 	it("holds nothing for no files", () => {
-		expect(packShards([]).shards).toEqual([]);
+		expect(layoutDiff([])).toMatchObject({ hunkIds: [], inlineHunkIds: [], pagedFiles: [] });
+	});
+});
+
+describe("what the workers reviewed", () => {
+	const layout = layoutDiff([file("a.ts", [1, 1]), file("b.ts", [1])]);
+	const worker = (status: WorkerState["status"], missedHunks: string[]): WorkerState => ({
+		index: 0,
+		wave: 1,
+		missedHunks,
+		status,
+		toolCalls: 0,
+		turns: 0,
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
+		candidates: [],
+		dropped: 0,
+	});
+
+	it("counts a finished worker that read every hunk as a full review", () => {
+		expect(discoveryCoverage(layout, [worker("done", []), worker("done", ["b.ts#0"])])).toEqual({
+			completed: 2,
+			fullReviews: 1,
+			unreviewedFiles: [],
+		});
+	});
+
+	it("counts no full review when workers read the change only between them", () => {
+		expect(discoveryCoverage(layout, [worker("done", ["a.ts#1"]), worker("done", ["b.ts#0"])])).toEqual({
+			completed: 2,
+			fullReviews: 0,
+			unreviewedFiles: [],
+		});
+	});
+
+	it("names the files with a hunk no finished worker read, ignoring workers that did not finish", () => {
+		const workers = [worker("done", ["b.ts#0"]), worker("done", ["a.ts#0", "b.ts#0"]), worker("failed", [])];
+		expect(discoveryCoverage(layout, workers)).toEqual({ completed: 2, fullReviews: 0, unreviewedFiles: ["b.ts"] });
+		expect(discoveryCoverage(layout, [worker("failed", [])]).unreviewedFiles).toEqual(["a.ts", "b.ts"]);
 	});
 });
 
@@ -234,7 +286,7 @@ describe("a verified finding as the host's candidate", () => {
 
 const context = {
 	summary: "1 confirmed finding(s).",
-	shardCount: 1,
+	fullReviews: 2,
 	unreviewedFiles: [],
 	completedWorkers: 2,
 	limitations: [],
@@ -279,19 +331,25 @@ describe("the result the engine submits", () => {
 		expect(result.verification).toMatchObject({ assessment: "complete", decisions: [] });
 	});
 
-	it("is incomplete, naming what was left open, when verifiers disagreed or part of the diff had no worker", () => {
+	it("is incomplete, naming what was left open, when verifiers disagreed or no worker reviewed the whole change", () => {
 		const open = (outcome: Cluster["outcome"]) => cluster({ id: outcome, outcome });
 		const result = buildSubmission(
 			state([open("disputed"), open("uncertain"), open("unverified")], {
 				waves: [{ wave: 2, workers: 3, candidates: 0, newClusters: 0, clusteringFallback: false, failed: true }],
 			}),
 			[],
-			{ ...context, shardCount: 3, unreviewedFiles: ["a.ts", "b.ts"] },
+			{ ...context, fullReviews: 0, unreviewedFiles: ["a.ts", "b.ts"] },
 		);
 		expect(result.verification.assessment).toBe("incomplete");
 		expect(result.verification.challenge).toBe(
-			"Left open: 1 cluster(s) where the verifiers disagreed; 1 cluster(s) the verifiers could not settle; 1 cluster(s) no verifier finished; every worker in wave 2 failed; 2 file(s) in a part of the diff (of 3) had no successful worker.",
+			"Left open: 1 cluster(s) where the verifiers disagreed; 1 cluster(s) the verifiers could not settle; 1 cluster(s) no verifier finished; every worker in wave 2 failed; no successful worker reviewed the whole change; 2 file(s) had diff no successful worker read.",
 		);
+		// Workers that read the change only between them are no independent review of all of it.
+		const between = buildSubmission(state([]), [], { ...context, fullReviews: 0 });
+		expect(between.verification).toMatchObject({
+			assessment: "incomplete",
+			challenge: "Left open: no successful worker reviewed the whole change.",
+		});
 		expect(Check(ReviewVerificationReportSchema, result.verification)).toBe(true);
 		// A cluster the verifiers rejected or the memory suppressed settles nothing open.
 		const settled = buildSubmission(state([open("rejected"), open("suppressed"), open("single")]), [], context);
@@ -443,11 +501,11 @@ describe("the options of a run", () => {
 describe("the report", () => {
 	const usage = (cost: number) => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost });
 	const pass = (cost: number): PassState => ({ status: "done", toolCalls: 0, turns: 1, usage: usage(cost) });
-	const worker = (index: number, cost: number): WorkerState => ({
+	const worker = (index: number, cost: number, missedHunks: string[] = []): WorkerState => ({
 		...pass(cost),
 		index,
 		wave: 1,
-		shard: 0,
+		missedHunks,
 		candidates: [],
 		dropped: 0,
 	});
@@ -479,7 +537,7 @@ describe("the report", () => {
 		target: {
 			description: "uncommitted changes",
 			scope: [],
-			shards: [{ index: 0, files: ["src/value.ts"], hunkIds: [], partialFiles: [] }],
+			...layoutDiff([file("src/value.ts", [100])]),
 			submodules: false,
 		},
 		workerModel: { provider: "faux", id: "worker" },
@@ -501,6 +559,25 @@ describe("the report", () => {
 		expect(markdown).toContain("Estimated cost: $3.75 (workers $1.00 · clustering $0.25 · verifiers $2.50) · 1m 5s");
 		expect(markdown).toContain("Rerun with `--fresh` to verify them again.");
 		expect(markdown).toContain("Remembered 2 rejected issue(s) for future reviews; `--fresh` ignores them.");
+	});
+
+	it("says how many workers reviewed the whole change, and names what none of them read", () => {
+		const paged = {
+			...setup,
+			target: { ...setup.target, ...layoutDiff([file("big.ts", [MAX_INLINE_BYTES + 1])]) },
+		} as SwarmSetup;
+		const whole = buildReport(paged, state([], { workers: [worker(0, 0), worker(1, 0, ["big.ts#0"])] }), 1_000, 0);
+		expect(whole.markdown).toContain(
+			"1 of 2 workers reviewed the whole change; the diffs of 1 file(s) did not fit the prompt and were paged.",
+		);
+		expect(whole.markdown).not.toContain("Not reviewed");
+		const none = buildReport(paged, state([], { workers: [worker(0, 0, ["big.ts#0"])] }), 1_000, 0);
+		expect(none.markdown).toContain(
+			"**Not reviewed:** no finished worker read the whole diff of 1 file(s) (big.ts).",
+		);
+		// A change every worker's prompt carries whole needs no word on it.
+		const inline = buildReport(setup, state([], { workers: [worker(0, 0)] }), 1_000, 0);
+		expect(inline.markdown).not.toContain("reviewed the whole change");
 	});
 
 	it("summarizes without the outcomes no cluster had", () => {
@@ -525,10 +602,7 @@ describe("swarm canonical path boundaries", () => {
 			description: "paths",
 			stat: "",
 			scope: [],
-			shards: [],
-			fileHunks: new Map(),
-			hunkBytes: new Map(),
-			complete: true,
+			...layoutDiff([]),
 			submodules: false,
 			commonDir: join(checkout, ".git"),
 			readBase: async () => undefined,
