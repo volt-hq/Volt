@@ -4,7 +4,13 @@
  * reads; queries share the intent context (target, services, profile).
  */
 
-import type { QueryErrorCode, QueryName, QueryParams, QueryResult, RemoteCapability } from "@hansjm10/volt-protocol";
+import type {
+	KnownQueryErrorCode,
+	QueryName,
+	QueryParams,
+	QueryResult,
+	RemoteCapability,
+} from "@hansjm10/volt-protocol";
 import type { IntentContext } from "../intents/types.ts";
 
 export interface QueryDefinition<N extends QueryName> {
@@ -25,10 +31,10 @@ export function defineQuery<N extends QueryName>(definition: QueryDefinition<N>)
 }
 
 export class QueryRejectedError extends Error {
-	readonly code: QueryErrorCode;
+	readonly code: KnownQueryErrorCode;
 	readonly requiredCapability?: RemoteCapability;
 
-	constructor(code: QueryErrorCode, message: string, details: { requiredCapability?: RemoteCapability } = {}) {
+	constructor(code: KnownQueryErrorCode, message: string, details: { requiredCapability?: RemoteCapability } = {}) {
 		super(message);
 		this.name = "QueryRejectedError";
 		this.code = code;

@@ -20,7 +20,7 @@
 import { type Static, type TSchema, Type } from "typebox";
 import { ClientSnapshotSchema } from "./client-fold.ts";
 import { LogEntryIdSchema, LogEntryOrdinalSchema, LogSessionIdSchema } from "./entries.ts";
-import { opaque, stringEnum } from "./helpers.ts";
+import { opaque, openStringEnum, stringEnum } from "./helpers.ts";
 import {
 	DYNAMIC_INTENT_PATTERN,
 	INTENT_NAME_MAX_CHARS,
@@ -31,7 +31,7 @@ import {
 import {
 	EXTENSION_STATUS_MAX_SERIALIZED_BYTES,
 	EXTENSION_TITLE_MAX_CHARS,
-	HostRequestKindSchema,
+	HOST_REQUEST_KINDS,
 	HostResponseSchema,
 	LIVE_EXTENSION_NAME_MAX_CHARS,
 	LIVE_KEY_ID_MAX_CHARS,
@@ -84,8 +84,10 @@ const peerSchema = Type.Object({ name: Type.String({ minLength: 1 }), version: T
  * - `read_only`: the subscription observes only.
  * - `failed`: the intent ran and failed.
  * - `host_shutdown`: the host is shutting down.
+ *
+ * Open: a host may add codes, and a client treats a code it does not know as `failed`.
  */
-export const RejectionCodeSchema = stringEnum([
+const REJECTION_CODES = [
 	"invalid_input",
 	"unknown_intent",
 	"not_allowed",
@@ -98,7 +100,10 @@ export const RejectionCodeSchema = stringEnum([
 	"read_only",
 	"failed",
 	"host_shutdown",
-]);
+] as const;
+/** A rejection code this protocol version defines: the codes a host sends. */
+export type KnownRejectionCode = (typeof REJECTION_CODES)[number];
+export const RejectionCodeSchema = openStringEnum(REJECTION_CODES);
 export type RejectionCode = Static<typeof RejectionCodeSchema>;
 
 const outcomeHints = {
@@ -113,15 +118,21 @@ export const RejectionReasonSchema = Type.Object(
 );
 export type RejectionReason = Static<typeof RejectionReasonSchema>;
 
-/** Why a query failed; the codes mean what the matching rejection codes mean. */
-export const QueryErrorCodeSchema = stringEnum([
+/**
+ * Why a query failed; the codes mean what the matching rejection codes mean.
+ * Open: a client treats a code it does not know as `failed`.
+ */
+const QUERY_ERROR_CODES = [
 	"invalid_input",
 	"unknown_query",
 	"not_allowed",
 	"unavailable",
 	"failed",
 	"host_shutdown",
-]);
+] as const;
+/** A query error code this protocol version defines: the codes a host sends. */
+export type KnownQueryErrorCode = (typeof QUERY_ERROR_CODES)[number];
+export const QueryErrorCodeSchema = openStringEnum(QUERY_ERROR_CODES);
 export type QueryErrorCode = Static<typeof QueryErrorCodeSchema>;
 
 export const QueryErrorReasonSchema = Type.Object(
@@ -133,17 +144,13 @@ export const QueryErrorReasonSchema = Type.Object(
  * The catalogs a `changed` frame invalidates. `host` is the host's own status:
  * the `host_status` and `web_search_status` queries; `resources` the
  * conversation's resources and tools (`resources`, `tools`).
+ *
+ * Open: a client ignores a catalog it does not know.
  */
-export const CatalogNameSchema = stringEnum([
-	"models",
-	"intents",
-	"sessions",
-	"mcp",
-	"extensions",
-	"settings",
-	"host",
-	"resources",
-]);
+const CATALOG_NAMES = ["models", "intents", "sessions", "mcp", "extensions", "settings", "host", "resources"] as const;
+/** A catalog this protocol version defines: the catalogs a host invalidates. */
+export type KnownCatalogName = (typeof CATALOG_NAMES)[number];
+export const CatalogNameSchema = openStringEnum(CATALOG_NAMES);
 
 /**
  * Why the host ended a connection.
@@ -153,28 +160,51 @@ export const CatalogNameSchema = stringEnum([
  * - `revoked`: the client's grant was revoked.
  * - `workspace_unregistered`: the connection's workspace was unregistered.
  * - `host_shutdown`: the host is shutting down.
+ *
+ * Open: the connection ends whatever the code, and a client reports a code it
+ * does not know as a generic failure.
  */
-export const FatalCodeSchema = stringEnum([
+const FATAL_CODES = [
 	"invalid_frame",
 	"frame_too_large",
 	"protocol_mismatch",
 	"revoked",
 	"workspace_unregistered",
 	"host_shutdown",
-]);
+] as const;
+/** A fatal code this protocol version defines: the codes a host sends. */
+export type KnownFatalCode = (typeof FATAL_CODES)[number];
+export const FatalCodeSchema = openStringEnum(FATAL_CODES);
 export type FatalCode = Static<typeof FatalCodeSchema>;
 
 // ============================================================================
 // Client frames
 // ============================================================================
 
+/** Longest host request kind a `hello` may name, in characters. */
+const HELLO_HOST_REQUEST_KIND_MAX_CHARS = 64;
+/** Most host request kinds a `hello` may name. */
+const HELLO_HOST_REQUESTS_MAX_ITEMS = 64;
+
 export const HelloFrameSchema = Type.Object(
 	{
 		type: Type.Literal("hello"),
 		protocol: Type.Literal(PROTOCOL_VERSION),
 		client: peerSchema,
-		/** The host request kinds this client can answer; it receives only those. */
-		accepts: Type.Object({ hostRequests: Type.Array(HostRequestKindSchema, { uniqueItems: true }) }, closed),
+		/**
+		 * The host request kinds this client can answer; it receives only those.
+		 * A host ignores kinds it does not know, so a newer client may name kinds
+		 * an older host lacks.
+		 */
+		accepts: Type.Object(
+			{
+				hostRequests: Type.Array(
+					openStringEnum(HOST_REQUEST_KINDS, { minLength: 1, maxLength: HELLO_HOST_REQUEST_KIND_MAX_CHARS }),
+					{ uniqueItems: true, maxItems: HELLO_HOST_REQUESTS_MAX_ITEMS },
+				),
+			},
+			closed,
+		),
 	},
 	closed,
 );

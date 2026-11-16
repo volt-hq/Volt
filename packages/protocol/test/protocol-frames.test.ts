@@ -20,7 +20,9 @@ describe("client frames", () => {
 		};
 		expect(client(hello)).toBe(true);
 		expect(client({ ...hello, protocol: 2 })).toBe(false);
-		expect(client({ ...hello, accepts: { hostRequests: ["terminal"] } })).toBe(false);
+		// A newer client may name kinds this host does not know; the host ignores them.
+		expect(client({ ...hello, accepts: { hostRequests: ["terminal"] } })).toBe(true);
+		expect(client({ ...hello, accepts: { hostRequests: [""] } })).toBe(false);
 		expect(client({ ...hello, accepts: { hostRequests: ["confirm", "confirm"] } })).toBe(false);
 	});
 
@@ -192,9 +194,11 @@ describe("host frames", () => {
 				reason: { code: "not_allowed", message: "no", requiredCapability: "host.manage.v1" },
 			}),
 		).toBe(true);
+		// Codes are open: a client treats one it does not know as `failed`.
 		expect(
 			host({ type: "rejected", intentId: "i1", reason: { code: "stale_conversation_authority", message: "" } }),
-		).toBe(false);
+		).toBe(true);
+		expect(host({ type: "rejected", intentId: "i1", reason: { code: "stale" } })).toBe(false);
 		expect(host({ type: "result", queryId: "q1", data: { models: [] } })).toBe(true);
 		expect(host({ type: "query_error", queryId: "q1", reason: { code: "unknown_query", message: "?" } })).toBe(true);
 		expect(host({ type: "ended", subscriptionId: "s1", reason: "moved", target: "session-2" })).toBe(true);
@@ -202,7 +206,8 @@ describe("host frames", () => {
 		expect(host({ type: "ended", subscriptionId: "s1", reason: "lost" })).toBe(true);
 		expect(host({ type: "changed", catalog: "settings" })).toBe(true);
 		expect(host({ type: "fatal", code: "revoked" })).toBe(true);
-		expect(host({ type: "fatal", code: "overflow" })).toBe(false);
+		expect(host({ type: "fatal", code: "overflow" })).toBe(true);
+		expect(host({ type: "fatal", code: 1 })).toBe(false);
 	});
 
 	it("name live values by family", () => {

@@ -537,8 +537,8 @@ const INVALID_RESPONSES: { [K in ControlResponse["type"]]?: Array<Record<string,
 		// The legacy RPC response envelope.
 		{ frame: undefined, response: { type: "response", command: "register_push_target", success: true } },
 		{ frame: { type: "accepted", intentId: "i-1" } },
-		{ frame: { type: "rejected", intentId: "i-1", reason: { code: "nope", message: "x" } } },
-		{ frame: { type: "query_error", queryId: "q-1", reason: { code: "stale", message: "x" } } },
+		{ frame: { type: "rejected", intentId: "i-1", reason: { code: 1, message: "x" } } },
+		{ frame: { type: "query_error", queryId: "q-1", reason: { code: "failed" } } },
 		// Only an outcome frame answers a relayed frame.
 		{ frame: { type: "changed", catalog: "host" } },
 		{ frame: { type: "fatal", code: "revoked" } },

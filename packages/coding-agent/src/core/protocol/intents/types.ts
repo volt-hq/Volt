@@ -19,11 +19,11 @@ import type {
 	IntentSlashAlias,
 	IntentStateValue,
 	IrohRemoteWorktreeSummary,
+	KnownRejectionCode,
 	PrReviewPrepareRequest,
 	PrReviewPrepareResponse,
 	PrReviewResolveResponse,
 	PrReviewSourceRequest,
-	RejectionCode,
 	RemoteCapability,
 	RemoteGrant,
 	RpcAgentOptionsSchema,
@@ -331,12 +331,12 @@ export function defineIntent<N extends BuiltinIntentName, O>(
 
 /** An intent the host refused before running it, or a run that failed with a protocol code. */
 export class IntentRejectedError extends Error {
-	readonly code: RejectionCode;
+	readonly code: KnownRejectionCode;
 	readonly ordinal?: number;
 	readonly requiredCapability?: RemoteCapability;
 
 	constructor(
-		code: RejectionCode,
+		code: KnownRejectionCode,
 		message: string,
 		details: { ordinal?: number; requiredCapability?: RemoteCapability } = {},
 	) {

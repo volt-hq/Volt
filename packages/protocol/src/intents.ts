@@ -899,8 +899,18 @@ export type IntentOutput<K extends BuiltinIntentName> = (typeof INTENT_SCHEMAS)[
 /** A built-in intent name. */
 export const BuiltinIntentNameSchema = stringEnum(BUILTIN_INTENT_NAMES);
 
-/** Any intent name: a built-in name or a dynamic one. */
-export const IntentNameSchema = Type.Union([BuiltinIntentNameSchema, DynamicIntentNameSchema]);
+/** The shape of a built-in intent name: dot-separated lowercase segments. */
+const BUILTIN_INTENT_NAME_PATTERN = "^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)*$";
+
+/**
+ * Any intent name: a built-in name or a dynamic one. Built-in names are a
+ * pattern, not the `BuiltinIntentName` enum, so a host may add intents; a
+ * client hides an intent it does not know.
+ */
+export const IntentNameSchema = Type.Union([
+	Type.String({ maxLength: INTENT_NAME_MAX_CHARS, pattern: BUILTIN_INTENT_NAME_PATTERN }),
+	DynamicIntentNameSchema,
+]);
 export type IntentName = BuiltinIntentName | (string & {});
 
 /** Arguments to an extension command, prompt template, or skill. */
@@ -998,8 +1008,12 @@ export type IntentFrame =
 // Descriptors
 // ============================================================================
 
-/** Where an intent comes from: built in, or an extension command, prompt template, skill, or package. */
-export const IntentSourceSchema = stringEnum(["builtin", "extension", "prompt", "skill", "package"]);
+/**
+ * Where an intent comes from: built in, or an extension command, prompt
+ * template, skill, or package. Open: a client hides an intent whose source it
+ * does not know.
+ */
+export const IntentSourceSchema = openStringEnum(["builtin", "extension", "prompt", "skill", "package"]);
 
 /** One choice for an intent's state or an input completion. */
 export const IntentOptionSchema = Type.Object(
@@ -1043,7 +1057,8 @@ export const IntentSlashAliasSchema = Type.Object(
 );
 export type IntentSlashAlias = Static<typeof IntentSlashAliasSchema>;
 
-export const IntentCategorySchema = stringEnum([
+/** How a client groups an intent. Open: a client hides an intent whose category it does not know. */
+export const IntentCategorySchema = openStringEnum([
 	"session",
 	"model",
 	"context",
