@@ -25,8 +25,8 @@ Use `/logout` to clear credentials. Tokens are stored in `~/.volt/agent/auth.jso
 
 - Requires ChatGPT Plus or Pro subscription
 - Officially endorsed by OpenAI: [Codex for OSS](https://developers.openai.com/community/codex-for-oss)
-- GPT-6.1 Sol uses OpenAI's [documented 500K-token Codex default](https://developers.openai.com/api/docs/models/gpt-6.1-sol). GPT-6 Astra, GPT-6 Sol, and GPT-6 Luna default to the 872K-token extended window from the [Codex catalog](https://github.com/openai/codex/blob/126a0ee92ed2c5e73cd8a8f7e37563e8527552d7/codex-rs/models-manager/models.json). GPT-5.5 and GPT-5.6 models retain a 272K-token default. Maximum output remains 128K tokens.
-- Use a `contextWindow` [model override](models.md#per-model-overrides) in `~/.volt/agent/models.json` to lower these defaults or extend GPT-6.1 Sol and GPT-5.6 to 872K tokens. Larger windows let sessions run longer before auto-compaction, but longer contexts consume more tokens. GPT-6.1 Sol subscription usage has no long-context surcharge.
+- GPT-6.2 Sol and GPT-6.1 Sol use OpenAI's [documented 500K-token Codex default](https://developers.openai.com/codex/models), and GPT-6.2 Astra uses its documented 272K-token default. GPT-6.1 Terra uses the 500K-token default from the [Codex catalog](https://github.com/openai/codex/blob/126a0ee92ed2c5e73cd8a8f7e37563e8527552d7/codex-rs/models-manager/models.json), and GPT-6 Astra, GPT-6 Sol, and GPT-6 Luna default to its 872K-token extended window. GPT-5.6 models retain a 272K-token default. Maximum output remains 128K tokens.
+- Use a `contextWindow` [model override](models.md#per-model-overrides) in `~/.volt/agent/models.json` to lower these defaults, extend GPT-6.2 Astra and GPT-6.2 Sol up to 1M tokens, or extend GPT-6.1 Sol, GPT-6.1 Terra, and GPT-5.6 to 872K tokens. Larger windows let sessions run longer before auto-compaction, but longer contexts consume more tokens. GPT-6.1 Sol subscription usage has no long-context surcharge.
 
   ```json
   {
