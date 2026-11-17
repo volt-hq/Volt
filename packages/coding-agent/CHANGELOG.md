@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.9.0] - 2026-11-17
+
+Standalone Windows executables in this release are not code-signed. Windows may show a SmartScreen warning when you first run them.
+
+### Highlights
+
+- The `/review` launcher lets you pick the review and verifier models from your model list, and opens with the options you last started a review with.
+  The models you pick are saved to the `reviewModel` and `reviewVerifierModel` settings; the effort, optional findings, scope mode, and an engine's own options are remembered per engine. Typing on a choice field in a form now searches its options.
+
+### Breaking Changes
+
+- **sdk:** Assistant streams now deliver the deltas queued for one block as one event, so `seq` no longer increases by exactly one. ([#1067](https://github.com/volt-hq/Volt/issues/1067))
+  A consumer that reads more slowly than the provider produces receives consecutive `text_delta`, `thinking_delta`, or `toolcall_delta` events for one block combined into one event with the newest `seq`, `snapshot`, and `toolState`. Treat `seq` as strictly increasing rather than contiguous, and append each delta as it arrives instead of counting delta events. Start, end, `done`, and `error` events are delivered as before.
+- **review:** Preserve exact Git filename bytes across review reads, searches, diffs, findings, and publication.
+  Review paths now use canonical byte-reversible references: ordinary printable UTF-8 stays readable, while invalid bytes, percent signs, backslashes, colons, and control characters use uppercase `%HH` escapes. Copy fresh references from review tools unchanged into scopes and reports. Extension authors must encode actual UTF-8 checkout filenames with `reviewPathFromUtf8` and decode only at native boundaries with `reviewPathToUtf8`; use snapshot tools when a path cannot be represented by the OS. An engine checks that a reported path exists with `ctx.hasTextFile`, which counts as nothing inspected. Non-UTF-8 findings remain summary-only when publishing, with their exact reference and location.
+
+  Rerun pre-change reviews: schema-1 review-run records are no longer read or reused for incremental review, and are not migrated. Swarm's old dismissal cache is also no longer reused. Client protocol fields and variants are unchanged.
+
+### Improvements
+
+- **anthropic:** Changing thinking levels on supported Claude models preserves earlier turns' effort and prompt-cache prefixes, including resumed and branched sessions. ([#1068](https://github.com/volt-hq/Volt/issues/1068))
+- **models:** Refreshed the built-in model catalog, adding GPT-6.2 Astra and GPT-6.2 Sol on OpenAI, Azure OpenAI, OpenAI Codex, and OpenRouter with low through max reasoning, Fast mode, and 30-minute prompt caching, GPT-6.1 Terra in OpenAI Codex, Gemini 4 Carbon and Hydrogen, and current upstream pricing and limits.
+- **remote:** Hosts accept host request kinds they do not know from newer clients instead of closing the connection. ([#982](https://github.com/volt-hq/Volt/issues/982))
+  The protocol contract marks intent names, intent categories and sources, rejection, query error, and fatal codes, and catalog names as open, and the `@hansjm10/volt-protocol` README documents how clients tolerate what a newer host adds within protocol 1.
+- **review:** Reviews now keep a private audit log of each pass by default: its reasoning, replies, tool calls and results, and submitted report, including candidates the verifier rejected, in the owner-only review-diagnostics directory (newest 20 runs); set VOLT_REVIEW_PRIVATE_DIAGNOSTICS=0 to turn it off.
+- **review:** Reviews with optional findings enabled now report P3 gaps the change introduces, such as test assertions that do not pin the behavior a test claims, and the verifier judges them as optional improvements instead of requiring a production failure.
+- **tui:** Text copied from user messages, bash output, and code blocks in the transcript no longer includes the │ rail character.
+
+### Fixes
+
+- **ai:** Fixed long responses failing with "Assistant event stream exceeded its queued bytes limit" when a client or extension fell behind the model. ([#1067](https://github.com/volt-hq/Volt/issues/1067))
+- **anthropic:** Thinking changes, including on/off, wait for the next explicit prompt instead of taking effect during tool continuations or injected reminders; empty input no longer leaves dangling effort controls. ([#1068](https://github.com/volt-hq/Volt/issues/1068))
+- **anthropic:** Fixed Claude subscription requests reporting an outdated Claude Code version, including requests to Claude Fable 5.2.
+- **models:** Gemini 4 models on Google, Vertex AI, and OpenCode no longer fail with HTTP 400, sending thinking levels instead of thinking budgets, with Extra high thinking on Gemini 4 Hydrogen and Vertex AI requests that allow compacted history.
+- **models:** GPT-6.1 Terra no longer sends the unsupported minimal reasoning effort and now offers xhigh and max reasoning, Fast mode, and 30-minute prompt caching.
+- **models:** Removed GPT-5.5 from OpenAI Codex, where OpenAI retired it for ChatGPT sign-in; use GPT-6.1 Sol or GPT-6.2 Sol instead.
+- **remote:** Fixed language servers in a phone pull request review using the workspace repository instead of the review checkout as their project root. ([#1041](https://github.com/volt-hq/Volt/issues/1041))
+- **review:** Review searches now run on git grep: searches across a whole repository no longer fail on trees with many large binary files, files over 8 MiB are searched, and results are paged by matches without listing skipped files.
+- **review:** Reviews count a changed hunk as covered once either the discovery or the verification pass has read it, so a clean verification of a large change no longer leaves the review incomplete; coverage gaps are listed by file instead of by hunk id.
+- **worktrees:** Fixed a security issue in the native filesystem addon that could allow file operations outside the workspace.
+- **worktrees:** Fixed a terminal, print, JSON, or RPC conversation in a pull request review checkout loading the pull request's project settings, extensions, and MCP servers instead of the workspace's. ([#1041](https://github.com/volt-hq/Volt/issues/1041))
+  Project trust for a daemon-managed worktree now follows the daemon's record of it, which also fixes workspaces that are themselves Git worktrees, submodules, or separate-git-dir clones. A managed checkout the daemon has no record of is trusted only while nothing in it needs trust, and `--approve` does not apply to it.
+- **worktrees:** Fixed package, config, store, and MCP commands run in a pull request review checkout reading the pull request's project settings and MCP servers instead of the workspace's. ([#1041](https://github.com/volt-hq/Volt/issues/1041))
+  In any daemon-managed worktree, these commands now take project trust from the workspace repository and never save a trust decision for a worktree path. An unreadable unrelated record in the daemon's state file no longer makes managed worktrees run untrusted.
+
 ## [0.8.0] - 2026-11-10
 
 Standalone Windows executables in this release are not code-signed. Windows may show a SmartScreen warning when you first run them.
