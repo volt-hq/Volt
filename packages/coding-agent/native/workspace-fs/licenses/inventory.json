@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "sourceFingerprint": "74c8a0fa4ce3777aaf84fb86ab2cc8609d9ba1651e3efad7e4ac30ba320b6abf",
-  "cargoLockSha256": "c0a17eae0eaa818abaf1f69c4291e968e7246649ffaad1795189af05bf190b26",
+  "sourceFingerprint": "22d090ca591c69f40df9c89d5953995ed04172080b77fa72954b5481581cf427",
+  "cargoLockSha256": "91342615f4d78342c171fced0bc2cf9fff1328591d43f3daa9f89baea6b9a98f",
   "packages": [
     {
       "name": "ambient-authority",
@@ -57,40 +57,40 @@
     },
     {
       "name": "cap-primitives",
-      "version": "4.0.2",
+      "version": "4.0.3",
       "declaredLicense": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
       "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
       "licenseFiles": [
         {
-          "path": "cap-primitives-4.0.2/LICENSE-APACHE",
+          "path": "cap-primitives-4.0.3/LICENSE-APACHE",
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
         },
         {
-          "path": "cap-primitives-4.0.2/LICENSE-Apache-2.0_WITH_LLVM-exception",
+          "path": "cap-primitives-4.0.3/LICENSE-Apache-2.0_WITH_LLVM-exception",
           "sha256": "268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5"
         },
         {
-          "path": "cap-primitives-4.0.2/LICENSE-MIT",
+          "path": "cap-primitives-4.0.3/LICENSE-MIT",
           "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
         }
       ]
     },
     {
       "name": "cap-std",
-      "version": "4.0.2",
+      "version": "4.0.3",
       "declaredLicense": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
       "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
       "licenseFiles": [
         {
-          "path": "cap-std-4.0.2/LICENSE-APACHE",
+          "path": "cap-std-4.0.3/LICENSE-APACHE",
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
         },
         {
-          "path": "cap-std-4.0.2/LICENSE-Apache-2.0_WITH_LLVM-exception",
+          "path": "cap-std-4.0.3/LICENSE-Apache-2.0_WITH_LLVM-exception",
           "sha256": "268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5"
         },
         {
-          "path": "cap-std-4.0.2/LICENSE-MIT",
+          "path": "cap-std-4.0.3/LICENSE-MIT",
           "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
         }
       ]
@@ -777,20 +777,20 @@
     },
     {
       "name": "rustix",
-      "version": "1.1.4",
+      "version": "1.1.6",
       "declaredLicense": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
       "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
       "licenseFiles": [
         {
-          "path": "rustix-1.1.4/LICENSE-APACHE",
+          "path": "rustix-1.1.6/LICENSE-APACHE",
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
         },
         {
-          "path": "rustix-1.1.4/LICENSE-Apache-2.0_WITH_LLVM-exception",
+          "path": "rustix-1.1.6/LICENSE-Apache-2.0_WITH_LLVM-exception",
           "sha256": "268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5"
         },
         {
-          "path": "rustix-1.1.4/LICENSE-MIT",
+          "path": "rustix-1.1.6/LICENSE-MIT",
           "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
         }
       ]
