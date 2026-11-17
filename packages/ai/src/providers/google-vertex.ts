@@ -29,6 +29,8 @@ import {
 	convertTools,
 	type GoogleStreamStop,
 	type GoogleUsageReport,
+	getGemini4ThinkingLevel,
+	isGemini4Model,
 	mapGoogleStopReason,
 	mapGoogleUsage,
 	mapToolChoice,
@@ -56,6 +58,8 @@ const THINKING_LEVEL_MAP: Record<GoogleThinkingLevel, ThinkingLevel> = {
 	LOW: ThinkingLevel.LOW,
 	MEDIUM: ThinkingLevel.MEDIUM,
 	HIGH: ThinkingLevel.HIGH,
+	// @google/genai 1.52 predates Gemini 4's XHIGH; the SDK forwards thinkingConfig to the API unchanged.
+	XHIGH: "XHIGH" as string as ThinkingLevel,
 };
 
 export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOptions> = createProviderStream<
@@ -97,6 +101,13 @@ export const streamSimpleGoogleVertex: StreamFunction<"google-vertex", SimpleStr
 	}
 
 	const clampedReasoning = clampThinkingLevel(model, options.reasoning);
+	if (isGemini4Model(model.id)) {
+		return streamGoogleVertex(model, context, {
+			...base,
+			thinking: { enabled: true, level: getGemini4ThinkingLevel(model.id, clampedReasoning) },
+		} satisfies GoogleVertexOptions);
+	}
+
 	const effort = (clampedReasoning === "off" ? "high" : clampedReasoning) as ClampedThinkingLevel;
 	const geminiModel = model as unknown as Model<"google-generative-ai">;
 
@@ -268,6 +279,16 @@ function buildParams(
 	} else if (model.reasoning && options.thinking && !options.thinking.enabled) {
 		config.thinkingConfig = getDisabledThinkingConfig(model);
 	}
+	if (isGemini4Model(model.id)) {
+		// Gemini 4 rejects same-model prompt-prefix edits with HTTP 400 unless told to drop the mismatched
+		// thought context, and Volt compacts and edits history. @google/genai 1.52 predates the field.
+		// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen (2026-11-17)
+		const thinkingConfig: ThinkingConfig & { prefixMismatchBehavior: "DROP" } = {
+			...config.thinkingConfig,
+			prefixMismatchBehavior: "DROP",
+		};
+		config.thinkingConfig = thinkingConfig;
+	}
 
 	if (options.signal) {
 		if (options.signal.aborted) {
@@ -300,8 +321,9 @@ function getDisabledThinkingConfig(model: Model<"google-vertex">): ThinkingConfi
 	// Google docs: Gemini 3.1 Pro cannot disable thinking, and Gemini 3 Flash / Flash-Lite
 	// do not support full thinking-off either. For Gemini 3 models, use the lowest supported
 	// thinkingLevel without includeThoughts so hidden thinking remains invisible to volt.
+	// Gemini 4 cannot disable thinking either and rejects MINIMAL.
 	const geminiModel = model as unknown as Model<"google-generative-ai">;
-	if (isGemini3ProModel(geminiModel)) {
+	if (isGemini3ProModel(geminiModel) || isGemini4Model(model.id)) {
 		return { thinkingLevel: ThinkingLevel.LOW };
 	}
 	if (isGemini3FlashModel(geminiModel)) {

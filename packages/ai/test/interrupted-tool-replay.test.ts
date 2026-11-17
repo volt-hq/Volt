@@ -6,7 +6,7 @@ import { applyReplayPolicy } from "../src/replay-policy.ts";
 import type { AssistantMessage, Message, ToolCall, ToolResultMessage } from "../src/types.ts";
 import type { JsonObject } from "../src/utils/json-value.ts";
 
-const model = getModel("openai-codex", "gpt-5.5");
+const model = getModel("openai-codex", "gpt-6.1-sol");
 const allowedProviders = new Set(["openai", "openai-codex", "opencode"]);
 
 function assistant(stopReason: AssistantMessage["stopReason"], ...ids: string[]): AssistantMessage {

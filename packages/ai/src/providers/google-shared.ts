@@ -17,6 +17,7 @@ import type {
 	Context,
 	ImageContent,
 	Model,
+	ModelThinkingLevel,
 	ProviderErrorKind,
 	StopReason,
 	TextContent,
@@ -31,10 +32,10 @@ import { transformMessages } from "./transform-messages.ts";
 type GoogleApiType = "google-generative-ai" | "google-vertex";
 
 /**
- * Thinking level for Gemini 3 models.
- * Mirrors Google's ThinkingLevel enum values.
+ * Thinking level for Gemini 3 and later models.
+ * Mirrors Google's ThinkingLevel enum values. XHIGH (Gemini 4 Hydrogen) postdates the pinned SDK enum.
  */
-export type GoogleThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
+export type GoogleThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | "XHIGH";
 
 /**
  * Determines whether a streamed Gemini `Part` should be treated as "thinking".
@@ -96,6 +97,35 @@ function getGeminiMajorVersion(modelId: string): number | undefined {
 	const match = modelId.toLowerCase().match(/^gemini(?:-live)?-(\d+)/);
 	if (!match) return undefined;
 	return Number.parseInt(match[1], 10);
+}
+
+/**
+ * Gemini 4 accepts only thinkingLevel: thinkingBudget and MINIMAL return HTTP 400, and thinking cannot be
+ * disabled. LOW, MEDIUM, and HIGH are universal; only Hydrogen accepts XHIGH.
+ * https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/get-started-with-gemini-4 (2026-11-17)
+ */
+export function isGemini4Model(modelId: string): boolean {
+	return getGeminiMajorVersion(modelId) === 4;
+}
+
+export function supportsGeminiXhighThinking(modelId: string): boolean {
+	return /^gemini-4(?:\.\d+)?-hydrogen/.test(modelId.toLowerCase());
+}
+
+export function getGemini4ThinkingLevel(modelId: string, level: ModelThinkingLevel): GoogleThinkingLevel {
+	switch (level) {
+		case "off":
+		case "minimal":
+		case "low":
+			return "LOW";
+		case "medium":
+			return "MEDIUM";
+		case "high":
+			return "HIGH";
+		case "xhigh":
+		case "max":
+			return supportsGeminiXhighThinking(modelId) ? "XHIGH" : "HIGH";
+	}
 }
 
 function supportsMultimodalFunctionResponse(modelId: string): boolean {

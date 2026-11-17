@@ -25,6 +25,8 @@ import {
 	convertTools,
 	type GoogleStreamStop,
 	type GoogleUsageReport,
+	getGemini4ThinkingLevel,
+	isGemini4Model,
 	mapGoogleStopReason,
 	mapGoogleUsage,
 	mapToolChoice,
@@ -78,6 +80,13 @@ export const streamSimpleGoogle: StreamFunction<"google-generative-ai", SimpleSt
 	}
 
 	const clampedReasoning = clampThinkingLevel(model, options.reasoning);
+	if (isGemini4Model(model.id)) {
+		return streamGoogle(model, context, {
+			...base,
+			thinking: { enabled: true, level: getGemini4ThinkingLevel(model.id, clampedReasoning) },
+		} satisfies GoogleOptions);
+	}
+
 	const effort = (clampedReasoning === "off" ? "high" : clampedReasoning) as ClampedThinkingLevel;
 	const googleModel = model as Model<"google-generative-ai">;
 
@@ -199,7 +208,8 @@ function getDisabledThinkingConfig(model: Model<"google-generative-ai">): Thinki
 	// Google docs: Gemini 3.1 Pro cannot disable thinking, and Gemini 3 Flash / Flash-Lite
 	// do not support full thinking-off either. For Gemini 3 models, use the lowest supported
 	// thinkingLevel without includeThoughts so hidden thinking remains invisible to volt.
-	if (isGemini3ProModel(model)) {
+	// Gemini 4 cannot disable thinking either and rejects MINIMAL.
+	if (isGemini3ProModel(model) || isGemini4Model(model.id)) {
 		return { thinkingLevel: "LOW" as any };
 	}
 	if (isGemini3FlashModel(model)) {

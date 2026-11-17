@@ -15,6 +15,7 @@ import {
 	supportsAnthropicSamplingParameters,
 	supportsAnthropicXhighEffort,
 } from "../src/providers/anthropic-capabilities.ts";
+import { isGemini4Model, supportsGeminiXhighThinking } from "../src/providers/google-shared.ts";
 import type {
 	AnthropicMessagesCompat,
 	Api,
@@ -126,6 +127,42 @@ const GPT_6_1_SOL_MODEL = {
 	name: "GPT-6.1 Sol",
 	cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
 } as const;
+// Verified 2026-11-17 against https://developers.openai.com/api/docs/models/gpt-6.2-astra and
+// https://developers.openai.com/api/docs/models/gpt-6.2-sol: both reject the none reasoning effort,
+// and models.dev lists low through max. models.dev supplies their OpenAI catalog entries. Codex default
+// contexts are from https://developers.openai.com/codex/models.
+const GPT_6_2_MODELS = [
+	{
+		id: "gpt-6.2-astra",
+		name: "GPT-6.2 Astra",
+		cost: { input: 8, output: 40, cacheRead: 0.4, cacheWrite: 10 },
+		codexContextWindow: 272000,
+	},
+	{
+		id: "gpt-6.2-sol",
+		name: "GPT-6.2 Sol",
+		cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
+		codexContextWindow: 500000,
+	},
+] as const;
+const GPT_6_2_MODEL_IDS = new Set<string>(GPT_6_2_MODELS.map((model) => model.id));
+// Verified 2026-11-17 against https://developers.openai.com/api/docs/models/gpt-6.1-terra: none through max,
+// without minimal. The Codex catalog lists low through max with a 500k default context:
+// https://github.com/openai/codex/blob/126a0ee92ed2c5e73cd8a8f7e37563e8527552d7/codex-rs/models-manager/models.json
+const GPT_6_1_TERRA_MODEL = {
+	id: "gpt-6.1-terra",
+	name: "GPT-6.1 Terra",
+	cost: { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 },
+	codexContextWindow: 500000,
+} as const;
+const OPENAI_30_MINUTE_PROMPT_CACHE_MODEL_IDS = new Set<string>([
+	...GPT_5_6_MODEL_IDS,
+	...GPT_6_SOL_LUNA_MODEL_IDS,
+	GPT_6_1_SOL_MODEL.id,
+	GPT_6_1_TERRA_MODEL.id,
+	...GPT_6_2_MODEL_IDS,
+	GPT_6_ASTRA_ID,
+]);
 const DAYBREAK_MODEL_IDS = new Set(["gpt-daybreak-blue-latest", "gpt-daybreak-red-latest"]);
 
 const MOONSHOT_CN_MIRRORED_MODEL_IDS = new Set(["kimi-k2.7-code", "kimi-k2.7-code-highspeed"]);
@@ -401,14 +438,11 @@ const PROMPT_CACHE_POLICIES: readonly PromptCachePolicyRecord[] = [
 	{
 		name: "OpenAI 30-minute prompt caching",
 		sourceUrl: "https://developers.openai.com/api/docs/guides/prompt-caching",
-		verifiedAt: "2026-09-29",
+		verifiedAt: "2026-11-17",
 		matches: (model) =>
 			model.provider === "openai" &&
 			model.api === "openai-responses" &&
-			(GPT_5_6_MODEL_IDS.has(model.id) ||
-				GPT_6_SOL_LUNA_MODEL_IDS.has(model.id) ||
-				model.id === GPT_6_1_SOL_MODEL.id ||
-				model.id === GPT_6_ASTRA_ID),
+			OPENAI_30_MINUTE_PROMPT_CACHE_MODEL_IDS.has(model.id),
 		metadata: OPENAI_30_MINUTE_PROMPT_CACHE,
 	},
 	{
@@ -434,13 +468,9 @@ const PROMPT_CACHE_POLICIES: readonly PromptCachePolicyRecord[] = [
 	{
 		name: "Azure OpenAI 30-minute prompt caching",
 		sourceUrl: "https://learn.microsoft.com/azure/foundry/openai/how-to/prompt-caching",
-		verifiedAt: "2026-09-29",
+		verifiedAt: "2026-11-17",
 		matches: (model) =>
-			model.provider === "azure-openai-responses" &&
-			(GPT_5_6_MODEL_IDS.has(model.id) ||
-				GPT_6_SOL_LUNA_MODEL_IDS.has(model.id) ||
-				model.id === GPT_6_1_SOL_MODEL.id ||
-				model.id === GPT_6_ASTRA_ID),
+			model.provider === "azure-openai-responses" && OPENAI_30_MINUTE_PROMPT_CACHE_MODEL_IDS.has(model.id),
 		metadata: OPENAI_30_MINUTE_PROMPT_CACHE,
 	},
 	{
@@ -646,11 +676,29 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (model.provider === "openrouter" && /^openai\/gpt-6-(sol|luna)(?:-pro)?(?::batch)?$/.test(model.id)) {
 		mergeThinkingLevelMap(model, { minimal: null, xhigh: "xhigh", max: "max" });
 	}
+	if (model.id === GPT_6_1_TERRA_MODEL.id) {
+		// The API accepts none through max; Codex's catalog exposes low through max.
+		mergeThinkingLevelMap(model, {
+			off: model.provider === "openai-codex" ? null : "none",
+			minimal: null,
+			xhigh: "xhigh",
+			max: "max",
+		});
+	}
+	if (model.provider === "openrouter" && /^openai\/gpt-6\.1-terra(?:-pro)?(?::batch)?$/.test(model.id)) {
+		mergeThinkingLevelMap(model, { minimal: null, xhigh: "xhigh", max: "max" });
+	}
 	if (
 		model.id === GPT_6_1_SOL_MODEL.id ||
 		(model.provider === "openrouter" && /^openai\/gpt-6\.1-sol(?:-pro)?(?::batch)?$/.test(model.id))
 	) {
 		// Low through max on the API and the Codex catalog; none and minimal are rejected.
+		mergeThinkingLevelMap(model, { off: null, minimal: null, xhigh: "xhigh", max: "max" });
+	}
+	if (
+		GPT_6_2_MODEL_IDS.has(model.id) ||
+		(model.provider === "openrouter" && /^openai\/gpt-6\.2-(?:astra|sol)(?:-pro)?(?::batch)?$/.test(model.id))
+	) {
 		mergeThinkingLevelMap(model, { off: null, minimal: null, xhigh: "xhigh", max: "max" });
 	}
 	if (
@@ -748,6 +796,16 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	}
 	if (isGoogleThinkingApi(model) && isGemini3FlashModel(model.id)) {
 		mergeThinkingLevelMap(model, { off: null });
+	}
+	if (isGoogleThinkingApi(model) && isGemini4Model(model.id)) {
+		mergeThinkingLevelMap(model, {
+			off: null,
+			minimal: null,
+			low: "LOW",
+			medium: "MEDIUM",
+			high: "HIGH",
+			...(supportsGeminiXhighThinking(model.id) ? { xhigh: "XHIGH" } : {}),
+		});
 	}
 	if (isGoogleThinkingApi(model) && isGemma4Model(model.id)) {
 		mergeThinkingLevelMap(model, { off: null, minimal: "MINIMAL", low: null, medium: null, high: "HIGH" });
@@ -2316,8 +2374,10 @@ async function generateModels() {
 	// GPT-6.1 Sol uses the documented 500k Codex default, despite the bundled catalog still listing 272k:
 	// https://developers.openai.com/api/docs/models/gpt-6.1-sol
 	// GPT-5 models retain 272k; GPT-5.6 and GPT-6.1 Sol can opt into 872k via a contextWindow override.
-	// GPT-5.3 Codex Spark, GPT-5.4, and GPT-5.4 mini are retired from Codex with ChatGPT sign-in
-	// (https://developers.openai.com/codex/models, verified 2026-09-29).
+	// GPT-6.2 Astra (272k), GPT-6.2 Sol (500k), and GPT-6.1 Terra (500k) use their Codex defaults, verified
+	// 2026-11-17; both GPT-6.2 models accept up to 1M through a contextWindow override.
+	// GPT-5.3 Codex Spark, GPT-5.4, GPT-5.4 mini, and GPT-5.5 are retired from Codex with ChatGPT sign-in
+	// (https://developers.openai.com/codex/models, verified 2026-11-17).
 	const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 	const CODEX_CONTEXT = 272000;
 	const CODEX_EXTENDED_CONTEXT = 872000;
@@ -2333,18 +2393,6 @@ async function generateModels() {
 			input: ["text", "image"],
 			cost: { ...GPT_6_ASTRA_COST },
 			contextWindow: CODEX_EXTENDED_CONTEXT,
-			maxTokens: CODEX_MAX_TOKENS,
-		},
-		{
-			id: "gpt-5.5",
-			name: "GPT-5.5",
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			baseUrl: CODEX_BASE_URL,
-			reasoning: true,
-			input: ["text", "image"],
-			cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
-			contextWindow: CODEX_CONTEXT,
 			maxTokens: CODEX_MAX_TOKENS,
 		},
 	];
@@ -2364,6 +2412,20 @@ async function generateModels() {
 					: GPT_6_SOL_LUNA_MODEL_IDS.has(model.id)
 						? CODEX_EXTENDED_CONTEXT
 						: CODEX_CONTEXT,
+			maxTokens: CODEX_MAX_TOKENS,
+		});
+	}
+	for (const model of [...GPT_6_2_MODELS, GPT_6_1_TERRA_MODEL]) {
+		codexModels.push({
+			id: model.id,
+			name: model.name,
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { ...model.cost },
+			contextWindow: model.codexContextWindow,
 			maxTokens: CODEX_MAX_TOKENS,
 		});
 	}

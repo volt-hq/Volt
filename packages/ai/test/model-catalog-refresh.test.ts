@@ -12,6 +12,14 @@ interface RequestPayload {
 	temperature?: number;
 	inferenceConfig?: { temperature?: number };
 	additionalModelRequestFields?: RequestPayload;
+	config?: {
+		thinkingConfig?: {
+			includeThoughts?: boolean;
+			thinkingLevel?: string;
+			thinkingBudget?: number;
+			prefixMismatchBehavior?: string;
+		};
+	};
 }
 
 async function capturePayload(
@@ -163,6 +171,65 @@ describe("Claude Fable 5.2 catalog", () => {
 	});
 });
 
+// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/get-started-with-gemini-4
+// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen
+// Verified 2026-11-17. Gemini 4 returns HTTP 400 for thinkingBudget and MINIMAL and cannot disable thinking.
+// The Vertex guides add prefix_mismatch_behavior=DROP for apps that compact history; the Gemini API does not
+// document the field.
+describe("Gemini 4 catalog", () => {
+	const routes = ["google", "google-vertex", "opencode"] as const;
+	const levelsById = {
+		"gemini-4-argon": ["low", "medium", "high"],
+		"gemini-4-carbon": ["low", "medium", "high"],
+		"gemini-4-hydrogen": ["low", "medium", "high", "xhigh"],
+	} as const;
+	const models = routes.flatMap((provider) =>
+		Object.keys(levelsById).map((id) => getModel(provider, id as keyof typeof levelsById) as Model<Api>),
+	);
+	const routeThinkingConfig = (model: Model<Api>) =>
+		model.provider === "google-vertex" ? { prefixMismatchBehavior: "DROP" } : {};
+
+	it("offers only the documented thinking levels", () => {
+		for (const model of models) {
+			expect(model, `${model.provider}/${model.id}`).toBeDefined();
+			expect(getSupportedThinkingLevels(model), `${model.provider}/${model.id}`).toEqual(
+				levelsById[model.id as keyof typeof levelsById],
+			);
+		}
+	});
+
+	it("sends thinkingLevel, never a thinking budget", async () => {
+		for (const model of models) {
+			const xhigh = model.id === "gemini-4-hydrogen" ? "XHIGH" : "HIGH";
+			for (const [reasoning, thinkingLevel] of [
+				["minimal", "LOW"],
+				["low", "LOW"],
+				["medium", "MEDIUM"],
+				["high", "HIGH"],
+				["xhigh", xhigh],
+				["max", xhigh],
+			] as const) {
+				const payload = await capturePayload(model, reasoning);
+				expect(payload.config?.thinkingConfig, `${model.provider}/${model.id} ${reasoning}`).toEqual({
+					includeThoughts: true,
+					thinkingLevel,
+					...routeThinkingConfig(model),
+				});
+			}
+		}
+	});
+
+	it("uses hidden LOW thinking when no effort is requested", async () => {
+		for (const model of models) {
+			const payload = await capturePayload(model);
+			expect(payload.config?.thinkingConfig, `${model.provider}/${model.id}`).toEqual({
+				thinkingLevel: "LOW",
+				...routeThinkingConfig(model),
+			});
+		}
+	});
+});
+
 describe("Daybreak catalog aliases", () => {
 	it.each(["gpt-daybreak-blue-latest", "gpt-daybreak-red-latest"] as const)("maps reasoning for %s", async (id) => {
 		const model = getModel("openai", id);
@@ -183,18 +250,18 @@ describe("Daybreak catalog aliases", () => {
 	});
 });
 
-// https://developers.openai.com/codex/models (verified 2026-09-29)
+// https://developers.openai.com/codex/models (verified 2026-11-17)
 describe("OpenAI Codex catalog", () => {
 	it("omits models retired from Codex with ChatGPT sign-in", () => {
 		const ids = getModels("openai-codex").map((model) => model.id);
 		expect(ids).toContain("gpt-6.1-sol");
-		for (const retiredId of ["gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini"]) {
+		for (const retiredId of ["gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5"]) {
 			expect(ids).not.toContain(retiredId);
 		}
 	});
 
 	// https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json
-	it.each(["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] as const)(
+	it.each(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] as const)(
 		"keeps the 272k Codex default context for %s",
 		(id) => {
 			expect(getModel("openai-codex", id).contextWindow).toBe(272_000);
