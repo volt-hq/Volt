@@ -333,7 +333,7 @@ describe("#421 operation elapsed timing", () => {
 			const harness = await setup({
 				settings: {
 					compaction: { enabled: true, keepRecentTokens: 1 },
-					retry: { enabled: true, maxRetries: 1, baseDelayMs: 60_000 },
+					retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 },
 				},
 				extensionFactories: [
 					(volt) => {
@@ -387,11 +387,11 @@ describe("#421 operation elapsed timing", () => {
 				expectSettled(harness);
 				return;
 			}
-			// Recovery compacts and retries the overflowed request once; the pending prompt then runs
-			// instead of a backoff retry, all within one operation.
+			// Recovery compacts and retries the overflowed request. Its provider failure still retries with the
+			// prompt pending, and the prompt joins that retry, all within one operation.
 			expect(error).toBeUndefined();
 			expect(harness.eventsOfType("compaction_start")).toMatchObject([{ reason: "overflow" }]);
-			expect(harness.eventsOfType("auto_retry_start")).toEqual([]);
+			expect(harness.eventsOfType("auto_retry_start").map((event) => event.attempt)).toEqual([1]);
 			expect(harness.getPendingResponseCount()).toBe(0);
 			expect(getUserTexts(harness)).toContain("new input");
 			const starts = harness.eventsOfType("agent_start");

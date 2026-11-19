@@ -1,0 +1,19 @@
+{
+	"name": "volt-project-goal",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"license": "MIT",
+	"volt": {
+		"id": "goal",
+		"displayName": "Goal (POC)",
+		"description": "Confirmed goals, durable task tracking, continuous execution, and independent completion audits.",
+		"entry": "index.ts",
+		"permissions": [
+			"exec",
+			"network",
+			"fs-write",
+			"secrets"
+		]
+	}
+}

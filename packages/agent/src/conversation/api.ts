@@ -279,7 +279,8 @@ export interface ConversationPolicy {
 	) => Promise<ConversationRequestContext | undefined>;
 	/**
 	 * Decides whether a failed request retries: the backoff in milliseconds, or
-	 * undefined to stop. `attempt` counts from 1 within one turn operation.
+	 * undefined to stop. `attempt` counts from 1 for consecutive failures and
+	 * resets after a successful assistant response commits, even if tools continue the turn.
 	 */
 	readonly retry?: (error: ProviderError, attempt: number, message: AssistantMessage) => number | undefined;
 	/**
@@ -393,6 +394,12 @@ export interface ConversationInput {
 export interface ConversationPromptOptions {
 	/** Run the prompt's turn under this reservation; it is consumed whether or not admission succeeds. */
 	readonly reservation?: ConversationTurnReservation;
+	/**
+	 * Synchronous host authority check before receipt persistence and after it,
+	 * before starting the reserved turn. Requires `reservation`. Throw to revoke
+	 * admission; an already persisted receipt is failed without delivering it.
+	 */
+	readonly assertCurrent?: () => void;
 }
 
 export interface ConversationAdmitOptions {

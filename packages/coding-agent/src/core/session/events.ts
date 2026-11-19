@@ -23,6 +23,7 @@ import type { ActiveAgentRun, AgentSessionEvent, AgentSessionEventListener } fro
 import type { BackgroundJobDiagnostics } from "../background-job-diagnostics.ts";
 import { cloneCanonicalData, freezeCanonicalData } from "../canonical-data.ts";
 import type {
+	AgentSettledEvent,
 	ExtensionRunner,
 	MessageEndEvent,
 	MessageStartEvent,
@@ -40,6 +41,7 @@ import type { WorkRegistry } from "../work/registry.ts";
 import type { SessionBash } from "./bash.ts";
 import type { SessionClientInputs } from "./client-inputs.ts";
 import type { SessionCompaction } from "./compaction.ts";
+import type { SettlementScope } from "./continuations.ts";
 import type { SessionExtensionServices } from "./extension-services.ts";
 import type { SessionJobs } from "./jobs.ts";
 import type { SessionPromptCache } from "./prompt-cache.ts";
@@ -115,6 +117,11 @@ export class SessionEvents {
 	private run: ActiveAgentRun | undefined = undefined;
 	/** Public elapsed timing spans every run and recovery phase before operation settlement. */
 	private operation: ActiveAgentRun | undefined = undefined;
+	private settlement: SettlementScope | undefined;
+	private lastStopReason: string | undefined;
+	private stopped = false;
+	private recoveryFailure = false;
+	private recoveryAborted = false;
 	/** The exclusive operation the conversation last published. */
 	private phase: ConversationPhase["operation"] = null;
 	/** Distinguishes handler-owned prompts that already completed a custom turn. */
@@ -353,6 +360,13 @@ export class SessionEvents {
 				await this.onPhaseChanged(event.phase);
 				return;
 			case "next_action_resolved": {
+				if (
+					event.stopReason === "policy" ||
+					event.stopReason === "tool" ||
+					event.action.type === "pause" ||
+					event.requestAuthority === "final_response"
+				)
+					this.stopped = true;
 				if (event.stopReason === "policy" || event.stopReason === "tool")
 					this.host.extensionServices().invalidate();
 				// A stop on a final response, a policy, or a tool fences the notices of the work its turn
@@ -380,6 +394,10 @@ export class SessionEvents {
 				this.host.compaction().started(event.cause);
 				return;
 			case "compaction_end":
+				if (this.settlement) {
+					if (event.status === "failed" || event.status === "skipped") this.recoveryFailure = true;
+					if (event.status === "aborted") this.recoveryAborted = true;
+				}
 				await this.host.compaction().ended(event.cause, event.status, event.error);
 				return;
 			case "ended":
@@ -420,6 +438,18 @@ export class SessionEvents {
 	 */
 	private async settleTurn(): Promise<void> {
 		const ran = this.operation !== undefined;
+		const settlement = this.settlement;
+		this.settlement = undefined;
+		const outcome: AgentSettledEvent["outcome"] =
+			this.lastStopReason === "aborted" || this.recoveryAborted
+				? "aborted"
+				: this.recoveryFailure || this.lastStopReason === "error" || this.lastStopReason === "length"
+					? "failed"
+					: this.stopped
+						? "stopped"
+						: this.lastStopReason === "stop"
+							? "completed"
+							: "failed";
 		this.run = undefined;
 		this.operation = undefined;
 		this.streaming = undefined;
@@ -455,6 +485,7 @@ export class SessionEvents {
 		if (!ran || this.host.isDisposed()) return;
 		this.host.extensionServices().invalidate();
 		this.settlementRevisionValue += 1;
+		if (settlement) this.host.prompting().continuations.settle(settlement, outcome);
 		this.emit({ type: "agent_settled" });
 	}
 
@@ -470,11 +501,20 @@ export class SessionEvents {
 	private async handleAgentEvent(event: AgentEvent): Promise<void> {
 		if (this.host.isDisposed()) return;
 		if (event.type === "agent_start") {
+			if (!this.settlement) {
+				this.settlement = this.host.prompting().continuations.capture();
+				this.stopped = false;
+				this.recoveryFailure = false;
+				this.recoveryAborted = false;
+			}
+			this.lastStopReason = undefined;
 			this.errorMessage = undefined;
 			this.host.retry.runStarted();
 			this.run = { startedAt: Date.now() };
 			this.operation ??= { ...this.run };
 		}
+		if (event.type === "message_end" && event.message.role === "assistant")
+			this.lastStopReason = event.message.stopReason;
 		if (event.type === "agent_end") {
 			// Aborted tool calls can skip afterToolCall, leaving their plan-mode
 			// authorization records behind; no record outlives its run.

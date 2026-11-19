@@ -3,8 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { ConversationEvent, ConversationPolicy, ConversationSummarizer } from "../../src/conversation/api.ts";
 import { fold } from "../../src/conversation/fold.ts";
 import { InMemoryConversationLog } from "../../src/conversation/in-memory-log.ts";
-import type { ConversationLog } from "../../src/conversation/log.ts";
-import type { AgentLoopNextAction, AgentMessage } from "../../src/types.ts";
+import { type ConversationLog, isCoreLogEntry } from "../../src/conversation/log.ts";
+import type { AgentAbortAcceptance, AgentLoopNextAction, AgentMessage } from "../../src/types.ts";
 import { calculateTool } from "../utils/calculate.ts";
 import {
 	lastAssistant,
@@ -272,10 +272,240 @@ describe("Conversation retry", () => {
 		expect((await readLog(log)).filter((entry) => entry.type === "message")).toHaveLength(4);
 	});
 
-	it("cancels the backoff on abort", async () => {
+	it.each(["completed", "failed"] as const)(
+		"retries with a queued %s background result and delivers its notice once",
+		async (outcome) => {
+			const retry = vi.fn<NonNullable<ConversationPolicy["retry"]>>((error, attempt) =>
+				error.retryable && attempt <= 1 ? 0 : undefined,
+			);
+			const { conversation, faux, events, log } = await openConversation({ policy: { retry } });
+			await conversation.work.reconcile();
+			await conversation.work.start({
+				workId: "queued-result",
+				kind: "job",
+				title: "Background check",
+				input: {},
+				cancellable: true,
+				delivery: "wake",
+				resume: false,
+			});
+			const requests: string[][] = [];
+			faux.setResponses([
+				async (context) => {
+					requests.push(userTexts(context.messages));
+					await conversation.work.finish("queued-result", { outcome, deliver: { text: "Background result." } });
+					return fauxAssistantMessage("", {
+						stopReason: "error",
+						error: { kind: "network", retryable: true, message: "WebSocket closed 1012" },
+					});
+				},
+				(context) => {
+					requests.push(userTexts(context.messages));
+					return fauxAssistantMessage("recovered");
+				},
+			]);
+			await promptAndSettle(conversation, "hello");
+
+			expect(retry.mock.calls.map(([, attempt]) => attempt)).toEqual([1]);
+			expect(faux.state.callCount).toBe(2);
+			expect(requests).toEqual([["hello"], ["hello", "Background result."]]);
+			expect(conversation.queue.steer).toHaveLength(0);
+			expect(conversation.state.context.messages.filter((message) => message.role === "custom")).toHaveLength(1);
+			expect(lastAssistant(conversation)).toMatchObject({ stopReason: "stop" });
+			expect(events.filter((event) => event.type === "retry_end")).toMatchObject([{ attempt: 1, success: true }]);
+			expect(events.flatMap((event) => (event.type === "phase_changed" ? [event.phase.operation] : []))).toEqual([
+				"turn",
+				null,
+			]);
+			expect(conversation.state).toEqual(fold(await readLog(log)));
+		},
+	);
+
+	it.each(["steer", "followUp", "prompt"] as const)("retries without losing queued %s input", async (kind) => {
+		const retry = vi.fn<NonNullable<ConversationPolicy["retry"]>>((error, attempt) =>
+			error.retryable && attempt <= 1 ? 0 : undefined,
+		);
+		const { conversation, faux } = await openConversation({ policy: { retry } });
+		const requests: string[][] = [];
+		faux.setResponses([
+			async (context) => {
+				requests.push(userTexts(context.messages));
+				if (kind === "prompt") await conversation.prompt({ message: "queued", streamingBehavior: "steer" });
+				else await conversation[kind]({ message: "queued" });
+				return fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "network", retryable: true, message: "WebSocket closed 1012" },
+				});
+			},
+			(context) => {
+				requests.push(userTexts(context.messages));
+				return fauxAssistantMessage("recovered");
+			},
+			...(kind === "followUp"
+				? [
+						(context: Context) => {
+							requests.push(userTexts(context.messages));
+							return fauxAssistantMessage("follow-up handled");
+						},
+					]
+				: []),
+		]);
+		await promptAndSettle(conversation, "hello");
+
+		expect(retry.mock.calls.map(([, attempt]) => attempt)).toEqual([1]);
+		expect(requests).toEqual(
+			kind === "followUp" ? [["hello"], ["hello"], ["hello", "queued"]] : [["hello"], ["hello", "queued"]],
+		);
+		expect(conversation.queue).toEqual({ prompt: [], steer: [], followUp: [] });
+		expect(lastAssistant(conversation)).toMatchObject({ stopReason: "stop" });
+	});
+
+	it.each(["terminal", "exhausted"] as const)("still stops on %s failures with queued input", async (failure) => {
+		const retry = vi.fn<NonNullable<ConversationPolicy["retry"]>>((error, attempt) =>
+			error.retryable && attempt <= 1 ? 0 : undefined,
+		);
+		const { conversation, faux, events } = await openConversation({ policy: { retry } });
+		const failWithQueuedInput = async () => {
+			await conversation.steer({ message: "pending input" });
+			return fauxAssistantMessage("", {
+				stopReason: "error",
+				error:
+					failure === "terminal"
+						? { kind: "auth", retryable: false, message: "Needs authorization" }
+						: { kind: "network", retryable: true, message: "WebSocket closed 1012" },
+			});
+		};
+		faux.setResponses([
+			failWithQueuedInput,
+			...(failure === "exhausted" ? [failWithQueuedInput] : []),
+			fauxAssistantMessage("must remain unused"),
+		]);
+		await promptAndSettle(conversation, "hello");
+
+		expect(retry.mock.calls.map(([, attempt]) => attempt)).toEqual(failure === "exhausted" ? [1, 2] : [1]);
+		expect(faux.state.callCount).toBe(failure === "exhausted" ? 2 : 1);
+		expect(faux.getPendingResponseCount()).toBe(1);
+		expect(conversation.queue.steer).toHaveLength(1);
+		expect(lastAssistant(conversation)).toMatchObject({ stopReason: "error" });
+		expect(events.filter((event) => event.type === "retry_end")).toMatchObject(
+			failure === "exhausted" ? [{ success: false }] : [],
+		);
+	});
+
+	it("keeps queued input cancellable when messageEnd replaces a failed request", async () => {
+		const { conversation, faux } = await openConversation({
+			policy: {
+				messageEnd: (message) => {
+					if (message.role !== "assistant" || message.stopReason !== "error") return undefined;
+					const { error: _error, ...recovered } = message;
+					return { ...recovered, stopReason: "stop" };
+				},
+			},
+		});
+		const requests: string[][] = [];
+		let acceptance: AgentAbortAcceptance | undefined;
+		faux.setResponses([
+			async (context) => {
+				requests.push(userTexts(context.messages));
+				await conversation.steer({ message: "queued" });
+				return fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "auth", retryable: false, message: "Needs authorization" },
+				});
+			},
+			(context) => {
+				requests.push(userTexts(context.messages));
+				acceptance = conversation.abort("keyboard_interrupt");
+				return fauxAssistantMessage("must be aborted");
+			},
+		]);
+		await promptAndSettle(conversation, "hello");
+
+		expect(requests).toEqual([["hello"], ["hello", "queued"]]);
+		expect(acceptance).toMatchObject({ accepted: true, source: "keyboard_interrupt" });
+		expect(lastAssistant(conversation)).toMatchObject({ stopReason: "aborted" });
+	});
+
+	it("resets the retry budget after successful tool responses within the same operation", async () => {
+		const retry = vi.fn<NonNullable<ConversationPolicy["retry"]>>((error, attempt) =>
+			error.retryable && attempt <= 1 ? 0 : undefined,
+		);
+		const { conversation, faux, events, log } = await openConversation({ policy: { retry } });
+		conversation.setTools([calculateTool]);
+		const timeout = fauxAssistantMessage("", {
+			stopReason: "error",
+			error: { kind: "timeout", retryable: true, message: "response headers timed out" },
+		});
+		faux.setResponses([
+			timeout,
+			toolCall("call-1"),
+			timeout,
+			toolCall("call-2"),
+			timeout,
+			fauxAssistantMessage("done"),
+		]);
+		await promptAndSettle(conversation, "keep working");
+
+		expect(retry.mock.calls.map(([, attempt]) => attempt)).toEqual([1, 1, 1]);
+		expect(faux.state.callCount).toBe(6);
+		expect(textOf(lastAssistant(conversation)!)).toBe("done");
+		expect(events.filter((event) => event.type === "retry_start" || event.type === "retry_end")).toMatchObject([
+			{ type: "retry_start", attempt: 1 },
+			{ type: "retry_end", attempt: 1, success: true },
+			{ type: "retry_start", attempt: 1 },
+			{ type: "retry_end", attempt: 1, success: true },
+			{ type: "retry_start", attempt: 1 },
+			{ type: "retry_end", attempt: 1, success: true },
+		]);
+		expect(events.flatMap((event) => (event.type === "phase_changed" ? [event.phase.operation] : []))).toEqual([
+			"turn",
+			null,
+		]);
+		const entries = await readLog(log);
+		expect(
+			entries.filter(
+				(entry) =>
+					isCoreLogEntry(entry) &&
+					entry.type === "message" &&
+					entry.payload.message.role === "assistant" &&
+					entry.payload.message.stopReason === "error",
+			),
+		).toHaveLength(3);
+		expect(conversation.state).toEqual(fold(entries));
+	});
+
+	it("still exhausts consecutive retries after an earlier successful recovery", async () => {
+		const retry = vi.fn<NonNullable<ConversationPolicy["retry"]>>((error, attempt) =>
+			error.retryable && attempt <= 1 ? 0 : undefined,
+		);
+		const { conversation, faux, events } = await openConversation({ policy: { retry } });
+		conversation.setTools([calculateTool]);
+		const timeout = fauxAssistantMessage("", {
+			stopReason: "error",
+			error: { kind: "timeout", retryable: true, message: "response headers timed out" },
+		});
+		faux.setResponses([timeout, toolCall("call-1"), timeout, timeout, fauxAssistantMessage("must remain unused")]);
+		await promptAndSettle(conversation, "keep working");
+
+		expect(retry.mock.calls.map(([, attempt]) => attempt)).toEqual([1, 1, 2]);
+		expect(faux.state.callCount).toBe(4);
+		expect(lastAssistant(conversation)).toMatchObject({ stopReason: "error", error: { kind: "timeout" } });
+		expect(events.filter((event) => event.type === "retry_end")).toMatchObject([
+			{ attempt: 1, success: true },
+			{ attempt: 1, success: false, error: "response headers timed out" },
+		]);
+	});
+
+	it.each([false, true])("cancels the backoff on abort with queued input=%s", async (queued) => {
 		const { conversation, faux, events } = await openConversation({ policy: { retry: () => 60_000 } });
 		faux.setResponses([
-			fauxAssistantMessage("", { stopReason: "error", error: { kind: "server", retryable: true, message: "down" } }),
+			async () => {
+				if (queued) await conversation.steer({ message: "pending input" });
+				return fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "server", retryable: true, message: "down" },
+				});
+			},
 		]);
 		conversation.subscribe((event) => {
 			if (event.type === "retry_start") conversation.abort("keyboard_interrupt");
@@ -283,6 +513,7 @@ describe("Conversation retry", () => {
 		await promptAndSettle(conversation, "hello");
 
 		expect(faux.state.callCount).toBe(1);
+		expect(conversation.queue.steer).toHaveLength(queued ? 1 : 0);
 		expect(events.filter((event) => event.type === "retry_end")).toMatchObject([
 			{ success: false, error: "Retry cancelled" },
 		]);
@@ -346,7 +577,7 @@ describe("Conversation compaction", () => {
 		};
 	}
 
-	it("compacts on overflow and retries once inside the turn", async () => {
+	it.each([false, true])("compacts on overflow and retries once inside the turn (queued=%s)", async (queued) => {
 		const calls: string[] = [];
 		const faux = registerFauxProvider({ models: [{ id: "small", contextWindow: 1000 }] });
 		const compaction = vi.fn<NonNullable<ConversationPolicy["compaction"]>>(() => ({}));
@@ -362,7 +593,10 @@ describe("Conversation compaction", () => {
 			});
 		let retried: string[] = [];
 		faux.setResponses([
-			overflow,
+			async () => {
+				if (queued) await conversation.steer({ message: "pending input" });
+				return overflow();
+			},
 			(context) => {
 				retried = (context.messages as AgentMessage[]).map((message) => message.role);
 				return overflow();
@@ -372,7 +606,7 @@ describe("Conversation compaction", () => {
 
 		expect(calls).toEqual(["overflow"]);
 		expect(compaction.mock.calls.map(([, cause]) => cause)).toEqual(["overflow"]);
-		expect(retried).toEqual(["user", "user"]);
+		expect(retried).toEqual(queued ? ["user", "user", "user"] : ["user", "user"]);
 		expect(faux.state.callCount).toBe(2);
 		expect(events.filter((event) => event.type === "compaction_end")).toMatchObject([
 			{ cause: "overflow", status: "compacted" },

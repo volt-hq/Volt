@@ -93,6 +93,8 @@ export {
 export type {
 	AfterProviderResponseEvent,
 	AgentEndEvent,
+	AgentSettledEvent,
+	AgentSettledEventResult,
 	AgentStartEvent,
 	// Re-exports
 	AgentToolResult,
@@ -219,6 +221,7 @@ export type {
 	ReviewEngineOptions,
 	SendMessageHandler,
 	SendUserMessageHandler,
+	SendUserMessageResult,
 	SessionBeforeCompactEvent,
 	SessionBeforeCompactResult,
 	SessionBeforeForkEvent,

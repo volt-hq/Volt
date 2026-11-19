@@ -91,6 +91,8 @@ export { createEventBus, type EventBus, type EventBusController } from "./core/e
 // Extension system
 export type {
 	AgentEndEvent,
+	AgentSettledEvent,
+	AgentSettledEventResult,
 	AgentStartEvent,
 	AgentToolResult,
 	AgentToolUpdateCallback,
