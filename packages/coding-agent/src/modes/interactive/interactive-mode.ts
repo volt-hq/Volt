@@ -598,8 +598,10 @@ export class InteractiveMode {
 	private planPaneInputUnsubscribe: (() => void) | undefined;
 	private globalInputUnsubscribe: (() => void) | undefined;
 	private readyPlanFocusKey: string | undefined;
-	/** Last plan identity/phase rendered, used to announce a live active-to-completed transition once. */
+	/** Last observed plan identity/phase, used to announce a live active-to-completed transition once. */
 	private lastObservedPlan: { id: string; phase: PlanPhase } | undefined;
+	/** Completed plans stay in the client fold but are only shown on request. */
+	private revealedCompletedPlanId: string | undefined;
 	private defaultEditor: CustomEditor;
 	private editor: EditorComponent;
 	private fdPath: string | undefined;
@@ -2351,6 +2353,7 @@ export class InteractiveMode {
 		this.closePlanDetails();
 		// A conversation the TUI moved to is a fresh presentation, so a ready plan is offered again.
 		this.readyPlanFocusKey = undefined;
+		this.revealedCompletedPlanId = undefined;
 		this.shownFold = this.store.state;
 		this.refreshPlanningUi();
 		this.syncStatus();
@@ -4553,25 +4556,29 @@ export class InteractiveMode {
 		const previous = this.lastObservedPlan;
 		const plan = planning.plan;
 		if (plan?.phase === "completed" && previous?.id === plan.id && previous.phase === "active") {
-			this.showStatus(`Plan complete · /plan-close or ${keyText("app.plan.togglePane")} → Close Plan`);
+			this.showStatus("Plan complete · /plan-details to view");
 		}
 		this.refreshPlanningUi(planning);
 	}
 
 	private refreshPlanningUi(planning = this.planning()): void {
-		this.lastObservedPlan = planning.plan ? { id: planning.plan.id, phase: planning.plan.phase } : undefined;
-		this.planStatus.setPlanning(planning);
-		this.planInspector.setPlanning(planning);
-		this.mainView.setPlanning(planning);
-		const plan = planning.plan;
+		const current = planning.plan;
+		this.lastObservedPlan = current ? { id: current.id, phase: current.phase } : undefined;
+		const hideCompletedPlan = current?.phase === "completed" && current.id !== this.revealedCompletedPlanId;
+		if (hideCompletedPlan || current?.phase !== "completed") this.revealedCompletedPlanId = undefined;
+		const visiblePlanning = hideCompletedPlan ? { ...planning, plan: null } : planning;
+		this.planStatus.setPlanning(visiblePlanning);
+		this.planInspector.setPlanning(visiblePlanning);
+		this.mainView.setPlanning(visiblePlanning);
+		const plan = visiblePlanning.plan;
 		const split = this.mainView.isTerminalSplit();
 		if (split && this.planDetails) {
 			this.focusPlanInspector();
 			this.closePlanDetails({ focusConversation: false });
 		} else if (this.planDetails && plan) {
 			this.planDetails.setPlan(plan);
-		} else if (this.planDetails && !plan) {
-			this.closePlanDetails();
+		} else if (this.planDetails) {
+			this.closePlanDetails({ focusConversation: !hideCompletedPlan });
 		}
 		if (!split) this.focusConversation(true);
 		this.updateEditorBorderColor();
@@ -4609,13 +4616,17 @@ export class InteractiveMode {
 	}
 
 	private showPlanDetails(): void {
-		if (this.mainView.isTerminalSplit()) {
-			this.focusPlanInspector();
-			return;
-		}
 		const plan = this.planning().plan;
 		if (!plan) {
 			this.showStatus("No structured plan yet");
+			return;
+		}
+		if (plan.phase === "completed" && plan.id !== this.revealedCompletedPlanId) {
+			this.revealedCompletedPlanId = plan.id;
+			this.refreshPlanningUi();
+		}
+		if (this.mainView.isTerminalSplit()) {
+			this.focusPlanInspector();
 			return;
 		}
 		this.planDetailsContainer.clear();
@@ -4658,9 +4669,9 @@ export class InteractiveMode {
 		if (options.focusConversation !== false && this.activeView === this.conversationView) {
 			this.focusConversation();
 		} else {
-			if (closingDetails && this.ui.getFocusedComponent() === closingDetails) {
+			if (closingDetails && this.ui.retargetFocus(closingDetails, this.getConversationFocusTarget())) {
 				this.fullscreenTranscript.setPrimary(true);
-				this.ui.setFocus(this.getConversationFocusTarget());
+				this.planPaneReturnFocus = undefined;
 			}
 			this.updateEditorBorderColor();
 		}

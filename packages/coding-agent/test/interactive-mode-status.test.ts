@@ -985,7 +985,7 @@ describe("InteractiveMode plan pane integration", () => {
 		const focusPlanInspector = vi.fn();
 		const fakeThis = {
 			mainView: { isTerminalSplit: () => true },
-			ui: { terminal: { columns: 160, rows: 30 } },
+			planning: () => ({ mode: "build", plan: { phase: "active" } }),
 			focusPlanInspector,
 		};
 
@@ -1172,7 +1172,7 @@ describe("InteractiveMode finished plan closing", () => {
 		changed("completed", "plan-4");
 		changed("completed", "plan-4");
 		expect(announcements()).toHaveLength(1);
-		expect(announcements()[0]?.[0]).toContain("/plan-close");
+		expect(announcements()[0]?.[0]).toContain("/plan-details");
 		expect(fakeThis.planStatus.setPlanning).toHaveBeenCalledTimes(7);
 	});
 });

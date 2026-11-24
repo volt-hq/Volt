@@ -22,7 +22,6 @@ type ModeAccess = {
 	editor: { setText(text: string): void; getText(): string };
 	handleCompactCommand(customInstructions?: string): Promise<void>;
 	showWorkInspector(workId?: string): void;
-	closeFinishedPlan(): Promise<void>;
 };
 
 const SETTINGS = { theme: "dark", quietStartup: true, lsp: { enabled: false }, compaction: { enabled: false } };
@@ -211,8 +210,14 @@ describe("the TUI's status from its store", () => {
 		expect(shown).toMatch(/\n\s+at /);
 	});
 
-	it("shows the plan from the client fold, announces its completion, and closes it through an intent", async () => {
-		const { tui, access, session } = await start();
+	it.each([
+		{ tuiMode: "regular", columns: 110 },
+		{ tuiMode: "regular", columns: 160 },
+		{ tuiMode: "fullscreen", columns: 110 },
+		{ tuiMode: "fullscreen", columns: 160 },
+	] as const)("closes the completed plan view without discarding it ($tuiMode, $columns columns)", async (layout) => {
+		const { tui, access, session } = await start(layout);
+		const editor = tui.ui.getFocusedComponent();
 		const execution = {
 			id: "execution-1",
 			approvedRevision: 1,
@@ -235,10 +240,23 @@ describe("the TUI's status from its store", () => {
 
 		await session.sessionWriter.appendPlanningState(plan("active"));
 		await waitForScreen(tui, "PLAN · EXECUTING", "Read the plan");
-		await session.sessionWriter.appendPlanningState(plan("completed"));
-		await waitForScreen(tui, "Plan complete · /plan-close");
+		await tui.submit("/plan-details");
+		expect(tui.ui.getFocusedComponent()).not.toBe(editor);
+		access.editor.setText("Draft follow-up");
 
-		await access.closeFinishedPlan();
+		await session.sessionWriter.appendPlanningState(plan("completed"));
+		const completed = await waitForScreen(tui, "Plan complete · /plan-details to view", "Draft follow-up");
+		expect(completed).not.toContain("PLAN · COMPLETE");
+		expect(completed).not.toContain("Read the plan");
+		expect(tui.ui.getFocusedComponent()).toBe(editor);
+		expect(access.editor.getText()).toBe("Draft follow-up");
+		expect(tui.store.state.planning?.plan).toEqual(plan("completed").plan);
+
+		tui.terminal.sendInput("\x1bp"); // Alt+P reopens the completed plan.
+		await waitForScreen(tui, "PLAN · COMPLETE", "Read the plan");
+		expect(tui.ui.getFocusedComponent()).not.toBe(editor);
+
+		await tui.submit("/plan-close");
 		await vi.waitFor(() => expect(tui.store.state.planning?.plan ?? null).toBeNull());
 		await waitForScreen(tui, "Plan closed");
 	});
