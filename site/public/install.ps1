@@ -31,9 +31,16 @@ function Install-NpmVolt {
         Fail "Node.js not found. The full Volt install requires Node.js >= 22.19. Install it from https://nodejs.org. For a local CLI/TUI without daemon or remote/iOS support, set VOLT_INSTALL_METHOD=binary."
     }
 
-    $nodeSupported = node -p 'const [major, minor] = process.versions.node.split(".").map(Number); Number(major > 22 || (major === 22 && minor >= 19))'
-    if ($LASTEXITCODE -ne 0 -or $nodeSupported -ne "1") {
-        Fail "Node.js $(node --version) is too old. Volt requires Node.js >= 22.19."
+    $nodeVersion = [string](node --version)
+    if ($LASTEXITCODE -ne 0) {
+        Fail "Could not determine the Node.js version: node --version failed (exit code $LASTEXITCODE)."
+    }
+    $parsedNodeVersion = $null
+    if ($nodeVersion -notmatch '^v([0-9]+\.[0-9]+\.[0-9]+)(?:[-+]\S+)?$' -or -not [version]::TryParse($Matches[1], [ref]$parsedNodeVersion)) {
+        Fail "Could not parse the Node.js version: '$nodeVersion'."
+    }
+    if ($parsedNodeVersion -lt [version]"22.19.0") {
+        Fail "Node.js $nodeVersion is too old. Volt requires Node.js >= 22.19."
     }
     if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
         Fail "npm not found. It normally ships with Node.js; install Node.js from https://nodejs.org."
