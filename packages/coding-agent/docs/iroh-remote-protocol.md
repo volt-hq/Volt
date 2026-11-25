@@ -359,8 +359,7 @@ The host's keep-awake state and, when the host shares it (`settings.themeTokenPu
 ## Prepared pull-request reviews
 
 To let the user choose the PR, list the open ones first: open
-`workspaceDiscovery:{"purpose":"review"}` and run the `pull_requests` query. A
-host without it answers `unknown_query`; fall back to entering a number.
+`workspaceDiscovery:{"purpose":"review"}` and run the `pull_requests` query.
 
 ```json
 {"type":"query","queryId":"list-1","query":"pull_requests","params":{}}
@@ -384,6 +383,18 @@ message is `pull_request_list_unsupported` (no remote names a repository a
 provider lists; only GitHub lists pull requests today),
 `pull_request_list_not_authenticated` (the host's GitHub CLI is not signed in),
 or `pull_request_list_failed`.
+
+Older hosts that serve the review stream but do not support `pull_requests`
+reply with `unavailable` and no `reason.retryAfterMs`:
+
+```json
+{"type":"query_error","queryId":"list-1","reason":{"code":"unavailable","message":"pull_requests is not available on this stream"}}
+```
+
+On this response or on `reason.code: "unknown_query"`, offer manual PR-number
+entry and pass the number to `pr_review`. If `unavailable` includes
+`reason.retryAfterMs`, wait at least that long before retrying instead of
+interpreting it as missing support.
 
 Resolve the PR before creating any conversation. Open `workspaceDiscovery:{"purpose":"review"}` and run the `pr_review` query:
 
