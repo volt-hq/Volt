@@ -1,5 +1,6 @@
 import { type Static, Type } from "typebox";
 import { stringEnum } from "./helpers.ts";
+import { RpcEpochMillisecondsSchema } from "./primitives.ts";
 import { RPC_GIT_CONTEXT_OID_PATTERN } from "./wire-limits.ts";
 
 export const RPC_PR_REVIEW_ERROR_CODES = [
@@ -9,6 +10,22 @@ export const RPC_PR_REVIEW_ERROR_CODES = [
 	"worktree_limit_reached",
 ] as const;
 export type PrReviewPreparationErrorCode = (typeof RPC_PR_REVIEW_ERROR_CODES)[number];
+
+/**
+ * Why a `pull_requests` query failed, as its `query_error` message:
+ * - `pull_request_list_unsupported`: the source's remote is not one a code-host provider lists pull requests for.
+ * - `pull_request_list_not_authenticated`: the host's code-host credentials are missing or rejected.
+ * - `pull_request_list_failed`: any other failure.
+ */
+export const RPC_PULL_REQUEST_LIST_ERROR_CODES = [
+	"pull_request_list_unsupported",
+	"pull_request_list_not_authenticated",
+	"pull_request_list_failed",
+] as const;
+export type PullRequestListErrorCode = (typeof RPC_PULL_REQUEST_LIST_ERROR_CODES)[number];
+
+/** Most pull requests one `pull_requests` answer carries. */
+export const PULL_REQUEST_LIST_MAX_ITEMS = 50;
 
 // JavaScript's $ also matches before a final newline; the lookahead requires actual end of input.
 const workspaceName = Type.String({
@@ -35,11 +52,14 @@ const headRefOid = Type.String({ maxLength: 64, pattern: `${RPC_GIT_CONTEXT_OID_
 const url = Type.String({ minLength: 1, maxLength: 2048, pattern: "^https://[^\\s]+$(?![\\s\\S])" });
 // Registered code-host provider id, e.g. "github".
 const provider = Type.String({ minLength: 1, maxLength: 64, pattern: "^[^\\s\\x00-\\x1f\\x7f]+$(?![\\s\\S])" });
-const sourceProperties = {
+/** Non-empty display text without control characters. */
+const displayText = (maxLength: number) =>
+	Type.String({ minLength: 1, maxLength, pattern: "^[^\\u0000-\\u001f\\u007f]+$(?![\\s\\S])" });
+const repositorySource = {
 	workingDirectory: Type.Optional(workingDirectory),
 	sourceWorktreeId: Type.Optional(worktreeId),
-	number: Type.Optional(number),
 };
+const sourceProperties = { ...repositorySource, number: Type.Optional(number) };
 const sourceOptions = {
 	additionalProperties: false,
 	not: { required: ["workingDirectory", "sourceWorktreeId"] },
@@ -71,6 +91,33 @@ export const RpcResolvePrReviewResponseSchema = Type.Object(
 	{ workspaceName, pullRequest: RpcPrReviewPullRequestSchema },
 	{ additionalProperties: false },
 );
+export const RpcPullRequestListRequestSchema = Type.Object(repositorySource, sourceOptions);
+export const RpcPullRequestListItemSchema = Type.Object(
+	{
+		number: Type.Integer({ minimum: 1, maximum: 2147483647 }),
+		title: displayText(512),
+		url,
+		headRefName: displayText(1024),
+		isDraft: Type.Boolean(),
+		/** The author's login on the code host. */
+		author: Type.Optional(displayText(256)),
+		updatedAt: Type.Optional(RpcEpochMillisecondsSchema),
+	},
+	{ additionalProperties: false },
+);
+export const RpcListPullRequestsResponseSchema = Type.Object(
+	{
+		workspaceName,
+		provider,
+		/** The base repository, in the display format of `pr_review`'s `pullRequest.repository`. */
+		repository: Type.String({ minLength: 1, maxLength: 256 }),
+		/** Newest first, as the code host orders them. */
+		pullRequests: Type.Array(RpcPullRequestListItemSchema, { maxItems: PULL_REQUEST_LIST_MAX_ITEMS }),
+		/** More open pull requests exist than the list carries. */
+		truncated: Type.Boolean(),
+	},
+	{ additionalProperties: false },
+);
 export const RpcPreparePrReviewResponseSchema = Type.Object(
 	{
 		workspaceName,
@@ -88,3 +135,6 @@ export type PrReviewPrepareRequest = Static<typeof RpcPrReviewPrepareRequestSche
 export type PrReviewPullRequest = Static<typeof RpcPrReviewPullRequestSchema>;
 export type PrReviewResolveResponse = Static<typeof RpcResolvePrReviewResponseSchema>;
 export type PrReviewPrepareResponse = Static<typeof RpcPreparePrReviewResponseSchema>;
+export type PullRequestListRequest = Static<typeof RpcPullRequestListRequestSchema>;
+export type PullRequestListItem = Static<typeof RpcPullRequestListItemSchema>;
+export type PullRequestListResponse = Static<typeof RpcListPullRequestsResponseSchema>;

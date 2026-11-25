@@ -208,6 +208,7 @@ describe("#426 PR review capacity errors", () => {
 		const f = await fixture();
 		const backend: IrohRemotePrReviewRpcBackend = {
 			resolvePrReview: vi.fn<IrohRemotePrReviewRpcBackend["resolvePrReview"]>(),
+			listPullRequests: vi.fn<IrohRemotePrReviewRpcBackend["listPullRequests"]>(),
 			preparePrReview: vi
 				.fn<IrohRemotePrReviewRpcBackend["preparePrReview"]>()
 				.mockRejectedValue(new PrReviewPreparationError(code, `${f.root}/secret/checkout git stderr`)),

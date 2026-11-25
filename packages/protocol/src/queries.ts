@@ -40,7 +40,12 @@ import {
 	RpcMcpToolResponseSchema,
 	RpcMcpToolsResponseSchema,
 } from "./mcp.ts";
-import { RpcPrReviewSourceRequestSchema, RpcResolvePrReviewResponseSchema } from "./pr-review.ts";
+import {
+	RpcListPullRequestsResponseSchema,
+	RpcPrReviewSourceRequestSchema,
+	RpcPullRequestListRequestSchema,
+	RpcResolvePrReviewResponseSchema,
+} from "./pr-review.ts";
 import { RpcConversationIdentifierSchema, RpcQueueModeSchema } from "./primitives.ts";
 import { ProjectedEntrySchema } from "./projected.ts";
 import { RpcReviewWorkflowListResponseSchema, RpcReviewWorkflowResultResponseSchema } from "./projections.ts";
@@ -412,6 +417,11 @@ export const QUERY_SCHEMAS = {
 	},
 	/** The pull request a review would target: by number, or the one for a checkout's branch. */
 	pr_review: { params: RpcPrReviewSourceRequestSchema, result: RpcResolvePrReviewResponseSchema },
+	/**
+	 * The open pull requests of the repository a numbered `pr_review` would resolve in, newest first, to choose
+	 * one to review; a failure's message is one of `RPC_PULL_REQUEST_LIST_ERROR_CODES`.
+	 */
+	pull_requests: { params: RpcPullRequestListRequestSchema, result: RpcListPullRequestsResponseSchema },
 	/**
 	 * What a new conversation in the workspace (or its worktree checkout `worktreeId`) would load: its
 	 * extensions and the review engines they register, predicted without opening a conversation.

@@ -1,5 +1,5 @@
 import { runGitHubCli } from "./github-cli.ts";
-import { canonicalizeGitHubRemoteUrl } from "./github-cli-discovery.ts";
+import { canonicalizeGitHubRemoteUrl, unavailableReason } from "./github-cli-discovery.ts";
 import { parseGitHubPullRequestUrl } from "./github-identity.ts";
 import {
 	reviewTargetFailure as failure,
@@ -8,7 +8,20 @@ import {
 	selectCurrentReviewRemote,
 	selectNumberedReviewRemote,
 } from "./review-remote.ts";
-import type { CodeHostPullRequestSummary, ReviewCodeHostContextCaptureOptions } from "./types.ts";
+import type {
+	CodeHostOpenPullRequest,
+	CodeHostOpenPullRequestListRequest,
+	CodeHostOpenPullRequestListResult,
+	CodeHostPullRequestSummary,
+	ReviewCodeHostContextCaptureOptions,
+} from "./types.ts";
+
+const MAX_PULL_REQUEST_NUMBER = 2_147_483_647;
+const MAX_OPEN_LIST_LIMIT = 100;
+const MAX_TITLE_CHARS = 512;
+const MAX_AUTHOR_CHARS = 256;
+const OPEN_LIST_FIELDS = "number,title,url,author,headRefName,isDraft,updatedAt";
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/u;
 
 type CurrentPullRequestTarget =
 	| (CodeHostPullRequestSummary & {
@@ -23,7 +36,7 @@ type CurrentPullRequestTarget =
 
 async function resolveReviewRemoteRepository(
 	remote: string,
-	options: ReviewCodeHostContextCaptureOptions,
+	options: Pick<ReviewCodeHostContextCaptureOptions, "cwd" | "signal">,
 ): Promise<{ ok: true; repository: string; remoteUrl: string } | ReviewTargetFailure> {
 	const urls = await readReviewRemoteUrls(remote, options);
 	if (!Array.isArray(urls)) return urls;
@@ -176,5 +189,125 @@ export async function resolveCurrentReviewPullRequest(
 		return failure(
 			"Could not resolve the current pull request safely. Check Git tracking configuration and GitHub CLI on the host, then retry.",
 		);
+	}
+}
+
+/** A pull request head branch a review checkout accepts: a valid Git branch name it can fetch and name. */
+export function isReviewHeadRefName(value: string): boolean {
+	return (
+		value.length > 0 &&
+		value.length <= 1024 &&
+		!value.startsWith("-") &&
+		!value.endsWith(".") &&
+		!/[\u0000-\u0020\u007f~^:?*[\\]/u.test(value) &&
+		!value.includes("..") &&
+		!value.includes("@{") &&
+		!value.split("/").some((part) => !part || part.startsWith(".") || part.endsWith(".lock"))
+	);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isDisplayText(value: string, maxChars: number): boolean {
+	return value.length > 0 && value.length <= maxChars && !CONTROL_CHARACTER.test(value);
+}
+
+/**
+ * The open pull requests of the repository a numbered review resolves in (its tracking remote, origin, or the only
+ * remote), newest first. A response that names another repository, or is malformed, fails the whole list; a pull
+ * request a review could not check out or show (by its head branch or title) is left out.
+ */
+export async function listOpenPullRequestsWithGitHubCli(
+	request: CodeHostOpenPullRequestListRequest,
+): Promise<CodeHostOpenPullRequestListResult> {
+	const { cwd, limit, signal } = request;
+	if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_OPEN_LIST_LIMIT) {
+		return { ok: false, reason: "provider_error" };
+	}
+	try {
+		const selected = await selectNumberedReviewRemote({ cwd, signal });
+		if (!selected.ok) return { ok: false, reason: "unsupported_repository" };
+		const resolved = await resolveReviewRemoteRepository(selected.remote, { cwd, signal });
+		const base = resolved.ok ? canonicalizeGitHubRemoteUrl(resolved.remoteUrl) : null;
+		if (!resolved.ok || !base) return { ok: false, reason: "unsupported_repository" };
+		const result = await runGitHubCli(
+			[
+				"pr",
+				"list",
+				"--repo",
+				resolved.repository,
+				"--state",
+				"open",
+				"--limit",
+				String(limit + 1),
+				"--json",
+				OPEN_LIST_FIELDS,
+			],
+			{
+				cwd,
+				signal,
+				stdoutMaxBytes: 256 * 1024,
+				stderrMaxBytes: 32 * 1024,
+				timeoutMs: 15_000,
+				cancellationMessage: "GitHub pull request listing was cancelled.",
+			},
+		);
+		if (!result.ok) {
+			return { ok: false, reason: unavailableReason(result.stderr, result.outputLimited, result.timedOut) };
+		}
+		let values: unknown;
+		try {
+			values = JSON.parse(result.stdout.toString("utf8"));
+		} catch {
+			return { ok: false, reason: "invalid_response" };
+		}
+		if (!Array.isArray(values) || values.length > limit + 1) return { ok: false, reason: "invalid_response" };
+		const numbers = new Set<number>();
+		const pullRequests: CodeHostOpenPullRequest[] = [];
+		for (const item of values) {
+			const locator =
+				isRecord(item) && typeof item.url === "string" ? parseGitHubPullRequestUrl(item.url) : undefined;
+			if (
+				!isRecord(item) ||
+				!locator ||
+				locator.repository !== resolved.repository ||
+				locator.number !== item.number ||
+				locator.number > MAX_PULL_REQUEST_NUMBER ||
+				numbers.has(locator.number) ||
+				typeof item.title !== "string" ||
+				typeof item.headRefName !== "string" ||
+				typeof item.isDraft !== "boolean"
+			) {
+				return { ok: false, reason: "invalid_response" };
+			}
+			numbers.add(locator.number);
+			if (!isDisplayText(item.title, MAX_TITLE_CHARS) || !isReviewHeadRefName(item.headRefName)) continue;
+			const author =
+				isRecord(item.author) &&
+				typeof item.author.login === "string" &&
+				isDisplayText(item.author.login, MAX_AUTHOR_CHARS)
+					? item.author.login
+					: undefined;
+			const updatedAt = typeof item.updatedAt === "string" ? Date.parse(item.updatedAt) : Number.NaN;
+			pullRequests.push({
+				number: locator.number,
+				title: item.title,
+				url: locator.url,
+				headRefName: item.headRefName,
+				isDraft: item.isDraft,
+				...(author === undefined ? {} : { author }),
+				...(Number.isSafeInteger(updatedAt) && updatedAt >= 0 ? { updatedAt } : {}),
+			});
+		}
+		return {
+			ok: true,
+			repository: base.path,
+			pullRequests: pullRequests.slice(0, limit),
+			truncated: values.length > limit,
+		};
+	} catch {
+		return { ok: false, reason: signal?.aborted ? "cancelled" : "provider_error" };
 	}
 }

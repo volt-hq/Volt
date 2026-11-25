@@ -35,7 +35,12 @@ import { queryErrorReason, rejectionReason } from "../src/core/protocol/server/c
 import { type IrohRemoteAuditEvent, IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts";
-import { type IrohRemotePrReviewRpcBackend, PrReviewPreparationError } from "../src/core/remote/iroh/pr-review-rpc.ts";
+import {
+	type IrohRemotePrReviewRpcBackend,
+	PrReviewPreparationError,
+	PullRequestListError,
+	type PullRequestListResponse,
+} from "../src/core/remote/iroh/pr-review-rpc.ts";
 import type {
 	IrohRemoteSessionContext,
 	IrohRemoteSessionContextsRpcBackend,
@@ -898,6 +903,10 @@ describe("remote intent services over protocol frames", () => {
 				expectedPullRequest: { url: PR_URL, headRefOid: HEAD_OID },
 			}),
 		).toMatchObject({ type: "rejected", reason: { code: "unavailable" } });
+		expect(await phone.query("pull_requests")).toMatchObject({
+			type: "query_error",
+			reason: { code: "unavailable", message: "unsupported_remote_command" },
+		});
 		expect(backend.removeWorktree).not.toHaveBeenCalled();
 		expect(prReviews).not.toHaveBeenCalled();
 		expect(host.audit.map((event) => event.details?.source)).toEqual(["remote_rpc"]);
@@ -1053,6 +1062,7 @@ describe("remote intent services over protocol frames", () => {
 			});
 			const prReviews = vi.fn<RemoteIntentHost["prReviews"]>(() => ({
 				resolvePrReview,
+				listPullRequests: () => Promise.reject(new Error("not part of this test")),
 				preparePrReview: () => Promise.reject(new Error("not part of this test")),
 			}));
 			const phone = await workspaceStream(
@@ -1089,6 +1099,104 @@ describe("remote intent services over protocol frames", () => {
 			).toMatchObject({ type: "rejected", reason: { code: "unavailable" } });
 		});
 
+		it("lists open pull requests with display fields only, and failures as stable codes", async () => {
+			const workspacePath = tempDir();
+			const item = {
+				number: 42,
+				title: "Fix login",
+				url: PR_URL,
+				headRefName: "fix-login",
+				isDraft: false,
+				author: "octocat",
+				updatedAt: 1_795_168_800_000,
+			};
+			const answer: PullRequestListResponse = {
+				workspaceName: "ws",
+				provider: "github",
+				repository: "volt-hq/volt",
+				pullRequests: [item, { ...item, number: 41, url: `${PR_URL.slice(0, -2)}41`, isDraft: true }],
+				truncated: true,
+			};
+			const answers: Array<() => Promise<PullRequestListResponse>> = [
+				// A backend answer carries more than display fields; the device gets the display fields.
+				async () =>
+					({
+						...answer,
+						checkoutPath: workspacePath,
+						pullRequests: answer.pullRequests.map((pullRequest) => ({
+							...pullRequest,
+							body: "secret",
+							headRefOid: HEAD_OID,
+						})),
+					}) as PullRequestListResponse,
+				async () => ({ ...answer, workspaceName: "other" }),
+				async () => ({ ...answer, pullRequests: [{ ...item, url: "http://insecure.example/pr" }] }),
+				async () => ({ ...answer, pullRequests: [{ ...item, title: "bell\u0007" }] }),
+				async () => ({
+					...answer,
+					pullRequests: Array.from({ length: 51 }, (_, index) => ({ ...item, number: index + 1 })),
+				}),
+				async () => ({ ...answer, pullRequests: null }) as unknown as PullRequestListResponse,
+				async () => Promise.reject(new PullRequestListError("pull_request_list_not_authenticated")),
+				async () => Promise.reject(new PullRequestListError("pull_request_list_unsupported")),
+				async () => Promise.reject(new PrReviewPreparationError("review_preparation_stale")),
+				async () => Promise.reject(new Error(`gh pr list failed in ${workspacePath}`)),
+			];
+			const listPullRequests = vi.fn<IrohRemotePrReviewRpcBackend["listPullRequests"]>(() => {
+				const next = answers.shift();
+				if (!next) throw new Error("No answer left");
+				return next();
+			});
+			const prReviews = vi.fn<RemoteIntentHost["prReviews"]>(() => ({
+				resolvePrReview: () => Promise.reject(new Error("not part of this test")),
+				listPullRequests,
+				preparePrReview: () => Promise.reject(new Error("not part of this test")),
+			}));
+			const host = fakeHost(join(workspacePath, "agent"), { prReviews });
+			const phone = await workspaceStream(host, authorizationFor(workspacePath), {
+				kind: "discovery",
+				purpose: "review",
+			});
+
+			const listed = await phone.query("pull_requests", { workingDirectory: "app" });
+			expect(listed.type === "result" ? listed.data : undefined).toEqual(answer);
+			expect(listPullRequests).toHaveBeenCalledWith("ws", { workingDirectory: "app" });
+			for (const expected of [
+				"pull_request_list_failed",
+				"pull_request_list_failed",
+				"pull_request_list_failed",
+				"pull_request_list_failed",
+				"pull_request_list_failed",
+				"pull_request_list_not_authenticated",
+				"pull_request_list_unsupported",
+				"pull_request_list_failed",
+				"pull_request_list_failed",
+			]) {
+				expect(await phone.query("pull_requests")).toMatchObject({
+					type: "query_error",
+					reason: { code: "failed", message: expected },
+				});
+			}
+			const frames = JSON.stringify(phone.frames);
+			for (const leaked of ["gh pr list", "secret", HEAD_OID, "checkoutPath", "review_preparation"]) {
+				expect(frames).not.toContain(leaked);
+			}
+
+			// Only the review purpose lists pull requests.
+			for (const scope of [
+				{ kind: "discovery", purpose: "list_sessions" },
+				{ kind: "management", purpose: "manage_worktrees" },
+			] as const) {
+				const other = await workspaceStream(host, authorizationFor(workspacePath), scope);
+				expect(await other.query("pull_requests"), scope.purpose).toMatchObject({
+					type: "query_error",
+					reason: { code: "unavailable" },
+				});
+			}
+			expect(answers).toHaveLength(0);
+			expect(listPullRequests).toHaveBeenCalledTimes(10);
+		});
+
 		it("prepares a review only when the answer matches the request", async () => {
 			const workspacePath = tempDir();
 			const request = {
@@ -1123,7 +1231,11 @@ describe("remote intent services over protocol frames", () => {
 			const signals: Array<AbortSignal | undefined> = [];
 			const prReviews = vi.fn<RemoteIntentHost["prReviews"]>((_authorization, signal) => {
 				signals.push(signal);
-				return { resolvePrReview: () => Promise.reject(new Error("not part of this test")), preparePrReview };
+				return {
+					resolvePrReview: () => Promise.reject(new Error("not part of this test")),
+					listPullRequests: () => Promise.reject(new Error("not part of this test")),
+					preparePrReview,
+				};
 			});
 			const controller = new AbortController();
 			const phone = await workspaceStream(
@@ -1228,7 +1340,7 @@ describe("remoteStreamAllows", () => {
 			{ scope: { kind: "discovery", purpose: "list_sessions" }, intents: [], queries: ["sessions"] },
 			{ scope: { kind: "discovery", purpose: "agent_options" }, intents: [], queries: ["agent_options"] },
 			{ scope: { kind: "discovery", purpose: "session_contexts" }, intents: [], queries: ["session_contexts"] },
-			{ scope: { kind: "discovery", purpose: "review" }, intents: [], queries: ["pr_review"] },
+			{ scope: { kind: "discovery", purpose: "review" }, intents: [], queries: ["pr_review", "pull_requests"] },
 			{ scope: { kind: "discovery", purpose: "extensions" }, intents: [], queries: ["extension_inventory"] },
 			{
 				scope: { kind: "management", purpose: "unregister_workspace" },

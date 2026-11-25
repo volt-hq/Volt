@@ -73,7 +73,8 @@ function repositorySlug(repository: CanonicalCodeHostRepository): string {
 	return repository.host === "github.com" ? repository.path : `${repository.host}/${repository.path}`;
 }
 
-function unavailableReason(
+/** Why a failed GitHub CLI read was unavailable, from its stderr and capture limits; never its raw text. */
+export function unavailableReason(
 	stderr: string,
 	outputLimited: boolean,
 	timedOut: boolean,

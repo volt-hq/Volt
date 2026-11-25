@@ -9,7 +9,7 @@ import {
 	listPullRequestsForHeadBranchWithGitHubCli,
 	refreshPullRequestStatusesWithGitHubCli,
 } from "./github-cli-discovery.ts";
-import { resolveCurrentReviewPullRequest } from "./github-cli-review-target.ts";
+import { listOpenPullRequestsWithGitHubCli, resolveCurrentReviewPullRequest } from "./github-cli-review-target.ts";
 import { githubCodeHostIdentity, parseGitHubPullRequestUrl } from "./github-identity.ts";
 import type {
 	CodeHostCommandOptions,
@@ -127,5 +127,6 @@ export const githubCliCodeHostProvider: CodeHostProvider = {
 	verifyPullRequestHead,
 	publishPullRequestReview,
 	listPullRequestsForHeadBranch: listPullRequestsForHeadBranchWithGitHubCli,
+	listOpenPullRequests: listOpenPullRequestsWithGitHubCli,
 	refreshPullRequestStatuses: refreshPullRequestStatusesWithGitHubCli,
 };

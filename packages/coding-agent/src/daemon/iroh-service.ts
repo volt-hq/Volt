@@ -55,7 +55,11 @@ import {
 	writeIrohRemoteHandshakeResponse,
 } from "../core/remote/iroh/handshake-reader.ts";
 import { resolveIrohRemoteWorkspaceProjectTrusted } from "../core/remote/iroh/host-policy.ts";
-import { type IrohRemotePrReviewRpcBackend, PrReviewPreparationError } from "../core/remote/iroh/pr-review-rpc.ts";
+import {
+	type IrohRemotePrReviewRpcBackend,
+	PrReviewPreparationError,
+	PullRequestListError,
+} from "../core/remote/iroh/pr-review-rpc.ts";
 import {
 	IROH_REMOTE_ALPN,
 	isIrohRemoteHostStorageFullError,
@@ -3426,17 +3430,22 @@ class IrohDaemonService {
 		authorization: IrohRemoteClientAuthorizationSuccess,
 		signal: AbortSignal,
 	): IrohRemotePrReviewRpcBackend {
-		const run = async <T>(operation: (authority: PrReviewPreparationAuthority) => Promise<T>): Promise<T> => {
+		/** Runs under daemon admission and the grant's authority; `failure` gives the safe error for any failure. */
+		const run = async <T>(
+			operation: (authority: PrReviewPreparationAuthority) => Promise<T>,
+			failure: (error: unknown) => Error = (error) =>
+				new PrReviewPreparationError(
+					error instanceof PrReviewCheckoutError ? error.code : "review_preparation_failed",
+				),
+		): Promise<T> => {
 			const admission = this.admission.tryAcquire();
-			if (!admission) throw new PrReviewPreparationError("review_preparation_failed");
+			if (!admission) throw failure(undefined);
 			try {
 				const authority = this.prReviewAuthority(authorization, AbortSignal.any([signal, admission.signal]));
 				authority.assertCurrent();
 				return await operation(authority);
 			} catch (error) {
-				throw new PrReviewPreparationError(
-					error instanceof PrReviewCheckoutError ? error.code : "review_preparation_failed",
-				);
+				throw failure(error);
 			} finally {
 				admission.release();
 			}
@@ -3444,6 +3453,11 @@ class IrohDaemonService {
 		return {
 			resolvePrReview: (_workspaceName, request) =>
 				run((authority) => this.prReviewCheckouts.resolve(authorization.workspace, request, authority)),
+			listPullRequests: (_workspaceName, request) =>
+				run(
+					(authority) => this.prReviewCheckouts.listPullRequests(authorization.workspace, request, authority),
+					(error) => (error instanceof PullRequestListError ? error : new PullRequestListError()),
+				),
 			preparePrReview: (_workspaceName, request) =>
 				run((authority) => this.prReviewCheckouts.prepare(authorization.workspace, request, authority)),
 		};

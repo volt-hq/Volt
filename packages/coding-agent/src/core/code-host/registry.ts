@@ -48,7 +48,10 @@ export function getCodeHostProvider(providerId: string): CodeHostProvider {
 	return provider;
 }
 
-export type ResolveCodeHostProviderOptions = Pick<ReviewCodeHostContextCaptureOptions, "cwd" | "number" | "signal">;
+export type ResolveCodeHostProviderOptions = Pick<ReviewCodeHostContextCaptureOptions, "cwd" | "number" | "signal"> & {
+	/** Select the remote a numbered PR resolves in without naming one, as listing its pull requests does. */
+	numbered?: boolean;
+};
 
 export type ResolveCodeHostProviderResult =
 	| {
@@ -61,15 +64,15 @@ export type ResolveCodeHostProviderResult =
 
 /**
  * Select the provider for a PR review from the same remote the provider will resolve:
- * the tracked upstream for the current PR, or the tracking remote/origin/single remote for a number.
+ * the tracked upstream for the current PR, or the tracking remote/origin/single remote for a number
+ * (or with `numbered`).
  */
 export async function resolveCodeHostProvider(
 	options: ResolveCodeHostProviderOptions,
 ): Promise<ResolveCodeHostProviderResult> {
+	const numbered = Boolean(options.number) || options.numbered === true;
 	try {
-		const selected = options.number
-			? await selectNumberedReviewRemote(options)
-			: await selectCurrentReviewRemote(options);
+		const selected = numbered ? await selectNumberedReviewRemote(options) : await selectCurrentReviewRemote(options);
 		if (!selected.ok) return selected;
 		const urls = await readReviewRemoteUrls(selected.remote, options);
 		if (!Array.isArray(urls)) return urls;
@@ -93,7 +96,7 @@ export async function resolveCodeHostProvider(
 	} catch {
 		if (options.signal?.aborted) throw new Error(REVIEW_TARGET_CANCELLED);
 		return reviewTargetFailure(
-			options.number
+			numbered
 				? "Could not resolve the numbered PR repository safely. Check Git configuration on the host and retry."
 				: "Could not resolve the current pull request safely. Check Git tracking configuration on the host, then retry.",
 		);

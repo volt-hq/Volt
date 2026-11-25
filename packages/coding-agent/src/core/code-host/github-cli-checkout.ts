@@ -1,6 +1,10 @@
 import { runGitHubCli } from "./github-cli.ts";
 import { canonicalizeGitHubRemoteUrl } from "./github-cli-discovery.ts";
-import { resolveCurrentReviewPullRequest, resolveNumberedReviewPullRequest } from "./github-cli-review-target.ts";
+import {
+	isReviewHeadRefName,
+	resolveCurrentReviewPullRequest,
+	resolveNumberedReviewPullRequest,
+} from "./github-cli-review-target.ts";
 import { parseGitHubPullRequestUrl } from "./github-identity.ts";
 import type { ResolvePullRequestCheckoutOptions, ResolvePullRequestCheckoutResult } from "./types.ts";
 
@@ -85,14 +89,7 @@ export async function resolvePullRequestCheckoutWithGitHubCli(
 			(value.headRefOid.length !== 40 && value.headRefOid.length !== 64) ||
 			/[^0-9a-f]/.test(value.headRefOid) ||
 			typeof value.headRefName !== "string" ||
-			!value.headRefName ||
-			value.headRefName.length > 1024 ||
-			value.headRefName.startsWith("-") ||
-			value.headRefName.endsWith(".") ||
-			/[\u0000-\u0020\u007f~^:?*[\\]/u.test(value.headRefName) ||
-			value.headRefName.includes("..") ||
-			value.headRefName.includes("@{") ||
-			value.headRefName.split("/").some((part) => !part || part.startsWith(".") || part.endsWith(".lock")) ||
+			!isReviewHeadRefName(value.headRefName) ||
 			(selected.kind === "current" && (value.id !== selected.id || value.headRefName !== selected.headBranch))
 		) {
 			return failure(

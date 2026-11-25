@@ -24,6 +24,9 @@ import type {
 	PrReviewPullRequest,
 	PrReviewResolveResponse,
 	PrReviewSourceRequest,
+	PullRequestListItem,
+	PullRequestListRequest,
+	PullRequestListResponse,
 	RpcExtensionInventory,
 	RpcKeepAwakeStatus,
 	RpcSessionChangeContextSchema,
@@ -33,6 +36,7 @@ import {
 	DYNAMIC_INTENT_PATTERN,
 	type RejectionReason,
 	RpcExtensionInventorySchema,
+	RpcListPullRequestsResponseSchema,
 	RpcPreparePrReviewResponseSchema,
 	RpcResolvePrReviewResponseSchema,
 } from "@hansjm10/volt-protocol";
@@ -52,7 +56,11 @@ import type { IrohRemoteAgentOptionsRpcBackend } from "../core/remote/iroh/agent
 import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
 import { uploadIrohRemoteDeviceLog } from "../core/remote/iroh/device-log-rpc.ts";
-import { type IrohRemotePrReviewRpcBackend, PrReviewPreparationError } from "../core/remote/iroh/pr-review-rpc.ts";
+import {
+	type IrohRemotePrReviewRpcBackend,
+	PrReviewPreparationError,
+	PullRequestListError,
+} from "../core/remote/iroh/pr-review-rpc.ts";
 import { isIrohRemoteWorkingDirectory } from "../core/remote/iroh/protocol.ts";
 import { createIrohRemoteProjectionSanitizer } from "../core/remote/iroh/sanitizer.ts";
 import {
@@ -140,7 +148,7 @@ const PURPOSE_FRAMES: Readonly<Record<string, { intents: readonly string[]; quer
 	list_sessions: { intents: [], queries: ["sessions"] },
 	agent_options: { intents: [], queries: ["agent_options"] },
 	session_contexts: { intents: [], queries: ["session_contexts"] },
-	review: { intents: [], queries: ["pr_review"] },
+	review: { intents: [], queries: ["pr_review", "pull_requests"] },
 	extensions: { intents: [], queries: ["extension_inventory"] },
 	unregister_workspace: { intents: ["unregister_workspace"], queries: [] },
 	list_workspace_directories: { intents: [], queries: ["workspace_directories"] },
@@ -222,7 +230,20 @@ function pullRequestSummary(pullRequest: PrReviewPullRequest): PrReviewPullReque
 	};
 }
 
+function pullRequestListItem(item: PullRequestListItem): PullRequestListItem {
+	return {
+		number: item.number,
+		title: item.title,
+		url: item.url,
+		headRefName: item.headRefName,
+		isDraft: item.isDraft,
+		...(item.author === undefined ? {} : { author: item.author }),
+		...(item.updatedAt === undefined ? {} : { updatedAt: item.updatedAt }),
+	};
+}
+
 const RESOLVE_RESPONSE = Compile(RpcResolvePrReviewResponseSchema);
+const LIST_RESPONSE = Compile(RpcListPullRequestsResponseSchema);
 const PREPARE_RESPONSE = Compile(RpcPreparePrReviewResponseSchema);
 const INVENTORY_RESPONSE = Compile(RpcExtensionInventorySchema);
 
@@ -486,6 +507,28 @@ export function remoteIntentServices(
 		}
 		return answer;
 	};
+	const listPullRequests: IntentWorkspaceServices["listPullRequests"] = async (request: PullRequestListRequest) => {
+		let answer: PullRequestListResponse;
+		try {
+			const listed = await host.prReviews(authorization, options.signal).listPullRequests(workspaceName, request);
+			answer = {
+				workspaceName: listed.workspaceName,
+				provider: listed.provider,
+				repository: listed.repository,
+				pullRequests: listed.pullRequests.map(pullRequestListItem),
+				truncated: listed.truncated,
+			};
+		} catch (error) {
+			// The device sees a stable code; what failed stays on the host.
+			throw new WorkspaceIntentError(
+				error instanceof PullRequestListError ? error.code : "pull_request_list_failed",
+			);
+		}
+		if (!LIST_RESPONSE.Check(answer) || answer.workspaceName !== workspaceName) {
+			throw new WorkspaceIntentError("pull_request_list_failed");
+		}
+		return answer;
+	};
 	const preparePrReview: IntentWorkspaceServices["preparePrReview"] = async (request: PrReviewPrepareRequest) => {
 		let prepared: PrReviewPrepareResponse;
 		try {
@@ -583,6 +626,7 @@ export function remoteIntentServices(
 						return contexts;
 					},
 					resolvePrReview,
+					listPullRequests,
 					...(extensionInventory === undefined ? {} : { extensionInventory }),
 				},
 			};
