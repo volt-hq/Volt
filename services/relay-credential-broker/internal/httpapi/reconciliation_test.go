@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/volt-hq/Volt/services/relay-credential-broker/internal/appstore"
-	"github.com/volt-hq/Volt/services/relay-credential-broker/internal/broker"
 )
 
 // Configuration and the fixture clock stay fixed while requests are in flight.
@@ -113,7 +112,7 @@ func TestRefreshReconciliationAttemptsAreBounded(t *testing.T) {
 		firstRetry string
 	}{
 		{name: "inactive success", cached: appstore.StatusInactive, result: appstore.StatusInactive, first: 402, firstRetry: "15"},
-		{name: "inactive outage", cached: appstore.StatusExpired, err: appstore.ErrSubscriptionUnavailable, first: 503, firstRetry: "3600"},
+		{name: "inactive outage", cached: appstore.StatusExpired, err: appstore.ErrSubscriptionUnavailable, first: 503, firstRetry: "15"},
 		{name: "inactive invalid proof", cached: appstore.StatusRevoked, err: appstore.ErrProofInvalid, first: 401},
 		{name: "inactive apply failure", cached: appstore.StatusBillingRetry, result: "invalid", first: 500},
 		{name: "stale active outage", cached: appstore.StatusActive, err: appstore.ErrSubscriptionUnavailable, first: 200},
@@ -254,7 +253,7 @@ func TestRefreshReconciliationIsSharedAcrossReplicasWithoutBlockingHeartbeats(t 
 	release.Do(func() { close(f.verifier.release) })
 	select {
 	case response := <-firstDone:
-		assertRefreshResponse(t, response, http.StatusServiceUnavailable, "3600")
+		assertRefreshResponse(t, response, http.StatusServiceUnavailable, "15")
 	case <-time.After(5 * time.Second):
 		t.Fatal("first refresh did not finish")
 	}
@@ -305,11 +304,11 @@ func TestRefreshReconciliationSuspensionHeartbeatsAndNotificationRecovery(t *tes
 			headers := map[string]string{"Authorization": "Bearer " + token}
 			for heartbeat := 0; heartbeat < 4; heartbeat++ {
 				f.service.now = f.service.now.Add(29 * 24 * time.Hour)
-				assertRefreshResponse(t, f.service.request(t, http.MethodPost, "/v1/tokens/refresh", "", headers), http.StatusServiceUnavailable, "3600")
+				assertRefreshResponse(t, f.service.request(t, http.MethodPost, "/v1/tokens/refresh", "", headers), http.StatusServiceUnavailable, "15")
 				f.assertHeartbeat(t, token)
 				f.service.now = f.service.now.Add(30 * time.Minute)
-				// The host has been without service for weeks, so it gets the slowest pace.
-				assertRefreshResponse(t, f.service.request(t, http.MethodPost, "/v1/tokens/refresh", "", headers), http.StatusPaymentRequired, "3600")
+				// Regression: #1100. Long lapses still check cached status promptly.
+				assertRefreshResponse(t, f.service.request(t, http.MethodPost, "/v1/tokens/refresh", "", headers), http.StatusPaymentRequired, "15")
 				f.assertHeartbeat(t, token)
 			}
 			if got := f.verifier.calls.Load(); got != 4 {
@@ -419,32 +418,6 @@ func TestRefreshReconciliationRejectsRevokedAndUnknownCredentials(t *testing.T) 
 	}
 }
 
-func TestSubscriptionRetryAfterPacesByHostSuspension(t *testing.T) {
-	now := time.Date(2026, time.September, 24, 3, 0, 0, 0, time.UTC)
-	for _, test := range []struct {
-		name      string
-		suspended time.Duration
-		want      string
-	}{
-		{name: "just suspended", suspended: 0, want: "15"},
-		{name: "clock skew", suspended: -time.Minute, want: "15"},
-		{name: "end of first day", suspended: 24*time.Hour - time.Nanosecond, want: "15"},
-		{name: "one day", suspended: 24 * time.Hour, want: "300"},
-		{name: "end of first week", suspended: 7*24*time.Hour - time.Nanosecond, want: "300"},
-		{name: "one week", suspended: 7 * 24 * time.Hour, want: "3600"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			err := &broker.SubscriptionSuspendedError{HostServedAt: now.Add(-test.suspended)}
-			if got := subscriptionRetryAfter(err, now); got != test.want {
-				t.Fatalf("retry after %s suspension = %q, want %q", test.suspended, got, test.want)
-			}
-		})
-	}
-	if got := subscriptionRetryAfter(broker.ErrSubscriptionRequired, now); got != "3600" {
-		t.Fatalf("untimed subscription denial retry = %q, want 3600", got)
-	}
-}
-
 func TestSuspendedRefreshRetryFollowsHostService(t *testing.T) {
 	f := newReconciliationFixture(t, appstore.StatusActive, 0)
 	appHeaders := map[string]string{"Authorization": "Bearer " + f.appRefresh}
@@ -464,8 +437,8 @@ func TestSuspendedRefreshRetryFollowsHostService(t *testing.T) {
 		want      string
 	}{
 		{suspended: time.Hour, want: "15"},
-		{suspended: 24 * time.Hour, want: "300"},
-		{suspended: 7 * 24 * time.Hour, want: "3600"},
+		{suspended: 24 * time.Hour, want: "15"},
+		{suspended: 7 * 24 * time.Hour, want: "15"},
 	} {
 		f.service.now = hostServedAt.Add(step.suspended)
 		// Both endpoints pace by the host, which only its daemon can reconnect.

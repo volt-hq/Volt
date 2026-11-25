@@ -198,6 +198,7 @@ func NewServer(
 	mux.HandleFunc("POST /v1/pairing-claims/{claimID}/exchange", server.handleExchangeClaim)
 	mux.HandleFunc("POST /v1/app-store/notifications", server.handleAppStoreNotification)
 	mux.HandleFunc("POST /v1/tokens/refresh", server.handleRefresh)
+	mux.HandleFunc("POST /v1/relay-access/status", server.handleRelayAccessStatus)
 	mux.HandleFunc("POST /v1/tokens/revoke", server.handleRevoke)
 	mux.HandleFunc("POST /v1/grant/endpoints/revoke", server.handleRevokeAppEndpoint)
 	mux.HandleFunc("POST /v1/grant/revoke", server.handleRevokeGrant)
@@ -450,6 +451,11 @@ func (s *Server) handleRefresh(writer http.ResponseWriter, request *http.Request
 			}
 			if !refreshEntitlement.Active(now) ||
 				!errors.Is(reconcileErr, appstore.ErrSubscriptionUnavailable) {
+				if errors.Is(reconcileErr, appstore.ErrSubscriptionUnavailable) {
+					writer.Header().Set("Retry-After", strconv.Itoa(subscriptionRetryAfterSeconds))
+					writeError(writer, http.StatusServiceUnavailable, "app_store_unavailable")
+					return
+				}
 				s.writeAppStoreError(writer, reconcileErr)
 				return
 			}
@@ -606,34 +612,9 @@ func brokerErrorResponse(err error, invalidCode string) (int, string, bool) {
 	}
 }
 
-const (
-	recentSuspensionWindow     = 24 * time.Hour
-	recentSuspensionRetryAfter = "15"
-	weekSuspensionWindow       = 7 * 24 * time.Hour
-	weekSuspensionRetryAfter   = "300"
-	longSuspensionRetryAfter   = "3600"
-)
-
-// subscriptionRetryAfter paces refreshes denied for an inactive subscription.
-// A renewal notification restores the cached entitlement immediately, but only
-// the suspended daemon can put its host back on the relay, and it learns about
-// the renewal only by retrying. Denied retries read cached state; Apple
-// reconciliation keeps its separate one-hour cooldown. Hosts that recently lost
-// service therefore retry often, and long-lapsed hosts back off.
-func subscriptionRetryAfter(err error, now time.Time) string {
-	var suspended *broker.SubscriptionSuspendedError
-	if !errors.As(err, &suspended) {
-		return longSuspensionRetryAfter
-	}
-	switch suspendedFor := now.Sub(suspended.HostServedAt); {
-	case suspendedFor < recentSuspensionWindow:
-		return recentSuspensionRetryAfter
-	case suspendedFor < weekSuspensionWindow:
-		return weekSuspensionRetryAfter
-	default:
-		return longSuspensionRetryAfter
-	}
-}
+// Cached subscription checks must stay short even after a long lapse.
+// Apple reconciliation has its own independent one-hour cooldown.
+const subscriptionRetryAfterSeconds = 15
 
 func (s *Server) writeAuthenticatedError(writer http.ResponseWriter, err error) {
 	switch {
@@ -642,7 +623,7 @@ func (s *Server) writeAuthenticatedError(writer http.ResponseWriter, err error) 
 	case errors.Is(err, broker.ErrRefreshInvalid), errors.Is(err, broker.ErrGrantRevoked):
 		writeError(writer, http.StatusUnauthorized, "refresh_token_invalid")
 	case errors.Is(err, broker.ErrSubscriptionRequired):
-		writer.Header().Set("Retry-After", subscriptionRetryAfter(err, s.now()))
+		writer.Header().Set("Retry-After", strconv.Itoa(subscriptionRetryAfterSeconds))
 		writeError(writer, http.StatusPaymentRequired, "subscription_inactive")
 	case errors.Is(err, broker.ErrSubscriptionConflict):
 		writeError(writer, http.StatusConflict, "subscription_conflict")

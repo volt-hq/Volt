@@ -2266,6 +2266,7 @@ class IrohDaemonService {
 	 * check follows the same Retry-After and backoff as the timer.
 	 */
 	private startManagedRelayCredentialRefresh(expectedEpoch: number): Promise<ManagedRelayRefreshOutcome> {
+		if (this.relayCredentialRefreshTask !== undefined) return this.relayCredentialRefreshTask;
 		this.relayCredentialLastRefreshAttemptAt = Date.now();
 		const isFenced = () =>
 			!this.admission.isOpen || expectedEpoch !== this.relayCredentialEpoch || this.relayCredentialIsRevoking;

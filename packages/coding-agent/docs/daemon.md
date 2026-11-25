@@ -539,8 +539,8 @@ active.
 Use **Pair a phone** for another phone using the same active subscription. If
 Volt Pro is inactive, renew the existing subscription; the daemon checks again
 automatically and reconnects existing phones without restarting or pairing again.
-Automatic checks run every 15 seconds for a computer that lost relay access less
-than a day ago, every 5 minutes for up to a week, then hourly. **Relay access**
+Automatic checks run every 15 seconds while relay access is paused, regardless
+of how long the subscription has been inactive. **Relay access**
 shows when the next check runs. After renewing, choose **Check relay access now**
 to check immediately. If the renewal is not recognized yet, Volt keeps checking;
 if Apple's renewal notification is missed, confirmation can take up to about an

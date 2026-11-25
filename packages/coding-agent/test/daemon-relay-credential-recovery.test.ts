@@ -798,6 +798,51 @@ describe("managed relay credential recovery", () => {
 		}
 	});
 
+	// Regression: #1100. Exercise the production 15-second poll after a long lapse.
+	it("restores an existing phone within one short poll after a multi-day subscription lapse", async () => {
+		const state = createEmptyVoltdState();
+		const original = credential(-25 * 60 * 60_000);
+		state.settings.relayCredential = original;
+		const access = createIrohRemotePresetAccess("coding");
+		state.clients = [
+			{
+				nodeId: OLD_PHONE,
+				label: "Existing phone",
+				allowedWorkspaces: [],
+				pairedAt: 1,
+				lastSeenAt: 2,
+				allowedTools: access.allowedTools,
+				rpcGrant: access.rpcGrant,
+			},
+		];
+		const broker = refreshBroker(deniedRefresh("15"));
+		const fixture = await startFixture({ state });
+		try {
+			await registerPairingWorkspace(fixture);
+			const grants = await pairedClientGrants(fixture.control);
+			await expect
+				.poll(async () => (await status(fixture.control)).relayCredential?.state)
+				.toBe("subscription_inactive");
+			const renewedAt = Date.now();
+			broker.set(renewedRefresh);
+			await expect
+				.poll(async () => (await status(fixture.control)).relayCredential?.state, { timeout: 18_000 })
+				.toBe("active");
+			expect(Date.now() - renewedAt).toBeLessThan(17_000);
+			expect(await fixture.native.connect(OLD_PHONE, "repo")).toMatchObject({ success: true, hostNodeId: HOST });
+			expect(await pairedClientGrants(fixture.control)).toEqual(grants);
+			expect(fixture.readState().settings.relayCredential).toMatchObject({
+				grantId: original.grantId,
+				endpointId: original.endpointId,
+				refreshToken: original.refreshToken,
+			});
+			expect(fixture.native.binds).toBe(1);
+			expect(broker.requests).toHaveLength(2);
+		} finally {
+			await fixture.close();
+		}
+	}, 25_000);
+
 	describe("renewal recovery (#375)", () => {
 		it("reconnects an existing pairing within the broker Retry-After after a delayed renewal", async () => {
 			const state = createEmptyVoltdState();
