@@ -260,7 +260,7 @@ Every stream a paired device opens is served on the remote profile, chosen by th
 
 | Capability | Intents | Queries |
 |---|---|---|
-| `conversation.observe.v1` | | `intents`, `intent_completions`, `history`, `content`, `sessions`, `settings`, `extensions`, `host_status`, `work_output`, `session_contexts`, `worktrees`, `workspace_directories`, `pr_review`, `extension_inventory`, `review.discussions`, `review.discussion_source`, `review.general`, `review.result`, `review.runs` |
+| `conversation.observe.v1` | | `intents`, `intent_completions`, `history`, `content`, `sessions`, `settings`, `extensions`, `host_status`, `work_output`, `session_contexts`, `worktrees`, `workspace_directories`, `pr_review`, `pull_requests`, `extension_inventory`, `review.discussions`, `review.discussion_source`, `review.general`, `review.result`, `review.runs` |
 | `conversation.control.v1` | `prompt`, `steer`, `follow_up`, `abort`, `set_fast_mode`, `set_agent_mode`, `plan_execute`, `plan_change`, `plan_discard`, `discard_client_input`, `new_session`, `switch_session`, `cancel_work`, `set_auto_compaction`, `set_compaction_threshold`, `review`, `review_rerun`, `review_open_session`, `open_work`, `resume_work`, `review_acknowledge`, `review_record_finding_outcome`, `review_publish`, `review_start_discussions`, `review_reset_discussion`, and the dynamic `extension.command.*` (only commands registered `remoteSafe: true`), `extension.intent.*` (only intents registered `remote: true`, with the capabilities they `require`), `prompt.template.*`, and `skill.*` intents | `editor_completions` (only completion providers registered `remote: true`) |
 | `model.select.v1` | `set_model`, `set_thinking_level` (the bound session only) | `models`, `agent_options` |
 | `model.select.v1` + `host.manage.v1` | `set_default_model`, `set_default_thinking_level` (host defaults) | |
@@ -296,7 +296,7 @@ A workspace stream (hello `workspaceDiscovery` or `workspaceManagement`) is a pr
 | `workspaceDiscovery: list_sessions` | `sessions` query |
 | `workspaceDiscovery: agent_options` | `agent_options` query (`agent_options.v1`) |
 | `workspaceDiscovery: session_contexts` | `session_contexts{sessionIds}` query |
-| `workspaceDiscovery: review` | `pr_review` query |
+| `workspaceDiscovery: review` | `pr_review` and `pull_requests` queries |
 | `workspaceDiscovery: extensions` | `extension_inventory{worktreeId?}` query |
 | `workspaceManagement: unregister_workspace` | `unregister_workspace{workspaceName}` intent |
 | `workspaceManagement: list_workspace_directories` | `workspace_directories{path?}` query |
@@ -357,6 +357,44 @@ Review targets come only from the host's bounded workflow target record: `PR #N`
 The host's keep-awake state and, when the host shares it (`settings.themeTokenPush` or `VOLT_HOST_THEME_TOKENS=1`), its resolved theme colors (hex values only) are the `host_status` query's `keepAwake` and `theme`; `changed{host}` announces a change.
 
 ## Prepared pull-request reviews
+
+To let the user choose the PR, list the open ones first: open
+`workspaceDiscovery:{"purpose":"review"}` and run the `pull_requests` query.
+
+```json
+{"type":"query","queryId":"list-1","query":"pull_requests","params":{}}
+```
+
+It takes the same optional `workingDirectory` or `sourceWorktreeId` as `pr_review`,
+but no `number`, and lists the open pull requests of the repository a numbered
+`pr_review` in that source resolves in (the branch's tracking remote, then
+`origin`, then the only remote), newest first. At most 50 are listed; `truncated`
+is true when more are open. Items carry display metadata only; `author` (a login)
+and `updatedAt` (epoch milliseconds) are optional. Listing requires
+`conversation.observe.v1`.
+
+```json
+{"type":"result","queryId":"list-1","data":{"workspaceName":"myrepo","provider":"github","repository":"owner/myrepo","pullRequests":[{"number":414,"title":"Fix value","url":"https://github.com/owner/myrepo/pull/414","headRefName":"fix-value","isDraft":false,"author":"octocat","updatedAt":1795168800000}],"truncated":false}}
+```
+
+A listed item is not a review identity: pass its `number` to `pr_review`, which
+resolves the current head. A failure is `query_error{code:"failed"}` whose
+message is `pull_request_list_unsupported` (no remote names a repository a
+provider lists; only GitHub lists pull requests today),
+`pull_request_list_not_authenticated` (the host's GitHub CLI is not signed in),
+or `pull_request_list_failed`.
+
+Older hosts that serve the review stream but do not support `pull_requests`
+reply with `unavailable` and no `reason.retryAfterMs`:
+
+```json
+{"type":"query_error","queryId":"list-1","reason":{"code":"unavailable","message":"pull_requests is not available on this stream"}}
+```
+
+On this response or on `reason.code: "unknown_query"`, offer manual PR-number
+entry and pass the number to `pr_review`. If `unavailable` includes
+`reason.retryAfterMs`, wait at least that long before retrying instead of
+interpreting it as missing support.
 
 Resolve the PR before creating any conversation. Open `workspaceDiscovery:{"purpose":"review"}` and run the `pr_review` query:
 

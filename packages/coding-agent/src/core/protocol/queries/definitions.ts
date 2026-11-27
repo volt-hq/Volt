@@ -481,6 +481,15 @@ export const prReviewQuery = defineQuery({
 	run: (ctx, params) => workspaceService(ctx, "resolvePrReview").operation(params),
 });
 
+/** The open pull requests a numbered `pr_review` could resolve, to choose one to review. */
+export const pullRequestsQuery = defineQuery({
+	name: "pull_requests",
+	scope: "host",
+	remote: "safe",
+	requires: observe,
+	run: (ctx, params) => workspaceService(ctx, "listPullRequests").operation(params),
+});
+
 /** What a new conversation in the workspace would load, on hosts that evaluate it without one (the daemon). */
 export const extensionInventoryQuery = defineQuery({
 	name: "extension_inventory",
@@ -678,6 +687,7 @@ export const BUILTIN_QUERIES = {
 	worktrees: worktreesQuery,
 	workspace_directories: workspaceDirectoriesQuery,
 	pr_review: prReviewQuery,
+	pull_requests: pullRequestsQuery,
 	extension_inventory: extensionInventoryQuery,
 	"mcp.capabilities": mcpCapabilitiesQuery,
 	"mcp.servers": mcpServersQuery,

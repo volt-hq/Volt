@@ -3,8 +3,10 @@ import { existsSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { PULL_REQUEST_LIST_MAX_ITEMS } from "@hansjm10/volt-protocol";
 import {
 	type CodeHostProvider,
+	type CodeHostPullRequestDiscoveryUnavailableReason,
 	findCodeHostProvider,
 	type ResolvedPullRequestCheckout,
 	resolveCodeHostProvider,
@@ -13,7 +15,14 @@ import type { PrReviewLaunch, PrReviewPlacement } from "../core/pr-review-placem
 import { hasIrohRemoteRpcCapability } from "../core/remote/iroh/access-grant.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
 import type { IrohRemoteHello } from "../core/remote/iroh/handshake.ts";
-import { PrReviewPreparationError, type PrReviewPreparationErrorCode } from "../core/remote/iroh/pr-review-rpc.ts";
+import {
+	PrReviewPreparationError,
+	type PrReviewPreparationErrorCode,
+	PullRequestListError,
+	type PullRequestListErrorCode,
+	type PullRequestListRequest,
+	type PullRequestListResponse,
+} from "../core/remote/iroh/pr-review-rpc.ts";
 import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
 import { getDefaultSessionDirPath, SessionManager } from "../core/session-manager.ts";
@@ -58,6 +67,19 @@ export class PrReviewCheckoutError extends Error {
 	constructor(code: PrReviewCheckoutError["code"] = "review_preparation_failed") {
 		super(code);
 		this.code = code;
+	}
+}
+
+/** The device-visible code of a provider's listing failure: credentials and repository support, else failed. */
+function pullRequestListFailure(reason: CodeHostPullRequestDiscoveryUnavailableReason): PullRequestListErrorCode {
+	switch (reason) {
+		case "not_authenticated":
+			return "pull_request_list_not_authenticated";
+		case "unsupported_repository":
+		case "repository_ambiguous":
+			return "pull_request_list_unsupported";
+		default:
+			return "pull_request_list_failed";
 	}
 }
 
@@ -161,6 +183,48 @@ export class PrReviewCheckoutManager {
 		const target = await this.target(source, request, authority.signal);
 		authority.assertCurrent();
 		return { workspaceName: workspace.name, pullRequest: target.pullRequest };
+	}
+
+	/**
+	 * The source repository's open pull requests, through the provider and remote a numbered review there resolves
+	 * with, so each listed number resolves to the same repository. Failures throw {@link PullRequestListError}.
+	 */
+	async listPullRequests(
+		workspace: IrohRemoteWorkspace,
+		request: PullRequestListRequest,
+		authority: PrReviewPreparationAuthority,
+	): Promise<PullRequestListResponse> {
+		authority.assertCurrent();
+		const source = await this.source(workspace, request, authority.signal).catch(() => {
+			throw new PullRequestListError();
+		});
+		let provider = this.options.provider;
+		if (!provider) {
+			const resolved = await resolveCodeHostProvider({
+				cwd: source.cwd,
+				numbered: true,
+				signal: authority.signal,
+			}).catch(() => undefined);
+			if (resolved?.ok) provider = resolved.provider;
+		}
+		if (!provider?.listOpenPullRequests) throw new PullRequestListError("pull_request_list_unsupported");
+		const listed = await provider
+			.listOpenPullRequests({
+				cwd: source.cwd,
+				limit: PULL_REQUEST_LIST_MAX_ITEMS,
+				...(authority.signal === undefined ? {} : { signal: authority.signal }),
+			})
+			.catch(() => undefined);
+		authority.assertCurrent();
+		if (!listed) throw new PullRequestListError();
+		if (!listed.ok) throw new PullRequestListError(pullRequestListFailure(listed.reason));
+		return {
+			workspaceName: workspace.name,
+			provider: provider.id,
+			repository: listed.repository,
+			pullRequests: listed.pullRequests,
+			truncated: listed.truncated,
+		};
 	}
 
 	async prepare(

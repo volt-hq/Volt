@@ -24,6 +24,8 @@ import type {
 	PrReviewPrepareResponse,
 	PrReviewResolveResponse,
 	PrReviewSourceRequest,
+	PullRequestListRequest,
+	PullRequestListResponse,
 	RemoteCapability,
 	RemoteGrant,
 	RpcAgentOptionsSchema,
@@ -153,6 +155,8 @@ export interface IntentWorkspaceServices {
 	agentOptions?(): Promise<Static<typeof RpcAgentOptionsSchema>>;
 	sessionContexts?(sessionIds: readonly string[]): Promise<Static<typeof RpcSessionContextSchema>[]>;
 	resolvePrReview?(request: PrReviewSourceRequest): Promise<PrReviewResolveResponse>;
+	/** The source repository's open pull requests, to choose one to review. */
+	listPullRequests?(request: PullRequestListRequest): Promise<PullRequestListResponse>;
 	/** What a new conversation in the workspace, or its worktree checkout `worktreeId`, would load. */
 	extensionInventory?(worktreeId: string | undefined): Promise<RpcExtensionInventory>;
 	preparePrReview?(request: PrReviewPrepareRequest): Promise<PrReviewPrepareResponse>;

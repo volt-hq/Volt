@@ -273,6 +273,39 @@ export type CodeHostHeadPullRequestListResult =
 	| { ok: true; pullRequests: CodeHostHeadPullRequest[] }
 	| { ok: false; reason: CodeHostPullRequestDiscoveryUnavailableReason };
 
+/** An open pull request of a base repository, as its provider lists it to choose one to review. */
+export interface CodeHostOpenPullRequest {
+	number: number;
+	title: string;
+	/** The pull request's web URL, normalized as `parsePullRequestUrl` returns it. */
+	url: string;
+	headRefName: string;
+	isDraft: boolean;
+	/** The author's login. */
+	author?: string;
+	/** Epoch milliseconds of the pull request's last update. */
+	updatedAt?: number;
+}
+
+export interface CodeHostOpenPullRequestListRequest {
+	/** The source checkout whose review remote names the base repository. */
+	cwd: string;
+	/** Most pull requests to return; more are reported as `truncated`. */
+	limit: number;
+	signal?: AbortSignal;
+}
+
+export type CodeHostOpenPullRequestListResult =
+	| {
+			ok: true;
+			/** The base repository, in the display format of `ResolvedPullRequestCheckout.pullRequest.repository`. */
+			repository: string;
+			/** Newest first. */
+			pullRequests: CodeHostOpenPullRequest[];
+			truncated: boolean;
+	  }
+	| { ok: false; reason: CodeHostPullRequestDiscoveryUnavailableReason };
+
 /** One already-associated pull request, identified by its base repository and number. */
 export interface CodeHostPullRequestStatusTarget {
 	/** The base repository's provider-defined path, as in `CanonicalCodeHostRepository.path`. */
@@ -393,6 +426,11 @@ export interface CodeHostProvider extends CodeHostIdentity {
 	listPullRequestsForHeadBranch?(
 		request: CodeHostHeadPullRequestListRequest,
 	): Promise<CodeHostHeadPullRequestListResult>;
+	/**
+	 * Remote review selection: the open pull requests of the repository a numbered `resolvePullRequestCheckout` in
+	 * the same checkout resolves in, so every listed number resolves there.
+	 */
+	listOpenPullRequests?(request: CodeHostOpenPullRequestListRequest): Promise<CodeHostOpenPullRequestListResult>;
 	/** Daemon change status refresh for pull requests this provider associated. */
 	refreshPullRequestStatuses?(request: CodeHostPullRequestStatusRequest): Promise<CodeHostPullRequestStatusOutcome[]>;
 }

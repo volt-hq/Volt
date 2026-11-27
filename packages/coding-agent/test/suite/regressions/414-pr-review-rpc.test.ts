@@ -78,6 +78,8 @@ const review: RemoteStreamScope = { kind: "discovery", purpose: "review" };
 const manageWorktrees: RemoteStreamScope = { kind: "management", purpose: "manage_worktrees" };
 const resolveParams = Compile(QUERY_SCHEMAS.pr_review.params);
 const resolveResult = Compile(QUERY_SCHEMAS.pr_review.result);
+const listParams = Compile(QUERY_SCHEMAS.pull_requests.params);
+const listResult = Compile(QUERY_SCHEMAS.pull_requests.result);
 const prepareParams = Compile(INTENT_SCHEMAS.prepare_pr_review.input);
 const prepareResult = Compile(INTENT_SCHEMAS.prepare_pr_review.output);
 
@@ -86,6 +88,21 @@ function backend() {
 		resolvePrReview: vi.fn<IrohRemotePrReviewRpcBackend["resolvePrReview"]>(async (workspaceName) => ({
 			workspaceName,
 			pullRequest,
+		})),
+		listPullRequests: vi.fn<IrohRemotePrReviewRpcBackend["listPullRequests"]>(async (workspaceName) => ({
+			workspaceName,
+			provider: pullRequest.provider,
+			repository: pullRequest.repository,
+			pullRequests: [
+				{
+					number: pullRequest.number,
+					title: pullRequest.title,
+					url: pullRequest.url,
+					headRefName: pullRequest.headRefName,
+					isDraft: false,
+				},
+			],
+			truncated: false,
 		})),
 		preparePrReview: vi.fn<IrohRemotePrReviewRpcBackend["preparePrReview"]>(async (workspaceName, request) => ({
 			workspaceName,
@@ -250,6 +267,10 @@ function resolve(device: RemotePhone, params: object = {}): Promise<QueryOutcome
 	return device.query("pr_review", params);
 }
 
+function list(device: RemotePhone, params: object = {}): Promise<QueryOutcome> {
+	return device.query("pull_requests", params);
+}
+
 describe("#414 PR review utility transport", () => {
 	test("round trips review discovery handshakes without feature opt-ins", () => {
 		const hello = parseIrohRemoteHello({
@@ -327,6 +348,53 @@ describe("#414 PR review utility transport", () => {
 			reason: { code: "invalid_input" },
 		});
 		expect(host.resolvePrReview).not.toHaveBeenCalled();
+	});
+
+	test.each([
+		{ number: "414" },
+		{ workingDirectory: "../escape" },
+		{ workingDirectory: "/absolute" },
+		{ workingDirectory: "a/.GiT/b" },
+		{ workingDirectory: "" },
+		{ sourceWorktreeId: "UPPER" },
+		{ sourceWorktreeId: "source", workingDirectory: "folder" },
+		{ workspaceName: "other" },
+		{ state: "closed" },
+	])("rejects pull request list payload %j before backend access", async (fields) => {
+		const host = backend();
+		expect(listParams.Check(fields)).toBe(false);
+		const { device } = await stream(review, { prReviews: host });
+		expect(await list(device, fields)).toMatchObject({
+			type: "query_error",
+			reason: { code: "invalid_input" },
+		});
+		expect(host.listPullRequests).not.toHaveBeenCalled();
+	});
+
+	test("lists pull requests for a validated source and redacts workspace text", async () => {
+		const host = backend();
+		host.listPullRequests.mockResolvedValue({
+			workspaceName: "volt",
+			provider: "github",
+			repository: pullRequest.repository,
+			pullRequests: [
+				{
+					number: pullRequest.number,
+					title: `Review ${workspacePath}/file.ts`,
+					url: pullRequest.url,
+					headRefName: pullRequest.headRefName,
+					isDraft: true,
+				},
+			],
+			truncated: false,
+		});
+		const { device } = await stream(review, { prReviews: host });
+		const outcome = await list(device, { sourceWorktreeId: "source" });
+		expect(host.listPullRequests).toHaveBeenCalledWith("volt", { sourceWorktreeId: "source" });
+		if (outcome.type !== "result") throw new Error("Expected a result");
+		expect(outcome.data).toMatchObject({ pullRequests: [{ title: "Review /workspace/file.ts" }] });
+		expect(listResult.Check(outcome.data)).toBe(true);
+		expect(JSON.stringify(device.frames)).not.toContain(workspacePath);
 	});
 
 	test.each([
